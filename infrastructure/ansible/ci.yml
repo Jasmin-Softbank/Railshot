@@ -1,0 +1,269 @@
+# Dedicated, disposable Ubuntu CI VM only. No app cluster, SDK auth, or runner registration.
+# Run: sudo ansible-playbook -i localhost, -c local infrastructure/ansible/ci.yml
+- name: Credential-free CI runtime and bounded dependency network
+  hosts: localhost
+  connection: local
+  become: true
+  tasks:
+    - name: Require the reviewed Ubuntu worker baseline
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_version == '24.04'
+        fail_msg: This bootstrap is only for a dedicated Ubuntu 24.04 CI VM.
+
+    - name: Check that this is not an app cluster node
+      ansible.builtin.stat:
+        path: /etc/rancher/k3s
+      register: ci_k3s
+
+    - name: Refuse to alter an app cluster Docker or firewall
+      ansible.builtin.assert:
+        that: not ci_k3s.stat.exists
+
+    - name: Install distro runtime packages
+      ansible.builtin.apt:
+        name: [docker.io, docker-buildx, python3-venv, git, jq, iptables, iproute2, ca-certificates]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Docker configuration directory
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        mode: '0755'
+
+    - name: Use public DNS without exempting metadata DNS from the container firewall
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+        content: |
+          {"dns":["1.1.1.1","8.8.8.8"],"iptables":true,"ip6tables":true,"ipv6":false,"live-restore":false}
+      register: ci_docker_config
+
+    - name: Create root-owned executor contract directory
+      ansible.builtin.file:
+        path: /etc/railshot
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Install the reviewed executor contract from the same repository revision
+      ansible.builtin.copy:
+        src: ../../ci/scripts/contract/ci-executor.yaml
+        dest: /etc/railshot/ci-executor.yaml
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install the idempotent bridge policy installer
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/railshot-ci-network
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          exec 9>/run/railshot-ci-network.lock
+          flock -x 9
+          profile=/etc/railshot/ci-executor.yaml
+          test -f "$profile" && test ! -L "$profile"
+          test "$(stat -c '%u:%a' "$profile")" = '0:644'
+          jq -e '.schema_version == 1 and .builder.network == "railshot-quality" and .builder.flags == ["--oci-worker-net=bridge"]' "$profile" >/dev/null
+          ipt() { iptables -w 10 "$@"; }
+          ip6t() { ip6tables -w 10 "$@"; }
+          case "${1:-install}" in
+            --check|--fingerprint)
+              # Hash only stable policy/binding state, not dynamic container lists.
+              fingerprint=$({
+                sha256sum "$profile"
+                ipt -S DOCKER-USER; ipt -S RAILSHOT-CI-EGRESS; ipt -S INPUT
+                ip6t -S INPUT; ip6t -S FORWARD
+                sysctl -n net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables
+                docker network inspect railshot-quality | jq -S '.[0] | {Id,Driver,EnableIPv6,Internal,IPAM,Options}'
+              } | sha256sum | cut -d' ' -f1)
+              if [ "$1" = --check ]; then
+                if [ "$#" -ge 2 ]; then
+                  test "$2" = "$(sha256sum "$profile" | cut -d' ' -f1)"
+                fi
+                test -f /var/lib/railshot-ci/network-verified.sha256
+                test "$fingerprint" = "$(cat /var/lib/railshot-ci/network-verified.sha256)"
+              else
+                echo "$fingerprint"
+              fi
+              exit 0 ;;
+            install) ;;
+            *) echo 'Unsupported network helper action' >&2; exit 2 ;;
+          esac
+          # Any reconciliation invalidates prior native-container evidence.
+          install -d -m 0700 /var/lib/railshot-ci
+          rm -f /var/lib/railshot-ci/network-verified.sha256
+          # Only traffic arriving from this worker bridge is affected, never host SSH/IAP.
+          # Guards remain in place on any failed update. Do not remove them in an EXIT trap.
+          ipt -S DOCKER-USER >/dev/null
+          ipt -C DOCKER-USER -i br-railshot -m comment --comment railshot-update-guard -j DROP 2>/dev/null || ipt -I DOCKER-USER 1 -i br-railshot -m comment --comment railshot-update-guard -j DROP
+          ipt -C INPUT -i br-railshot -m comment --comment railshot-ci-host-block -j DROP 2>/dev/null || ipt -I INPUT 1 -i br-railshot -m comment --comment railshot-ci-host-block -j DROP
+          ip6t -C INPUT -i br-railshot -j DROP 2>/dev/null || ip6t -I INPUT 1 -i br-railshot -j DROP
+          ip6t -C FORWARD -i br-railshot -j DROP 2>/dev/null || ip6t -I FORWARD 1 -i br-railshot -j DROP
+          # Per-run internal bridges need DB/app traffic, but no host services.
+          # Reply traffic for the host's localhost health probes remains allowed.
+          ipt -C INPUT -i rsrun+ -m comment --comment railshot-runtime-host-block -j DROP 2>/dev/null || ipt -I INPUT 1 -i rsrun+ -m comment --comment railshot-runtime-host-block -j DROP
+          ipt -C INPUT -i rsrun+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || ipt -I INPUT 1 -i rsrun+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+          ip6t -C INPUT -i rsrun+ -j DROP 2>/dev/null || ip6t -I INPUT 1 -i rsrun+ -j DROP
+          ip6t -C FORWARD -i rsrun+ -j DROP 2>/dev/null || ip6t -I FORWARD 1 -i rsrun+ -j DROP
+          modprobe br_netfilter
+          sysctl -q -w net.bridge.bridge-nf-call-iptables=1 net.bridge.bridge-nf-call-ip6tables=1
+          if ! docker network inspect railshot-quality >/dev/null 2>&1; then
+            docker network create --driver bridge --subnet 172.30.0.0/24 --gateway 172.30.0.1 \
+              --opt com.docker.network.bridge.name=br-railshot \
+              --opt com.docker.network.bridge.enable_icc=false railshot-quality >/dev/null
+          fi
+          docker network inspect railshot-quality | jq -e '.[0] |
+            .Driver == "bridge" and .EnableIPv6 == false and .Internal == false and
+            (.IPAM.Config | length) == 1 and .IPAM.Config[0].Subnet == "172.30.0.0/24" and
+            .IPAM.Config[0].Gateway == "172.30.0.1" and
+            .Options["com.docker.network.bridge.name"] == "br-railshot" and
+            .Options["com.docker.network.bridge.enable_icc"] == "false"' >/dev/null
+          sysctl -q -w net.ipv6.conf.br-railshot.disable_ipv6=1
+          ipt -S RAILSHOT-CI-EGRESS >/dev/null 2>&1 || ipt -N RAILSHOT-CI-EGRESS
+          ipt -F RAILSHOT-CI-EGRESS
+          ipt -A RAILSHOT-CI-EGRESS ! -s 172.30.0.0/24 -j DROP
+          ipt -A RAILSHOT-CI-EGRESS -m conntrack --ctstate INVALID -j DROP
+          ipt -A RAILSHOT-CI-EGRESS -m addrtype --dst-type LOCAL -j DROP
+          # RFC1918, link-local/metadata, loopback, carrier NAT, special/reserved space.
+          for cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 192.0.0.0/24 192.0.2.0/24 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 168.63.129.16/32; do
+            ipt -A RAILSHOT-CI-EGRESS -d "$cidr" -m comment --comment "railshot-deny-$cidr" -j DROP
+          done
+          ipt -A RAILSHOT-CI-EGRESS -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+          ipt -A RAILSHOT-CI-EGRESS -p udp --dport 53 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+          ipt -A RAILSHOT-CI-EGRESS -p tcp --dport 53 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+          ipt -A RAILSHOT-CI-EGRESS -m comment --comment railshot-deny-other-egress -j DROP
+          # Put our jump before Docker's RETURN. The update guard prevents transient allow.
+          while ipt -C DOCKER-USER -i br-railshot -j RAILSHOT-CI-EGRESS 2>/dev/null; do
+            ipt -D DOCKER-USER -i br-railshot -j RAILSHOT-CI-EGRESS
+          done
+          ipt -I DOCKER-USER 1 -i br-railshot -j RAILSHOT-CI-EGRESS
+          ipt -D DOCKER-USER -i br-railshot -m comment --comment railshot-update-guard -j DROP
+
+    - name: Install network policy service after Docker
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/railshot-ci-network.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=RAILSHOT disposable CI bridge egress policy
+          Requires=docker.service
+          After=docker.service network-online.target
+          PartOf=docker.service
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/railshot-ci-network
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=docker.service
+      register: ci_network_unit
+
+    - name: Install the real-container network verification command
+      ansible.builtin.copy:
+        src: test-ci-network.sh
+        dest: /usr/local/sbin/test-ci-network
+        mode: '0755'
+
+    - name: Enable Docker and reload service definitions
+      ansible.builtin.systemd_service:
+        name: docker
+        enabled: true
+        daemon_reload: true
+        state: "{{ 'restarted' if ci_docker_config.changed else 'started' }}"
+
+    - name: Enable policy after each Docker start
+      ansible.builtin.systemd_service:
+        name: railshot-ci-network
+        enabled: true
+        state: started
+
+    - name: Reconcile bridge firewall without altering host inbound policy
+      ansible.builtin.command: /usr/local/sbin/railshot-ci-network
+      changed_when: false
+
+    - name: Prepare the dedicated bounded BuildKit builder on the filtered bridge
+      ansible.builtin.shell: |
+        set -euo pipefail
+        profile=/etc/railshot/ci-executor.yaml
+        jq -e '.schema_version == 1 and .builder.flags == ["--oci-worker-net=bridge"]' "$profile" >/dev/null
+        builder=$(jq -er '.builder.name' "$profile")
+        container=$(jq -er '.builder.container' "$profile")
+        test "$(jq -er '.builder.driver' "$profile")" = remote
+        # Buildx 0.30.1 adds network.host to docker-container drivers. Manage the
+        # same bounded daemon directly and use its documented stdio transport.
+        # Only migrate our named old CI builder; never touch other containers.
+        if docker buildx inspect "$builder" >/dev/null 2>&1; then
+          driver=$(docker buildx inspect "$builder" | sed -n 's/^Driver:[[:space:]]*//p')
+          if [ "$driver" = docker-container ]; then
+            docker buildx rm "$builder"
+          else
+            test "$driver" = remote
+          fi
+        fi
+        if ! docker container inspect "$container" >/dev/null 2>&1; then
+          mapfile -t flags < <(jq -er '.builder.flags[]' "$profile")
+          docker run --detach --name "$container" --label railshot.component=ci-builder \
+            --privileged --restart unless-stopped --entrypoint buildkitd \
+            --network "$(jq -er '.builder.network' "$profile")" \
+            --memory "$(jq -er '.builder.memory_bytes' "$profile")" \
+            --memory-swap "$(jq -er '.builder.memory_bytes' "$profile")" \
+            --cpu-period "$(jq -er '.builder.cpu_period' "$profile")" \
+            --cpu-quota "$(jq -er '.builder.cpu_quota' "$profile")" \
+            --mount "type=volume,src=${container}-state,dst=/var/lib/buildkit" \
+            "$(jq -er '.builder.image' "$profile")" "${flags[@]}" >/dev/null
+        fi
+        docker inspect "$container" | jq -e --slurpfile p "$profile" '.[0] |
+          .Config.Labels["railshot.component"] == "ci-builder" and .Config.Entrypoint == ["buildkitd"] and
+          .Config.Image == $p[0].builder.image and .Config.Cmd == $p[0].builder.flags and
+          .HostConfig.NetworkMode == $p[0].builder.network and
+          (.NetworkSettings.Networks | keys) == [$p[0].builder.network] and
+          .HostConfig.Memory == $p[0].builder.memory_bytes and .HostConfig.MemorySwap == $p[0].builder.memory_bytes and
+          .HostConfig.CpuQuota == $p[0].builder.cpu_quota and .HostConfig.CpuPeriod == $p[0].builder.cpu_period' >/dev/null
+        docker start "$container" >/dev/null
+        if ! docker buildx inspect "$builder" >/dev/null 2>&1; then
+          docker buildx create --name "$builder" --driver remote "docker-container://$container" >/dev/null
+        fi
+        docker buildx inspect "$builder" --bootstrap >/dev/null
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Verify the network again after each policy reconciliation or Docker restart
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/railshot-ci-verify.service
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=RAILSHOT native CI isolation acceptance
+          Requires=docker.service railshot-ci-network.service
+          After=docker.service railshot-ci-network.service network-online.target
+          PartOf=docker.service railshot-ci-network.service
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/test-ci-network
+          TimeoutStartSec=600
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=railshot-ci-network.service
+
+    - name: Enable and run native acceptance after the builder has been prepared
+      ansible.builtin.systemd_service:
+        name: railshot-ci-verify
+        enabled: true
+        daemon_reload: true
+        state: restarted
+
+    - name: Show the worker readiness boundary
+      ansible.builtin.debug:
+        msg: >-
+          Runtime installed for the administrator/root executor; railshot-ci-verify reruns real container probes after each boot.
+          Failed probes leave readiness blocked; inspect journalctl -u railshot-ci-verify and retry that service after fixing the cause.
+          L2 uses the dedicated railshot-ci BuildKit builder; L3 uses internal rsrun-* bridges with host access blocked.
+          Public 80/443 and DNS are allowed for dependency installation, not a domain allowlist.
+          This worker has no GitHub registration or SDK credentials. Destroy it after untrusted CI.

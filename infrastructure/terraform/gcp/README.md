@@ -1,0 +1,24 @@
+# GCP 호스트 준비
+
+이 module은 Ubuntu 24.04 amd64 VM 한 대, 전용 VPC/subnet, 정적 IP, 역할 없는 service account와 별도 데이터 disk를 구성한다. 팀 K3s/Cilium·Ansible·CD·DB 구현은 설치하지 않는다. 현재 역할은 [저장소 README](../../../README.md), 공통 실행·보존 계약은 [infra README](../../README.md)를 따른다.
+
+`project_id`, region/zone, target/owner, 정확한 공개 Ubuntu image를 명시한다. image family는 거부한다. 계정·billing·API 활성화와 quota는 module 외부 관리자 준비 사항이며 credential은 입력이나 metadata에 넣지 않는다. `node_repo`, `node_ref`, public bundle, GitOps 입력은 제거했다. 기존 target 설정에서도 해당 입력을 정리한다.
+
+cloud-init은 Ubuntu apt source를 HTTPS로 바꾸고 디스크 도구를 설치한다. `/dev/disk/by-id/google-railshot-data`를 기다려 `/var/lib/rancher`에 mount한 뒤 `host_prepared` marker만 남긴다. `/etc/railshot/host.yml`의 desired node identity는 팀 runtime 인계 정보이며, runtime은 `not_configured`다. Terraform bootstrap 상태는 실제 확인 전 `unverified`로 유지한다.
+
+`initialize_empty_data_disk`는 기본 false다. 새 module-created 빈 디스크를 검토한 경우만 true로 초기화한다. 기존 ext4는 재사용하고, 파티션·알 수 없는 서명·다른 파일시스템·비어 있지 않은 unmounted 경로·다른 UUID는 거부한다. fstab은 UUID를 사용하고 `nofail`을 두지 않는다. 팀 runtime 설치자는 mount-before-start와 기존 node identity/버전 호환성을 별도 검증해야 한다.
+
+데이터 disk의 `prevent_destroy` 및 `deletion_policy = PREVENT`, compute attachment의 비자동 삭제를 유지한다. 같은 zone의 compute 교체도 중단·동시 writer 방지·백업/복구 검토가 필요하다. retained disk는 백업이나 HA가 아니며, disk 확대 후 filesystem 확대도 별도다. 소스 변경은 기존 guest를 재구성하지 않으며 cloud-init metadata 변경이 자동 재실행을 보장하지 않는다.
+
+HTTP/HTTPS ingress는 기본 닫힘이다. IAP SSH도 별도 opt-in이며 `35.235.240.0/20`의 TCP22만 허용하고 OS Login/IAP 권한을 따로 준비한다. host egress는 TCP443 허용 후 나머지를 deny한다. Google metadata DNS/NTP의 플랫폼 예외는 남으므로 tenant 격리는 팀 guest 정책의 책임이다. registry OAuth scope는 기본 없고, opt-in 시 read-only scope만 추가한다. 실제 repository IAM은 별도다. 정적 공인 IP는 egress에 사용되며 정지 후에도 보존 비용이 남는다.
+
+`max_run_duration_seconds`는 기본 null이다. 설정하면 매 start마다 지정 기간 후 STOP, `automatic_restart = false`를 적용한다. 작업 drain·절대 예산 cap·disk/IP 삭제는 수행하지 않는다. `desired_status`를 강제하지 않고 `allow_stopping_for_update = false`를 유지한다. cutoff를 다른 reconciler가 다시 시작하지 않도록 운영자가 확인해야 한다. [GCP runtime limits](https://docs.cloud.google.com/compute/docs/instances/limit-vm-runtime).
+
+오프라인 확인:
+
+```sh
+python3 infra/terraform/gcp/test_bootstrap.py
+python3 -m unittest discover -s infra/terraform -p test_egress.py
+```
+
+검사는 임시 source-only 디렉터리의 Terraform console, YAML, `bash -n` 및 임시 apt 파일만 사용한다. 계정·provider·state를 읽거나 guest 명령을 실행하지 않는다. 실제 apply는 [관리자 실행 절차](../../README.md)에 따라 saved plan을 검토한 뒤 별도로 수행한다. 생성 후 project/zone/image/SA/network/disk ID, cloud-init 결과와 실제 mount UUID를 확인해야 하며 team runtime readiness는 별도 증거가 필요하다.

@@ -1,0 +1,77 @@
+"""Admission regressions retained when the deployment renderer was removed."""
+import copy
+from pathlib import Path
+import tempfile
+import subprocess
+import sys
+import unittest
+from unittest.mock import patch
+
+import jsonschema
+import yaml
+
+import gate
+
+
+class SemanticsTest(unittest.TestCase):
+    def setUp(self):
+        self.spec = {"apiVersion": "jasmin/v0", "app": "memo", "services": [
+            {"name": "api", "build": {"dockerfile": "Dockerfile"}, "port": 8000, "route": "/"}]}
+
+    def test_unsupported_autoscaling_and_invalid_static_inputs_are_rejected(self):
+        mutations = [lambda s: s.update(autoscaling={"minReplicas": 1, "maxReplicas": 3, "cpu": 70}),
+                     lambda s: s.update(replicas=0), lambda s: s.update(replicas=4),
+                     lambda s: s.update(size="XL"), lambda s: s.update(strategy="canary"),
+                     lambda s: s.update(migrate={"command": ["python", "migrate.py"]})]
+        original = copy.deepcopy(self.spec)
+        for mutation in mutations:
+            self.spec = copy.deepcopy(original)
+            mutation(self.spec["services"][0])
+            with self.subTest(spec=self.spec), self.assertRaises(jsonschema.ValidationError):
+                gate.validate_semantics(self.spec)
+
+    def test_removed_controller_flags_fail_before_execution(self):
+        for entrypoint in (gate.PLATFORM / "gate/gate.py", gate.PLATFORM / "loop/loop.py"):
+            for flags in (["--enable-keda"], ["--autoscaling-profile", "bounded-v1"]):
+                with self.subTest(entrypoint=entrypoint, flags=flags):
+                    result = subprocess.run([sys.executable, str(entrypoint), "--self-test", *flags],
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("unrecognized arguments", result.stderr)
+
+    def test_duplicate_services_and_reserved_bindings_still_fail_l1(self):
+        original = copy.deepcopy(self.spec)
+        mutations = [lambda s: s["services"].append(copy.deepcopy(s["services"][0]))]
+        mutations += [lambda s, key=key: s["services"][0].update(env={key: "override"})
+                      for key in ("PORT", "DATABASE_URL", "MIGRATION_DATABASE_URL")]
+        mutations += [lambda s, key=key: s["services"][0].update(secrets=[key])
+                      for key in ("PORT", "MIGRATION_DATABASE_URL")]
+        for mutation in mutations:
+            self.spec = copy.deepcopy(original)
+            mutation(self.spec)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / ".jasmin").mkdir()
+                (root / ".jasmin/jasmin.yaml").write_text(yaml.safe_dump(self.spec))
+                (root / ".dockerignore").write_text(".git\n.env*\n")
+                with patch.object(gate, "check_dockerfile", return_value=[]), self.assertRaises(gate.OperationError) as caught:
+                    gate.l1(root)
+                self.assertEqual(caught.exception.code, "GATE_CHECK_FAILED")
+                self.assertEqual(caught.exception.phase, "L1")
+
+    def test_static_l1_works_without_deployment_renderer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".jasmin").mkdir()
+            (root / ".jasmin/jasmin.yaml").write_text(yaml.safe_dump(self.spec))
+            (root / ".dockerignore").write_text(".git\n.env*\n")
+            before = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+            with patch.object(gate, "check_dockerfile", return_value=[]):
+                errors, spec = gate.l1(root)
+            self.assertEqual(errors, [])
+            self.assertEqual(spec, self.spec)
+            self.assertEqual(before, sorted(str(p.relative_to(root)) for p in root.rglob("*")))
+
+
+if __name__ == "__main__":
+    unittest.main()

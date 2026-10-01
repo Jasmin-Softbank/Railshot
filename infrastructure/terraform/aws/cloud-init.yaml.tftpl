@@ -1,0 +1,18 @@
+#cloud-config
+# Public configuration only; this content is visible in Terraform state and VM metadata.
+package_update: true
+packages: [e2fsprogs, util-linux]
+write_files:
+  - path: /etc/railshot/host.yml
+    permissions: "0600"
+    content: |
+      ${indent(6, host_config)}
+  - path: /usr/local/sbin/railshot-bootstrap
+    permissions: "0700"
+    content: |
+      ${indent(6, bootstrap_script)}
+  - path: /etc/railshot/bootstrap-manifest.json
+    permissions: "0600"
+    content: ${jsonencode(bootstrap_manifest)}
+runcmd:
+  - [bash, /usr/local/sbin/railshot-bootstrap]
