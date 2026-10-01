@@ -1,0 +1,54 @@
+# 테스트 중에만 적용. Pod 간 ingress만 제한하며 외부 NodePort는 이 정책의 검증 대상이 아니다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: poc-test-sample-ingress
+  namespace: jasmin-poc
+spec:
+  podSelector:
+    matchLabels:
+      app: jasmin-sample
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              poc-client: allowed
+        - podSelector:
+            matchLabels:
+              app: jasmin-sample
+      ports:
+        - protocol: TCP
+          port: 80
+---
+# 허용 클라이언트는 DNS와 sample HTTP로만 나갈 수 있다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: poc-test-client-egress
+  namespace: jasmin-poc
+spec:
+  podSelector:
+    matchLabels:
+      poc-client: allowed
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              app: jasmin-sample
+      ports:
+        - protocol: TCP
+          port: 80

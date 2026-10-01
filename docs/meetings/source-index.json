@@ -1,0 +1,48 @@
+{
+  "captured": "2026-10-02",
+  "audio_independently_verified": false,
+  "files": [
+    {
+      "file": "2026-09-28-huddle.md",
+      "bytes": 226125,
+      "sha256": "1957f11fd45d4a67c5b90be71acd71d8b7f0dfc98d002e4993f46b6bd70993a9",
+      "source_type": "automatic_huddle_transcript",
+      "private_local_only": true
+    },
+    {
+      "file": "2026-09-28-thread.md",
+      "bytes": 5979,
+      "sha256": "a746a4fbf09526c0c55dc2addc860657d91e9589243e87f2cdb8a24437fccc21",
+      "source_type": "full_slack_thread",
+      "private_local_only": true
+    },
+    {
+      "file": "2026-09-29-huddle.md",
+      "bytes": 266926,
+      "sha256": "3b3867bc43e00cbaf271fd958cc8292d4dbc7a382bb678e4dafe304842feae4b",
+      "source_type": "automatic_huddle_transcript",
+      "private_local_only": true
+    },
+    {
+      "file": "2026-09-29-thread.md",
+      "bytes": 17287,
+      "sha256": "7fab3a0e44a17145154d57a287639bc459419b0d32db153a97743779030c0a7c",
+      "source_type": "full_slack_thread",
+      "private_local_only": true
+    },
+    {
+      "file": "2026-10-01-huddle.md",
+      "bytes": 306005,
+      "sha256": "3ca906b02b9ffb5014a9fff5ceadaf6719a69281fad71a5b9f37f5d95fac7903",
+      "source_type": "automatic_huddle_transcript",
+      "private_local_only": true
+    },
+    {
+      "file": "2026-10-01-thread.md",
+      "bytes": 3948,
+      "sha256": "5cd2244aa93e9aaa7b00dadaaa52204046f98a9c21f403b01afc5d5cc75dc966",
+      "source_type": "full_slack_thread",
+      "private_local_only": true
+    }
+  ]
+}

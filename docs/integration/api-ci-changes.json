@@ -1,0 +1,154 @@
+{
+  "source_map": "source-map.json",
+  "scope": [
+    "apps/api",
+    "apps/dashboard",
+    "ci"
+  ],
+  "changes": [
+    {
+      "path": "apps/api/README.md",
+      "assembled_sha256": "c9d150073f46673b0c437acf4bed29c502fcfb24e632b4aefab465412eeb1339",
+      "connected_sha256": "4c5365ec17b6e7c4772927a26d482dc225c7c575c4c640d3ad20a8cd0a52c59b",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/docs/interface.md",
+      "assembled_sha256": "477a727dace3f857d5faf2cc9060491a4cef48cee314bea3e7d8f1af837f4fb3",
+      "connected_sha256": "a783f8bc3cbc29c42b27ee87ce269592ad2dc44f2f6014b64189d869a08e2ff6",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/docs/source-formats.md",
+      "assembled_sha256": "232225cbe3b93a5d0f1e6259a35f31e4c79f96d6abb11bd8657feca3215156f0",
+      "connected_sha256": "489129d94d002b36b156528a4c15aba6f1031808a21e92fbe490b21fcbd8b55a",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/package.json",
+      "assembled_sha256": "98e6e606b91337c7f83db3b3b3c012d2e733eeb6ec6a8462e137dd9b722bd2ee",
+      "connected_sha256": "c4a13e5e7d7f27dc3cfc87c049c37d8ed6389343e9246c47ee51e7b790302894",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/src/cli.js",
+      "assembled_sha256": "272989ab5e8bcdc6693a7003313fb10d8f07b1b10a41cd670a48ef62aa481bbb",
+      "connected_sha256": "9bb93e15657c5eae90fcb104e9c2e9e61432f9a08c25064a0ec50c522b7e1cc4",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/src/client.js",
+      "assembled_sha256": "6053a7cd2ef046505998cdfb7ad04b325b15aea48cb66903ac2170675139c8b9",
+      "connected_sha256": "80e3c121152b8d06c9237d29f8ce0879f2125f3fefe0e479e2e942284ecae47f",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/src/contract.js",
+      "assembled_sha256": null,
+      "connected_sha256": "fcf0c1635b759f4e8dc6488cb85fd081bf9f23454d017071bb6eb8e7cfcbb917",
+      "kind": "new"
+    },
+    {
+      "path": "apps/api/src/github.js",
+      "assembled_sha256": "9ed445452469d04c0ad1ccd1ae0c431880c8f5af7e5bc5cd5032c5a98a49cc01",
+      "connected_sha256": "872f2d5b470bd18f60e0af7e238211fe3cb499eebf46148cc92ab2aacdd2d414",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/src/mcp.js",
+      "assembled_sha256": "2a4cebdce9073c5315c89bba59766e7d129778ee18a7dafae60764cea0595105",
+      "connected_sha256": "026a4236b1b214241bf4c07ad34adb3485bd1302b39456b0483ea5c8ffbbfe69",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/src/published.js",
+      "assembled_sha256": null,
+      "connected_sha256": "8a1271d4ba6762c1c37a1de9716c916c163c151e31f6a348d0b670785374c14d",
+      "kind": "new"
+    },
+    {
+      "path": "apps/api/src/server.js",
+      "assembled_sha256": "351ac860651ae67ee1be68073477a4a61db121404c424b95da57cfaf7f7723d3",
+      "connected_sha256": "27d82c5945b6fee9e6ca87be2abfed919d75801affbbe43d4c9a7173e0cc74fb",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/api/test/deployment.test.js",
+      "assembled_sha256": "8670a269cda1a1c04812bac4ee079e0a22f16187bd2cfec252e2606dd1c9e2af",
+      "connected_sha256": "ce570945554e2c4650f88538a1004a827157d349c5a3a69bf16f81c4ebb7e20f",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/dashboard/app.js",
+      "assembled_sha256": "26ebe6cde9c1f9817d7b2ef11574c71d0f4ee6ae942ab1ead735c0992e539e98",
+      "connected_sha256": "a2ea54b6f58aeb22096eec4269392040472d0efb99cbdf7b7f96cf53b7173cb5",
+      "kind": "integration_change"
+    },
+    {
+      "path": "apps/dashboard/index.html",
+      "assembled_sha256": "b8b281ce0ed9071867b20043e94700b6695670e0c000b9761c90b24997393c26",
+      "connected_sha256": "002067c33a749bf88f51bc744890336fceaaec4739e95a3a61780dbc41aea706",
+      "kind": "integration_change"
+    },
+    {
+      "path": "ci/README.md",
+      "assembled_sha256": "cf28cfbe9a744bb5f08df154b036143167516ceda438b3a7dab8ea04568caeaa",
+      "connected_sha256": "d3c8ef61515ad36f1a0571882898a812bc3768e53713c5aa6f27d8af6f01f611",
+      "kind": "integration_change"
+    },
+    {
+      "path": "ci/scripts/codebuild.py",
+      "assembled_sha256": "d99326cdb9a8a6c92135c5eb94d88a99f750b9a3f24608b9b014c093ab95fb4e",
+      "connected_sha256": "cdd2d9514f87dfc03cd963bda49995e04b630c5f4937d214251a02d99620762c",
+      "kind": "integration_change"
+    },
+    {
+      "path": "ci/scripts/codebuild_release.py",
+      "assembled_sha256": "f4414ec26d48456ad63765204b330dbb1eb0e39ae02f127e118ebe279a1ed012",
+      "connected_sha256": "1bd1597b1f6214c5b7f014a2cd39560817af307af3c9ea16256f855ef63985ba",
+      "kind": "integration_change"
+    },
+    {
+      "path": "ci/scripts/gate/test_pipeline.py",
+      "assembled_sha256": "88ca1f426ec522b14d95ec09aed46e64146cd813fab3fe17b7f9d407d6c94b4c",
+      "connected_sha256": "3723e3d3591054558500543db4bbefc8962062addbccc7d8cb65f12a8ed98684",
+      "kind": "integration_change"
+    },
+    {
+      "path": "ci/scripts/publication.py",
+      "assembled_sha256": null,
+      "connected_sha256": "716293ed442e3f86941cd2726e33003e2af1065b1fb52aae34df2fcb7ef00e5b",
+      "kind": "new"
+    },
+    {
+      "path": "ci/scripts/test_codebuild.py",
+      "assembled_sha256": "c86cbdabc3edf8d740e63b2d76ef1d50ecec5f7e09c23420f238b1fed3c5c51f",
+      "connected_sha256": "561fc7b6aab6930b8a672d73d0b118843d4d8612b892297fa7d5fe326b4e4c26",
+      "kind": "integration_change"
+    },
+    {
+      "path": "ci/scripts/test_publication.py",
+      "assembled_sha256": null,
+      "connected_sha256": "189e08d06181a033bf9bef0f7a11b6b2936ff71bd36a1949939f6f07ba624e05",
+      "kind": "new"
+    },
+    {
+      "path": "ci/scripts/test_workflow_policy.py",
+      "assembled_sha256": "958fe43d1bb4d8f1142df1f011a7f992f0572ce44bc2c4dc20dde1fea2b4cdea",
+      "connected_sha256": "d83794ee58ea952b6ff7c751f5234498bdab6f171d1b32f06dbc7efe8ab1082a",
+      "kind": "integration_change"
+    },
+    {
+      "path": "ci/workflows/codebuild-release.yml",
+      "assembled_sha256": "8e508996f5648a28f57b05b08bad6e8619af74a60464461e61f658b37ba3db0d",
+      "connected_sha256": "ae57a8c9af2ee8c66665949f71394fb05aa344b1d81076a672da07b1dfe55577",
+      "kind": "integration_change"
+    },
+    {
+      "path": "ci/workflows/railshot-deploy.yml",
+      "assembled_sha256": "71d78e47f54de7445442079ee543b78128320aaf2aaa2a9df955c9e3675dfa5b",
+      "connected_sha256": "efcbb3d89aa6b9cffe93822c243d93c130cabdf91370b4be758c190d6f0cb66f",
+      "kind": "integration_change"
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+import { createHash } from 'node:crypto';
+import { APP_NAME, SOURCE_COMMIT, TARGET_ID, TENANT_NAME } from './contract.js';
+
+const HASH = /^[a-f0-9]{64}$/;
+const IMAGE = /^ghcr\.io\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/;
+const LAYERS = ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'];
+const FILES = ['images.json', 'jasmin.yaml', 'verdict.json', 'manifest.json'];
+const sameKeys = (a, b) => JSON.stringify(Object.keys(a || {}).sort()) === JSON.stringify(Object.keys(b || {}).sort());
+
+// These hashes check the trusted workflow artifact channel, not a detached signature.
+export function readPublished(files, { runId, attempt, headSha, targetId, tenant }) {
+  const entries = new Map(files.map(({ path, content }) => [path, content]));
+  const require = (ok, message) => { if (!ok) throw new Error(`게시 산출물 확인 실패: ${message}`); };
+  require(entries.size === 5 && [...FILES, 'handoff.json'].every((name) => entries.has(name)), '파일 구성');
+  const handoff = JSON.parse(entries.get('handoff.json'));
+  require(handoff.version === 1 && handoff.status === 'published', '인계 상태');
+  require(handoff.run_id === Number(runId) && handoff.producer_attempt === attempt, 'run/attempt 불일치');
+  require(SOURCE_COMMIT.test(handoff.source_commit) && handoff.source_commit === headSha, 'source commit 불일치');
+  require(typeof handoff.target_id === 'string' && TARGET_ID.test(handoff.target_id) && handoff.target_id === targetId, 'target 불일치');
+  require(typeof handoff.tenant === 'string' && TENANT_NAME.test(handoff.tenant) && handoff.tenant === tenant && typeof handoff.app === 'string' && APP_NAME.test(handoff.app), 'tenant/app 불일치');
+  require(Number.isSafeInteger(handoff.bundle_artifact_id) && handoff.bundle_artifact_id > 0, 'bundle artifact ID');
+  require(sameKeys(handoff.files, Object.fromEntries(FILES.map((name) => [name, true]))), '파일 해시 목록');
+  for (const name of FILES) {
+    require(HASH.test(handoff.files[name]) && createHash('sha256').update(entries.get(name)).digest('hex') === handoff.files[name], `${name} 해시`);
+  }
+  const images = JSON.parse(entries.get('images.json'));
+  const manifest = JSON.parse(entries.get('manifest.json'));
+  const verdict = JSON.parse(entries.get('verdict.json'));
+  require(images && !Array.isArray(images) && Object.keys(images).length > 0 && Object.values(images).every((value) => typeof value === 'string' && IMAGE.test(value)), '이미지 digest');
+  require(manifest.version === 1 && manifest.trust === 'trusted-ci-artifact-not-a-signature', 'bundle 계약');
+  require(HASH.test(manifest.source_sha256) && manifest.source_sha256 === verdict.source_sha256, 'source digest');
+  require(manifest.files?.['jasmin.yaml'] === handoff.files['jasmin.yaml'] && manifest.files?.['verdict.json'] === handoff.files['verdict.json'], 'bundle 파일 해시');
+  require(verdict.ok === true && verdict.release_eligible === true && verdict.status === 'PASS', 'gate 판정');
+  require(Array.isArray(verdict.layers) && verdict.layers.length === LAYERS.length && verdict.layers.every((row, index) => row.layer === LAYERS[index] && row.ok === true && !row.blocked && !row.errors?.length), 'gate 단계');
+  require(sameKeys(images, manifest.images) && sameKeys(images, verdict.images) && sameKeys(images, verdict.image_ids), 'service 목록');
+  for (const name of Object.keys(images)) {
+    require(manifest.images[name]?.local_ref === verdict.images[name] && manifest.images[name]?.id === verdict.image_ids[name], '검사 이미지 ID');
+  }
+  return { ...handoff, images };
+}

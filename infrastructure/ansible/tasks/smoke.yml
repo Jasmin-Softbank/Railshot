@@ -1,0 +1,87 @@
+---
+- name: Write smoke test manifest
+  ansible.builtin.template:
+    src: templates/smoke.yaml.j2
+    dest: /etc/rancher/k3s/smoke.yaml
+    mode: '0600'
+
+- name: Apply smoke workload
+  ansible.builtin.command:
+    argv: [/usr/local/bin/k3s, kubectl, apply, -f, /etc/rancher/k3s/smoke.yaml]
+  register: smoke_apply
+  changed_when: "'created' in smoke_apply.stdout or 'configured' in smoke_apply.stdout"
+
+- name: Wait for smoke workload
+  ansible.builtin.command:
+    argv: [/usr/local/bin/k3s, kubectl, -n, k3s-smoke, rollout, status, deployment/web, --timeout=180s]
+  changed_when: false
+
+- name: Verify HTTP through the node's private address
+  ansible.builtin.uri:
+    url: "http://{{ ansible_facts.default_ipv4.address }}:{{ smoke_node_port }}/"
+    return_content: true
+    use_proxy: false
+  register: smoke_http
+  until: smoke_http.status == 200 and 'Welcome to nginx!' in (smoke_http.content | default(''))
+  retries: 12
+  delay: 5
+
+- name: Remove previous transient DNS probe
+  ansible.builtin.command:
+    argv: [/usr/local/bin/k3s, kubectl, -n, k3s-smoke, delete, pod, dns-probe, --ignore-not-found=true, --wait=true, --timeout=30s]
+  register: smoke_probe_delete
+  changed_when: "'deleted' in smoke_probe_delete.stdout"
+
+- name: Verify DNS and HTTP from inside a pod
+  block:
+    - name: Write bounded DNS probe manifest
+      ansible.builtin.template:
+        src: templates/probe.yaml.j2
+        dest: /etc/rancher/k3s/probe.yaml
+        mode: '0600'
+
+    - name: Start in-cluster DNS and HTTP probe
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, apply, -f, /etc/rancher/k3s/probe.yaml]
+      changed_when: true
+
+    - name: Wait for successful DNS and HTTP probe
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, -n, k3s-smoke, wait, pod/dns-probe, '--for=jsonpath={.status.phase}=Succeeded', --timeout=120s]
+      changed_when: false
+
+    - name: Check the probe response body
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, -n, k3s-smoke, logs, dns-probe]
+      register: smoke_dns
+      changed_when: false
+      failed_when: smoke_dns.rc != 0 or 'Welcome to nginx!' not in smoke_dns.stdout
+  rescue:
+    - name: Collect probe diagnostics before cleanup
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, -n, k3s-smoke, describe, pod, dns-probe]
+      register: smoke_diagnostics
+      changed_when: false
+      failed_when: false
+    - name: Report failed probe
+      ansible.builtin.fail:
+        msg: "DNS/HTTP probe failed: {{ smoke_diagnostics.stdout }}"
+  always:
+    - name: Clean up transient probe pod
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, -n, k3s-smoke, delete, pod, dns-probe, --ignore-not-found=true, --wait=false]
+      register: smoke_probe_cleanup
+      changed_when: "'deleted' in smoke_probe_cleanup.stdout"
+
+- name: Verify public HTTP from the controller when requested
+  ansible.builtin.uri:
+    url: "http://{{ smoke_public_host }}:{{ smoke_node_port }}/"
+    return_content: true
+    use_proxy: false
+  delegate_to: localhost
+  become: false
+  register: smoke_public
+  until: smoke_public.status == 200 and 'Welcome to nginx!' in (smoke_public.content | default(''))
+  retries: 6
+  delay: 5
+  when: smoke_test_from_controller | bool

@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jasmin-poc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jasmin-sample-html
+  namespace: jasmin-poc
+data:
+  index.html: |
+    Jasmin Deployment PoC OK
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jasmin-sample
+  namespace: jasmin-poc
+spec:
+  replicas: 1
+  minReadySeconds: 3
+  progressDeadlineSeconds: 120
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: jasmin-sample
+  template:
+    metadata:
+      labels:
+        app: jasmin-sample
+    spec:
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: nginx
+          image: nginx:1.28.0-alpine
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: html
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+      volumes:
+        - name: html
+          configMap:
+            name: jasmin-sample-html

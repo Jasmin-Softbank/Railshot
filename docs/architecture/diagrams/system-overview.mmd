@@ -1,0 +1,31 @@
+%%{init: {"theme":"base","fontFamily":"Arial,sans-serif","themeVariables":{"fontFamily":"Arial,sans-serif","fontSize":"16px","primaryTextColor":"#172033","lineColor":"#64748b","edgeLabelBackground":"#ffffff","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1"},"flowchart":{"curve":"linear","nodeSpacing":28,"rankSpacing":32,"htmlLabels":true,"subGraphTitleMargin":{"top":12,"bottom":30}}}}%%
+flowchart TB
+  USER["개발자 · AI 클라이언트<br/>UI / CLI / MCP"]:::actor
+  subgraph PLATFORM["플랫폼 운영 영역"]
+    API["[구현] UI / API<br/>소스 접수 · 상태 조회"]:::code
+  end
+  subgraph BUILD["CI 실행 영역 · API와 격리"]
+    CI["[구현] AI-assisted CI<br/>기본 검사 → 수정 → 재검사"]:::code
+    ART[("[구현] 검증 산출물<br/>bundle · verdict · digest")]:::code
+  end
+  CD["[구현] manifest 인계 생성<br/>[설계] Argo CD 설치·적용"]:::design
+  PREP["[구현] Ansible → runtime<br/>[설계] Provider 결과 연결"]:::design
+  subgraph TARGETS["독립된 고객 실행 영역"]
+    AWS["[설계] AWS target<br/>K3s · Cilium · 고객 앱"]:::design
+    ONP["[설계] OpenStack target<br/>K3s · Cilium · 고객 앱"]:::design
+  end
+  RESULT["[설계] 사용자 완료<br/>적용 revision · 공개 URL 확인"]:::design
+  USER --->|"앱 · 대상 확인"| API
+  API --->|"고정 source·target"| CI
+  CI -->|"통과한 이미지 게시"| ART
+  ART -->|"digest·인계 파일 검증"| CD
+  CD --->|"선택 target의 선언 적용"| TARGETS
+  API -.->|"최초 준비 · 연결 필요"| PREP
+  PREP -..->|"VM·runtime 준비"| TARGETS
+  AWS -->|"상태·외부 HTTP"| RESULT
+  ONP -->|"상태·외부 HTTP"| RESULT
+
+classDef code fill:#e0f2fe,stroke:#0284c7,color:#172033,stroke-width:2px
+classDef design fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
+classDef pending fill:#ffe4e6,stroke:#e11d48,color:#172033,stroke-width:2px
+classDef actor fill:#172033,stroke:#172033,color:#ffffff,stroke-width:2px

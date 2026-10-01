@@ -1,0 +1,29 @@
+%%{init: {"theme":"base","fontFamily":"Arial,sans-serif","themeVariables":{"fontFamily":"Arial,sans-serif","fontSize":"16px","primaryTextColor":"#172033","lineColor":"#64748b","edgeLabelBackground":"#ffffff","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1"},"flowchart":{"curve":"linear","nodeSpacing":28,"rankSpacing":80,"htmlLabels":true,"subGraphTitleMargin":{"top":12,"bottom":30}}}}%%
+flowchart TB
+  BROWSER["앱 사용자"]:::actor
+  DNS["[구현·미적용] Route 53<br/>Alias 값 = ALB의 DNS 이름"]:::code
+  subgraph AWS["AWS edge · apply 미실행"]
+    ALB["[구현·미적용] ALB<br/>internet-facing · 2AZ 필요<br/>ACM TLS · HTTPS 443"]:::code
+    APP["[구현·미적용] 고객 앱<br/>host 규칙 · instance target<br/>private IP : NodePort"]:::code
+    API["[후속 설계] 운영 UI / API 공개<br/>사용자 인증·Host/Origin 계약 필요"]:::pending
+    WG["[구현·미적용] EIP · SG<br/>gateway ENI · UDP 51820<br/>[설계] WireGuard 구성"]:::design
+    ALB -->|"app host · HTTP + health check"| APP
+    ALB -.->|"별도 운영 host · 현재 모듈 미지원"| API
+    API -->|"터널 내부의 인증된 관리 요청 · 설계"| WG
+  end
+  subgraph CUSTOMER["고객 온프레미스 · 기존 OpenStack"]
+    MGMT["[설계] 관리 호스트 · WG peer<br/>[구현] Provider API"]:::design
+    ONP["[설계] OpenStack K3s 앱<br/>Cilium VXLAN · 내부 통신"]:::design
+    MGMT -->|"OpenStack API · VM 준비"| ONP
+  end
+  PUBLIC["[결정 대기] 온프레 공개 입구<br/>Named Tunnel 등 후보"]:::pending
+  DNS -.->|"DNS 응답 · HTTP 경로 아님"| BROWSER
+  BROWSER -->|"이름 해석 후 HTTPS 443"| ALB
+  MGMT <-->|"L3 암호화 터널 · UDP 51820 · 설계"| WG
+  BROWSER -->|"별도 공개 HTTPS URL"| PUBLIC
+  PUBLIC -->|"선택 후 origin 연결"| ONP
+
+classDef code fill:#e0f2fe,stroke:#0284c7,color:#172033,stroke-width:2px
+classDef design fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
+classDef pending fill:#ffe4e6,stroke:#e11d48,color:#172033,stroke-width:2px
+classDef actor fill:#172033,stroke:#172033,color:#ffffff,stroke-width:2px

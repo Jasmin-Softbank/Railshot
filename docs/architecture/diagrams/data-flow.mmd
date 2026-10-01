@@ -1,0 +1,25 @@
+%%{init: {"theme":"base","fontFamily":"Arial,sans-serif","themeVariables":{"fontFamily":"Arial,sans-serif","fontSize":"16px","primaryTextColor":"#172033","lineColor":"#64748b","edgeLabelBackground":"#ffffff","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1"},"flowchart":{"curve":"linear","nodeSpacing":28,"rankSpacing":32,"htmlLabels":true,"subGraphTitleMargin":{"top":12,"bottom":30}}}}%%
+flowchart TB
+  SOURCE[("[구현] 앱 source commit<br/>운영자 target + 정확한 SHA")]:::code
+  GATE["[구현] 기본 gate → 필요한 AI 수정<br/>같은 gate로 결과 재검사"]:::code
+  BUNDLE[("[구현] 검증 bundle<br/>images.tar · spec · verdict")]:::code
+  REG[("[구현] GHCR digest + images.json<br/>검사한 이미지 그대로 게시")]:::code
+  MAN[("[구현] target별 manifest 검토본<br/>[설계] Git commit · Argo 연결")]:::design
+  ARGO["[설계] Argo CD<br/>대상 선언 동기화"]:::design
+  RUNTIME["[구현] K3s / Cilium 설치기<br/>[설계] 실제 고객 앱 실행"]:::design
+  RESULT[("[설계] 적용·공개 접속 결과<br/>target / manifest revision<br/>실패 단계 · URL 검증")]:::design
+  VIEW["[구현] 게시 상태 API<br/>[설계] 적용·URL 결과 확장"]:::design
+  SOURCE -->|"동일 입력 판본"| GATE
+  GATE -->|"passed일 때만 export"| BUNDLE
+  BUNDLE -->|"재빌드 없이 load / push"| REG
+  REG -->|"digest + spec + handoff.json 검증"| MAN
+  MAN -->|"Git에 반영한 뒤 Argo가 pull · 미연결"| ARGO
+  ARGO -->|"대상 Kubernetes API에 apply"| RUNTIME
+  REG -->|"containerd가 digest로 pull"| RUNTIME
+  RUNTIME -->|"적용 상태 · 외부 HTTP 관측"| RESULT
+  RESULT -->|"한 실행과 한 target에 결합"| VIEW
+
+classDef code fill:#e0f2fe,stroke:#0284c7,color:#172033,stroke-width:2px
+classDef design fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
+classDef pending fill:#ffe4e6,stroke:#e11d48,color:#172033,stroke-width:2px
+classDef actor fill:#172033,stroke:#172033,color:#ffffff,stroke-width:2px

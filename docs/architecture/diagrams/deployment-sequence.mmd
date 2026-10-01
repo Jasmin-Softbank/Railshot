@@ -1,0 +1,33 @@
+%%{init: {"theme":"base","fontFamily":"Arial,sans-serif","themeVariables":{"fontFamily":"Arial,sans-serif","fontSize":"15px","primaryColor":"#e0f2fe","primaryBorderColor":"#0284c7","primaryTextColor":"#172033","signalColor":"#475569","noteBkgColor":"#fef3c7","noteTextColor":"#172033"},"sequence":{"actorMargin":30,"messageMargin":28,"noteMargin":12,"wrap":true,"width":135}}}%%
+sequenceDiagram
+  autonumber
+  actor U as 사용자
+  participant API as 플랫폼 API
+  participant CI as CI · AI + gate
+  participant REG as GHCR
+  participant GIT as 배포 선언 Git
+  participant CD as Argo CD
+  participant K as 대상 K3s
+  Note over U,K: 목표 실행 순서 · 실제 통합 배포 미검증 · 대상 환경은 미리 준비
+  U->>API: 앱 입력 + 준비된 대상 선택
+  API->>CI: 고정 source commit + target_id로 CI 요청
+  CI->>CI: 기본 검사 · 필요한 범위만 AI 수정 · 재검사
+  alt gate 실패
+    CI-->>API: 실패 단계 + 검사 근거
+    API-->>U: 중단 · 수정 또는 재시도 안내
+  else gate 통과
+    CI->>REG: 검사한 이미지 그대로 게시
+    REG-->>CI: immutable image digest
+    CI-->>API: published artifact / images.json
+    Note over API,K: 이후 CD·상태 연결은 설계 단계 · image publish는 배포 완료가 아님
+    API->>GIT: CD 담당 연계로 digest 고정 manifest 기록
+    CD->>GIT: 대상 경로 / revision 조회 (outbound pull)
+    GIT-->>CD: manifest commit
+    CD->>K: 대상 Kubernetes API에 선언 적용
+    K->>REG: containerd가 지정 digest pull
+    K-->>CD: rollout / readiness 상태
+    CD-->>API: 적용 revision + 동기화 / health 상태
+    API->>K: 공개 endpoint를 통한 별도 HTTP 검사
+    K-->>API: 기대 앱 응답 또는 실패
+    API-->>U: target · revision · URL 검증 결과
+  end

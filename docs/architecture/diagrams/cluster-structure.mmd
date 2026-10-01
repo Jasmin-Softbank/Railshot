@@ -1,0 +1,43 @@
+%%{init: {"theme":"base","fontFamily":"Arial,sans-serif","themeVariables":{"fontFamily":"Arial,sans-serif","fontSize":"16px","primaryTextColor":"#172033","lineColor":"#64748b","edgeLabelBackground":"#ffffff","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1"},"flowchart":{"curve":"linear","nodeSpacing":28,"rankSpacing":80,"htmlLabels":true,"subGraphTitleMargin":{"top":12,"bottom":30}}}}%%
+flowchart TB
+  subgraph OPS["운영 신뢰 영역 · 개념 배치"]
+    API["[구현] UI / API<br/>[설계] 운영 VM 또는 운영 K3s<br/>고객 앱과 다른 권한·Secret"]:::design
+  end
+  subgraph BUILD["CI 빌드 격리 영역"]
+    CI["[구현] CI / AI / gate 코드<br/>[설계] 전용 worker 등록·격리 인수"]:::design
+  end
+    subgraph CLOUD["AWS K3s · 단일 Linux 노드"]
+        CP["K3s server · 제어부<br/>API · scheduler · controller"]:::code
+        CS[("Kubernetes 상태<br/>기본 SQLite")]:::code
+        CW["K3s agent · 실행부<br/>kubelet · containerd"]:::code
+        CN["Cilium VXLAN · kube-proxy<br/>CoreDNS · 내부 통신"]:::code
+        subgraph CNS["고객 앱 namespace"]
+          CA["[설계] 고객 앱<br/>Deployment / Service"]:::design
+        end
+        CP -->|"상태 저장"| CS
+        CP -->|"Pod 조정"| CW
+        CW --> CA
+        CA <-->|"Pod / Service / DNS"| CN
+    end
+    subgraph ONPREM["OpenStack K3s · 단일 Linux 노드"]
+        OP["K3s server · 제어부<br/>API · scheduler · controller"]:::code
+        OS[("Kubernetes 상태<br/>기본 SQLite")]:::code
+        OW["K3s agent · 실행부<br/>kubelet · containerd"]:::code
+        ON["Cilium VXLAN · kube-proxy<br/>CoreDNS · 내부 통신"]:::code
+        subgraph ONS["고객 앱 namespace"]
+          OA["[설계] 고객 앱<br/>Deployment / Service"]:::design
+        end
+        OP -->|"상태 저장"| OS
+        OP -->|"Pod 조정"| OW
+        OW --> OA
+        OA <-->|"Pod / Service / DNS"| ON
+    end
+  DB[("[결정 대기] 별도 DB VM<br/>PostgreSQL / Patroni<br/>배치·수량·복구 계약 필요")]:::pending
+  API -->|"검사·게시 요청"| CI
+  CA -.->|"현재 stateless 인계에서는 미지원"| DB
+  OA -.->|"DB 연결은 후속 담당 계약"| DB
+
+classDef code fill:#e0f2fe,stroke:#0284c7,color:#172033,stroke-width:2px
+classDef design fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
+classDef pending fill:#ffe4e6,stroke:#e11d48,color:#172033,stroke-width:2px
+classDef actor fill:#172033,stroke:#172033,color:#ffffff,stroke-width:2px

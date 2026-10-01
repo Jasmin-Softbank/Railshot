@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RAILSHOT · 배포</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="주 메뉴">
+        <div class="brand">
+          <strong>RAILSHOT</strong>
+          <span>ONE ACTION · INFINITE CLOUDS</span>
+        </div>
+        <nav>
+          <button class="nav-item active" id="nav-create" type="button">새 배포</button>
+          <button class="nav-item" id="nav-runs" type="button">배포 내역</button>
+        </nav>
+        <div class="connection" id="connection-status" role="status">● API 확인 중</div>
+      </aside>
+
+      <main class="content">
+        <section id="create-view" aria-labelledby="create-title">
+          <header class="page-header">
+            <p class="eyebrow">DEPLOY / CREATE</p>
+            <h1 id="create-title">앱을 배포하세요</h1>
+            <p>앱 소스를 검사하고 검증된 이미지를 게시합니다. 대상 앱 적용과 외부 URL 확인은 CD 인계 후 별도 수행합니다.</p>
+          </header>
+
+          <form class="panel deploy-form" id="deploy-form">
+            <div>
+              <h2>배포 소스</h2>
+              <p class="hint">앱 소스 하나를 입력하세요. 현재는 ZIP, 로컬 폴더, 공개 GitHub 저장소를 지원합니다.</p>
+            </div>
+
+            <div class="source-entry" id="dropzone">
+              <strong>ZIP 파일을 여기에 놓거나 소스를 선택하세요</strong>
+              <div class="source-actions">
+                <button id="choose-file" type="button">파일 선택</button>
+                <button id="choose-folder" type="button">폴더 선택</button>
+              </div>
+              <input id="archive" type="file" accept=".zip,application/zip" hidden />
+              <input id="folder" type="file" webkitdirectory multiple hidden />
+              <label for="repository-url">또는 공개 GitHub 저장소 URL</label>
+              <input id="repository-url" type="url" placeholder="https://github.com/owner/repo" autocomplete="url" />
+              <small>URL은 기본 브랜치의 현재 커밋을 한 번 가져옵니다. 이후 변경 사항은 자동 배포되지 않습니다.</small>
+              <p id="source-selection" role="status">선택한 소스가 없습니다.</p>
+            </div>
+
+            <div class="fields">
+              <label>배포 대상
+                <input id="target-id" type="text" value="운영자 대상 설정 필요" disabled />
+              </label>
+            </div>
+            <details class="advanced">
+              <summary>앱 이름 변경 (선택)</summary>
+              <label>다른 앱으로 배포할 때만 이름을 변경하세요. 같은 이름은 기존 앱을 갱신합니다.
+                <input id="app-name" type="text" pattern="[a-z][a-z0-9-]{1,28}[a-z0-9]" maxlength="30" placeholder="소스 이름에서 자동 생성" />
+              </label>
+            </details>
+
+            <div class="form-actions">
+              <p>소스 확인 후 GitHub Actions가 검사와 이미지 게시를 시작합니다.</p>
+              <button class="primary-button" id="deploy-button" type="submit">검사 및 이미지 게시 →</button>
+            </div>
+            <p class="form-message" id="form-message" role="alert" hidden></p>
+          </form>
+
+          <section class="recent" aria-labelledby="recent-title">
+            <h2 id="recent-title">최근 배포</h2>
+            <div class="recent-row" id="recent-row">아직 배포 내역이 없습니다.</div>
+          </section>
+        </section>
+
+        <section id="run-view" aria-labelledby="run-title" hidden>
+          <header class="page-header">
+            <p class="eyebrow">DEPLOY / RUN</p>
+            <h1 id="run-title">CI 및 CD 인계 상태</h1>
+            <p>앱 검사부터 URL 확인까지 한 화면에서 추적합니다.</p>
+          </header>
+
+          <div class="panel run-panel">
+            <div class="run-heading">
+              <div>
+                <h2 id="run-app">앱 이름</h2>
+                <p class="run-meta" id="run-meta">RUN # · 대상 확인 중</p>
+              </div>
+              <span class="state-badge" id="run-badge">대기 중</span>
+            </div>
+            <h3>CI 단계</h3>
+            <ol class="steps" id="run-steps"></ol>
+            <div class="run-footer">
+              <span id="run-message">상태를 조회하고 있습니다.</span>
+              <a id="actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions에서 보기 ↗</a>
+            </div>
+            <a class="result-link" id="result-link" target="_blank" rel="noopener noreferrer" hidden>배포된 앱 열기 ↗</a>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,20 @@
+---
+# Explicitly pinned; upgrades are NOT performed by this starter playbook.
+k3s_version: v1.37.0+k3s1
+k3s_node_name: demo-k3s
+k3s_cluster_cidr: 10.42.0.0/16
+k3s_service_cidr: 10.43.0.0/16
+k3s_cluster_dns: 10.43.0.10
+k3s_api_host: "{{ ansible_host | default(inventory_hostname) }}"
+k3s_tls_sans: []
+k3s_artifacts_dir: "{{ lookup('ansible.builtin.env', 'HOME') }}/.kube/hackathon-k3s"
+
+# A deliberately small baseline: Flannel, CoreDNS, local-path storage, SQLite.
+# No HA, GPU runtime, Cilium, ingress controller, or monitoring stack.
+smoke_test_enabled: true
+smoke_test_image: nginx:1.28-alpine
+smoke_probe_image: busybox:1.37.0
+smoke_node_port: 30080
+# Enable only when the controller can reach the node directly on this port.
+smoke_test_from_controller: false
+smoke_public_host: "{{ k3s_api_host }}"

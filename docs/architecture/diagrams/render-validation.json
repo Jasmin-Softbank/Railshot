@@ -1,0 +1,51 @@
+[
+  {
+    "name": "system-overview",
+    "width": 668.96875,
+    "height": 1119.375,
+    "viewBox": "0 21 668.97265625 1119.3837890625",
+    "clipped": [],
+    "cluster_label_overlaps": [],
+    "source_sha256": "c52182efe8acd13fb1ec142a9afd806ea644847fcb2f59f3af5122c7c12b978b"
+  },
+  {
+    "name": "cluster-structure",
+    "width": 1440,
+    "height": 1031.5625,
+    "viewBox": "0 -21 1483.234375 1062.5352783203125",
+    "clipped": [],
+    "source_sha256": "fd69686e376ba465327679347aee8d2db35ab1369f0348f223c1991992eb15f5"
+  },
+  {
+    "name": "network-topology",
+    "width": 1440,
+    "height": 994.703125,
+    "viewBox": "0 21 1502.65625 1038",
+    "clipped": [],
+    "source_sha256": "d4bbbd98e6fca53e7174ae52be06e2639b8a6a333ad49564ebe16bbbf0d96f01"
+  },
+  {
+    "name": "user-flow",
+    "width": 565.375,
+    "height": 1313,
+    "viewBox": "0 21 565.3828125 1313.03125",
+    "clipped": [],
+    "source_sha256": "fc4ff72026a23b7d8831d30470ea6e011ea8d75f48a940de7a4dead1abfee7c7"
+  },
+  {
+    "name": "data-flow",
+    "width": 422.40625,
+    "height": 1467.140625,
+    "viewBox": "0 21.00000762939453 422.40625 1467.147705078125",
+    "clipped": [],
+    "source_sha256": "72fa1c030503094ebdfedff18a0c4e4a7a2b0206b8fbea19536b7ca729fdf9ee"
+  },
+  {
+    "name": "deployment-sequence",
+    "width": 1226,
+    "height": 1314,
+    "viewBox": "-50 -10 1226 1314",
+    "clipped": [],
+    "source_sha256": "f6dbfe01740f61e727ac13cbb18bd1d69a757fc175ab21192670d3118c4be0a5"
+  }
+]

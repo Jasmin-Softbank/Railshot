@@ -1,0 +1,55 @@
+---
+- name: Validate templates offline without SSH or infrastructure changes
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    k3s_api_host: demo.example.test
+    k3s_tls_sans: [demo.example.test, 192.0.2.10]
+  tasks:
+    - name: Set explicit test inputs after loading defaults
+      ansible.builtin.set_fact:
+        k3s_api_host: demo.example.test
+        k3s_tls_sans: [demo.example.test, 192.0.2.10]
+        k3s_kubeconfig:
+          content: "{{ {'apiVersion': 'v1', 'kind': 'Config', 'clusters': [{'name': 'default', 'cluster': {'server': 'https://127.0.0.1:6443', 'certificate-authority-data': 'test-ca'}}], 'users': [{'name': 'default', 'user': {'client-key-data': 'test-key'}}], 'contexts': [{'name': 'default', 'context': {'cluster': 'default', 'user': 'default'}}], 'current-context': 'default'} | to_yaml | b64encode }}"
+
+    - name: Parse configuration and workload templates
+      ansible.builtin.set_fact:
+        config: "{{ lookup('ansible.builtin.template', '../templates/config.yaml.j2') | from_yaml }}"
+        smoke: "{{ lookup('ansible.builtin.template', '../templates/smoke.yaml.j2') | from_yaml_all | list }}"
+        probe: "{{ lookup('ansible.builtin.template', '../templates/probe.yaml.j2') | from_yaml }}"
+        service: "{{ lookup('ansible.builtin.template', '../templates/k3s.service.j2') }}"
+        kubeconfig: "{{ lookup('ansible.builtin.template', '../templates/kubeconfig.yaml.j2') | from_yaml }}"
+
+    - name: Assert minimal cluster and bounded smoke test contracts
+      ansible.builtin.assert:
+        that:
+          - config['write-kubeconfig-mode'] == '0600'
+          - config['tls-san'] == ['demo.example.test', '192.0.2.10']
+          - config['disable'] == ['traefik', 'servicelb', 'metrics-server']
+          - config['cluster-cidr'] == '10.42.0.0/16'
+          - smoke | length == 3
+          - smoke[0].kind == 'Namespace'
+          - smoke[1].spec.template.metadata.labels == smoke[2].spec.selector
+          - smoke[1].spec.template.spec.containers[0].readinessProbe.httpGet.port == smoke[2].spec.ports[0].targetPort
+          - smoke[2].spec.ports[0].nodePort == 30080
+          - probe.spec.activeDeadlineSeconds == 90
+          - probe.spec.containers[0].securityContext.runAsNonRoot
+          - not probe.spec.automountServiceAccountToken
+          - "'ExecStart=/usr/local/bin/k3s server' in service"
+          - kubeconfig.clusters[0].cluster.server == 'https://demo.example.test:6443'
+          - kubeconfig.clusters[0].cluster['certificate-authority-data'] == 'test-ca'
+          - kubeconfig.users[0].user['client-key-data'] == 'test-key'
+          - kubeconfig['current-context'] == 'default'
+
+    - name: Override sample port and confirm rendering uses it
+      ansible.builtin.set_fact:
+        smoke_node_port: 31080
+
+    - name: Check customized port
+      ansible.builtin.assert:
+        that:
+          - (lookup('ansible.builtin.template', '../templates/smoke.yaml.j2') | from_yaml_all | list)[2].spec.ports[0].nodePort == 31080

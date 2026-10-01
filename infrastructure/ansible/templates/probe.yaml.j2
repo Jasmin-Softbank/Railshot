@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dns-probe
+  namespace: k3s-smoke
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: 90
+  automountServiceAccountToken: false
+  containers:
+    - name: probe
+      image: {{ smoke_probe_image | to_json }}
+      command: [wget, '-T', '15', '-qO-', 'http://web.k3s-smoke.svc.cluster.local']
+      resources:
+        requests:
+          cpu: 10m
+          memory: 8Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+        seccompProfile:
+          type: RuntimeDefault

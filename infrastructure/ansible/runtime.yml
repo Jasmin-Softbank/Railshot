@@ -1,0 +1,132 @@
+---
+- name: Run the Seungmin runtime exactly once after the guest check
+  hosts: k3s_server
+  gather_facts: false
+  become: true
+  vars:
+    railshot_runtime_dir: /var/lib/railshot/runtime
+    railshot_deployment_source: "{{ playbook_dir }}/../../deployment"
+    railshot_runtime_identity:
+      target_id: "{{ railshot_target_id }}"
+      resource_id: "{{ railshot_resource_id }}"
+      node_id: "{{ k3s_node_name }}"
+      node_ip: "{{ railshot_node_ip }}"
+      architecture: "{{ railshot_expected_arch }}"
+      k3s_version: v1.34.11+k3s1
+      cilium_version: 1.20.2
+      profile: seungmin-single-node-cilium-v1
+  tasks:
+    - name: Inspect runtime ownership and preexisting installation
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/railshot/runtime-identity.json
+        - /etc/rancher/k3s
+        - /var/lib/rancher/k3s
+        - /usr/local/bin/k3s
+        - /etc/systemd/system/k3s.service
+      register: railshot_existing
+
+    - name: Refuse to adopt an unowned existing cluster
+      ansible.builtin.assert:
+        that:
+          - railshot_existing.results[0].stat.exists or not (railshot_existing.results[1].stat.exists or railshot_existing.results[2].stat.exists or railshot_existing.results[3].stat.exists or railshot_existing.results[4].stat.exists)
+        fail_msg: Existing K3s has no integration ownership marker; use an explicitly prepared fresh target.
+
+    - name: Read the previous immutable runtime identity
+      ansible.builtin.slurp:
+        src: /etc/railshot/runtime-identity.json
+      register: railshot_previous_identity
+      when: railshot_existing.results[0].stat.exists
+      no_log: true
+
+    - name: Reject implicit target changes or runtime upgrades
+      ansible.builtin.assert:
+        that:
+          - (railshot_previous_identity.content | b64decode | from_json) == railshot_runtime_identity
+        fail_msg: Existing target identity differs; explicit migration is required.
+      when: railshot_existing.results[0].stat.exists
+      no_log: true
+
+    - name: Prepare private runtime ownership directory
+      ansible.builtin.file:
+        path: /etc/railshot
+        state: directory
+        mode: '0700'
+
+    - name: Record immutable identity before the first runtime mutation
+      ansible.builtin.copy:
+        dest: /etc/railshot/runtime-identity.json
+        content: "{{ railshot_runtime_identity | to_json }}"
+        mode: '0600'
+      no_log: true
+    - name: Create private runtime script directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0700'
+      loop:
+        - "{{ railshot_runtime_dir }}"
+        - "{{ railshot_runtime_dir }}/scripts"
+
+    - name: Copy the team's runtime-only entrypoint
+      ansible.builtin.copy:
+        src: "{{ railshot_deployment_source }}/runtime.sh"
+        dest: "{{ railshot_runtime_dir }}/runtime.sh"
+        mode: '0700'
+
+    - name: Copy only the required team runtime scripts
+      ansible.builtin.copy:
+        src: "{{ railshot_deployment_source }}/scripts/{{ item }}"
+        dest: "{{ railshot_runtime_dir }}/scripts/{{ item }}"
+        mode: '0700'
+      loop: [common.sh, preflight.sh, install-k3s.sh, install-cilium.sh]
+
+    - name: Install and check K3s and Cilium without the JB Flannel installer
+      ansible.builtin.command:
+        argv: [/bin/bash, "{{ railshot_runtime_dir }}/runtime.sh"]
+      environment:
+        K3S_VERSION: v1.34.11+k3s1
+        CILIUM_VERSION: 1.20.2
+        CILIUM_CLI_VERSION: v0.20.1
+        WAIT_TIMEOUT: 300s
+        K3S_NODE_NAME: "{{ k3s_node_name }}"
+        NODE_IP: "{{ railshot_node_ip }}"
+        K3S_URL: ''
+        K3S_TOKEN: ''
+        K3S_CONFIG_FILE: ''
+      changed_when: true
+      no_log: true
+
+    - name: Check the single node's actual identity and readiness
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, get, nodes, -o, json, --request-timeout=10s]
+      register: railshot_nodes
+      changed_when: false
+
+    - name: Verify runtime observations before issuing readiness
+      ansible.builtin.assert:
+        that:
+          - (railshot_nodes.stdout | from_json)['items'] | length == 1
+          - (railshot_nodes.stdout | from_json)['items'][0].metadata.name == k3s_node_name
+          - (railshot_nodes.stdout | from_json)['items'][0].status.nodeInfo.kubeletVersion == 'v1.34.11+k3s1'
+          - "(railshot_nodes.stdout | from_json)['items'][0].status.conditions | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length == 1"
+        fail_msg: Runtime node identity, version or readiness differs from the request.
+
+    - name: Check Cilium and CoreDNS rollout
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, kubectl, -n, kube-system, rollout, status, "{{ item }}", --timeout=180s, --request-timeout=10s]
+      loop: [daemonset/cilium, deployment/cilium-operator, deployment/coredns]
+      changed_when: false
+
+    - name: Write a private receipt only after runtime checks passed
+      ansible.builtin.copy:
+        dest: "{{ railshot_receipt_path }}"
+        mode: '0600'
+        content: >-
+          {{ {'request_id': railshot_request_id, 'target_id': railshot_target_id,
+              'node_id': inventory_hostname, 'nonce': railshot_nonce,
+              'stage': 'runtime', 'runtime_ready': true} | to_json }}
+      delegate_to: localhost
+      become: false
+      no_log: true
