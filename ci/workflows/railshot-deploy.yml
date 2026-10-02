@@ -74,6 +74,7 @@ jobs:
         id: loop
         env:
           PROVIDER: ${{ vars.AGENT_PROVIDER || 'codex' }}
+          RAILSHOT_MAX_REPAIR_ATTEMPTS: ${{ vars.RAILSHOT_MAX_REPAIR_ATTEMPTS }}
           QUALITY_NETWORK: ${{ vars.QUALITY_NETWORK }}
           REPAIR_SCOPE: ${{ vars.REPAIR_SCOPE || 'source' }}
           RAILSHOT_AUTH_MODE: ${{ vars.AGENT_AUTH_MODE }}
@@ -85,23 +86,31 @@ jobs:
           set -euo pipefail
           progress_token="$RAILSHOT_PROGRESS_TOKEN"
           unset RAILSHOT_PROGRESS_TOKEN
+          MAX_REPAIR_ATTEMPTS=${RAILSHOT_MAX_REPAIR_ATTEMPTS:-3}
+          [[ "$MAX_REPAIR_ATTEMPTS" =~ ^[0-3]$ ]] || { echo "RAILSHOT_MAX_REPAIR_ATTEMPTS must be 0, 1, 2 or 3"; exit 1; }
+          [[ "$PROVIDER" = codex || "$PROVIDER" = claude ]] || { echo "AGENT_PROVIDER must be claude or codex"; exit 1; }
           test -f .railshot/ci/scripts/loop/checks_progress.py || { echo 'PLATFORM_REF must support isolated progress publishing'; exit 1; }
           python -c 'import os; from pathlib import Path; p=Path.cwd().resolve()/"apps"/os.environ["TENANT"]/os.environ["APP"]; assert p.is_dir() and p.resolve()==p, "app directory must stay within checkout; symlinks forbidden"'
-          case "$RAILSHOT_AUTH_MODE:$PROVIDER" in
-            subscription:codex)
-              test -n "$RAILSHOT_CODEX_HOME" && test -f "$RAILSHOT_CODEX_HOME/auth.json"
-              unset CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY ;;
-            api-key:codex) test -n "$CODEX_API_KEY" ;;
-            api-key:claude) test -n "$ANTHROPIC_API_KEY" ;;
-            *) echo "Set explicit supported AGENT_AUTH_MODE/AGENT_PROVIDER"; exit 1 ;;
-          esac
-          case "$PROVIDER" in
-            claude) pip install -q pyyaml jsonschema "claude-agent-sdk==0.2.158"; unset CODEX_API_KEY ;;
-            codex)  pip install -q pyyaml jsonschema "openai-codex==0.159.3"; unset ANTHROPIC_API_KEY ;;
-            *) echo "AGENT_PROVIDER must be claude or codex"; exit 1 ;;
-          esac
+          if (( MAX_REPAIR_ATTEMPTS > 0 )); then
+            case "$RAILSHOT_AUTH_MODE:$PROVIDER" in
+              subscription:codex)
+                test -n "$RAILSHOT_CODEX_HOME" && test -f "$RAILSHOT_CODEX_HOME/auth.json"
+                unset CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY ;;
+              api-key:codex) test -n "$CODEX_API_KEY" ;;
+              api-key:claude) test -n "$ANTHROPIC_API_KEY" ;;
+              *) echo "Set explicit supported AGENT_AUTH_MODE/AGENT_PROVIDER"; exit 1 ;;
+            esac
+            case "$PROVIDER" in
+              claude) pip install -q "claude-agent-sdk==0.2.158"; unset CODEX_API_KEY ;;
+              codex)  pip install -q "openai-codex==0.159.3"; unset ANTHROPIC_API_KEY ;;
+            esac
+          else
+            # A baseline-only run neither needs nor inherits model credentials.
+            unset CODEX_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY CODEX_HOME RAILSHOT_CODEX_HOME RAILSHOT_AUTH_MODE ANTHROPIC_BASE_URL
+          fi
+          pip install -q pyyaml jsonschema
           [[ "$REPAIR_SCOPE" = packaging || "$REPAIR_SCOPE" = source ]] || exit 1
-          args=(--repair-scope "$REPAIR_SCOPE" --app-id "$APP")
+          args=(--max-attempts "$MAX_REPAIR_ATTEMPTS" --repair-scope "$REPAIR_SCOPE" --app-id "$APP")
           if [ -f "$RUN_DIR/state.sqlite3" ]; then args+=(--resume); fi
           if [ -n "$QUALITY_NETWORK" ]; then args+=(--quality-network "$QUALITY_NETWORK"); fi
           if RAILSHOT_PROGRESS_TOKEN="$progress_token" python .railshot/ci/scripts/loop/loop.py "apps/$TENANT/$APP" "$RUN_DIR" --provider "$PROVIDER" "${args[@]}"; then

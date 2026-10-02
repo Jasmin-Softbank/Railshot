@@ -301,7 +301,8 @@ jobs:
     if: needs.changes.outputs.containers == 'true'
     uses: ./.github/workflows/platform-containers.yml
     with:
-      components: ${{ needs.changes.outputs.container_components }}
+      components: ${{ vars.RAILSHOT_AUTO_RELEASE == 'true' && github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && '["dashboard","api","mcp","ci-runner"]' || needs.changes.outputs.container_components }}
+      export_image: ${{ vars.RAILSHOT_AUTO_RELEASE == 'true' && github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF }}
     permissions:
       contents: read
 
@@ -319,3 +320,19 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: python3 ci/scripts/ci_scope.py gate
+
+  release:
+    name: Publish and verify the passed platform revision
+    needs: [changes, gate]
+    if: ${{ always() && !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.containers == 'true' && vars.RAILSHOT_AUTO_RELEASE == 'true' && github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF }}
+    uses: ./.github/workflows/platform-publish.yml
+    with:
+      components: '["dashboard","api","mcp","ci-runner"]'
+      publish: true
+      deploy: true
+      skip_build: true
+    permissions:
+      contents: write
+      actions: read
+      packages: write
+      id-token: write
