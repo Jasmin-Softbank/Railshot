@@ -172,7 +172,9 @@ python3 -m unittest discover -s . -p 'test_*.py' -v
 
 CI는 standalone `site.yml` 구문과 오프라인 템플릿을 실제 Ansible로 검사합니다.
 `test_cilium.py`는 전달 자산의 실제 경로, 공통 스크립트 로딩, 이미지 정책·버전, 설치 순서와 소유권 경계를 검사합니다.
-새 Cilium 경로의 실제 서버 설치, 재실행, NetworkPolicy 허용/차단은 아직 검증하지 않았습니다.
+2026-10-02 [AWS 실자원 인수 검증](../../docs/integration/observability-acceptance-20261002.md)에서
+새 Cilium standalone 설치·동일 설정 재실행·identity 변경 거부와 관측 Namespace ingress 허용/차단을 확인했습니다.
+이 결과를 통합 HTTP runtime 요청이나 온프레미스/ARM64 검증으로 확대하지 않습니다.
 
 2026-10-01 **이전 Flannel 버전** 검증 결과 (Cilium 설치 성공 증거가 아님):
 

@@ -86,9 +86,12 @@ python3 observability/render.py observability/.local/target.json observability/.
    VPN 내부에서도 관측 송신 주소만 허용합니다. 규칙을 이 모듈이 자동 변경하지 않습니다.
 3. 관리 kubeconfig를 가진 실행기에서 생성된 `cluster.json`을 적용합니다. 관측 VM에 관리자
    kubeconfig를 둘 필요는 없습니다. 기존 권한이 있는 관리 실행기로 이 파일만 전달해도 됩니다.
+   서버 dry-run은 같은 List의 Namespace를 실제로 생성하지 않으므로 전용 Namespace를 먼저 준비합니다.
 
 ```sh
 kubectl --context YOUR_TARGET get nodes
+kubectl --context YOUR_TARGET create namespace railshot-observability --dry-run=client -o yaml | \
+  kubectl --context YOUR_TARGET apply -f -
 kubectl --context YOUR_TARGET apply --dry-run=server -f observability/.local/aws-demo/cluster.json
 kubectl --context YOUR_TARGET apply -f observability/.local/aws-demo/cluster.json
 kubectl --context YOUR_TARGET -n railshot-observability rollout status deployment/cluster-metrics --timeout=120s
@@ -175,8 +178,10 @@ PROMTOOL=/path/to/promtool BLACKBOX=/path/to/blackbox_exporter \
 - 도구는 공식 release checksum을 확인한 Linux 바이너리를 사용했습니다.
 - 로컬 작업 지침 `AGENTS.md`, 렌더 출력과 비밀번호는 gitignore로 제외합니다.
 
-실제 AWS/온프레 설치, Grafana 화면 렌더링,
-NodePort/Cilium 정책과 VPN 도달성은 아직 검증하지 않았습니다. API/CD 연결을 완료했다고 주장하지 않습니다.
+2026-10-02 [AWS 실자원 인수 검증](../docs/integration/observability-acceptance-20261002.md)에서
+설치·수집·정상/실패 HTTP·수집 중단·앱 이미지 장애·NodePort/Cilium 접근 제한과 자원 정리를 확인했습니다.
+Grafana는 API 및 패널 질의 결과를 확인했으며 브라우저 화면 렌더는 검증하지 않았습니다.
+온프레미스/VPN 도달성과 제품 API/CD 연결도 별도 검증 대상입니다.
 
 중지 시 `docker compose -f .../compose.yaml down`은 named volume을 보존합니다. `down -v`는 데이터를
 삭제하므로 기본 절차로 사용하지 않습니다. Exporter 제거는 해당 `cluster.json`의 리소스만 검토 후
