@@ -45,7 +45,7 @@ class WorkflowPolicyTest(unittest.TestCase):
                 result = subprocess.run(['bash', '-c', script], env={**env, 'REGISTRY_PREFIX': prefix}, capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
 
-    def test_private_default_blocks_before_registry_login_and_cannot_use_ready_flag(self):
+    def test_private_requires_credentials_and_target_reference_before_push(self):
         release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
         guard = release['steps'][0]
         self.assertEqual(guard['name'], 'Validate trusted platform bindings')
@@ -57,6 +57,11 @@ class WorkflowPolicyTest(unittest.TestCase):
                 self.assertIn('BLOCKED:', result.stderr)
         env.pop('REGISTRY_VISIBILITY', None)
         self.assertNotEqual(subprocess.run(['bash', '-c', guard['run']], env=env, capture_output=True).returncode, 0)
+        configured = {**env, 'REGISTRY_VISIBILITY': 'private', 'GHCR_PULL_USERNAME': 'operator',
+                      'GHCR_PULL_TOKEN': 'synthetic', 'PULL_SECRET_NAMESPACE': 'tenant-demo', 'PULL_SECRET_NAME': 'ghcr-pull'}
+        self.assertEqual(subprocess.run(['bash', '-c', guard['run']], env=configured, capture_output=True).returncode, 0)
+        for name in ('GHCR_PULL_USERNAME', 'GHCR_PULL_TOKEN', 'PULL_SECRET_NAMESPACE', 'PULL_SECRET_NAME'):
+            self.assertNotEqual(subprocess.run(['bash', '-c', guard['run']], env={**configured, name: ''}, capture_output=True).returncode, 0)
 
     def test_login_uses_password_stdin_and_private_ephemeral_config(self):
         release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
@@ -86,38 +91,16 @@ class WorkflowPolicyTest(unittest.TestCase):
             subprocess.run(['bash', '-c', cleanup['run']], env=env, check=True)
             self.assertFalse(Path(env['DOCKER_CONFIG']).exists())
 
-    def test_public_mode_requires_each_digest_without_inherited_docker_credentials(self):
-        release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
-        check = next(s for s in release['steps'] if s.get('name') == 'Require anonymous access to published digests')
-        steps = release['steps']
-        self.assertLess(steps.index(check), next(i for i,s in enumerate(steps) if s.get('id') == 'published'))
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            inherited = root / 'authenticated'; inherited.mkdir(); (inherited / 'config.json').write_text('{"auths":{"ghcr.io":{"auth":"synthetic-only"}}}')
-            refs = {'web': 'ghcr.io/owner/tenant-app-web@sha256:' + 'a' * 64,
-                    'api': 'ghcr.io/owner/tenant-app-api@sha256:' + 'b' * 64}
-            (root / 'images.json').write_text(json.dumps(refs))
-            env = {**os.environ, 'RUNNER_TEMP': tmp, 'REGISTRY_PREFIX': 'ghcr.io/owner',
-                   'DOCKER_CONFIG': str(inherited), 'DOCKER_AUTH_CONFIG': 'synthetic-inherited-auth',
-                   'CAPTURE': tmp, 'PRIVATE_DIGEST': ''}
-            stub = '''docker() {
-              test "$DOCKER_CONFIG" != "$CAPTURE/authenticated" && test -z "$DOCKER_AUTH_CONFIG" || return 90
-              test "$(cat "$DOCKER_CONFIG/config.json")" = '{"auths":{"ghcr.io":{}}}' || return 91
-              printf '%s\\n' "$*" >> "$CAPTURE/calls"
-              test "$3" != "$PRIVATE_DIGEST"
-            }
-            '''
-            result = subprocess.run(['bash', '-c', stub + check['run']], cwd=tmp, env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / 'calls').read_text().splitlines(), ['manifest inspect ' + v for v in refs.values()])
-            self.assertFalse(list(root.glob('railshot-anonymous.*')))
-            result = subprocess.run(['bash', '-c', stub + check['run']], cwd=tmp,
-                                    env={**env, 'PRIVATE_DIGEST': refs['api']}, capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('not anonymously readable', result.stderr)
-            self.assertFalse(list(root.glob('railshot-anonymous.*')))
-            (root / 'images.json').write_text('{}')
-            self.assertNotEqual(subprocess.run(['bash', '-c', stub + check['run']], cwd=tmp, env=env, capture_output=True).returncode, 0)
+    def test_pull_credentials_reach_only_trusted_release_validation(self):
+        jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
+        self.assertNotIn('GHCR_PULL_', json.dumps(jobs['loop']))
+        steps = jobs['release']['steps']
+        readers = [step for step in steps if 'secrets.GHCR_PULL_TOKEN' in json.dumps(step)]
+        self.assertEqual([step['name'] for step in readers],
+                         ['Validate trusted platform bindings', 'Bind publication to the source and target'])
+        writer = readers[-1]
+        self.assertIn('publication.py release-bundle images.json published', writer['run'])
+        self.assertLess(steps.index(writer), next(i for i, step in enumerate(steps) if step.get('id') == 'published'))
 
     def test_submitted_commit_and_operator_target_match_before_any_agent_work(self):
         jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
