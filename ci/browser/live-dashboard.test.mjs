@@ -126,5 +126,35 @@ test('session history pages and live environment states remain truthful across n
   assert.equal(await rows.count(), 0); assert.match(await page.locator('#history-detail').innerText(), /조회 연결 실패/);
   await page.unroute('**/api/v1/deployments?*'); await page.locator('#history-refresh').click();
   await page.waitForFunction(() => document.querySelector('#history-list').textContent.includes('demo-aws-app'));
+  await page.clock.install();
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  await page.locator('[data-view="monitor"]').click();
+  await page.waitForFunction(() => document.querySelector('#environment-message').textContent.includes('마지막 조회'));
+  // Exercise the actual request timeout/abort path, not an HTTP error response.
+  for (const path of ['**/api/v1/targets?*', '**/api/v1/targets/demo-aws/observations']) {
+    const held = [];
+    await page.route(path, (route) => { held.push(route); });
+    const requested = page.waitForRequest(path);
+    await page.locator('#monitor-refresh').click(); await requested;
+    await page.clock.fastForward(15001);
+    await page.waitForFunction(() => document.querySelector('#environment-message').textContent.includes('환경 조회 실패'));
+    assert.match(await page.locator('#environment-message').innerText(), /30초 후/);
+    assert.equal(await page.locator('#environment-list [data-state="failed"]').count(), 3);
+    await page.unroute(path);
+    await Promise.all(held.map((route) => route.continue().catch(() => {})));
+    await page.clock.fastForward(30001);
+    await page.waitForFunction(() => document.querySelector('#environment-message').textContent.includes('마지막 조회'));
+    assert.doesNotMatch(await page.locator('#environment-list').innerText(), /조회 실패/);
+  }
+  const held = []; let targetRequests = 0;
+  await page.route('**/api/v1/targets?*', (route) => { targetRequests++; held.push(route); });
+  const requested = page.waitForRequest('**/api/v1/targets?*');
+  await page.locator('#monitor-refresh').click(); await requested;
+  await page.locator('[data-view="history"]').click();
+  await page.clock.fastForward(45001);
+  assert.equal(targetRequests, 1, 'leaving the view cancels observation polling without retry');
+  await page.unroute('**/api/v1/targets?*');
+  await Promise.all(held.map((route) => route.continue().catch(() => {})));
   assert.deepEqual(errors, []);
 });
