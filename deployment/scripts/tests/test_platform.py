@@ -100,6 +100,9 @@ class PlatformTests(unittest.TestCase):
         environment = {value['name']: value.get('value') for value in container['env']}
         self.assertEqual(environment['TMPDIR'], '/var/lib/railshot/tmp')
         self.assertEqual(environment['TF_PLUGIN_CACHE_DIR'], '/var/lib/railshot/provider-cache')
+        profiles = next(value for value in container['env'] if value['name'] == 'RAILSHOT_PROFILES_FILE')
+        self.assertEqual(profiles['valueFrom']['configMapKeyRef'],
+                         {'name': 'railshot-environments', 'key': 'profiles_file', 'optional': True})
         self.assertIn({'name': 'state', 'mountPath': '/var/lib/railshot'}, container['volumeMounts'])
         self.assertIn("configured", container["readinessProbe"]["exec"]["command"][-1])
         self.assertTrue(all(item["spec"]["type"] == "ClusterIP" for item in output["items"] if item["kind"] == "Service"))

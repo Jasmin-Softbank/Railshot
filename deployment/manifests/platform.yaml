@@ -97,6 +97,9 @@ spec:
             - {name: RAILSHOT_STATE_DIR, value: /var/lib/railshot/state}
             - {name: RAILSHOT_CD_CONFIG, value: /var/lib/railshot/config/cd.json}
             - {name: RAILSHOT_OBSERVER_CONFIG, value: /var/lib/railshot/config/observer.json}
+            - name: RAILSHOT_PROFILES_FILE
+              valueFrom:
+                configMapKeyRef: {name: railshot-environments, key: profiles_file, optional: true}
             - {name: KUBECONFIG, value: /var/lib/railshot/config/kubeconfig}
             - {name: HOME, value: /var/lib/railshot}
             - {name: TMPDIR, value: /var/lib/railshot/tmp}
