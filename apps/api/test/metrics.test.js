@@ -5,6 +5,44 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMetricsObserver } from '../src/metrics.js';
 
+test('native healthz is independent of apps and distinguishes failed, missing and stale probes', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-healthz-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const configPath = join(directory, 'observer.json'), now = 1800000000000;
+  const node = { target_id: 'demo', prometheus_url: 'http://observer.internal:9090', node_instance: '10.0.0.1:30910',
+    healthz_url: 'https://10.0.0.1:6443/healthz' };
+  const app = { ...node, app: 'demo-app', namespace: 'tenant-demo', cluster_instance: '10.0.0.1:30911', probe_url: 'https://app.example.test/health' };
+  delete app.healthz_url;
+  const save = (targets) => writeFile(configPath, JSON.stringify({ version: 1, targets }), { mode: 0o600 });
+  await save([node, app]);
+  let value = 1, age = 10, up = 1, missing = false, fail = false;
+  const observe = createMetricsObserver({ configPath, now: () => now, fetchImpl: async (url) => {
+    const query = url.searchParams.get('query');
+    if (!query.includes('job="runtime_healthz"')) throw new Error('app and node collector unavailable');
+    assert.match(query, /instance="https:\/\/10.0.0.1:6443\/healthz"/);
+    assert.ok(!query.includes('app.example.test'));
+    if (fail) throw new Error('observer unreachable');
+    const samples = { up, observed: now / 1000 - age, runtime_healthz: value, runtime_healthz_observed: now / 1000 - age };
+    return Response.json({ status: 'success', data: { resultType: 'vector', result: missing ? [] : Object.entries(samples)
+      .map(([name, sample]) => ({ metric: { railshot_metric: name }, value: [now / 1000, String(sample)] })) } });
+  } });
+  let result = await observe({ target_id: 'demo', app: 'demo-app' });
+  assert.equal(result.metrics.http.state, 'unavailable');
+  assert.equal(result.metrics.node_up.state, 'unavailable');
+  assert.deepEqual(result.metrics.runtime_healthz, { state: 'ready', value: 1, observed_at: new Date(now - 10000).toISOString(), scope: 'target_runtime' });
+  await save([node]);
+  assert.deepEqual((await observe({ target_id: 'demo' })).metrics.runtime_healthz, result.metrics.runtime_healthz, 'removing the app cannot disconnect the runtime');
+  value = 0; assert.equal((await observe({ target_id: 'demo' })).metrics.runtime_healthz.value, 0);
+  age = 91; assert.equal((await observe({ target_id: 'demo' })).metrics.runtime_healthz.state, 'stale');
+  age = 10; up = 0; assert.equal((await observe({ target_id: 'demo' })).metrics.runtime_healthz.state, 'collection_failed');
+  up = 1; missing = true; assert.equal((await observe({ target_id: 'demo' })).metrics.runtime_healthz.state, 'no_data');
+  missing = false; fail = true; assert.equal((await observe({ target_id: 'demo' })).metrics.runtime_healthz.state, 'unavailable');
+  for (const healthz_url of ['http://10.0.0.1:6443/healthz', 'https://app.example.test/', 'https://user:password@10.0.0.1/healthz']) {
+    await save([{ ...node, healthz_url }]);
+    assert.equal((await observe({ target_id: 'demo' })).metrics.runtime_healthz.state, 'unavailable');
+  }
+});
+
 test('bound observations expire, fail closed, and never expose backend details', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-metrics-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

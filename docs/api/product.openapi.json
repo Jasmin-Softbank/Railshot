@@ -3577,7 +3577,8 @@
             "enum": [
               "app_pods",
               "target_node",
-              "app_probe"
+              "app_probe",
+              "target_runtime"
             ]
           }
         },
@@ -3634,6 +3635,9 @@
               },
               "network_transmit_bytes_per_second": {
                 "$ref": "#/components/schemas/Metric"
+              },
+              "runtime_healthz": {
+                "$ref": "#/components/schemas/Metric"
               }
             },
             "required": [
@@ -3644,10 +3648,11 @@
               "node_up",
               "disk_percent",
               "network_receive_bytes_per_second",
-              "network_transmit_bytes_per_second"
+              "network_transmit_bytes_per_second",
+              "runtime_healthz"
             ],
             "additionalProperties": false,
-            "description": "CPU, memory and root filesystem usage are node-wide percentages. Network rates sum non-loopback interfaces (including virtual interfaces) over 2 minutes, in bytes/s. Missing collectors yield no_data/null. node_up reports node exporter collection, not application readiness. No synthetic history."
+            "description": "CPU, memory and root filesystem usage are node-wide percentages. Network rates sum non-loopback interfaces (including virtual interfaces) over 2 minutes, in bytes/s. Missing collectors yield no_data/null. node_up reports node exporter collection, not application readiness. No synthetic history. runtime_healthz measures the native runtime HTTPS /healthz probe, independently of apps and node exporters."
           },
           "collector": {
             "type": "object",
@@ -4486,21 +4491,30 @@
             "type": "object",
             "properties": {
               "status": {
-                "$ref": "#/components/schemas/Metric/properties/state"
+                "type": "string",
+                "enum": [
+                  "healthy",
+                  "unhealthy",
+                  "unknown"
+                ]
               },
               "observed_at": {
                 "type": [
                   "string",
                   "null"
                 ]
+              },
+              "observation_state": {
+                "$ref": "#/components/schemas/Metric/properties/state"
               }
             },
             "required": [
               "status",
-              "observed_at"
+              "observed_at",
+              "observation_state"
             ],
             "additionalProperties": false,
-            "description": "Mirrors node_up state and sample timestamp; never a deployment or application health verdict."
+            "description": "Fresh native runtime /healthz success or failure. Missing, failed collection or stale samples mean unknown. Independent of app registration, app health and node exporter availability."
           }
         },
         "required": [

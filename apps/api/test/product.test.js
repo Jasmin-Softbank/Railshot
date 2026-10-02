@@ -850,13 +850,17 @@ test('HTTP target observations authorize IDs before collecting and need no deplo
     observeMetrics: async (record) => {
       calls.push(record);
       return { deployment_id: null, target_id: record.target_id, app: record.app, checked_at: new Date().toISOString(), stale_after_seconds: 90,
-        metrics: { node_up: { state: record.target_id === 'stack-gcp' ? 'collection_failed' : 'ready', value: record.target_id === 'stack-gcp' ? null : 1, observed_at: '2026-10-03T00:00:00.000Z', scope: 'target_node' } } };
+        metrics: {
+          node_up: { state: 'collection_failed', value: null, observed_at: '2026-10-03T00:00:00.000Z', scope: 'target_node' },
+          runtime_healthz: { state: record.target_id === 'stack-openstack' ? 'stale' : 'ready', value: record.target_id === 'stack-gcp' ? 0 : record.target_id === 'stack-openstack' ? null : 1, observed_at: '2026-10-03T00:00:00.000Z', scope: 'target_runtime' },
+        } };
     } });
   for (const [id, app] of [['demo', 'demo-app'], ['stack-gcp', 'gcp-app'], ['stack-openstack', 'openstack-app']]) {
     const response = await fetch(`${base}/api/v1/targets/${id}/observations`), body = await response.json();
     assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store'); assert.ok(response.headers.get('x-request-id'));
     assert.equal(body.target_id, id); assert.equal(body.app, app); assert.equal(body.environment_id, null); assert.equal(body.deployment_id, null);
-    assert.deepEqual(body.runtime, { status: body.metrics.node_up.state, observed_at: body.metrics.node_up.observed_at });
+    assert.deepEqual(body.runtime, { status: id === 'demo' ? 'healthy' : id === 'stack-gcp' ? 'unhealthy' : 'unknown',
+      observation_state: body.metrics.runtime_healthz.state, observed_at: body.metrics.runtime_healthz.observed_at });
   }
   for (const id of ['unknown', '__proto__', 'BAD-ID']) assert.equal((await fetch(`${base}/api/v1/targets/${id}/observations`)).status, 404);
   assert.equal((await fetch(`${base}/api/v1/targets/demo/observations?app=another-app`)).status, 422);
