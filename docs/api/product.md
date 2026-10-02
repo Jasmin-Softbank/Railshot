@@ -6,6 +6,7 @@
 
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
+| 화면 선택 | `GET /api/v1/deployment-options` | 원래 UI의 클라우드(AWS)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. 서버에 명시한 provider와 CI/CD 연결이 일치할 때만 available이다. |
 | 대상 | `GET /api/v1/targets` | 서버의 한 등록 대상. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
 | 빌드 | `POST /api/v1/builds`, `GET /api/v1/builds/{id}` | ZIP·폴더·공개 GitHub를 기존 CI로 제출한다. ID는 GitHub run ID 문자열이며 등록한 run만 조회한다. `published`는 검증한 이미지 게시다. |
 | 배포 | `POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | CI 게시 결과를 검증한 후 CD 어댑터를 한 번 호출한다. 같은 source/target의 고정 revision 배포 및 기대 공개 HTTP 검증까지 확인해야 succeeded와 최상위 url을 반환한다. |
@@ -28,3 +29,7 @@ CI는 `GITHUB_TOKEN`, `RAILSHOT_TARGET_ID` 및 기존 GitHub 저장소 설정을
 기존 `POST /api/deploy`와 `GET /api/runs/{run_id}`는 응답 필드와 `x-jasmin-request: deploy` 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·admission·run binding을 공유하므로 이 workspace에서 접수하지 않은 과거 또는 외부 run ID는 조회하지 않는다. v1 배포와 달리 legacy deploy는 CI 제출이다.
 
 현재 운영 메트릭, 수집 시각과 실패 상태는 [제품 관측 계약](observations.md)을 따른다.
+
+대시보드는 소스와 `environment=cloud|onprem`, `provider=aws|openstack|proxmox`를 기존 배포 endpoint로 보낸다. 이 모드는 `app`·`target_id`와 함께 사용할 수 없다. API가 `RAILSHOT_TARGET_ID`·`RAILSHOT_TARGET_PROVIDER`와 CD 등록 앱을 결정하며, 등록 앱이 없으면 GitHub/ZIP/폴더 이름에서 유효한 앱 이름을 생성한다. 폴더명은 선택적 `source_name`(1–255자, 제어 문자 금지)으로 전달한다. 알 수 없는 provider와 잘못된 조합은 422, 연결되지 않은 선택은 409이며 다른 대상으로 대체하지 않는다. 기존 app/target_id 요청과 builds API는 유지한다.
+
+현재 공개 플랫폼 manifest는 검증된 AWS 대상에 `RAILSHOT_TARGET_PROVIDER=aws`를 명시한다. 대상 인프라를 바꾸면 이 운영자 설정도 함께 바꿔야 한다. provider 미설정 시 화면 선택 실행은 차단되며 대상 ID 문자열로 provider를 추측하지 않는다. UI의 클라우드/온프레미스 카드와 provider 선택을 backend의 target ID나 실행 종류 드롭다운으로 대체하지 않는다.

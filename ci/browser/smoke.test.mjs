@@ -40,7 +40,7 @@ async function start(t, options) {
 test('dashboard loads without credentials, offers no login and blocks unconfigured execution', { timeout: 45000 }, async (t) => {
   const { page, origin, errors, requests } = await start(t, { service: null });
   await page.goto(origin);
-  await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('API 연결됨'));
+  await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('연결을 준비'));
   assert.equal(await page.locator('#api-token').count(), 0);
   assert.equal(await page.locator('input[type="password"]').count(), 0);
   await page.locator('#deploy-form button[type="submit"]').click();
@@ -50,7 +50,7 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   assert.match(await page.locator('#form-error').innerText(), /GitHub 저장소 URL/);
   await page.locator('#repository-url').fill('https://github.com/example/demo');
   await page.locator('#deploy-form button[type="submit"]').click();
-  assert.match(await page.locator('#form-error').innerText(), /실행 가능한 대상/);
+  assert.match(await page.locator('#form-error').innerText(), /실행 가능한 인프라/);
   assert.equal(await page.locator('#deploy-button').isDisabled(), true);
   await page.locator('[data-view="history"]').click();
   assert.equal(await page.locator('#history-view').isVisible(), true);
@@ -62,7 +62,7 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   assert.deepEqual(errors, []);
 });
 
-test('public dashboard submits three source types, distinguishes publication from deployment and restores the saved record', { timeout: 90000 }, async (t) => {
+test('original dashboard cards submit three source types through backend selection and restore the saved record', { timeout: 90000 }, async (t) => {
   const submitted = [], cd = [];
   const commit = 'a'.repeat(40);
   const service = {
@@ -77,45 +77,64 @@ test('public dashboard submits three source types, distinguishes publication fro
       steps: [{ key: 'loop', status: 'completed', conclusion: 'success' }, { key: 'release', status: 'completed', conclusion: 'success' }],
       publication: { run_id: String(id), target_id: 'demo-aws', app: submitted[Number(id) - 1].app, source_commit: commit, artifact_id: 22, producer_attempt: 1 } }),
   };
-  const { page, origin, errors, requests, stateDirectory } = await start(t, { service,
+  const { page, origin, errors, requests, stateDirectory } = await start(t, { service, target: { provider: 'aws' },
     access: apiAccessConfig({ RAILSHOT_PUBLIC_DEMO: '1', RAILSHOT_ALLOWED_HOSTS: '127.0.0.1', RAILSHOT_ALLOWED_ORIGINS: 'http://127.0.0.1' }),
     sourceLoader: async () => ({ files: [{ path: 'index.js', content: Buffer.from('source from github') }] }),
     deployPublished: async (request) => { cd.push(request); return { cd: { state: 'deployed', revision: 'b'.repeat(40), deployed: true },
       public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://demo.railshot.io' } }; },
   });
   await page.goto(origin);
-  await page.waitForFunction(() => document.querySelector('#target').value === 'demo-aws');
+  await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('URL 확인'));
+  assert.equal(await page.locator('#target, #operation, #app-name, #environment-panel').count(), 0, 'backend internals do not replace the original UI');
+  await page.getByRole('radio', { name: /온프레미스/ }).check();
+  await page.locator('#provider').selectOption('openstack');
+  assert.match(await page.locator('#connection-status').innerText(), /OpenStack.*아직 연결되지/);
+  await page.getByRole('radio', { name: /클라우드/ }).check();
+  assert.equal(await page.locator('#provider-field').isVisible(), false);
   const review = () => page.locator('#deploy-form button[type="submit"]').click();
   const run = () => page.locator('#deploy-button').click();
   await page.locator('#repository-url').fill('https://github.com/example/browser-demo');
-  await page.locator('#operation').selectOption('builds');
+  await review();
+  await page.getByRole('radio', { name: /온프레미스/ }).check();
+  assert.equal(await page.locator('#review-panel').isVisible(), false, 'changing environment invalidates the reviewed request');
+  await page.locator('#provider').selectOption('proxmox');
+  await review();
+  assert.match(await page.locator('#form-error').innerText(), /Proxmox.*아직 연결되지/);
+  assert.equal(submitted.length, 0);
+  await page.getByRole('radio', { name: /클라우드/ }).check();
+  const output = process.env.CI_OUTPUT_DIR;
+  if (output) {
+    await mkdir(output, { recursive: true });
+    await page.screenshot({ path: join(output, 'original-cards-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.screenshot({ path: join(output, 'original-cards-mobile.png'), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  }
   await review(); await run();
-  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '이미지 게시 완료');
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
   assert.equal(submitted.length, 1);
-  assert.equal(await page.locator('#application-link').isVisible(), false, 'CI publication cannot expose a deployment URL');
+  assert.equal(await page.locator('#application-link').getAttribute('href'), 'https://demo.railshot.io/');
   assert.equal(await page.locator('#actions-link').getAttribute('href'), 'https://github.com/example/apps/actions/runs/1');
   await page.reload();
-  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '이미지 게시 완료');
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
   assert.match(await page.locator('#history-summary').innerText(), /browser-demo/);
   assert.equal(submitted.length, 1, 'reload observes without submitting');
   const files = join(stateDirectory, 'fixture'); await mkdir(files);
   await writeFile(join(files, 'index.js'), 'source from zip');
   const zip = await archiveFromPath(files);
   await page.locator('#archive').setInputFiles({ name: 'archive-app.zip', mimeType: 'application/zip', buffer: zip.bytes });
-  await page.locator('#operation').selectOption('builds');
   await review(); await run();
-  await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('archive-app') && document.querySelector('#run-state').textContent === '이미지 게시 완료');
+  await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('archive-app') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
   assert.equal(submitted[1].files[0].content.toString(), 'source from zip');
   await writeFile(join(files, 'index.js'), 'source from folder');
   await page.locator('#folder').setInputFiles(files);
-  await page.locator('#operation').selectOption('deployments');
-  await page.locator('#app-name').fill('folder-app');
   await review(); await run();
-  await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('folder-app') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('fixture') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
   assert.equal(await page.locator('#run-state').innerText(), '앱 배포 완료');
   assert.equal(submitted.length, 3);
   assert.equal(submitted[2].files[0].content.toString(), 'source from folder');
-  assert.equal(cd.length, 1);
+  assert.equal(cd.length, 3);
   assert.equal(await page.locator('#application-link').getAttribute('href'), 'https://demo.railshot.io/');
   assert.equal(requests.some((request) => request.authorization), false, 'no browser credentials');
   assert.equal(requests.some((request) => ['/api/deploy'].includes(request.path)), false, 'dashboard uses product resources');
@@ -148,14 +167,14 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   };
   await page.goto(origin); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '2개');
   await monitor();
-  assert.match(await page.locator('#monitor-binding').innerText(), /CI run: 123/);
-  assert.match(await page.locator('#monitor-binding').innerText(), /sha256:cccc/);
+  assert.match(await page.locator('#run-binding').textContent(), /CI run: 123/);
+  assert.match(await page.locator('#run-binding').textContent(), /sha256:cccc/);
   assert.equal(await page.locator('#monitor-application-link').isVisible(), false);
   const output = process.env.CI_OUTPUT_DIR;
   if (output) { await mkdir(output, { recursive: true }); await page.screenshot({ path: join(output, 'monitor-running.png'), fullPage: true }); }
   record.status = 'succeeded'; record.stage = 'complete'; record.cd.deployed = true; record.cd.state = 'deployed';
   record.public_http = { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://app.example.test/health', site_url: 'https://app.example.test/' };
-  await page.reload(); await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료'); await monitor();
+  await page.reload(); await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 }); await monitor();
   assert.equal(await page.locator('#monitor-application-link').getAttribute('href'), 'https://app.example.test/');
   if (output) await page.screenshot({ path: join(output, 'monitor-success.png'), fullPage: true });
   age = 100000; await refresh(); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '오래된 값');

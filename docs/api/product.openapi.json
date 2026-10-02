@@ -318,7 +318,7 @@
           "content": {
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/Source"
+                "$ref": "#/components/schemas/DeploymentSource"
               }
             }
           }
@@ -766,6 +766,101 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Environment"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/deployment-options": {
+      "get": {
+        "operationId": "listDeploymentOptions",
+        "summary": "Resolve original cloud and on-premise UI choices against operator configuration",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configured public metadata only; unconfigured server returns an empty list.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DeploymentOption"
+                      }
+                    },
+                    "next_marker": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_marker"
+                  ],
+                  "additionalProperties": false
                 }
               }
             }
@@ -1864,6 +1959,250 @@
           "metrics"
         ],
         "additionalProperties": false
+      },
+      "DeploymentOption": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "environment": {
+            "enum": [
+              "cloud",
+              "onprem"
+            ]
+          },
+          "provider": {
+            "enum": [
+              "aws",
+              "openstack",
+              "proxmox"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "environment",
+          "provider",
+          "label",
+          "available",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "DeploymentSource": {
+        "description": "Either explicit app/target_id or the original UI environment/provider choice, never both. Server resolves the registered target and fixed app name; otherwise it derives a valid app name from the source. An unavailable provider is rejected before source retrieval or execution.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Source"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "github"
+              },
+              "repository_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "Public HTTPS GitHub owner/repository URL. Default branch SHA is pinned once."
+              },
+              "environment": {
+                "enum": [
+                  "cloud",
+                  "onprem"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "aws",
+                  "openstack",
+                  "proxmox"
+                ]
+              },
+              "source_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000-\\u001f]+$"
+              }
+            },
+            "required": [
+              "repository_url",
+              "environment",
+              "provider"
+            ],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "properties": {
+                  "environment": {
+                    "const": "cloud"
+                  },
+                  "provider": {
+                    "const": "aws"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "environment": {
+                    "const": "onprem"
+                  },
+                  "provider": {
+                    "enum": [
+                      "openstack",
+                      "proxmox"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "zip"
+              },
+              "archive": {
+                "type": "string",
+                "format": "binary",
+                "description": "ZIP; at most 100 MiB expanded and 2,000 files."
+              },
+              "environment": {
+                "enum": [
+                  "cloud",
+                  "onprem"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "aws",
+                  "openstack",
+                  "proxmox"
+                ]
+              },
+              "source_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000-\\u001f]+$"
+              }
+            },
+            "required": [
+              "archive",
+              "environment",
+              "provider"
+            ],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "properties": {
+                  "environment": {
+                    "const": "cloud"
+                  },
+                  "provider": {
+                    "const": "aws"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "environment": {
+                    "const": "onprem"
+                  },
+                  "provider": {
+                    "enum": [
+                      "openstack",
+                      "proxmox"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "folder"
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "maxItems": 2000
+              },
+              "paths": {
+                "type": "string",
+                "description": "JSON string array, one safe relative path per files entry."
+              },
+              "environment": {
+                "enum": [
+                  "cloud",
+                  "onprem"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "aws",
+                  "openstack",
+                  "proxmox"
+                ]
+              },
+              "source_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000-\\u001f]+$"
+              }
+            },
+            "required": [
+              "files",
+              "paths",
+              "environment",
+              "provider"
+            ],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "properties": {
+                  "environment": {
+                    "const": "cloud"
+                  },
+                  "provider": {
+                    "const": "aws"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "environment": {
+                    "const": "onprem"
+                  },
+                  "provider": {
+                    "enum": [
+                      "openstack",
+                      "proxmox"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
       }
     },
     "responses": {
