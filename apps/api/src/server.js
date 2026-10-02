@@ -155,7 +155,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
   deployPublished, environmentAdapter, observeMetrics, product, pollInterval,
-  target = { provider: process.env.RAILSHOT_TARGET_PROVIDER },
+  target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
 } = {}) {
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
@@ -170,7 +170,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     const observer = observeMetrics || createMetricsObserver({
       configPath: process.env.RAILSHOT_OBSERVER_PRODUCT_FILE || process.env.RAILSHOT_OBSERVER_CONFIG,
     });
-    return createProductService({ observeMetrics: observer, service, target, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
+    const selections = providerTargets ?? (process.env.RAILSHOT_PROVIDER_TARGETS === undefined ? undefined : JSON.parse(process.env.RAILSHOT_PROVIDER_TARGETS));
+    return createProductService({ observeMetrics: observer, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});

@@ -598,6 +598,76 @@ test('original UI environment selection is resolved server-side and never falls 
   assert.deepEqual(onprem.product.deploymentOptions().filter((option) => option.available).map((option) => option.provider), ['openstack']);
 });
 
+test('HTTP provider selection binds AWS, GCP and OpenStack to separate CI, app and CD targets', async (t) => {
+  const previous = process.env.RAILSHOT_PROVIDER_TARGETS;
+  process.env.RAILSHOT_PROVIDER_TARGETS = JSON.stringify({ gcp: 'stack-gcp', openstack: 'stack-openstack' });
+  t.after(() => { if (previous === undefined) delete process.env.RAILSHOT_PROVIDER_TARGETS; else process.env.RAILSHOT_PROVIDER_TARGETS = previous; });
+  const submissions = [], deliveries = [], runs = new Map();
+  const deployPublished = async ({ app, targetId }) => {
+    deliveries.push({ app, targetId });
+    return { ...deployed, public_http: { ...deployed.public_http, url: `https://${targetId}.example.test` } };
+  };
+  deployPublished.targets = { demo: { applicationName: 'demo-app' }, 'stack-gcp': { applicationName: 'gcp-app' }, 'stack-openstack': { applicationName: 'openstack-app' } };
+  const { base } = await httpFixture(t, { target: { provider: 'aws' }, deployPublished,
+    service: { targetId: 'demo', targetIds: ['demo', 'stack-gcp', 'stack-openstack'],
+      deploy: async (value) => {
+        submissions.push({ app: value.app, targetId: value.target_id });
+        const runId = String(123 + runs.size);
+        runs.set(runId, { ...publication, run_id: runId, app: value.app, target_id: value.target_id });
+        return { run_id: runId, source_commit: publication.source_commit };
+      },
+      status: async (runId, targetId) => {
+        assert.equal(runs.get(runId).target_id, targetId);
+        return { state: 'published', publication: runs.get(runId) };
+      } } });
+  const options = await (await fetch(`${base}/api/v1/options`)).json();
+  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['gcp', true], ['openstack', true], ['proxmox', false]]);
+  const targets = await (await fetch(`${base}/api/v1/targets`)).json();
+  assert.deepEqual(targets.items.map(({ id, provider }) => [id, provider]), [['demo', 'aws'], ['stack-gcp', 'gcp'], ['stack-openstack', 'openstack']]);
+  for (const [provider, environment, id, app] of [['aws', 'cloud', 'demo', 'demo-app'], ['gcp', 'cloud', 'stack-gcp', 'gcp-app'], ['openstack', 'onprem', 'stack-openstack', 'openstack-app']]) {
+    const post = () => {
+      const body = form(); body.delete('app'); body.delete('target_id');
+      body.set('provider', provider); body.set('environment', environment); body.set('source_name', 'different-source');
+      return fetch(`${base}/api/v1/deployments`, { method: 'POST', body, headers: { 'Idempotency-Key': `multi-${provider}` } });
+    };
+    const accepted = await post(); assert.equal(accepted.status, 202, await accepted.text());
+    const completed = await settle(async () => (await fetch(`${base}${accepted.headers.get('location')}`)).json());
+    assert.equal(completed.status, 'succeeded'); assert.equal(completed.target_id, id); assert.equal(completed.app, app);
+    assert.equal(completed.url, `https://${id}.example.test`);
+    const replay = await post(); assert.equal(replay.status, 200); assert.equal((await replay.json()).id, completed.id);
+  }
+  assert.deepEqual(submissions, [{ app: 'demo-app', targetId: 'demo' }, { app: 'gcp-app', targetId: 'stack-gcp' }, { app: 'openstack-app', targetId: 'stack-openstack' }]);
+  assert.deepEqual(deliveries, submissions);
+});
+
+test('provider metadata never admits an additional target without both CI permission and a CD registration', async (t) => {
+  for (const [name, permitted, registered] of [['missing-ci', false, true], ['missing-cd', true, false], ['legacy-adapter', true, null]]) {
+    await t.test(name, async (t) => {
+      const deployPublished = async () => assert.fail('Unavailable selection must not invoke CD');
+      if (registered !== null) deployPublished.targets = { demo: { applicationName: 'demo-app' },
+        ...(registered ? { 'stack-openstack': { applicationName: 'openstack-app' } } : {}) };
+      const f = await fixture(t, { target: { provider: 'aws' }, providerTargets: { openstack: 'stack-openstack' }, deployPublished,
+        service: { targetIds: permitted ? ['demo', 'stack-openstack'] : ['demo'] } });
+      assert.equal(f.product.deploymentOptions().find(({ provider }) => provider === 'aws').available, true);
+      assert.equal(f.product.deploymentOptions().find(({ provider }) => provider === 'openstack').available, false);
+      await assert.rejects(f.product.createDeployment({ source_type: 'folder', files,
+        deployment_selection: { environment: 'onprem', provider: 'openstack' } }, 'unavailable'), { code: 'CAPABILITY_UNAVAILABLE' });
+      assert.equal(f.dispatches(), 0);
+    });
+  }
+  const deployPublished = async () => deployed;
+  deployPublished.targets = { demo: { applicationName: 'demo-app' } };
+  const f = await fixture(t, { target: { provider: 'aws' }, deployPublished, service: { targetIds: [] } });
+  assert.ok(f.product.deploymentOptions().every(({ available }) => !available), 'the legacy default also requires CI admission');
+});
+
+test('provider target configuration rejects ambiguous identities and cannot replace the existing default', async () => {
+  for (const providerTargets of [null, [], 'openstack', { openstack: '../foreign' }, { unknown: 'stack-openstack' },
+    { aws: 'replacement' }, { openstack: 'demo' }, { openstack: 'stack-openstack', proxmox: 'stack-openstack' }]) {
+    await assert.rejects(createProductService({ service: { targetId: 'demo' }, target: { provider: 'aws' }, providerTargets }), { code: 'INVALID_INPUT' });
+  }
+});
+
 test('HTTP deployment accepts a dynamic app-bound plan alongside existing environment options and replays once', async (t) => {
   const app = 'fresh-app', targetId = 'request-aws-new', targetIds = ['demo'];
   const sequence = [];
