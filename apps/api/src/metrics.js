@@ -106,7 +106,8 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
     }
     const registered = config.targets.filter((item) => item.target_id === record.target_id);
     const exact = record.app ? registered.filter((item) => item.app === record.app) : registered;
-    const bindings = exact.length ? exact : registered.filter((item) => item.app == null);
+    const nodeId = record.environment_target_id ?? record.target_id;
+    const bindings = exact.length ? exact : config.targets.filter((item) => item.target_id === nodeId && item.app == null);
     // A node-only request cannot choose an arbitrary app or an ambiguous physical target.
     if (!record.app && new Set(bindings.map((item) => `${item.prometheus_url}|${item.node_instance}`)).size > 1) {
       for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable');
