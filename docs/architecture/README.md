@@ -33,7 +33,8 @@ infrastructure/
   ansible/                    # 요청 검증 → guest 검사 → 팀 runtime 호출
 contracts/                    # Ansible 입력 스키마 등 경계 계약
 deployment/
-  runtime.sh · scripts/       # K3s/Cilium 전용 설치; 샘플 설치와 분리
+  bootstrap/ · cilium/        # K3s/Cilium 설치와 상태 확인
+  scripts/                    # 별도 앱 배포·검사 CLI
 gitops/handoff.py              # digest manifest 로컬 검토본 생성
 ```
 
@@ -43,7 +44,7 @@ gitops/handoff.py              # digest manifest 로컬 검토본 생성
 | 지환 CI | `ci/workflows/railshot-deploy.yml`, `loop.py`, `gate/bundle.py`, `publication.py` | 고정 source → 검사/AI → 검증 bundle → registry/게시 receipt |
 | 화균 Provider | `create_server()` → `ComputeService.create_server()` → `ComputeProvider` 구현 | DTO를 도메인 입력으로 변환하고 project/자원 참조 검증 후 OpenStack SDK 호출. 이 경로는 Terraform 실행기가 아님 |
 | 정빈 연결 | `infrastructure/ansible/run.py: validate()/run()/read_receipt()` | 제한된 JSON 요청 → guest/runtime playbook → nonce가 맞는 readiness 영수증 |
-| 승민 runtime | `deployment/runtime.sh`, `install-k3s.sh`, `install-cilium.sh` | Ansible이 한 번 호출하는 공통 K3s/Cilium 설치. 고객 앱 배포와 분리 |
+| 승민 runtime | `deployment/bootstrap/install-k3s.sh`, `deployment/cilium/install.sh` | Ansible이 한 번 호출하는 공통 K3s/Cilium 설치. 고객 앱 배포와 분리 |
 | CD 인계 | `gitops/handoff.py: read_artifact()/render()` | 검증된 게시 파일 → target 조건 확인 → manifest와 Argo Application 검토본. 네트워크 실행 없음 |
 | AWS edge | `infrastructure/terraform/aws-edge/` | 제공된 AWS 자원 참조 → 앱 1 host ALB/DNS·gateway EIP/SG. guest WG 구성 미포함 |
 
@@ -57,7 +58,7 @@ gitops/handoff.py              # digest manifest 로컬 검토본 생성
 | CD 선택 | **Argo CD로 임시 진행**, 정빈의 대안 조사 병행 | 설치·Git 자격·선언 작성·결과 조회 연결. 최종 제품 선택으로 고정하지 않음 |
 | runtime 설치 | 승민의 K3s/Cilium 설치기를 단일 설치 경로로 사용. `run.py` → `guest.yml` → `runtime.yml` 연결 구현 완료 | 실제 노드 실행 검증. 기존 `site.yml`과 중복 실행 방지 |
 | 클러스터 | AWS와 OpenStack은 독립 실행 클러스터. Cilium VXLAN은 각 클러스터 내부 | 실제 target·CPU·네트워크·격리 정책 검증 |
-| 앱 DB | 앱 K3s 밖의 별도 VM 배치. PostgreSQL/Patroni는 화균 중심 팀 과제 | VM 수·DCS·DB endpoint·비밀 전달·백업·복구·HA 범위 확정 |
+| 앱 DB | 앱 K3s 밖의 별도 VM들에 단일 PostgreSQL/Patroni 클러스터 구성. 화균의 etcd·HAProxy·백업 플레이북 사용 | 운영자 profile의 거점·수량·TLS·접속 정책 확정과 실제 장애·복구 인수 |
 | 완료 | 해당 target의 적용 revision과 기대 앱의 외부 HTTP 응답까지 확인 | 상태 수집·공개 URL·실패 및 재시도 계약 |
 
 근거는 [10/1 회의 전사 원문](https://softbankhackathon2026.slack.com/files/USLACKBOT/F0C63236BL1/___________________)의 2:26:02–2:27:33(클러스터·기반 네트워크), 2:38:15–2:40:50(온보딩·인증), 2:43:09–2:55:10(Provider/runtime/DB 담당), 2:55:51–2:56:37(Argo 임시 진행), 3:04:18–3:05:14(운영 영역)입니다. 링크 열람에는 팀 Slack 접근 권한이 필요합니다. 자동 전사문을 대조했으며 원음은 별도로 검증하지 않았습니다.
@@ -112,13 +113,13 @@ classDef actor fill:#172033,stroke:#172033,color:#ffffff,stroke-width:2px
 
 운영 API, CI 실행기(worker), 고객 앱은 신뢰 영역을 분리합니다. 운영 서비스는 VM 또는 운영용 K3s에 배치할 수 있습니다. 회의 3:04:39에서도 Kubernetes를 필수 조건으로 정하지 않았습니다. 현재 그림은 배치 구조를 설명하며, CI worker의 운영 클러스터 설치 상태는 [검증 보고](../integration/validation.md)에서 확인합니다.
 
-승민 runtime의 현재 구성은 **단일 Linux 노드 PoC**입니다. 통합 진입점인 [runtime.sh](../../deployment/runtime.sh)는 경량 Kubernetes인 K3s와 네트워크 구성 요소인 Cilium만 설치합니다. CoreDNS는 클러스터 내부 이름 해석을, kube-proxy는 Service 트래픽 전달을 담당합니다. nginx Deployment와 노드 포트로 공개하는 NodePort Service의 설치·검사는 별도의 [install.sh 샘플 경로](../../deployment/install.sh)에 포함됩니다.
+승민 runtime의 현재 구성은 **단일 Linux 노드 PoC**입니다. 통합 진입점 [runtime.yml](../../infrastructure/ansible/runtime.yml)은 공통 bootstrap·Cilium 스크립트를 호출해 경량 Kubernetes인 K3s와 네트워크 구성 요소인 Cilium을 설치합니다. CoreDNS는 클러스터 내부 이름 해석을, kube-proxy는 Service 트래픽 전달을 담당합니다. 앱 Deployment와 노드 포트로 공개하는 NodePort Service의 설치·검사는 별도 [deploy.sh](../../deployment/scripts/deploy.sh)·[verify.sh](../../deployment/scripts/verify.sh) 경로가 담당합니다.
 
 고객 앱 namespace에는 배포된 Deployment와 Service가 위치합니다. [manifest 인계 생성 도구](../../gitops/handoff.py)는 고객 클러스터 밖에서 실행하여 배포 검토본을 만듭니다. 현재 통합 runtime은 이 도구나 고객 앱을 설치하지 않습니다.
 
 Cilium 설정은 `routingMode=tunnel`, `tunnelProtocol=vxlan`이며 kube-proxy를 유지합니다. VXLAN은 각 클러스터 내부의 노드 간 통신에 사용합니다. Traefik·ServiceLB·metrics-server·동적 local-path storage·Hubble은 기본 설치 범위에 없습니다. 단일 노드는 현재 설치 프로파일의 제약이며, 제품 전체나 Patroni의 노드 수를 정하는 기준은 아닙니다. Kubernetes 상태 저장소와 앱 PostgreSQL은 별도 구성입니다.
 
-앱 DB는 K3s 밖의 별도 VM에 배치하는 설계입니다. PostgreSQL 고가용성 구성을 관리하는 Patroni의 배치, 노드 수, 복구 범위는 담당자 합의가 필요합니다. AWS와 온프레미스를 묶는 단일 DB 클러스터나 자동 이관은 확정하지 않았습니다. 고객 워크로드의 namespace, 역할 기반 접근 제어(RBAC), NetworkPolicy, Pod Security, 자원 할당량도 별도로 검증해야 합니다.
+앱 DB는 **K3s에 가입하지 않는 별도 VM들로 구성한 단일 PostgreSQL/Patroni 클러스터**입니다. 화균의 [원본 README](https://github.com/Jasmin-Softbank/Railshot/blob/67d19efc81b01b2a55b6dd54c198088b018bdd1f/README.md)와 [하이브리드 DB 구조](hybrid-db.md)를 따르며, Patroni는 etcd를 통해 리더를 관리하고 앱은 HAProxy를 거쳐 PostgreSQL에 TLS로 접속합니다. 여러 거점에 배치할 수 있지만 거점별 독립 대기 클러스터나 자동 데이터 이관은 구현하지 않았습니다. 실제 운영의 노드 수·장애 영역·동기 복제 지연·접속 주소의 이중화는 별도 인수 대상입니다. [이번 AWS 검증](../integration/remaining-work-20261002.md)을 다중 거점 장애 내성의 증거로 사용하지 않습니다. 고객 워크로드의 namespace, 역할 기반 접근 제어(RBAC), NetworkPolicy, Pod Security, 자원 할당량도 별도로 검증해야 합니다.
 
 ```mermaid
 %%{init: {"theme":"base","fontFamily":"Arial,sans-serif","themeVariables":{"fontFamily":"Arial,sans-serif","fontSize":"16px","primaryTextColor":"#172033","lineColor":"#64748b","edgeLabelBackground":"#ffffff","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1"},"flowchart":{"curve":"linear","nodeSpacing":28,"rankSpacing":80,"htmlLabels":true,"subGraphTitleMargin":{"top":12,"bottom":30}}}}%%
@@ -155,7 +156,7 @@ flowchart TB
         OW --> OA
         OA <-->|"Pod / Service / DNS"| ON
     end
-  DB[("[결정 대기] 별도 DB VM<br/>PostgreSQL / Patroni<br/>배치·수량·복구 계약 필요")]:::pending
+  DB[("K3s 밖의 별도 DB 클러스터<br/>PostgreSQL / Patroni / etcd / HAProxy<br/>운영 배치·장애 내성은 별도 인수")]:::design
   API -->|"검사·게시 요청"| CI
   CA -.->|"현재 stateless 인계에서는 미지원"| DB
   OA -.->|"DB 연결은 후속 담당 계약"| DB
@@ -311,9 +312,9 @@ Application credential은 애플리케이션에 발급하는 ID·secret 자격�
 1. Provider `create_server()`가 DTO를 `CreateServerSpec`으로 바꾸고 참조·권한을 검사합니다.
 2. HTTP 202 이후 `get_server()`로 VM 상태를 조회합니다. ACTIVE라도 guest ready로 처리하지 않습니다.
 3. 신뢰된 실행자가 `run.py`에 명시적 요청을 전달합니다. `guest.yml`은 OS/CPU/IP/자원과 초기화 완료를 검사합니다.
-4. `runtime.yml`이 소유권과 기존 구성을 확인하고 `runtime.sh`로 K3s/Cilium을 설치합니다. nonce가 맞는 단계 영수증이 있어야 ready를 승인합니다.
+4. `runtime.yml`이 소유권과 기존 구성을 확인하고 공통 bootstrap·Cilium 스크립트로 K3s/Cilium을 설치합니다. nonce가 맞는 단계 영수증이 있어야 ready를 승인합니다.
 
-**부분 실패/미지원:** 시간 초과 또는 runtime 실패 후 일부 설치가 남을 수 있습니다. 현재 통합 runtime은 amd64 단일 노드이며, ARM64·다중 worker·Patroni 설치 요청은 거부합니다. 중복 설치를 방지하기 위해 기존 `site.yml`의 K3s 설치를 추가 실행하지 않습니다. 이 단계의 성공은 고객 앱 준비나 공개 HTTP 응답까지 확인한 결과는 아닙니다.
+**부분 실패/미지원:** 시간 초과 또는 runtime 실패 후 일부 설치가 남을 수 있습니다. 현재 통합 runtime은 amd64 단일 노드이며 ARM64·다중 worker 요청은 거부합니다. Patroni는 이 K3s runtime 경로에 포함하지 않으며 별도 DB 클러스터의 [Ansible 계약](../api/ansible.md)을 따릅니다. 중복 설치를 방지하기 위해 기존 `site.yml`의 K3s 설치를 추가 실행하지 않습니다. 이 단계의 성공은 고객 앱 준비나 공개 HTTP 응답까지 확인한 결과는 아닙니다.
 
 ### C.3 Case 3: 게시 산출물에서 배포 검토본 만들기
 
@@ -416,8 +417,8 @@ sequenceDiagram
 | API→GitHub/상태 조회 | [github.js](../../apps/api/src/github.js), [API 계약](../../apps/api/docs/interface.md) | source/target과 published 인계 소비 구현. 외부 URL null; 실배포 증거 아님 |
 | AI→gate→bundle→digest | [CI workflow](../../ci/workflows/railshot-deploy.yml), [loop.py](../../ci/scripts/loop/loop.py), [bundle.py](../../ci/scripts/gate/bundle.py) | 소스 구현. workflow 설치·runner 등록·실제 cloud run은 별도 |
 | Provider→OpenStack | [router.py](../../infrastructure/providers/openstack/src/control_plane/api/router.py), [connection.py](../../infrastructure/providers/openstack/src/control_plane/infrastructure/openstack/connection.py), [auth.py](../../infrastructure/providers/openstack/src/control_plane/auth.py) | project 범위 VM API와 고정 Bearer 인증. OIDC/다중 고객·unscoped 교환 구현 아님 |
-| Ansible→runtime | [run.py](../../infrastructure/ansible/run.py), [guest.yml](../../infrastructure/ansible/guest.yml), [runtime.yml](../../infrastructure/ansible/runtime.yml), [runtime.sh](../../deployment/runtime.sh) | guest/runtime 단계와 nonce 영수증을 검사하는 실행 경로 구현. 실제 노드 실행 아님 |
-| K3s·Cilium·앱 Service | [K3s](../../deployment/scripts/install-k3s.sh), [Cilium](../../deployment/scripts/install-cilium.sh), [Service](../../deployment/manifests/service.yaml), [검사](../../deployment/scripts/verify.sh) | 단일 노드 부품의 설치·검사 코드. 이 통합본의 cloud E2E 아님 |
+| Ansible→runtime | [run.py](../../infrastructure/ansible/run.py), [guest.yml](../../infrastructure/ansible/guest.yml), [runtime.yml](../../infrastructure/ansible/runtime.yml) | guest/runtime 단계와 nonce 영수증을 검사하는 실행 경로 구현. 실제 노드 실행 아님 |
+| K3s·Cilium·앱 Service | [K3s](../../deployment/bootstrap/install-k3s.sh), [Cilium](../../deployment/cilium/install.sh), [Service](../../deployment/manifests/service.json.template), [검사](../../deployment/scripts/verify.sh) | 단일 노드 부품의 설치·검사 코드. 이 통합본의 cloud E2E 아님 |
 | AWS edge 코드 | [main.tf](../../infrastructure/terraform/aws-edge/main.tf), [입력 계약](../../infrastructure/terraform/aws-edge/variables.tf) | Terraform validate 범위. apply·DNS/TLS/HTTP·WG 실증 없음 |
 | CD manifest 인계 | [handoff.py](../../gitops/handoff.py) | 단일 stateless 검토본 생성. Git push·Argo sync·배포 완료 아님 |
 | 독립 클러스터·Argo·DB | [회의 전사 원문](https://softbankhackathon2026.slack.com/files/USLACKBOT/F0C63236BL1/___________________), 위 시간대 | 회의 진행 기준. 설치·HA·복구 완료 주장 없음 |
