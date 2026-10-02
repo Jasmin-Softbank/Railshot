@@ -4,6 +4,36 @@
 
 이 문서는 최초 소스 조립 당시의 기록입니다. 아래 설치 경로와 CI/CD 미연결 설명도 당시 상태를 보존합니다. 현재 구조와 후속 검증 범위는 [루트 README](../../README.md), [공통 아키텍처](../architecture/README.md), [Ansible 인터페이스](../api/ansible.md), [AWS/GCP 배포 기록](cloud-e2e-progress.md)을 확인하세요.
 
+## 현재 runtime 경로와 승민 담당 범위 — 2026-10-02 대조
+
+대조 기준은 승민 원본 `5f893ff2cf991561698524fe0d76cabcd2c07323`과 integration `b9cfd2969b261d1279aae927bbb5886209716c62`다. 원본 HEAD 전체가 integration의 조상은 아니지만 bootstrap·Cilium·JSON runtime·airgap·Lima 검사·선택 모듈 안내의 핵심 구현은 동일하다. 원본에만 있는 후속 [GCP blocked smoke](https://github.com/Jasmin-Softbank/Railshot/blob/5f893ff2cf991561698524fe0d76cabcd2c07323/deployment/scripts/tests/results/GCP-SMOKE-2026-10-02.md)와 [Vercel 진단 기록](https://github.com/Jasmin-Softbank/Railshot/blob/5f893ff2cf991561698524fe0d76cabcd2c07323/deployment/scripts/tests/results/VERCEL-DIAGNOSIS-2026-10-02.md)을 핵심 runtime 미반영으로 분류하지 않는다. 통합본의 플랫폼 이미지·배치 변경은 고객 runtime 구현과 별도로 비교한다.
+
+GCP 기록의 `BLOCKED`와 도구·권한 부족은 작성자 환경과 그 실행 시점의 결과다. 이를 현재 운영 GCP의 상태나 통합본의 모든 GCP 경로 실패로 바꾸어 해석하지 않는다.
+
+| 최초 담당 항목 | 현재 소스와 지원 범위 | 구분해야 할 한계 |
+|---|---|---|
+| 온프레/클라우드 배포 환경·`install.sh` | 준비된 단일 Linux 노드의 [bootstrap](../../deployment/bootstrap/)·[Cilium](../../deployment/cilium/) 설치, [JSON runtime](../../deployment/scripts/runtime.py) 반영 | `deployment/install.sh`와 `deployment/runtime.sh`는 양쪽에 없다. VM 생성·SSH 대상 선택은 상위 Provider/Ansible 책임 |
+| Lima | [provider simulation](../../deployment/scripts/tests/provider_simulation.py)으로 같은 runtime을 일회성 VM에서 검사 | AWS/GCP 입력을 모의해도 실제 클라우드 IAM·라우팅·공개 ingress 검증은 아님 |
+| Cilium 네트워크 정책 | [Ingress 템플릿](../../deployment/cilium/network-policy.json.template)과 [renderer](../../deployment/scripts/render.py), 허용/차단 검사 제공 | 기본 standalone 배포에는 자동 적용하지 않는다. 같은 namespace의 승인 label Pod를 허용하는 선택 예제이며 전체 tenant 격리 완료가 아님 |
+| cloudflared | [모듈 안내](../../deployment/cloudflared/README.md), [기존 공개 URL의 HTTP 확인](../../deployment/scripts/exposure.py) | `cloudflare-tunnel` 입력이 connector 설치·Tunnel 생성·DNS 설정을 수행하지 않음 |
+| CNPG | [선택 모듈 안내](../../deployment/cnpg/README.md)만 존재 | 자동 설치 미구현. 후속 DB 배치 합의를 대신하는 기본 DB 관리자로 추가하지 않음 |
+| Sealed Secrets | [선택 모듈 안내](../../deployment/sealed-secrets/README.md)만 존재 | controller 설치·SealedSecret 암호화/해제 자동화 미구현. Kubernetes Secret 사용과 다름 |
+
+현재 실행 경로는 다음 두 가지이며 서로의 완료 상태를 대신하지 않는다.
+
+- **통합 노드 준비:** `infrastructure/ansible/run.py` → `guest.yml` → [`runtime.yml`](../../infrastructure/ansible/runtime.yml). 팀의 `common.sh`, bootstrap/K3s·Cilium·health 스크립트와 버전 정책을 대상 노드로 복사하고 `/run/railshot-deployment.lock` 아래에서 실행한다. JSON `runtime.py`/`engine.py`를 호출하거나 샘플 앱을 설치하는 경로는 아니다. 별도 standalone `site.yml`을 연이어 실행하지 않는다.
+- **단독 runtime·CI 시험:** [`deployment/scripts/deploy.sh`](../../deployment/scripts/deploy.sh) → `runtime.py` → 입력 adapter → `engine.py`. K3s/Cilium과 요청 workload를 설치하고 `verify.sh`로 Pod·Service·HTTP를 검사한다. `cleanup.sh`의 전체 클러스터 제거 옵션은 소유가 확인된 일회성 노드에만 사용한다. [정리 절차](e2e-teardown.md)를 따른다.
+
+여기서 단일 노드 지원은 고객 runtime 기준이다. 운영 K3s의 control/build profile은 [`cilium/preflight.py`](../../deployment/cilium/preflight.py)가 별도 CIDR·노드 역할로 검사하며, 이를 고객 클러스터의 일반 다중 노드 지원으로 표현하지 않는다.
+
+제품의 Argo 경로는 [`gitops/handoff.py`](../../gitops/handoff.py)가 앱별 Deployment/Service와 **명시한 ingress CIDR·포트 허용, egress 차단** NetworkPolicy를 생성한다. standalone의 선택 Ingress 템플릿과 다른 경로다. Private pull은 namespace의 Kubernetes Secret과 `imagePullSecrets` 참조를 사용하며, Argo cluster Secret·자격 갱신 역시 Sealed Secrets 구현을 의미하지 않는다. 선언 생성, 실제 Secret 설치·image pull, Cilium의 트래픽 허용/차단은 각각 확인한다. [GitOps 계약](../../gitops/README.md)을 따른다.
+
+DB 책임은 [10/1 회의 2:45:09–2:46:55 및 2:53:19–2:53:42](../meetings/2026-10-01.md)의 K8s 외부 배치·화균 담당 결정을 따른다. 최초 CNPG 항목만으로 CNPG와 외부 Patroni를 동시에 설치하지 않는다. 후속 DB 실행 지원과 단일 거점 인수 결과는 [현재 Ansible 계약](../api/ansible.md), [DB 검증 기록](database-acceptance-20261002.md)에서 확인한다.
+
+이 대조는 소스 반영과 역할 범위 확인이다. 원본의 Lima 결과, hosted runner E2E, [AWS/GCP 앱 배포](cloud-e2e-progress.md), [runtime·관측 인수](observability-acceptance-20261002.md)는 각각 기록된 노드·revision·시점의 증거다. 코드 동일성만으로 현재 운영 Cilium·runner 상태나 모든 R&R 항목의 실환경 완료를 주장하지 않는다. 이번 문서 수정에서는 운영 자원을 변경하지 않았다.
+
+## 최초 조립 내역 — 과거 기록
+
 | 담당 | 선택 파일 수 | 배치 |
 | --- | ---: | --- |
 | 홍진기 | 16 | `apps/api`, `apps/dashboard` |
@@ -16,7 +46,7 @@
 
 지환 소스는 원격 `9e13c7c2e50b003c146852ccf22c9e9399271cf7`에 보관된 정리 patch SHA256 `50cefac55f73c4c74e9f2bba9d3183706eb4d7940f352a15d16d02093d1616fe`를 임시 디렉터리에서 적용했다. 수정 파일을 cleanup manifest와 대조했으며 workflow는 SHA256 `71d78e47f54de7445442079ee543b78128320aaf2aaa2a9df955c9e3675dfa5b`의 보관본과 같았다. 원격의 개인 renderer·observer를 다시 가져오지 않았다.
 
-운영 UI/API와 고객 runtime은 별도 책임이다. API는 진기의 localhost 서비스이며 Provider API는 화균의 project-scoped OpenStack 서비스다. CI는 원본 검사·제한된 AI 수정·재검사·동일 이미지 게시까지만 수행한다. `deployment/install.sh`는 승민의 단일 노드 runtime 및 nginx sample 설치다. 정빈의 `site.yml`도 K3s를 설치하므로 두 설치기를 연속 실행하면 안 된다. 통합 실행 경로는 새 `infrastructure/ansible/run.py`가 guest 검사 후 승민 `deployment/runtime.sh`를 한 번 호출한다.
+초기 조립 기록에서는 운영 UI/API와 고객 runtime을 별도 책임으로 구분했다. API는 진기의 localhost 서비스, Provider API는 화균의 project-scoped OpenStack 서비스, CI는 원본 검사·제한된 AI 수정·재검사·동일 이미지 게시 범위였다. 당시 `deployment/install.sh`를 단일 노드 runtime·nginx sample 설치로, `deployment/runtime.sh`를 guest 검사 뒤 한 번 호출하는 경로로 기술했다. **이 두 파일명은 현재 실행 지침이 아니다.** 현재 경로는 위 대조 표와 실행 순서를 따른다.
 
 초기 조립 당시 CI workflow는 `ci/workflows`의 소스 템플릿으로만 보관했다. 업로드용 private apps 저장소에 설치하고 신뢰할 수 있는 integration commit을 PLATFORM_REF로 고정하기 전에는 remote CI 실행 경로가 연결된 상태가 아니다. CodeBuild publisher와 Azure Terraform는 보존된 선택 실험이며 첫 통합 경로의 기본값이 아니다.
 
