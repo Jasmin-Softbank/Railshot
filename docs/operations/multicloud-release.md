@@ -1,6 +1,6 @@
 # 공통 릴리스 배포
 
-`railshot-ci.yml`의 성공한 `Railshot CI gate`가 같은 커밋의 플랫폼 릴리스를 호출한다. `RAILSHOT_AUTO_RELEASE=true`이고 현재 브랜치가 `RAILSHOT_PLATFORM_VERIFY_REF`와 일치하면 문서 전용 변경을 제외한 플랫폼·런타임·공통 정책 변경을 자동 게시하고 플랫폼 배포를 검증한다. 기존 플랫폼 자동 릴리스는 이 변수로 계속 운영한다. 중앙 워커와 AWS/GCP/OpenStack까지 같은 릴리스를 적용하려면 별도로 `RAILSHOT_MULTICLOUD_RELEASE=true`를 설정한다. 이 두 번째 변수는 미설정·`false`가 기본이며, 초기 운영 바인딩과 세 환경 검증을 준비한 뒤 활성화한다. 수동 실행은 `multicloud` 입력으로 선택한다.
+`railshot-ci.yml`의 성공한 `Railshot CI gate`가 같은 커밋의 플랫폼 릴리스를 호출한다. `RAILSHOT_AUTO_RELEASE=true`이고 현재 브랜치가 `RAILSHOT_PLATFORM_VERIFY_REF`와 일치하면 문서 전용 변경을 제외한 플랫폼·런타임·공통 정책 변경을 자동 게시하고 플랫폼 배포를 검증한다. 기존 플랫폼 자동 릴리스는 이 변수로 계속 운영한다. 중앙 워커와 AWS/GCP/OpenStack까지 같은 릴리스를 적용하려면 별도로 `RAILSHOT_MULTICLOUD_RELEASE=true`를 설정한다. 이 두 번째 변수는 미설정·`false`가 기본이며, 초기 운영 바인딩과 세 환경 검증을 준비한 뒤 활성화한다. 수동 실행도 저장소 변수가 `true`일 때만 `multicloud` 입력을 허용한다. `false`·미설정 상태에서 입력만 켜면 admission에서 차단한다.
 
 1. dashboard/API/ci-runner를 시험하고 같은 실행에서 얻은 GHCR digest를 고정한다.
 2. 기존 `deployment/platform` 브랜치에 플랫폼 선언을 반영하고 실제 Argo 상태·파드 digest·공개 HTTPS를 검증한다.
@@ -49,6 +49,27 @@ Target 파일 경로는 `/home/railshot-operator/.local/share/railshot/` 아래�
 각 provider의 `edge_config_file`은 `edge_update.py`의 v1 입력이다. 원본 local Terraform writer를 중지하고 최신 lineage·serial·파일 hash·fresh no-op plan을 확인한 뒤 단 하나의 실행 권위를 옮긴다. state 복사만으로 권위 인수가 완료되지는 않는다. GCP native LB와 OpenStack AWS relay의 source 모듈은 다르다. OpenStack의 `edge_kind="aws-relay"`는 기존 TG·listener·Route53 alias 세 리소스만 소유하며, 제어 SG ingress와 ALB SG egress는 기존 소유자에게 남긴다. 기존 target tuple·ingress rule·healthy 상태도 매번 검사한다. Octavia로 전환할 때는 별도 인수 절차가 필요하다.
 
 GCP의 WireGuard를 사용하지 않는 관리 경로는 provisioned public IPv4의 TLS endpoint에 고정한다. 관측도 같은 주소를 사용하고 `observer_source_cidr`를 기존 collector의 외부 IPv4 `/32`에 고정한다. 기본 내부 환경은 기존 observer private IP `/32`를 유지한다. SSH는 기존 SSM/IAP 연결을 재사용한다.
+
+## 공용 관측 등록 원본
+
+공통 런타임 릴리스는 API PVC의 registrar 상태만 사용한다. 운영자의 `observability_config_file`에는 다음 바인딩을 추가한다. UID는 기존 객체를 조회해 고정하며 아래 예시를 그대로 사용하지 않는다.
+
+```json
+{
+  "api_registrar": {
+    "context": "railshot-control",
+    "deployment_uid": "EXISTING_RAILSHOT_API_DEPLOYMENT_UID",
+    "pvc_uid": "EXISTING_RAILSHOT_API_PVC_UID",
+    "config_file": "/var/lib/railshot/config/app-db/observer.json"
+  }
+}
+```
+
+`config_file`은 **registrar settings** 파일이다. API의 legacy metrics용 `/var/lib/railshot/config/observer.json`과 구분한다. 이 파일의 `state_dir/product.json`과 API의 `RAILSHOT_OBSERVER_PRODUCT_FILE`이 같아야 한다. API 설정에는 `api_registrar`를 넣지 않는다. 운영자와 API의 collector 식별자·수명·주소·포트·collector 디렉터리가 다르면 쓰기 전에 거부한다.
+
+제어 서버는 바인딩된 Deployment·PVC 및 그 ReplicaSet이 소유한 Ready API Pod를 확인하고, 그 Pod의 기존 `register.py --api-registrar`에 대상 한 건만 전달한다. API의 일반 앱 등록과 이 요청은 같은 `registration.lock` 안에서 현재 desired/product를 병합하고 Prometheus를 갱신한 후 product를 원자적으로 저장한다. 운영자 디렉터리로 product를 복제하지 않으며, 릴리스 검증도 API 원본을 다시 읽는다. 실행 중 Pod/Deployment/PVC가 바뀌거나 응답이 불확실하면 실패로 남기고 자동 재시도하지 않는다.
+
+API 바인딩이 준비되지 않으면 노드 변경 전에 `observer_preflight`에서 차단한다. 기존 앱의 관측 파일을 이동해야 한다면 먼저 API·운영자 등록을 정지하고, 기존 desired와 product의 대상이 모두 보존된 한 원본을 API PVC에 준비한 뒤 경로를 연결한다. 단순 파일 덮어쓰기나 두 collector writer의 병행 운용은 허용하지 않는다.
 
 ## 검증과 복구
 

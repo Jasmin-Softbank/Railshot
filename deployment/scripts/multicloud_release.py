@@ -153,7 +153,7 @@ else:
  except (ValueError,TypeError): edge_proof={'phase':'unknown'}
  if edge_run.returncode!=0 or edge_proof.get('phase')!='succeeded' or edge_proof.get('provider')!=target['provider'] or edge_proof.get('release_sha')!=release['source_sha']:
   print(json.dumps({'status':'failed','code':'EDGE_UPDATE_NOT_VERIFIED','provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha']})); sys.exit(1)
-run=subprocess.run(command,capture_output=True,text=True,timeout=1800)
+run=subprocess.run(command,capture_output=True,text=True,timeout=1800,env={**os.environ,'RAILSHOT_RELEASE_API_IMAGE':release['images']['api']})
 try: proof=json.loads(run.stdout)
 except (ValueError,TypeError): proof={'status':'failed','code':'RUNTIME_RECEIPT_UNAVAILABLE'}
 if not isinstance(proof,dict) or any(proof.get(key)!=value for key,value in {'provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha'],'scope':target.get('scope')}.items()):

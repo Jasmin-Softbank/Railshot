@@ -137,6 +137,25 @@ class RuntimeReleaseTests(unittest.TestCase):
                 self.assertEqual(commands.call_count, count)
                 self.assertEqual(json.loads((root / 'etc/railshot/runtime-identity.json').read_text()), identity)
 
+    def test_unavailable_canonical_registrar_blocks_before_any_runtime_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            args = SimpleNamespace(state_dir=home / 'release', registration_dir=home / 'registration', target_id='aws')
+            config = {'observability_config_file': '/private/observer'}
+            observer = SimpleNamespace(product=Mock(side_effect=ValueError('canonical registrar unavailable')))
+            with patch.object(update, 'load', return_value=(release(), {}, {'target': {'provider': 'aws'}}, {}, config, None, None, {})), \
+                    patch.object(update.env, 'read_private', return_value={}), \
+                    patch.object(update.importlib.util, 'module_from_spec', return_value=observer), \
+                    patch.object(update.importlib.util, 'spec_from_file_location', return_value=SimpleNamespace(loader=SimpleNamespace(exec_module=lambda x: None))), \
+                    patch.object(update, 'connection') as connection, patch.object(update, 'stage_source') as stage:
+                result = update.execute(args)
+                self.assertEqual(result['status'], 'blocked')
+                self.assertEqual(result['stage'], 'observer_preflight')
+                self.assertFalse(result['mutation_started'])
+                connection.assert_not_called(); stage.assert_not_called()
+                observer.product.assert_called_once_with({}, require_api=True)
+                self.assertFalse((args.registration_dir / 'runtime-release.json').exists())
+
     def test_policy_release_reapplies_existing_registration_and_failure_cannot_retry(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary).resolve() / 'release'
@@ -165,7 +184,7 @@ class RuntimeReleaseTests(unittest.TestCase):
             @contextmanager
             def kubectl(_):
                 yield lambda *a, **kw: {'metadata': {'labels': {'railshot.io/registration': 'c' * 32}}}
-            observer = SimpleNamespace(register=Mock(return_value={'registered': True, 'status': 'succeeded'}))
+            observer = SimpleNamespace(product=Mock(return_value={}), register=Mock(return_value={'registered': True, 'status': 'succeeded'}))
             with patch.object(update, 'load', return_value=(plan, record, request, cd, settings, {}, None, identity)), \
                     patch.object(update, 'connection', connection), patch.object(update, 'stage_source', return_value='/private/source'), \
                     patch.object(update, 'node_call', side_effect=node_call), \
@@ -253,7 +272,8 @@ class RuntimeReleaseTests(unittest.TestCase):
         product['collector']['id'] = config['owner']
         registration = {'version': 2, 'scope': 'node-only', 'target_id': 'gcp', 'environment_id': 'node-registration'}
         identity = {'descriptor': {'resource_id': 'vm', 'addresses': {'private': '10.66.0.2'}}}
-        observer = SimpleNamespace(settings=lambda value: value, metrics_host=lambda descriptor, ip: ip)
+        observer = SimpleNamespace(settings=lambda value: value, metrics_host=lambda descriptor, ip: ip,
+                                   product=Mock(side_effect=lambda config, **kw: product))
         response = Mock(status=200); response.read.return_value = b'{}'
         response.__enter__ = Mock(return_value=response); response.__exit__ = Mock(return_value=False)
         with patch.object(update.importlib.util, 'module_from_spec', return_value=observer), \

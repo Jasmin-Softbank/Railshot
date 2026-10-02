@@ -50,6 +50,7 @@ jobs:
           PUBLISH: ${{ inputs.publish }}
           DEPLOY: ${{ inputs.deploy }}
           MULTICLOUD: ${{ inputs.multicloud }}
+          MULTICLOUD_ENABLED: ${{ vars.RAILSHOT_MULTICLOUD_RELEASE }}
           SKIP_BUILD: ${{ inputs.skip_build || false }}
           AUTO_RELEASE: ${{ vars.RAILSHOT_AUTO_RELEASE }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
@@ -80,6 +81,7 @@ jobs:
               assert os.environ['CI_RUN_ID'] == os.environ['GITHUB_RUN_ID'], 'artifact reuse requires the calling CI run gate'
               assert set(components) == allowed, 'automatic deployment requires all tested components'
           if os.environ['MULTICLOUD'] == 'true':
+              assert os.environ.get('MULTICLOUD_ENABLED') == 'true', 'multicloud release requires RAILSHOT_MULTICLOUD_RELEASE=true'
               assert os.environ['DEPLOY'] == 'true', 'multicloud release requires platform deployment'
           if os.environ['DEPLOY'] == 'true':
               assert os.environ['GITHUB_REPOSITORY'] == 'Jasmin-Softbank/Railshot' and os.environ['GITHUB_REPOSITORY_ID'] == '1400202256', 'deploy requires the registered platform repository'
@@ -255,7 +257,7 @@ jobs:
           retention-days: 14
 
   multicloud:
-    if: ${{ always() && !cancelled() && inputs.multicloud && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' }}
+    if: ${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' }}
     needs: [deploy, verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 90

@@ -323,7 +323,7 @@ class NodeOnlyAdoptionTests(unittest.TestCase):
                 @contextmanager
                 def kubectl(_):
                     yield Mock(side_effect=AssertionError('only mocked observer-health may read Kubernetes'))
-                observer = SimpleNamespace(register=Mock(return_value={'status': 'succeeded', 'registered': True}))
+                observer = SimpleNamespace(product=Mock(return_value={}), register=Mock(return_value={'status': 'succeeded', 'registered': True}))
                 with patch.object(adopt.update, 'node_call', side_effect=node_call), patch.object(adopt.update, 'stage_source', return_value='/source'), \
                         patch.object(adopt.env, 'runtime_kubectl', kubectl), patch.object(adopt.update, 'observer_health', return_value={'exporters_ready': True}), \
                         patch.object(adopt.update, 'collection_health', return_value={'collection_state': 'ready'}), \

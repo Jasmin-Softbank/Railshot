@@ -298,7 +298,7 @@ def collection_health(settings, registration, registered, identity, *, wait_seco
     spec = importlib.util.spec_from_file_location('release_observer_validation', ROOT / 'observability/register.py')
     observer = importlib.util.module_from_spec(spec); spec.loader.exec_module(observer)
     config = observer.settings(env.read_private(settings['observability_config_file']))
-    product = env.read_private(Path(config['state_dir']) / 'product.json')
+    product = observer.product(config, require_api=True)
     env.argo.require(product.get('version') == 1 and product.get('collector') ==
         {'id': config['owner'], 'lifecycle': config['lifecycle'], 'expires_at': config['expires_at']}, 'observer collector binding differs')
     application = not node_only(registration)
@@ -412,6 +412,12 @@ def execute(args):
         def done(name):
             receipt['steps'].append(name); env.save(path, receipt)
         try:
+            stage('observer_preflight')
+            spec = importlib.util.spec_from_file_location('runtime_release_observer', ROOT / 'observability/register.py')
+            observer = importlib.util.module_from_spec(spec); spec.loader.exec_module(observer)
+            observer_config = env.read_private(settings['observability_config_file'])
+            observer.product(observer_config, require_api=True)
+            done('observer_preflight')
             stage('runtime_readback')
             if empty:
                 previous_policy = registration['baseline_policy_sha256']
@@ -449,14 +455,12 @@ def execute(args):
                 done('common_policy')
             stage('observability', mutation=True)
             env.argo.require(settings.get('observability_config_file'), 'registered observer required for common release')
-            spec = importlib.util.spec_from_file_location('runtime_release_observer', ROOT / 'observability/register.py')
-            observer = importlib.util.module_from_spec(spec); spec.loader.exec_module(observer)
             observation = {'version': 1, 'target_id': args.target_id, 'environment_id': registration['environment_id'],
                            'node_ip': expected['node_ip'], 'registry_file': str(args.registry)}
             if not empty:
                 observation.update(app=registered['app'], namespace=registered['target']['namespace'],
                                    probe_url=registered['public_http']['url'], context=cd['context'])
-            result = observer.register(env.read_private(settings['observability_config_file']), observation, home / 'observability.json')
+            result = observer.register(observer_config, observation, home / 'observability.json')
             env.argo.require(result.get('registered') is True and result.get('status') == 'succeeded', 'observer reconciliation unverified')
             done('observability')
             stage('health')
