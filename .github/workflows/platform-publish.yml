@@ -1,6 +1,21 @@
 name: Publish platform containers
 
 on:
+  workflow_call:
+    inputs:
+      components:
+        type: string
+        default: '["dashboard","api","mcp","ci-runner"]'
+      publish:
+        type: boolean
+        default: false
+      deploy:
+        type: boolean
+        default: false
+      skip_build:
+        description: Reuse tested-image artifacts from this same trusted CI run
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       components:
@@ -29,6 +44,7 @@ jobs:
         env:
           PUBLISH: ${{ inputs.publish }}
           DEPLOY: ${{ inputs.deploy }}
+          SKIP_BUILD: ${{ inputs.skip_build || false }}
           COMPONENTS: ${{ inputs.components }}
           PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
           PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
@@ -48,6 +64,9 @@ jobs:
           allowed = {'dashboard', 'api', 'mcp', 'ci-runner'}
           assert isinstance(components, list) and components and all(isinstance(value, str) for value in components), 'components must be a nonempty string array'
           assert len(components) == len(set(components)) and set(components) <= allowed, 'components must be unique supported names'
+          if os.environ['SKIP_BUILD'] == 'true':
+              assert os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['DEPLOY'] == 'true', 'artifact reuse is restricted to automatic deployment after CI'
+              assert set(components) == allowed, 'automatic deployment requires all tested components'
           if os.environ['DEPLOY'] == 'true':
               assert os.environ['GITHUB_REPOSITORY'] == 'Jasmin-Softbank/Railshot' and os.environ['GITHUB_REPOSITORY_ID'] == '1400202256', 'deploy requires the registered platform repository'
               assert os.environ['VERIFY_REF'] and os.environ['GITHUB_REF'] == os.environ['VERIFY_REF'], 'deploy requires the exact OIDC trusted ref'
@@ -67,14 +86,15 @@ jobs:
           PYCODE
   build:
     needs: admission
+    if: ${{ !inputs.skip_build }}
     uses: ./.github/workflows/platform-containers.yml
     with:
       components: ${{ inputs.components }}
       export_image: ${{ inputs.publish }}
 
   publish:
-    if: inputs.publish
-    needs: build
+    if: ${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}
+    needs: [admission, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions: {contents: read, actions: read, packages: write}
@@ -121,7 +141,7 @@ jobs:
           retention-days: 14
 
   deploy:
-    if: inputs.deploy && inputs.publish
+    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.admission.result == 'success' && needs.publish.result == 'success' }}
     needs: [admission, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -146,6 +166,21 @@ jobs:
           pin=$(sed -n '/^PyYAML==[0-9.]*$/p' ci/requirements-test.txt)
           test -n "$pin"
           python3 -m pip install --disable-pip-version-check "$pin"
+      - name: Reject superseded source before deployment
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$GITHUB_REF"
+          python3 -B - <<'PYCODE'
+          import os, subprocess, sys
+          sys.path.insert(0, 'ci/scripts')
+          from ci_scope import container_components
+          source = os.environ['GITHUB_SHA']
+          subprocess.run(['git', 'merge-base', '--is-ancestor', source, 'FETCH_HEAD'], check=True)
+          delta = subprocess.check_output(['git', 'diff', '--name-only', '--no-renames', '-z', source, 'FETCH_HEAD', '--'])
+          paths = [os.fsdecode(path) for path in delta.split(b'\0') if path]
+          if container_components(paths):
+              raise SystemExit('A newer container source revision exists; refusing to roll back the platform.')
+          PYCODE
       - name: Commit the tested digest declaration to the platform branch
         id: declaration
         env:
@@ -161,7 +196,7 @@ jobs:
             --provider-targets "$PROVIDER_TARGETS"
 
   verify:
-    if: inputs.deploy && inputs.publish
+    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.deploy.result == 'success' }}
     needs: deploy
     runs-on: ubuntu-24.04
     timeout-minutes: 15

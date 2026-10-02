@@ -4,7 +4,9 @@ import json
 import io
 import os
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -14,11 +16,127 @@ HERE = Path(__file__).resolve().parent
 
 
 class WorkflowPolicyTest(unittest.TestCase):
+    def run_loop_policy(self, root, attempts, *, provider='codex', credentials=False,
+                        loop_exit=0, entry=None):
+        """Run the actual workflow shell; pip and the expensive gate are local stand-ins."""
+        step = next(s for s in yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())
+                    ['jobs']['loop']['steps'] if s.get('id') == 'loop')
+        self.assertEqual(step['env']['RAILSHOT_MAX_REPAIR_ATTEMPTS'], '${{ vars.RAILSHOT_MAX_REPAIR_ATTEMPTS }}')
+        root = Path(root)
+        app = root / 'apps/demo/example'
+        app.mkdir(parents=True, exist_ok=True)
+        (app / 'app.py').write_text('print("fixture")\n')
+        script = root / '.railshot/ci/scripts/loop/loop.py'
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(entry or textwrap.dedent('''\
+            import json, os, sys
+            from pathlib import Path
+            Path('invocation.json').write_text(json.dumps({'args': sys.argv[1:],
+                'model_env': [key for key in os.environ if key in (
+                    'CODEX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
+                    'CODEX_HOME', 'RAILSHOT_CODEX_HOME', 'RAILSHOT_AUTH_MODE')]}))
+            sys.exit(int(os.environ['LOOP_EXIT']))
+            '''))
+        env = {**os.environ, 'TENANT': 'demo', 'APP': 'example', 'PROVIDER': provider,
+               'QUALITY_NETWORK': 'railshot-quality', 'REPAIR_SCOPE': 'packaging',
+               'RUN_DIR': str(root / 'run'), 'GITHUB_OUTPUT': str(root / 'output'),
+               'PIP_LOG': str(root / 'pip.log'), 'TEST_PYTHON': sys.executable,
+               'TRUSTED_LOOP_DIRECTORY': str(HERE / 'loop'), 'LOOP_EXIT': str(loop_exit)}
+        for key in ('CODEX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_HOME',
+                    'RAILSHOT_CODEX_HOME', 'RAILSHOT_AUTH_MODE', 'ANTHROPIC_BASE_URL',
+                    'RAILSHOT_MAX_REPAIR_ATTEMPTS'):
+            env.pop(key, None)
+        if attempts is not None:
+            env['RAILSHOT_MAX_REPAIR_ATTEMPTS'] = attempts
+        if credentials:
+            env.update(RAILSHOT_AUTH_MODE='api-key', CODEX_API_KEY='synthetic-codex',
+                       ANTHROPIC_API_KEY='synthetic-claude', OPENAI_API_KEY='synthetic-openai',
+                       CODEX_HOME=str(root / 'absent-auth'), RAILSHOT_CODEX_HOME=str(root / 'absent-auth'))
+        stub = ('pip() { printf "%s\\n" "$*" >> "$PIP_LOG"; }\n'
+                'python() { "$TEST_PYTHON" "$@"; }\n')
+        return subprocess.run(['bash', '-c', stub + step['run']], cwd=root, env=env,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_zero_repair_runs_without_model_auth_or_sdk_and_does_not_promote_failure(self):
+        for provider in ('codex', 'claude'):
+            for credentials in (False, True):
+                for loop_exit in (0, 1):
+                    with self.subTest(provider=provider, credentials=credentials, loop_exit=loop_exit), tempfile.TemporaryDirectory() as tmp:
+                        result = self.run_loop_policy(tmp, '0', provider=provider,
+                                                      credentials=credentials, loop_exit=loop_exit)
+                        self.assertEqual(result.returncode, loop_exit, result.stderr)
+                        invocation = json.loads(Path(tmp, 'invocation.json').read_text())
+                        args = invocation['args']
+                        self.assertEqual(args[args.index('--max-attempts') + 1], '0')
+                        self.assertEqual(invocation['model_env'], [])
+                        self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
+                        self.assertEqual(Path(tmp, 'output').read_text(), f'passed={str(loop_exit == 0).lower()}\n')
+
+    def test_repair_defaults_to_three_and_nonzero_still_requires_provider_auth(self):
+        for attempts in (None, '', '1', '2', '3'):
+            for provider, sdk in (('codex', 'openai-codex==0.159.3'), ('claude', 'claude-agent-sdk==0.2.158')):
+                for credentials in (False, True):
+                    with self.subTest(attempts=attempts, provider=provider, credentials=credentials), tempfile.TemporaryDirectory() as tmp:
+                        result = self.run_loop_policy(tmp, attempts, provider=provider, credentials=credentials)
+                        if not credentials:
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertFalse(Path(tmp, 'invocation.json').exists())
+                            self.assertFalse(Path(tmp, 'pip.log').exists())
+                            continue
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        args = json.loads(Path(tmp, 'invocation.json').read_text())['args']
+                        self.assertEqual(args[args.index('--max-attempts') + 1], attempts or '3')
+                        self.assertEqual(Path(tmp, 'pip.log').read_text().splitlines(),
+                                         [f'install -q {sdk}', 'install -q pyyaml jsonschema'])
+
+    def test_repair_attempts_reject_noncanonical_values_before_install_or_loop(self):
+        for attempts in ('-1', '4', '00', '03', '1.0', 'true', ' 0', '0 ', '0\n', '1; true', '$(true)'):
+            with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
+                result = self.run_loop_policy(tmp, attempts, credentials=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('RAILSHOT_MAX_REPAIR_ATTEMPTS must be', result.stdout)
+                self.assertFalse(Path(tmp, 'pip.log').exists())
+                self.assertFalse(Path(tmp, 'invocation.json').exists())
+
+    def test_zero_repair_uses_real_loop_checkpoint_and_rejects_changed_retry_budget(self):
+        # Real intake, loop CLI, binding and SQLite checkpoints; only Docker gates are mocked.
+        entry = textwrap.dedent('''\
+            import json, os, sys
+            from pathlib import Path
+            from unittest.mock import patch
+            sys.path.insert(0, os.environ['TRUSTED_LOOP_DIRECTORY'])
+            import loop
+            def gate(workspace, run, attempt, *args, **kwargs):
+                with Path('gate-calls').open('a') as output:
+                    output.write(str(attempt) + '\\n')
+                target = run / f'gate-{attempt}'
+                target.mkdir()
+                verdict = {'ok': True, 'release_eligible': True, 'status': 'PASS'}
+                (target / 'verdict.json').write_text(json.dumps(verdict))
+                return verdict
+            with patch.object(loop, 'gate', side_effect=gate), patch.object(loop, 'agent', side_effect=AssertionError('SDK must not run')):
+                sys.exit(loop.main())
+            ''')
+        with tempfile.TemporaryDirectory() as tmp:
+            for _ in range(2):
+                result = self.run_loop_policy(tmp, '0', entry=entry)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertEqual(Path(tmp, 'gate-calls').read_text(), '0\n')
+            evidence = json.loads(Path(tmp, 'run/evidence.json').read_text())
+            self.assertTrue(evidence['passed'])
+            self.assertEqual(evidence['max_attempts'], 0)
+            self.assertEqual(evidence['agent_attempts'], 0)
+            self.assertEqual(evidence['sdk_invocations'], 0)
+            changed = self.run_loop_policy(tmp, '1', credentials=True, entry=entry)
+            self.assertNotEqual(changed.returncode, 0)
+            self.assertIn('STATE_BINDING_MISMATCH', changed.stdout)
+            self.assertEqual(Path(tmp, 'gate-calls').read_text(), '0\n')
+
     def test_repository_scope_outputs_and_required_gate_cover_every_job(self):
         import ci_scope
         workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())
         jobs = workflow['jobs']
-        self.assertEqual(set(jobs), set(ci_scope.JOBS) | {'changes', 'gate'})
+        self.assertEqual(set(jobs), set(ci_scope.JOBS) | {'changes', 'gate', 'release'})
         self.assertEqual(set(jobs['gate']['needs']), set(ci_scope.JOBS) | {'changes'})
         self.assertEqual(jobs['gate']['if'], 'always()')
         self.assertEqual(set(jobs['changes']['outputs']),

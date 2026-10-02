@@ -71,6 +71,8 @@ Terraform plan에 delete·replace가 있거나 기존 VM의 AMI/subnet/root disk
 
 이미지 게시는 기존 `platform-publish.yml`의 `publish=true, deploy=false`를 사용한다. 같은 run의 dashboard/API/runner artifact만 읽고 기존 `publish-platform.py`를 깨끗한 전용 checkout에서 실행한다. `verify-platform.py remote`가 정확한 Argo revision, 소유 ReplicaSet/Ready Pod의 imageID, 외부 HTTPS를 모두 확인해야 마지막 `verified`를 출력한다. 향후 workflow의 자동 deploy를 위한 고정 target/port/verifier 변수도 준비하고 readback한다. GitHub OIDC subject 설정과 계정 권한은 검토된 verifier 정책에 맞아야 한다.
 
+최초 bootstrap 이후 일반 업데이트는 `RAILSHOT_PLATFORM_VERIFY_REF`에 지정한 브랜치의 컨테이너 영향 변경을 push하여 시작한다. CI가 검사한 이미지 artifact를 같은 실행에서 GHCR 게시·GitOps 선언 갱신·운영 검증에 사용한다. 수동 `deploy=false` bootstrap 기록은 자동 업데이트의 성공 근거가 아니며, `platform-verification-<source SHA>` artifact의 exact revision·running digest·HTTPS 검증 결과를 확인한다.
+
 재실행은 receipt만으로 단계를 건너뛰지 않는다. instance/volume/lineage/node UID와 현재 Kubernetes 객체를 다시 읽는다. 기존 Secret의 회전된 자격은 보존하고 executor binding이 바뀌면 중단한다. 검증 Job은 deterministic 이름으로 한 번 생성하고 같은 Job 결과를 다시 읽는다. native CI 검증 전에는 runner를 중단시키지 않고, active runner가 있으면 차단한다. 검증 실패 시 controller가 suspend 상태로 남을 수 있으며 이를 숨기거나 자동 성공으로 처리하지 않는다.
 
 SDK 초기 자격은 별도 운영자가 active CODEX_HOME인 `/var/lib/railshot-runner/codex`에 준비하며 bootstrap은 해당 auth/config와 native SDK의 refresh 권위를 보존하고 legacy 자격을 다시 복사하지 않는다.
