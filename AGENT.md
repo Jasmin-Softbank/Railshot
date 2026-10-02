@@ -46,7 +46,7 @@ railshot/
 │   ├── api/
 │   ├── decisions/
 │   └── poc/
-├── AGENTS.md
+├── AGENT.md
 └── README.md
 ```
 
@@ -72,6 +72,10 @@ railshot/
 6. Existing code may be located outside the agreed layout. Do not move that code as part of this guidelines task, and do not treat a mismatch as permission to reorganize the repository during later work.
 7. Do not unnecessarily modify code owned by another responsibility area. Keep changes limited to the requested scope.
 
+## API Conventions
+
+Follow the [REST API conventions on the integration branch](https://github.com/Jasmin-Softbank/Railshot/blob/integration/team-assembly-20261002/docs/api/conventions.md). Use product resource names such as `builds`, `deployments`, `profiles`, and `plans`; do not join words with hyphens or underscores in collection names. This naming rule does not restrict resource IDs or JSON field names.
+
 ## Scope of This Guidelines Task
 
-Create or update only the root `AGENTS.md`. Do not modify feature code, create the documented directories, or change the actual directory structure. The tree above records the agreement; it is not a migration instruction.
+Create or update only the root `AGENT.md`. Do not modify feature code, create the documented directories, or change the actual directory structure. The tree above records the agreement; it is not a migration instruction.
