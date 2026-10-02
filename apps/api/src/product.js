@@ -81,7 +81,7 @@ export async function createProductService({ service, directory, target, deployP
       const id = randomUUID(), now = new Date().toISOString();
       await store.snapshot(id, files);
       const record = { id, kind, app: input.app, target_id: targetId, status: 'queued', stage: 'ci',
-        ci: { run_id: null, state: 'queued', publication_artifact_id: null, producer_attempt: null },
+        ci: { run_id: null, state: 'queued', steps: [], publication_artifact_id: null, producer_attempt: null },
         cd: { state: 'not_started', revision: null, deployed: false },
         public_http: { state: 'not_run', verified_at: null, url: null }, url: null,
         actions_url: null, error: null, created_at: now, updated_at: now, fingerprint, key,
@@ -128,7 +128,7 @@ export async function createProductService({ service, directory, target, deployP
       for (;;) {
         if (abort.signal.aborted) return;
         const build = await readBuild(runId);
-        const ci = { run_id: runId, state: build.status, publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null, producer_attempt: build.publication?.producer_attempt || null };
+        const ci = { run_id: runId, state: build.status, steps: build.steps ?? [], publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null, producer_attempt: build.publication?.producer_attempt || null };
         await update(record.id, { ci });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
