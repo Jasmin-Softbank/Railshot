@@ -155,6 +155,7 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
     getDeployment: () => {
       if (broken) throw new Error('private backend details');
       return { ...record, observation: { deployment_id: record.id, app: record.app, target_id: record.target_id, checked_at: new Date().toISOString(), stale_after_seconds: 90,
+        collector: { id: 'acceptance-observer', role: 'shared_observer', lifecycle: 'acceptance', expires_at: new Date(Date.now() + 3600000).toISOString() },
         metrics: Object.fromEntries(Object.entries({ pods: 2, cpu_percent: 12.5, memory_percent: 30, http }).map(([name, value]) => [name, { state, value: state === 'ready' ? value : null, observed_at: new Date(Date.now() - age).toISOString() }])) } };
     },
   } });
@@ -167,6 +168,7 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   };
   await page.goto(origin); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '2개');
   await monitor();
+  assert.match(await page.locator('#collector-note').innerText(), /공유 관측 서버 · 임시 인수용 · 만료/);
   assert.match(await page.locator('#run-binding').textContent(), /CI run: 123/);
   assert.match(await page.locator('#run-binding').textContent(), /sha256:cccc/);
   assert.equal(await page.locator('#monitor-application-link').isVisible(), false);
