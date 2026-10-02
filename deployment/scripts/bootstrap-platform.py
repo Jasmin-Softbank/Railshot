@@ -142,7 +142,9 @@ def config(path):
     require(set(value['github']) == {'ref', 'target_id', 'node_port', 'application'} and
             value['github']['ref'] in ('main', 'integration/team-assembly-20261002') and
             re.fullmatch(r'[a-z][a-z0-9-]{0,62}', value['github']['target_id']) and
-            re.fullmatch(r'[a-z][a-z0-9-]{0,62}', value['github']['application']) and
+            (value['github']['application'] is None or
+             isinstance(value['github']['application'], str) and
+             re.fullmatch(r'[a-z][a-z0-9-]{0,62}', value['github']['application'])) and
             type(value['github']['node_port']) is int and 30000 <= value['github']['node_port'] <= 32767,
             'REGISTERED_PLATFORM_REQUIRED')
     require(set(value['secrets']) == {'api_token', 'github_token', 'pull_config', 'executors', 'controller_github_token'},
@@ -983,8 +985,16 @@ class Bootstrap:
     def bootstrap_secrets(self):
         import yaml
         docs = list(yaml.safe_load_all((self.root / 'deployment/manifests/product-access.yaml').read_text()
-                    .replace('APPLICATION_REQUIRED', self.config['github']['application'])
                     .replace('TARGET_REQUIRED', self.config['github']['target_id'])))
+        application = self.config['github']['application']
+        for document in docs:
+            if document['kind'] == 'Role':
+                for rule in document['rules'][:]:
+                    if rule.get('resourceNames') == ['APPLICATION_REQUIRED']:
+                        if application is None:
+                            document['rules'].remove(rule)
+                        else:
+                            rule['resourceNames'] = [application]
         namespaces = [{'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'labels': labels}}
                       for name, labels in [('railshot-system', {}), ('railshot-build', {'pod-security.kubernetes.io/enforce': 'privileged'})]]
         self.objects(namespaces + docs)
