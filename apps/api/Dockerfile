@@ -24,6 +24,7 @@ COPY apps/api/prepare-state.js ./
 COPY ci/requirements-dev.txt ci/requirements-test.txt /app/ci/
 COPY gitops/bridge.py gitops/argo.py gitops/handoff.py /app/gitops/
 COPY gitops/credentials.py /app/gitops/
+COPY observability/register.py observability/bootstrap.py observability/render.py observability/compose.yaml /app/observability/
 COPY ci/scripts/execution.py ci/scripts/observability.py ci/scripts/process.py ci/scripts/publication.py ci/scripts/storage.py /app/ci/scripts/
 COPY ci/scripts/gate/bundle.py /app/ci/scripts/gate/
 COPY ci/scripts/runner/runtime_boundary.py /app/ci/scripts/runner/

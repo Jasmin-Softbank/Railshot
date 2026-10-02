@@ -22,7 +22,14 @@ function configuration(path) {
         !instance.test(target.node_instance || '') || !instance.test(target.cluster_instance || '') || seen.has(key)) throw new Error('Invalid observer binding');
     safeUrl(target.prometheus_url); safeUrl(target.probe_url); seen.add(key);
   }
-  return config.targets;
+  let collector;
+  if (config.collector) {
+    const { id, lifecycle, expires_at } = config.collector;
+    if (!TARGET_ID.test(id || '') || !['acceptance', 'shared'].includes(lifecycle) ||
+        !Number.isFinite(Date.parse(expires_at))) throw new Error('Invalid observer lifecycle');
+    collector = { id, role: 'shared_observer', lifecycle, expires_at };
+  }
+  return { targets: config.targets, collector };
 }
 const selector = (job, address) => `{job=${JSON.stringify(job)},instance=${JSON.stringify(address)}}`;
 const named = (name, expression) => `label_replace((${expression}), "railshot_metric", "${name}", "", "")`;
@@ -73,10 +80,17 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
       checked_at: new Date(checked).toISOString(), stale_after_seconds: STALE_SECONDS,
       metrics: Object.fromEntries(Object.keys(scopes).map((name) => [name, metric(name, 'not_configured')])) };
     if (!configPath) return result;
-    let targets;
-    try { targets = configuration(configPath); }
+    let config;
+    try { config = configuration(configPath); }
     catch { for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable'); return result; }
-    const target = targets.find((item) => item.target_id === record.target_id && item.app === record.app);
+    if (config.collector) {
+      result.collector = config.collector;
+      if (Date.parse(config.collector.expires_at) <= checked) {
+        for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable');
+        return result;
+      }
+    }
+    const target = config.targets.find((item) => item.target_id === record.target_id && item.app === record.app);
     if (!target) { for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unsupported'); return result; }
     await Promise.all(queries(target).map(async ({ names, query: expression }) => {
       try {

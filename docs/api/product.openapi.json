@@ -1853,6 +1853,34 @@
               "http"
             ],
             "additionalProperties": false
+          },
+          "collector": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "role": {
+                "const": "shared_observer"
+              },
+              "lifecycle": {
+                "enum": [
+                  "acceptance",
+                  "shared"
+                ]
+              },
+              "expires_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "role",
+              "lifecycle",
+              "expires_at"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
