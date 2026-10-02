@@ -59,7 +59,7 @@ python3 infrastructure/ansible/run.py --request examples/ansible/runtime-single-
 python3 -m unittest discover -s infrastructure/ansible -p 'test_*.py' -v
 ```
 
-`--validate-only` 통과는 입력 검사가 끝났다는 뜻입니다. Patroni 요청은 DB/DCS 배치를 구분해 받으며, 담당 playbook이 없으면 실행을 차단합니다. AWS SSM·GCP IAP 포트 전달과 strict SSH를 통한 runtime 설치를 검증했습니다. 상세 입력과 결과 형식은 [Ansible 인터페이스](docs/api/ansible.md)를 따릅니다.
+`--validate-only` 통과는 입력 검사가 끝났다는 뜻입니다. 선택형 하이브리드 DB playbook은 통합됐지만 HTTP `database.configure`와 CLI `patroni.install`의 실행에는 연결하지 않아 차단을 유지합니다. 해당 구현은 DB 2대 이상·etcd 홀수 3대 이상·proxy 1대 이상이 필요하며 기본 단일 PostgreSQL VM의 설치기는 아닙니다. AWS SSM·GCP IAP 포트 전달과 strict SSH를 통한 runtime 설치를 검증했습니다. 상세 입력과 결과 형식은 [Ansible 인터페이스](docs/api/ansible.md)를 따릅니다.
 
 ### Case 4. CD와 AWS 경계 검토
 

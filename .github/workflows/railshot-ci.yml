@@ -106,8 +106,8 @@ jobs:
       - name: Existing guest and runtime syntax
         working-directory: infrastructure/ansible
         run: |
-          ansible-playbook -i inventory/hosts.yml guest.yml --syntax-check
-          ansible-playbook -i inventory/hosts.yml runtime.yml --syntax-check
+          ansible-playbook -i inventory/hosts.example.yml guest.yml --syntax-check
+          ansible-playbook -i inventory/hosts.example.yml runtime.yml --syntax-check
 
   api-browser:
     name: HTTP publication and browser E2E
