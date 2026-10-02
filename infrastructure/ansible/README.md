@@ -200,3 +200,51 @@ CI는 standalone `site.yml` 구문과 오프라인 템플릿을 실제 Ansible�
 참고: [k3s 설정](https://docs.k3s.io/installation/configuration),
 [k3s 요구사항](https://docs.k3s.io/installation/requirements),
 [Cilium on K3s](https://docs.cilium.io/en/stable/installation/k3s/).
+
+## 제품 worker의 외부 HA DB 연결
+
+`cluster.py`는 운영자가 등록한 AWS/GCP NodeDescriptor와 SSH 참조를 받아 기존
+`database.prepare/run`을 호출합니다. VM을 만들거나 HTTP 서버를 시작하지 않습니다.
+DB 2대 이상, 홀수 DCS 3대 이상, DB와 분리한 proxy 1대 이상이 필요합니다.
+
+```sh
+python3 infrastructure/ansible/cluster.py \
+  --registry-file /private/database-targets.json \
+  --spec-file /private/database-spec.json \
+  --state-dir /private/database-state
+```
+
+registry·spec·descriptor·SSH 참조는 실행기 소유 0600 파일이며 state는 저장소 밖 0700
+디렉터리여야 합니다. registry는 `{version: 1, targets: {id: {purpose: "database",
+descriptor_file, ssh: {user, identity_file, known_hosts_file}, timeout_seconds?}}}` 형식입니다.
+spec에는 `version: 1`, `request_id`, `cluster_name`, `app_name`,
+`nodes: [{target_id, roles: ["database", "dcs", "proxy"]}]`, 승인한 private `client_cidrs`,
+선택적 `timeout_seconds`(30–1800)를 전달합니다. 각 node의 roles에는 실제 역할만 넣습니다.
+placement와 SSM/IAP 대상은 descriptor에서 읽으며 별도 임의 명령을 받지 않습니다.
+descriptor의 `purpose=database`, 보존형 `data_disk`와 `/var/lib/postgresql` mount를 요구합니다.
+원격 preflight에서도 이 경로가 root와 다른 장치에 실제 mount되었는지 확인하여 root 디스크에
+PostgreSQL을 설치하는 fallback을 차단합니다. etcd의 기존 `/var/lib/etcd` 경로는 변경하지 않습니다.
+
+실행기는 클러스터별 CA·TLS 인증서·Vault·실행 profile·앱 자격증명을 한 번 생성합니다.
+PostgreSQL 인증서 SAN에 모든 proxy IP를 넣고, 등록 입력과 생성 파일의 SHA-256을 보존합니다.
+동일 입력 재요청은 기존 값을 재사용하며 입력·SSH 파일·생성 파일이 바뀌면 차단합니다.
+30일 인증서의 갱신, topology 변경, 실패 후 `outcome_unknown` 해소는 별도 운영자 작업입니다.
+기존 etcd template의 `enable-grpc-gateway: true`와 mTLS v3 gateway 검사를 그대로 사용합니다.
+
+DB readiness 뒤 고정 `application-database.yml`이 현재 primary에 앱 DB와 migration owner,
+runtime role을 만듭니다. 기존 타 소유 role/DB는 거부합니다. migration owner가 `public`
+schema에서 생성하는 테이블·sequence에 runtime DML 권한을 부여하며 runtime에는 DDL 권한을
+주지 않습니다. 두 계정의 proxy 경유 `verify-full` TLS 로그인을 확인한 뒤에만 binding을 반환합니다.
+다른 schema와 사용자 정의 함수의 runtime 권한은 현재 자동 부여 범위에 없습니다.
+
+stdout 성공 결과는 `status`, `request_id`, `target_id`, `database_ready`, `binding_file`,
+`binding_sha256`입니다. 0600 binding JSON에는 `version`, `request_id`, `cluster_name`, `app_name`,
+`host`, `port`, `database`, `migration: {username,password}`, `runtime: {username,password}`,
+`sslmode: "verify-full"`, `sslrootcert`가 있습니다. 이 파일은 제품 worker만 읽고 클라이언트 응답에
+포함하지 않습니다. public receipt에는 자격증명이 없으며 동일 binding digest를 기록합니다.
+재요청의 성공은 보존한 실행 결과이고 새 가용성 검사나 앱 배포 완료를 뜻하지 않습니다.
+
+`python3 -m unittest discover -s infrastructure/ansible -p test_cluster.py -v`는 로컬 입력·재요청·
+권한 경계와 TLS SAN을 검사합니다. OpenSSL/Ansible Vault가 있으면 실제 인증서와 암호화 파일도
+검사하며 cloud·SSH·실제 DB를 호출하지 않습니다. 고정 guest installer의 SQL 검사는 모의 연결
+검사이므로 실제 PostgreSQL 인수와 구분합니다.
