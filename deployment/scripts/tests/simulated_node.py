@@ -18,7 +18,7 @@ ROOT = SCRIPTS.parent
 
 def core_hashes(root=ROOT):
     paths = [root/'scripts'/name for name in ('engine.py', 'models.py', 'runtime.py', 'input_adapter.py', 'render.py', 'common.sh')]
-    paths += list((root/'bootstrap').glob('*.sh')) + list((root/'cilium').glob('*.sh'))
+    paths += list((root/'bootstrap').glob('*.sh')) + list((root/'cilium').glob('*.sh')) + list((root/'cilium').glob('*.py'))
     paths += list((root/'manifests').glob('*.template'))
     return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(paths)}
 

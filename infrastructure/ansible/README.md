@@ -9,6 +9,11 @@ python3 -m unittest discover -s . -p 'test_*.py' -v
 
 아래는 직접 실행용 starter 안내다. 기존 AWS Flannel 서버를 제자리에서 Cilium으로 바꾸는 절차가 아니다. 이전 검증 기록과 이번 코드 변경의 검증을 구분한다.
 
+운영 전용 `control.sh`도 같은 Cilium 설치기를 사용하며 Pod/Service CIDR은 `10.52/10.53`으로 유지한다.
+신규 설치·재실행·기존 Flannel 거부 조건과 백업/전환/복구는 [운영 Cilium runbook](../../docs/operations/control-cilium-migration.md)을 따른다.
+`test-control-cilium.sh --run`은 임시 namespace에서 실제 DNS/API/NetworkPolicy/NodePort를 검사한다.
+운영 CNI 전환 및 ALB/WireGuard 경로 검증은 별도 유지보수 작업이다.
+
 ---
 
 # Minimal k3s + Cilium Ansible starter
@@ -55,7 +60,7 @@ flowchart TD
 - CoreDNS, SQLite 사용. Traefik, ServiceLB, metrics-server, local-path storage는 제외합니다.
 - HA, HTTPS, 외부 DNS, 클라우드 LB/CSI, 자동 방화벽 수정은 미포함입니다.
 - Pod/Service CIDR은 팀 공유 Cilium 설치기와 일치하도록 고정합니다. 사용자 정의 CIDR은 거부합니다.
-- `deployment/cilium/install.sh`, `deployment/scripts/common.sh`, `deployment/airgap/versions.json`을 그대로 재사용하므로 **저장소 전체를 clone**합니다. 이 직접 실행 경로는 온라인 설치만 지원합니다.
+- `deployment/cilium/install.sh`, `deployment/cilium/preflight.py`, `deployment/scripts/common.sh`, `deployment/airgap/versions.json`을 그대로 재사용하므로 **저장소 전체를 clone**합니다. 이 직접 실행 경로는 온라인 설치만 지원합니다.
 
 ## 실행
 
