@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RailShot · 새 배포</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="#deploy" aria-label="RailShot 홈">RAILSHOT<span class="brand-dot">.</span></a>
+        <nav class="navigation" aria-label="주 메뉴">
+          <button class="nav-item active" type="button" data-view="deploy" aria-current="page">새 배포</button>
+          <button class="nav-item" type="button" data-view="monitor">환경 모니터링</button>
+          <button class="nav-item" type="button" data-view="history">배포 내역</button>
+        </nav>
+        <div class="sidebar-footer">One Action, Infinite Clouds</div>
+      </aside>
+
+      <main class="content">
+        <section class="view" id="deploy-view" aria-labelledby="deploy-title">
+          <header class="page-header">
+            <span class="eyebrow">NEW DEPLOYMENT</span>
+            <h1 id="deploy-title">앱 배포하기</h1>
+          </header>
+
+          <form class="panel deploy-form" id="deploy-form" novalidate>
+            <section class="form-section" aria-labelledby="source-title">
+              <div class="section-heading">
+                <span class="section-number">01</span>
+                <h2 id="source-title">소스 선택</h2>
+              </div>
+              <div class="source-box" id="source-box">
+                <div class="source-intro">
+                  <strong>앱 파일 또는 폴더를 선택하세요</strong>
+                  <span>ZIP 파일을 여기에 끌어 놓을 수도 있습니다.</span>
+                </div>
+                <div class="source-buttons">
+                  <button class="secondary-button" id="choose-file" type="button">ZIP 선택</button>
+                  <button class="secondary-button" id="choose-folder" type="button">폴더 선택</button>
+                </div>
+                <input id="archive" type="file" accept=".zip,application/zip" hidden />
+                <input id="folder" type="file" webkitdirectory multiple hidden />
+                <div class="source-divider"><span>또는</span></div>
+                <label class="field-label" for="repository-url">공개 GitHub URL</label>
+                <input id="repository-url" type="url" inputmode="url" autocomplete="url" placeholder="https://github.com/owner/repo" />
+                <div class="source-divider"><span>또는</span></div>
+                <label class="field-label" for="registered-app">등록된 앱 재배포</label>
+                <input id="registered-app" type="text" autocomplete="off" placeholder="앱 이름 (예: memo-sqlite)" />
+                <p class="selection" id="source-selection" role="status" hidden></p>
+              </div>
+            </section>
+
+            <section class="form-section" aria-labelledby="target-title">
+              <div class="section-heading">
+                <span class="section-number">02</span>
+                <h2 id="target-title">배포 환경</h2>
+              </div>
+              <fieldset class="target-options">
+                <legend class="sr-only">배포 환경 선택</legend>
+                <label class="target-option">
+                  <input type="radio" name="environment" value="cloud" checked />
+                  <span class="target-icon" aria-hidden="true">☁</span>
+                  <span class="target-copy"><strong>클라우드</strong><small>RailShot AWS</small></span>
+                  <span class="radio-mark" aria-hidden="true"></span>
+                </label>
+                <label class="target-option">
+                  <input type="radio" name="environment" value="onprem" />
+                  <span class="target-icon" aria-hidden="true">▣</span>
+                  <span class="target-copy"><strong>온프레미스</strong><small>내 인프라에 배포</small></span>
+                  <span class="radio-mark" aria-hidden="true"></span>
+                </label>
+              </fieldset>
+              <div class="provider-field" id="provider-field" hidden>
+                <label class="field-label" for="provider">인프라 종류</label>
+                <select id="provider" name="provider">
+                  <option value="" selected>선택하세요</option>
+                  <option value="openstack">OpenStack</option>
+                  <option value="proxmox">Proxmox</option>
+                </select>
+                <p class="field-note">인프라 연결 정보는 배포 연동 단계에서 받습니다.</p>
+              </div>
+            </section>
+
+            <div class="form-bottom">
+              <p class="form-error" id="form-error" role="alert" hidden></p>
+              <button class="primary-button" type="submit">선택 내용 확인 <span aria-hidden="true">→</span></button>
+            </div>
+          </form>
+
+          <section class="panel review-panel" id="review-panel" aria-labelledby="review-title" hidden>
+            <div class="review-heading">
+              <div><span class="eyebrow">READY TO CONNECT</span><h2 id="review-title">선택 내용</h2></div>
+              <button class="text-button" id="edit-selection" type="button">수정</button>
+            </div>
+            <dl class="review-list">
+              <div><dt>소스</dt><dd id="review-source"></dd></div>
+              <div><dt>배포 환경</dt><dd id="review-target"></dd></div>
+            </dl>
+            <p class="review-note" id="review-note"></p>
+            <button class="primary-button" id="start-deployment" type="button" disabled>배포 시작</button>
+          </section>
+        </section>
+
+        <section class="view" id="history-view" aria-labelledby="history-title" hidden>
+          <header class="page-header"><span class="eyebrow">DEPLOYMENTS</span><h1 id="history-title">배포 내역</h1></header>
+          <div class="panel empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2>저장된 배포 내역이 없습니다</h2><p>현재 실행은 환경 모니터링에서 확인할 수 있습니다. 내역 저장은 아직 연결되지 않았습니다.</p></div>
+        </section>
+
+        <section class="view" id="monitor-view" aria-labelledby="monitor-title" hidden>
+          <header class="page-header"><span class="eyebrow">ENVIRONMENT</span><h1 id="monitor-title">환경 모니터링</h1></header>
+          <div class="monitor-grid">
+            <div class="monitor-left">
+              <div class="panel monitor-summary"><span class="status-dot muted" id="run-dot"></span><div><h2 id="run-title">연결된 실행 없음</h2><p id="run-status">배포를 시작하면 Actions 상태가 표시됩니다.</p><a id="actions-link" href="#" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions에서 보기 ↗</a></div></div>
+              <div class="panel stages-panel"><h2>Actions 작업·단계</h2><ol id="workflow-jobs"><li>실행 대기</li></ol></div>
+            </div>
+            <div class="console panel">
+              <div class="console-heading"><h2>배포 환경 콘솔</h2><span><i class="status-dot muted"></i> Actions 상태 · 읽기 전용</span></div>
+              <div class="console-tabs" role="tablist" aria-label="콘솔 보기">
+                <button type="button" role="tab" aria-selected="true" data-console="work">Actions 단계</button>
+                <button type="button" role="tab" aria-selected="false" data-console="environment">환경 상태</button>
+                <button type="button" role="tab" aria-selected="false" data-console="app">앱 로그</button>
+              </div>
+              <div class="console-metrics"><span>Pod <strong>—</strong></span><span>CPU <strong>—</strong></span><span>Memory <strong>—</strong></span><span>HTTP <strong>—</strong></span></div>
+              <div class="console-output" id="console-output" role="tabpanel"><p>실행을 시작하면 Actions 단계별 상태가 표시됩니다.</p></div>
+              <div class="console-footer">전체 로그는 GitHub Actions에서 확인할 수 있습니다.</div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
