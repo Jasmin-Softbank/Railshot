@@ -10,13 +10,15 @@
 | 작업 branch | feature/deployment-runtime-seungmin |
 | 시작 HEAD | a50dd1a3239e2f8651ee61b4efe7a0dba55c08b4 |
 | 최초 integration 조회 | 004709677627fe8f7bde7f73426a1b84a1a87686 |
-| 작업 중 추가 integration 조회 | 08dc01ec51c98001a5cfc986ae3ae6539f938203 |
-| 동기화 | git merge origin/integration/team-assembly-20261002, 두 번 모두 fast-forward |
-| 신규 merge commit | 없음; 기존 팀 이력을 그대로 가져왔습니다. |
+| 작업 중 추가 integration 조회 | 08dc01ec51c98001a5cfc986ae3ae6539f938203, 최종 조회 02f845e029062c34bac8aaa9389b799926917814 |
+| 동기화 | git merge origin/integration/team-assembly-20261002; 처음 두 번은 fast-forward, 마지막은 일반 merge |
+| 신규 merge commit | 0717582b5229a159d5f2b4c07eb74a2902477ace |
 | 충돌 | 없음 |
-| push | 먼저 0047096 동기화분을 지정 feature에 push했습니다. 최종 진단 기록과 08dc01e 포함 여부는 최종 응답에서 실제 원격 SHA로 확인합니다. |
+| push | 0047096 및 진단 commit 98c454d를 지정 feature에 push했습니다. 마지막 동기화와 보고서 갱신의 push 결과는 최종 응답에서 실제 원격 SHA로 확인합니다. |
 
 이전 점검 commit a50dd1a는 팀이 PR #6으로 integration에 이미 통합했습니다. 따라서 이 작업에서 다른 branch를 checkout하거나 rebase·force push할 필요가 없었습니다. Team integration에는 대시보드/CI/인프라/AGENT.md 변경이 포함되어 있어 merge로 가져왔으나, 이 파일을 직접 편집하지 않았습니다. Main/integration/타인 branch 직접 commit·push, PR merge는 수행하지 않습니다.
+
+진단 기록 push 후 integration에 PR #19의 기존 팀 문서 변경이 추가되어 02f845e까지 다시 동기화했습니다. 이 마지막 merge는 docs/ 아래 5개 파일만 가져오며 기능 코드·Deployment·npm 구성은 바뀌지 않았습니다. 충돌은 없었으며 앞서 수행한 build/unit 검사 대상 코드는 동일합니다. 이력 분기로 일반 merge commit 0717582가 생성되었습니다.
 
 ## Vercel에서 실제 확인한 것
 
