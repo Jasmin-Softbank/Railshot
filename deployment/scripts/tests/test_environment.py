@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'deployment/scripts'))
@@ -69,9 +70,10 @@ class RegistrationTest(unittest.TestCase):
         self.write('pull.json', {'auths': {'ghcr.io': {'auth': base64.b64encode(b'reader:synthetic-secret').decode()}}})
         self.write('registry.json', self.registry); self.write('config.json', self.config)
         self.runtime, self.control = Kube(), Kube()
-        self.control.objects['argocd', 'role', 'railshot-product-registrations'] = {
-            'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role',
-            'metadata': {'name': 'railshot-product-registrations', 'namespace': 'argocd', 'resourceVersion': '1'}, 'rules': []}
+        self.bootstrap = yaml.safe_load((ROOT / 'deployment/manifests/runtime-registration-access.yaml').read_text())
+        for document in self.bootstrap['items']:
+            document['metadata']['resourceVersion'] = '1'
+            self.control.objects[document['metadata']['namespace'], document['kind'].lower(), document['metadata']['name']] = document
         self.control.objects['argocd', 'cronjob', 'railshot-credentials'] = {'spec': {'jobTemplate': {'spec': {'template': {'spec': {
             'serviceAccountName': 'railshot-credentials', 'containers': [{'command': ['python3', '/app/gitops/credentials.py', 'renew']}]}}}}}}
         old = {'secret': 'railshot-old-target', 'target_id': 'old-target', 'server': 'https://10.0.0.2:6443', 'project': 'old-project',
@@ -145,6 +147,60 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(result['status'], 'succeeded', result)
         self.assertNotIn('error', result)
         self.assertEqual(identities, set(self.runtime.objects) | set(self.control.objects))
+
+    def test_bootstrap_grants_registration_and_renewal_without_unrelated_access(self):
+        subject = {'kind': 'ServiceAccount', 'name': 'railshot-product', 'namespace': 'railshot-system'}
+        self.assertEqual((self.bootstrap['apiVersion'], self.bootstrap['kind']), ('v1', 'List'))
+        self.assertEqual(len(self.bootstrap['items']), 5)
+        for document in self.bootstrap['items']:
+            self.assertIn(document['kind'], ('ServiceAccount', 'Role', 'RoleBinding'))
+            if document['kind'] == 'ServiceAccount':
+                self.assertEqual(document['metadata']['name'], subject['name'])
+                self.assertEqual(document['metadata']['namespace'], subject['namespace'])
+                self.assertFalse(document['automountServiceAccountToken'])
+                continue
+            self.assertEqual(document['metadata']['namespace'], 'argocd')
+            if document['kind'] == 'RoleBinding':
+                self.assertEqual(document['subjects'], [subject])
+                self.assertEqual(document['roleRef'], {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role',
+                    'name': document['metadata']['name']})
+            for rule in document.get('rules', []):
+                self.assertNotIn('*', sum(rule.values(), []))
+                if rule['verbs'] != ['create']:
+                    self.assertTrue(rule.get('resourceNames'))
+
+        def allowed(group, resource, verb, name, namespace='argocd'):
+            roles = [self.control.objects['argocd', 'role', item['roleRef']['name']]
+                     for item in self.bootstrap['items'] if item['kind'] == 'RoleBinding']
+            return namespace == 'argocd' and any(group in r['apiGroups'] and resource in r['resources']
+                and verb in r['verbs'] and (not r.get('resourceNames') or name in r['resourceNames'])
+                for role in roles for r in role.get('rules', []))
+
+        for name in ('railshot-product-registrations', 'railshot-credentials'):
+            for verb in ('get', 'update', 'escalate'):
+                self.assertTrue(allowed('rbac.authorization.k8s.io', 'roles', verb, name))
+        for verb in ('get', 'update'):
+            self.assertTrue(allowed('', 'configmaps', verb, 'railshot-credentials'))
+        self.assertTrue(allowed('batch', 'cronjobs', 'get', 'railshot-credentials'))
+        for group, resource in (('', 'secrets'), ('argoproj.io', 'appprojects'), ('argoproj.io', 'applications')):
+            self.assertTrue(allowed(group, resource, 'create', ''))
+            self.assertFalse(allowed(group, resource, 'get', 'unrelated'))
+            self.assertFalse(allowed(group, resource, 'list', ''))
+            self.assertFalse(allowed(group, resource, 'create', '', 'kube-system'))
+        for group, resource, verb, name in (
+            ('rbac.authorization.k8s.io', 'roles', 'update', 'railshot-product-registration-bootstrap'),
+            ('rbac.authorization.k8s.io', 'roles', 'escalate', 'unrelated'),
+            ('rbac.authorization.k8s.io', 'roles', 'create', ''),
+            ('rbac.authorization.k8s.io', 'rolebindings', 'create', ''),
+            ('rbac.authorization.k8s.io', 'clusterroles', 'create', ''),
+            ('', 'configmaps', 'update', 'unrelated'), ('batch', 'cronjobs', 'patch', 'railshot-credentials')):
+            self.assertFalse(allowed(group, resource, verb, name))
+        secret = 'railshot-' + self.target
+        self.assertFalse(allowed('', 'secrets', 'patch', secret))
+        self.assertEqual(self.run_registration()['status'], 'succeeded')
+        self.assertTrue(allowed('', 'secrets', 'patch', secret))
+        self.assertFalse(allowed('', 'secrets', 'get', 'unrelated'))
+        self.assertFalse(allowed('', 'secrets', 'get', secret, 'kube-system'))
 
     def test_foreign_namespace_is_not_adopted(self):
         self.runtime.objects['default', 'namespace', 'app-new'] = {'metadata': {'name': 'app-new', 'labels': {'owner': 'someone-else'}}}
