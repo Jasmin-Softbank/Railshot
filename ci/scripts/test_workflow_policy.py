@@ -36,7 +36,13 @@ class WorkflowPolicyTest(unittest.TestCase):
             }
             pip() { test -z "${RAILSHOT_PROGRESS_TOKEN+x}"; }
             '''
-            result = subprocess.run(['bash', '-c', stub + step['run']], env=env, capture_output=True, text=True)
+            # A stale platform pin must stop before handing the token to an older loop.
+            result = subprocess.run(['bash', '-c', stub + step['run']], cwd=directory, env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(Path(env['GITHUB_OUTPUT']).exists())
+            capability = Path(directory, '.railshot/ci/scripts/loop/checks_progress.py')
+            capability.parent.mkdir(parents=True); capability.touch()
+            result = subprocess.run(['bash', '-c', stub + step['run']], cwd=directory, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(Path(env['GITHUB_OUTPUT']).read_text(), 'passed=true\n')
             self.assertNotIn('sentinel-progress-token', result.stdout + result.stderr)
