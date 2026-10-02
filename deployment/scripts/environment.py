@@ -111,8 +111,13 @@ def load(registry_file, target_id, config_file, binding_file=None):
         argo.require(b'-----BEGIN CERTIFICATE-----' in ca, 'database CA required')
         binding = {**binding, 'ca': ca.decode('ascii')}
     public = registered['public_http']
-    argo.require(set(public) == {'url', 'expected_json'} and isinstance(public['expected_json'], dict), 'HTTP expectation required')
-    argo.http_path(urlsplit(argo.https_url(public['url'])).path)
+    if settings.get('edge_config_file') and 'health_path' in public:
+        argo.require(set(public) == {'health_path', 'expected_json'}, 'edge health expectation required')
+        argo.http_path(public['health_path'])
+    else:
+        argo.require(set(public) == {'url', 'expected_json'}, 'HTTP expectation required')
+        argo.http_path(urlsplit(argo.https_url(public['url'])).path)
+    argo.require(isinstance(public['expected_json'], dict), 'HTTP JSON expectation required')
     cd = {**cd, 'targets': {target_id: registered}}
     identity = {'descriptor': descriptor, 'cd': cd, 'settings': settings,
                 'ssh_sha256': {key: hashlib.sha256(Path(selected['ssh'][key]).read_bytes()).hexdigest() for key in ('identity_file', 'known_hosts_file')},
@@ -337,7 +342,7 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
             if settings.get('edge_config_file'):
                 edge_request = {'target_id': target_id, 'tenant': registered['tenant'], 'app': registered['app'],
                     'environment_id': home.name, 'provider_kind': request['target']['provider'], 'target_private_ip': identity['descriptor']['addresses']['private'],
-                    'namespace': target['namespace'], 'health_path': urlsplit(registered['public_http']['url']).path,
+                    'namespace': target['namespace'], 'health_path': registered['public_http'].get('health_path') or urlsplit(registered['public_http']['url']).path,
                     'expected_json': registered['public_http']['expected_json'], 'expires_at': settings['expires_at']}
                 if request['target']['provider'] == 'aws':
                     edge_request['target_security_group_id'] = aws_security_group(identity['descriptor'], settings.get('target_security_group_id'))
