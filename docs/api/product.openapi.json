@@ -1130,6 +1130,12 @@
               "state": {
                 "type": "string"
               },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
               "publication_artifact_id": {
                 "type": [
                   "string",
