@@ -47,6 +47,9 @@
                 <label class="field-label" for="repository-url">공개 GitHub URL</label>
                 <input id="repository-url" type="url" inputmode="url" autocomplete="url" placeholder="https://github.com/owner/repo" />
                 <p class="selection" id="source-selection" role="status" hidden></p>
+                <label class="field-label" for="app-name">앱 이름</label>
+                <input id="app-name" type="text" maxlength="30" autocomplete="off" placeholder="my-app" />
+                <p class="field-note">영문 소문자로 시작하는 3~30자입니다. 같은 이름으로 요청하면 기존 앱 소스를 갱신합니다.</p>
               </div>
             </section>
 
@@ -69,7 +72,17 @@
                   <span class="target-copy"><strong>온프레미스</strong><small>내 인프라에 배포</small></span>
                   <span class="radio-mark" aria-hidden="true"></span>
                 </label>
+                <label class="target-option">
+                  <input type="radio" name="environment" value="registered" />
+                  <span class="target-icon" aria-hidden="true">↗</span>
+                  <span class="target-copy"><strong>운영자 등록 대상</strong><small id="registered-target">연결 확인 중</small></span>
+                  <span class="radio-mark" aria-hidden="true"></span>
+                </label>
               </fieldset>
+              <p class="field-note" id="connection-status" role="status">API 연결을 확인하고 있습니다.</p>
+              <p class="field-note">클라우드·온프레미스 자동 연결은 준비 중입니다. 현재는 API에 등록된 대상으로 CI 검사와 이미지 게시를 요청할 수 있습니다.</p>
+              <label class="field-label" for="api-token">API 접근 토큰 (운영자가 요구한 경우)</label>
+              <input id="api-token" type="password" maxlength="4096" autocomplete="off" spellcheck="false" />
               <div class="provider-field" id="provider-field" hidden>
                 <label class="field-label" for="provider">인프라 종류</label>
                 <select id="provider" name="provider">
@@ -89,28 +102,41 @@
 
           <section class="panel review-panel" id="review-panel" aria-labelledby="review-title" hidden>
             <div class="review-heading">
-              <div><span class="eyebrow">READY TO CONNECT</span><h2 id="review-title">선택 내용</h2></div>
+              <div><span class="eyebrow">REVIEW REQUEST</span><h2 id="review-title">선택 내용</h2></div>
               <button class="text-button" id="edit-selection" type="button">수정</button>
             </div>
             <dl class="review-list">
               <div><dt>소스</dt><dd id="review-source"></dd></div>
+              <div><dt>앱 이름</dt><dd id="review-app"></dd></div>
               <div><dt>배포 환경</dt><dd id="review-target"></dd></div>
             </dl>
-            <p class="review-note">화면 준비 단계입니다. 배포 요청은 아직 전송되지 않습니다.</p>
-            <button class="primary-button" type="button" disabled>배포 시작</button>
+            <p class="review-note" id="review-note">선택 내용을 확인하세요.</p>
+            <p class="form-error" id="request-error" role="alert" hidden></p>
+            <button class="primary-button" id="deploy-button" type="button" disabled>검사 및 이미지 게시</button>
+          </section>
+
+          <section class="panel review-panel" id="run-panel" aria-labelledby="run-title" hidden>
+            <h2 id="run-title">CI 실행</h2>
+            <p id="run-meta"></p>
+            <p id="run-state" role="status"></p>
+            <p class="review-note" id="run-message"></p>
+            <ul id="run-steps"></ul>
+            <a id="actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 로그</a>
+            <button class="text-button" id="stop-polling" type="button" hidden>상태 조회 중지</button>
+            <button class="text-button" id="refresh-run" type="button" hidden>상태 다시 조회</button>
           </section>
         </section>
 
         <section class="view" id="history-view" aria-labelledby="history-title" hidden>
           <header class="page-header"><span class="eyebrow">DEPLOYMENTS</span><h1 id="history-title">배포 내역</h1></header>
-          <div class="panel empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2>아직 배포 내역이 없습니다</h2><p>배포 API가 연결되면 이곳에서 실행 기록을 확인할 수 있습니다.</p></div>
+          <div class="panel empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2 id="history-summary">아직 배포 내역이 없습니다</h2><p id="history-detail">이 페이지에서 요청한 마지막 CI 실행이 표시됩니다.</p></div>
         </section>
 
         <section class="view" id="monitor-view" aria-labelledby="monitor-title" hidden>
           <header class="page-header"><span class="eyebrow">ENVIRONMENT</span><h1 id="monitor-title">환경 모니터링</h1></header>
           <div class="monitor-grid">
             <div class="monitor-left">
-              <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2>연결된 배포 없음</h2><p>배포를 선택하면 환경 상태가 표시됩니다.</p></div></div>
+              <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2 id="monitor-state">연결된 배포 없음</h2><p>CI 이미지 게시는 앱 배포 완료를 의미하지 않습니다. 실제 환경·앱 상태는 아직 연결되지 않았습니다.</p></div></div>
               <div class="panel stages-panel"><h2>배포 단계</h2><ol><li>소스 접수</li><li>앱 검사 및 수정</li><li>이미지 빌드</li><li>GitOps 반영</li><li>URL 및 앱 상태 확인</li></ol></div>
             </div>
             <div class="console panel">

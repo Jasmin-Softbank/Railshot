@@ -19,7 +19,7 @@ flowchart TB
     subgraph BUILD["빌드 워커 · taint"]
       R["CI runner Job<br/>검사 · 호스트 BuildKit"]
     end
-    D -. "UI 연결 예정" .-> A
+    D -. "분리 배포 연결 예정" .-> A
     A -->|"GitHub Actions"| R
     R -. "이미지 게시 · Git 검토 경유" .-> C
   end
@@ -173,7 +173,7 @@ python3 deployment/scripts/render-platform.py /private/images.json \
 4. 기본 Service는 모두 ClusterIP다. 우선 승인된 운영 context에서 `kubectl -n railshot-system port-forward service/railshot-dashboard 4181:8080`, API는 `service/railshot-api 4173:4173`으로 검증한다. API readiness는 `configured:true`도 확인하지만 GitHub 자격의 실제 권한을 보증하지 않으므로 실요청 검증이 별도로 필요하다.
 5. 공개 UI가 필요하면 renderer에 할당한 `--dashboard-node-port`를 추가하고 기존 `infrastructure/terraform/aws-edge`의 host route로 운영 노드 사설 IP와 연결한다. health path는 `/healthz`. `externalTrafficPolicy:Local`이므로 ALB target 노드에 실제 UI Pod가 있어야 한다. 보안 그룹은 ALB에서 오는 해당 포트만 허용한다. API에는 공개 route나 프런트 프록시를 넣지 않았다.
 
-화면의 API 연결과 사용자 인증·사용자별 target 인가는 후속 작업이다. 현재 Bearer token은 신뢰한 운영자 CLI/MCP용이며 사용자 로그인이나 multi-tenant 인가 구현이 아니다. 프런트에 이 token을 넣지 않는다. Ansible HTTP API의 운영 클러스터 이전도 이번 배포에 포함하지 않는다.
+통합 브랜치의 UI는 API와 함께 실행할 때 CI 제출·결과 조회를 지원한다. 현재 정적 대시보드 컨테이너에는 API 프록시가 없으므로 분리 배포의 연결과 사용자 인증·사용자별 target 인가는 후속 작업이다. 현재 Bearer token은 신뢰한 운영자 CLI/MCP용이며 사용자 로그인이나 multi-tenant 인가 구현이 아니다. 프런트에 이 token을 넣지 않는다. Ansible HTTP API의 운영 클러스터 이전도 이번 배포에 포함하지 않는다.
 
 ## 빌드 워커와 고객 앱
 

@@ -35,3 +35,5 @@ dist/
 *.pem
 infrastructure/ansible/inventories/production/
 .ansible/
+/infrastructure/ansible/inventory/hosts.yml
+/infrastructure/ansible/artifacts/
