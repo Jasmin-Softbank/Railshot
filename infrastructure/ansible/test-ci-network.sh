@@ -56,7 +56,7 @@ trap cleanup EXIT
   for priority in -20 0; do
     suffix=${priority#-}
     for hook in input forward; do
-      printf 'add chain inet "%s" %s_%s { type filter hook %s priority %s; policy accept; }\n' "$probe_table" "$hook" "$suffix" "$hook" "$priority"
+      printf 'add chain inet %s %s_%s { type filter hook %s priority %s; policy accept; }\n' "$probe_table" "$hook" "$suffix" "$hook" "$priority"
       for interface in br-railshot 'rsrun*'; do
         echo "add rule inet $probe_table ${hook}_${suffix} iifname \"$interface\" counter accept"
       done

@@ -230,7 +230,7 @@ class NetworkPolicyTest(unittest.TestCase):
         # native acceptance script, never by mutating the developer's host.
         probe = (ROOT / "infrastructure/ansible/test-ci-network.sh").read_text()
         self.assertIn("for priority in -20 0", probe)
-        self.assertIn('add chain inet "%s"', probe)
+        self.assertIn('add chain inet %s', probe)
         self.assertIn('nft delete table inet "$probe_table"', probe)
         self.assertIn('counter railshot-deny-169.254.0.0/16', probe)
         self.assertIn('counter railshot-ci-host-block', probe)
