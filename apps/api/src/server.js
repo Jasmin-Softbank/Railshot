@@ -250,6 +250,13 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
           }
+          const eventRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/events$/.exec(url.pathname);
+          if (eventRoute) {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+            json(response, 200, await products.getDeploymentEvents(eventRoute[1], sessionId)); return;
+          }
           const observationRoute = /^\/api\/v1\/targets\/([A-Za-z0-9._-]+)\/observations$/.exec(url.pathname);
           if (observationRoute) {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }

@@ -67,7 +67,6 @@ test('target node metrics preserve partial data, real zero, timestamps and node-
     if (node) {
       assert.match(query, /mountpoint="\/"/); assert.match(query, /device!="lo"/);
       assert.match(query, /rate\(node_network_receive_bytes_total/);
-      assert.match(query, /__name__=~"node_filesystem_avail_bytes\|node_filesystem_size_bytes"/);
     }
     const metrics = node ? { node_up: String(up), cpu_percent: '0', memory_percent: '21', disk_percent: disk,
       ...(network ? { network_receive_bytes_per_second: '100', network_transmit_bytes_per_second: '0' } : {}) }

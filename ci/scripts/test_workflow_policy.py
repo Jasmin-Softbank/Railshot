@@ -28,6 +28,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         (app / 'app.py').write_text('print("fixture")\n')
         script = root / '.railshot/ci/scripts/loop/loop.py'
         script.parent.mkdir(parents=True, exist_ok=True)
+        (script.parent / 'checks_progress.py').touch()
         script.write_text(entry or textwrap.dedent('''\
             import json, os, sys
             from pathlib import Path
@@ -41,7 +42,8 @@ class WorkflowPolicyTest(unittest.TestCase):
                'QUALITY_NETWORK': 'railshot-quality', 'REPAIR_SCOPE': 'packaging',
                'RUN_DIR': str(root / 'run'), 'GITHUB_OUTPUT': str(root / 'output'),
                'PIP_LOG': str(root / 'pip.log'), 'TEST_PYTHON': sys.executable,
-               'TRUSTED_LOOP_DIRECTORY': str(HERE / 'loop'), 'LOOP_EXIT': str(loop_exit)}
+               'TRUSTED_LOOP_DIRECTORY': str(HERE / 'loop'), 'LOOP_EXIT': str(loop_exit),
+               'RAILSHOT_PROGRESS_TOKEN': ''}
         for key in ('CODEX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_HOME',
                     'RAILSHOT_CODEX_HOME', 'RAILSHOT_AUTH_MODE', 'ANTHROPIC_BASE_URL',
                     'RAILSHOT_MAX_REPAIR_ATTEMPTS'):
@@ -131,6 +133,41 @@ class WorkflowPolicyTest(unittest.TestCase):
             self.assertNotEqual(changed.returncode, 0)
             self.assertIn('STATE_BINDING_MISMATCH', changed.stdout)
             self.assertEqual(Path(tmp, 'gate-calls').read_text(), '0\n')
+
+    def test_progress_token_is_only_forwarded_to_trusted_loop_and_checks_permission_is_job_scoped(self):
+        jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
+        self.assertEqual(jobs['loop']['permissions'], {'contents': 'read', 'checks': 'write'})
+        self.assertNotIn('checks', jobs['release']['permissions'])
+        steps = [step for step in jobs['loop']['steps'] if 'RAILSHOT_PROGRESS_TOKEN' in step.get('env', {})]
+        self.assertEqual(len(steps), 1)
+        step = steps[0]
+        self.assertEqual(step['env']['RAILSHOT_PROGRESS_TOKEN'], '${{ github.token }}')
+        for attempts in ('0', '3'):
+            with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as directory:
+                env = {**os.environ, 'RAILSHOT_PROGRESS_TOKEN': 'sentinel-progress-token', 'RAILSHOT_AUTH_MODE': 'api-key',
+                       'RAILSHOT_MAX_REPAIR_ATTEMPTS': attempts,
+                       'PROVIDER': 'codex', 'CODEX_API_KEY': 'synthetic', 'REPAIR_SCOPE': 'source', 'QUALITY_NETWORK': '',
+                       'APP': 'calculator', 'TENANT': 'demo', 'RUN_DIR': directory + '/run', 'GITHUB_OUTPUT': directory + '/output'}
+                # Execute the real shell flow. Setup/install subprocesses must not receive the publisher token.
+                stub = '''python() {
+                  if [ "$1" = ".railshot/ci/scripts/loop/loop.py" ]; then
+                    test "$RAILSHOT_PROGRESS_TOKEN" = sentinel-progress-token
+                  else
+                    test -z "${RAILSHOT_PROGRESS_TOKEN+x}"
+                  fi
+                }
+                pip() { test -z "${RAILSHOT_PROGRESS_TOKEN+x}"; }
+                '''
+                # A stale platform pin must stop before handing the token to an older loop.
+                result = subprocess.run(['bash', '-c', stub + step['run']], cwd=directory, env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(Path(env['GITHUB_OUTPUT']).exists())
+                capability = Path(directory, '.railshot/ci/scripts/loop/checks_progress.py')
+                capability.parent.mkdir(parents=True); capability.touch()
+                result = subprocess.run(['bash', '-c', stub + step['run']], cwd=directory, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(Path(env['GITHUB_OUTPUT']).read_text(), 'passed=true\n')
+                self.assertNotIn('sentinel-progress-token', result.stdout + result.stderr)
 
     def test_repository_scope_outputs_and_required_gate_cover_every_job(self):
         import ci_scope
