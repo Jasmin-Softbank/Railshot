@@ -80,8 +80,9 @@ def prepare(config_path, request):
     """Only the environment registrar calls this with its private provider/profile snapshot."""
     config = config_at(config_path)
     fields = {'target_id', 'tenant', 'app', 'environment_id', 'provider_kind', 'target_private_ip',
-              'namespace', 'health_path', 'expected_json', 'expires_at'}
-    require(isinstance(request, dict) and fields <= set(request) <= fields | {'target_security_group_id'},
+              'namespace', 'health_path', 'expires_at'}
+    require(isinstance(request, dict) and fields <= set(request) <= fields | {
+        'target_security_group_id', 'expected_json', 'expected_status', 'node_port', 'manage_dns'},
             'exact registered route input required')
     for key in ('target_id', 'app', 'namespace'):
         require(isinstance(request[key], str) and re.fullmatch(r'[a-z][a-z0-9-]{0,61}[a-z0-9]|[a-z]', request[key]),
@@ -99,8 +100,15 @@ def prepare(config_path, request):
     sg = request.get('target_security_group_id')
     require(isinstance(sg, str) and re.fullmatch(r'sg-[0-9a-f]{8,17}', sg), 'AWS target security group required')
     http_path(request['health_path'])
-    require(isinstance(request['expected_json'], dict) and len(encoded(request['expected_json'])) <= 8192,
-            'bounded app health contract required')
+    require(('expected_json' in request) != ('expected_status' in request), 'one app health contract required')
+    if 'expected_json' in request:
+        require(isinstance(request['expected_json'], dict) and len(encoded(request['expected_json'])) <= 8192,
+                'bounded app health contract required')
+    else:
+        require(type(request['expected_status']) is int and request['expected_status'] == 200, 'exact HTTP 200 contract required')
+    require(type(request.get('manage_dns', True)) is bool, 'explicit DNS ownership required')
+    if 'node_port' in request:
+        require(type(request['node_port']) is int and 30000 <= request['node_port'] <= 32767, 'registered NodePort required')
     require(isinstance(request['expires_at'], str), 'resource expiry required')
     expires = datetime.fromisoformat(request['expires_at'].replace('Z', '+00:00'))
     require(expires.tzinfo is not None and expires > datetime.now(timezone.utc), 'future owned resource expiry required')
@@ -125,15 +133,22 @@ def prepare(config_path, request):
         name = service_name(request['app'], request['tenant'], request['environment_id'], values['base_domain'])
         require(key not in values['routes'] and name['hostname'] not in {r['host'] for r in routes}, 'hostname collision')
         seed = int(digest(identity), 16)
+        node_port = request.get('node_port')
+        if node_port is not None:
+            require(not any(r['node_port'] == node_port and r['target_private_ip'] == str(address) for r in routes),
+                    'registered NodePort already routed')
         route = {'host': name['hostname'], 'provider_kind': request['provider_kind'],
                  'target_private_ip': str(address), 'health_path': request['health_path'],
-                 'node_port': free_number(seed, 30000, 32767, {r['node_port'] for r in routes}),
+                 'node_port': node_port if node_port is not None else free_number(seed, 30000, 32767, {r['node_port'] for r in routes}),
                  'priority': free_number(seed, 1000, 49999, {r['priority'] for r in routes})}
+        if request.get('manage_dns') is False:
+            route['manage_dns'] = False
         if sg:
             route['target_security_group_id'] = sg
         row = {'version': 1, 'route_key': key, 'request': request, 'route': route,
                'hostname': route['host'], 'node_port': route['node_port'], 'priority': route['priority'],
-               'public_http': {'url': 'https://' + route['host'] + request['health_path'], 'expected_json': request['expected_json']},
+               'public_http': {'url': 'https://' + route['host'] + request['health_path'],
+                               **{k: request[k] for k in ('expected_json', 'expected_status') if k in request}},
                'phase': 'reserved', 'config_sha256': config['_sha256']}
         ledger[key] = row
         durable_write(ledger_path, encoded(ledger))
@@ -157,9 +172,11 @@ def load(reference):
 
 
 def native(args):
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(('TF_CLI_ARGS', 'TF_VAR_')) and key not in ('TF_DATA_DIR', 'TF_WORKSPACE')}
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=110, check=False,
-                                env={**os.environ, 'AWS_PAGER': '', 'TF_IN_AUTOMATION': '1'})
+                                env={**environment, 'AWS_PAGER': '', 'TF_IN_AUTOMATION': '1'})
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError('edge native outcome requires observation') from exc
     require(result.returncode == 0, 'edge native command did not succeed')

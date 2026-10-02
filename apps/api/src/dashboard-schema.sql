@@ -17,6 +17,14 @@ CREATE TABLE IF NOT EXISTS operations (
   record TEXT NOT NULL CHECK(json_valid(record))
 ) STRICT;
 CREATE INDEX IF NOT EXISTS operations_session_created ON operations(session_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS applications (
+  id TEXT PRIMARY KEY,
+  session_id TEXT REFERENCES sessions(id),
+  environment_target_id TEXT NOT NULL,
+  app TEXT NOT NULL,
+  record TEXT NOT NULL CHECK(json_valid(record)),
+  UNIQUE(environment_target_id, app)
+) STRICT;
 CREATE TABLE IF NOT EXISTS plans (
   id TEXT PRIMARY KEY,
   session_id TEXT REFERENCES sessions(id),

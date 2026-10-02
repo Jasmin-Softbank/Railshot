@@ -18,6 +18,7 @@ data "google_compute_instance" "backend" {
 locals {
   nic         = data.google_compute_instance.backend.network_interface[0]
   gfe_sources = ["35.191.0.0/16", "130.211.0.0/22"]
+  route_names = { for id in keys(var.routes) : id => "${var.name}-${substr(sha256(id), 0, 16)}" }
 }
 
 resource "google_project_service" "certificates" {
@@ -33,7 +34,7 @@ resource "google_compute_firewall" "gfe" {
   target_service_accounts = [one(data.google_compute_instance.backend.service_account).email]
   allow {
     protocol = "tcp"
-    ports    = [tostring(var.node_port)]
+    ports    = concat([tostring(var.node_port)], [for id in sort(keys(var.routes)) : tostring(var.routes[id].node_port)])
   }
 }
 
@@ -82,6 +83,48 @@ resource "google_compute_backend_service" "app" {
   }
 }
 
+resource "google_compute_network_endpoint_group" "routes" {
+  for_each              = var.routes
+  name                  = local.route_names[each.key]
+  zone                  = var.zone
+  network               = local.nic.network
+  subnetwork            = local.nic.subnetwork
+  network_endpoint_type = "GCE_VM_IP_PORT"
+  default_port          = each.value.node_port
+}
+
+resource "google_compute_network_endpoint" "routes" {
+  for_each               = var.routes
+  network_endpoint_group = google_compute_network_endpoint_group.routes[each.key].name
+  zone                   = var.zone
+  instance               = data.google_compute_instance.backend.name
+  ip_address             = local.nic.network_ip
+  port                   = each.value.node_port
+}
+
+resource "google_compute_health_check" "routes" {
+  for_each = var.routes
+  name     = local.route_names[each.key]
+  http_health_check {
+    port         = each.value.node_port
+    request_path = each.value.health_path
+    host         = each.value.hostname
+  }
+}
+
+resource "google_compute_backend_service" "routes" {
+  for_each              = var.routes
+  name                  = local.route_names[each.key]
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+  protocol              = "HTTP"
+  health_checks         = [google_compute_health_check.routes[each.key].id]
+  backend {
+    group                 = google_compute_network_endpoint_group.routes[each.key].id
+    balancing_mode        = "RATE"
+    max_rate_per_endpoint = 100
+  }
+}
+
 resource "google_compute_url_map" "app" {
   name = var.name
   default_url_redirect {
@@ -95,6 +138,28 @@ resource "google_compute_url_map" "app" {
   path_matcher {
     name            = "app"
     default_service = google_compute_backend_service.app.id
+  }
+  dynamic "host_rule" {
+    for_each = var.routes
+    content {
+      hosts        = [host_rule.value.hostname]
+      path_matcher = local.route_names[host_rule.key]
+    }
+  }
+  dynamic "path_matcher" {
+    for_each = var.routes
+    content {
+      name            = local.route_names[path_matcher.key]
+      default_service = google_compute_backend_service.routes[path_matcher.key].id
+    }
+  }
+  lifecycle {
+    precondition {
+      condition = alltrue([for route in var.routes :
+        route.hostname != var.hostname && route.node_port != var.node_port
+      ])
+      error_message = "Additional applications cannot reuse the existing application's hostname or NodePort."
+    }
   }
 }
 
@@ -125,6 +190,31 @@ resource "google_certificate_manager_certificate_map_entry" "app" {
   certificates = [google_certificate_manager_certificate.app.id]
 }
 
+resource "google_certificate_manager_dns_authorization" "routes" {
+  for_each   = var.routes
+  name       = local.route_names[each.key]
+  domain     = each.value.hostname
+  type       = "PER_PROJECT_RECORD"
+  depends_on = [google_project_service.certificates]
+}
+
+resource "google_certificate_manager_certificate" "routes" {
+  for_each = var.routes
+  name     = local.route_names[each.key]
+  managed {
+    domains            = [each.value.hostname]
+    dns_authorizations = [google_certificate_manager_dns_authorization.routes[each.key].id]
+  }
+}
+
+resource "google_certificate_manager_certificate_map_entry" "routes" {
+  for_each     = var.routes
+  name         = local.route_names[each.key]
+  map          = google_certificate_manager_certificate_map.app.name
+  hostname     = each.value.hostname
+  certificates = [google_certificate_manager_certificate.routes[each.key].id]
+}
+
 resource "google_compute_target_https_proxy" "app" {
   name            = var.name
   url_map         = google_compute_url_map.app.id
@@ -153,6 +243,25 @@ resource "google_compute_url_map" "redirect" {
     redirect_response_code = "MOVED_PERMANENTLY_DEFAULT"
     strip_query            = false
   }
+  dynamic "host_rule" {
+    for_each = var.routes
+    content {
+      hosts        = [host_rule.value.hostname]
+      path_matcher = local.route_names[host_rule.key]
+    }
+  }
+  dynamic "path_matcher" {
+    for_each = var.routes
+    content {
+      name = local.route_names[path_matcher.key]
+      default_url_redirect {
+        host_redirect          = path_matcher.value.hostname
+        https_redirect         = true
+        redirect_response_code = "MOVED_PERMANENTLY_DEFAULT"
+        strip_query            = false
+      }
+    }
+  }
 }
 
 resource "google_compute_target_http_proxy" "redirect" {
@@ -174,3 +283,11 @@ output "health_url" { value = "https://${var.hostname}${var.health_path}" }
 output "backend_service" { value = google_compute_backend_service.app.name }
 output "required_workload_ingress_cidrs" { value = local.gfe_sources }
 output "readiness" { value = "configured-references-only; certificate, backend health and public HTTPS require live verification" }
+output "application_routes" {
+  value = { for id, route in var.routes : id => {
+    frontend_ip              = google_compute_global_address.app.address
+    hostname                 = route.hostname
+    backend_service          = google_compute_backend_service.routes[id].name
+    dns_authorization_record = google_certificate_manager_dns_authorization.routes[id].dns_resource_record[0]
+  } }
+}

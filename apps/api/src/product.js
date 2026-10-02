@@ -5,6 +5,7 @@ import { APP_NAME, TARGET_ID, sourceAppName } from './contract.js';
 import { validateFiles } from './archive.js';
 import { createMetricsObserver } from './metrics.js';
 import { emptyAgentEvents } from './agent-events.js';
+import { EnvironmentError } from './environments.js';
 
 export class ProductError extends Error {
   constructor(status, code, message, { outcomeUnknown = false, retryable = false } = {}) {
@@ -41,7 +42,7 @@ function checkFree(state) {
   if (Object.values(state.operations).some(active)) throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
 }
 
-export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const targetId = target?.id || service?.targetId;
   if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
   const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
@@ -65,6 +66,8 @@ export async function createProductService({ service, directory, target, provide
   const owns = (value, sessionId) => value && (!sessionId || value.session_id === sessionId);
   function providerSelection(provider) {
     const id = selections.get(provider);
+    const environment = id && applicationAdapter?.targets?.[id];
+    if (environment) return { id, cdTarget: null, available: Boolean(service && environment.provider === provider && environment.automaticDelivery !== false) };
     const cdTarget = id && deployPublished?.targets && Object.hasOwn(deployPublished.targets, id) ? deployPublished.targets[id] : null;
     // Older single-target adapters have no registry; they authorize only the existing default.
     const available = Boolean(service && id && sharedTargets.has(id) && deployPublished
@@ -128,12 +131,13 @@ export async function createProductService({ service, directory, target, provide
   }
   // Restore only successful registrations; interrupted intents still occupy checkFree admission.
   const restored = store.read();
+  for (const app of Object.values(restored.applications)) if (app.status === 'ready') service?.allowTarget?.(app.target_id);
   for (const operation of Object.values(restored.operations)) {
     const id = operation.kind === 'environments' ? operation.runtime_target_id : operation.environment?.runtime_target_id;
     if (registeredEnvironment(restored, id)) service?.allowTarget?.(id);
   }
   function inputFingerprint(input) {
-    return digest({ app: input.app, target_id: input.target_id, type: input.source_type, ...(input.plan_id ? { plan_id: input.plan_id } : {}),
+    return digest({ app: input.app, target_id: input.target_id, type: input.source_type, ...(input.environment_target_id ? { environment_target_id: input.environment_target_id } : {}), ...(input.plan_id ? { plan_id: input.plan_id } : {}),
       ...(input.deployment_selection ? { selection: input.deployment_selection } : {}),
       ...(input.repository_url ? { repository_url: input.repository_url } : {
         files: input.files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort(([a], [b]) => a.localeCompare(b)),
@@ -150,10 +154,16 @@ export async function createProductService({ service, directory, target, provide
         return { record: existing, replay: true };
       }
       const selectedCdTarget = deployPublished?.targets?.[input.target_id];
+      const application = kind === 'deployments' && input.environment_target_id
+        ? applicationAdapter.describe(input.environment_target_id, input.app) : null;
+      const previousApplication = application && state.applications[application.id];
+      if (application && applicationAdapter.targets[application.environment_target_id]?.automaticDelivery === false) throw unavailable();
+      if (previousApplication && previousApplication.session_id !== sessionId) throw new ProductError(409, 'APPLICATION_OWNERSHIP_CONFLICT', '같은 환경의 이 앱 이름은 다른 세션에 등록되어 있습니다. 다른 이름을 사용하세요.');
+      if (previousApplication && !['queued', 'ready'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 등록 결과를 운영자가 확인해야 합니다. 자동 재등록하지 않습니다.');
       const selectedCdAvailable = Boolean(deployPublished && (!deployPublished.targets || selectedCdTarget));
       const savedEnvironment = registeredEnvironment(state, input.target_id, sessionId);
       const registered = !selectedCdAvailable && !input.plan_id && kind === 'deployments' ? savedEnvironment : null;
-      const admittedTarget = sharedTargets.has(input.target_id) || Boolean(savedEnvironment);
+      const admittedTarget = sharedTargets.has(input.target_id) || Boolean(savedEnvironment) || Boolean(application);
       const plan = input.plan_id && Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
       if (input.plan_id) {
         if (kind !== 'deployments' || !owns(plan, sessionId) || !environmentAdapter?.deployPublished) throw invalid('실행 가능한 환경 계획이 필요합니다.');
@@ -165,7 +175,7 @@ export async function createProductService({ service, directory, target, provide
         await environmentAdapter.verifyPlan(plan);
       }
       if (!admittedTarget && !plan && !savedEnvironment) throw invalid('등록된 배포 대상만 사용할 수 있습니다.');
-      if (kind === 'deployments' && !input.plan_id && !selectedCdAvailable && !registered) throw unavailable();
+      if (kind === 'deployments' && !input.plan_id && !selectedCdAvailable && !registered && !application) throw unavailable();
       checkFree(state);
       checkCapacity(state);
       const applicationName = selectedCdTarget?.applicationName || savedEnvironment?.applicationName;
@@ -176,7 +186,10 @@ export async function createProductService({ service, directory, target, provide
       checkCapacity(state, sourceBytes);
       const id = randomUUID(), now = new Date().toISOString();
       await store.snapshot(id, files);
-      const record = { id, kind, session_id: sessionId, app: input.app, target_id: input.target_id, ...(plan ? { plan_id: input.plan_id, environment_id: `${id}.environment`, environment: { status: 'queued' } } : registered ? { environment_id: registered.environment_id } : {}), status: 'queued', stage: plan ? 'environment' : 'ci',
+      if (application && !previousApplication) state.applications[application.id] = { ...application, session_id: sessionId, status: 'queued', created_at: now };
+      const record = { id, kind, session_id: sessionId, app: input.app, target_id: input.target_id,
+        ...(application ? { application_id: application.id, environment_target_id: application.environment_target_id } : {}),
+        ...(plan ? { plan_id: input.plan_id, environment_id: `${id}.environment`, environment: { status: 'queued' } } : registered ? { environment_id: registered.environment_id } : {}), status: 'queued', stage: application ? 'registration' : plan ? 'environment' : 'ci',
         ci: { run_id: null, state: 'queued', steps: [], publication_artifact_id: null, producer_attempt: null },
         cd: { state: 'not_started', revision: null, deployed: false },
         public_http: { state: 'not_run', verified_at: null, url: null }, url: null,
@@ -193,8 +206,11 @@ export async function createProductService({ service, directory, target, provide
     await update(record.id, { status: 'running', stage: 'ci' });
     try {
       if (!(service.targetIds || [targetId]).includes(record.target_id)) {
+        const application = record.application_id && store.read().applications[record.application_id];
         const registered = registeredEnvironment(store.read(), record.target_id);
-        if (!registered || registered.applicationName !== record.app || typeof service.allowTarget !== 'function') throw unavailable();
+        const admitted = application?.status === 'ready' && application.app === record.app && application.target_id === record.target_id
+          || registered?.applicationName === record.app;
+        if (!admitted || typeof service.allowTarget !== 'function') throw unavailable();
         service.allowTarget(record.target_id);
       }
       const result = await service.deploy(input);
@@ -235,7 +251,8 @@ export async function createProductService({ service, directory, target, provide
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
           await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
-          const deploy = record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
+          const deploy = record.application_id ? (args) => applicationAdapter.deployPublished(store.read().applications[record.application_id], args)
+            : record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
           const result = await deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
             sourceCommit: build.source_commit, publication: build.publication, signal: abort.signal,
             onProgress: (progress) => update(record.id, { stage: progress.cd?.deployed ? 'http' : 'cd', cd: progress.cd, public_http: progress.public_http }) });
@@ -250,12 +267,19 @@ export async function createProductService({ service, directory, target, provide
         }
         await pause(pollInterval, undefined, { signal: abort.signal, ref: false });
       }
-    } catch {
-      if (!abort.signal.aborted) await update(record.id, { status: 'unknown', error: operationError() });
+    } catch (error) {
+      const known = error instanceof EnvironmentError;
+      if (!abort.signal.aborted) await update(record.id, { status: known && !error.outcomeUnknown ? 'blocked' : 'unknown', error: operationError(known ? error.code : 'CD_OUTCOME_UNKNOWN', !known || error.outcomeUnknown) });
     }
   }
   return {
     dashboard: store.dashboard,
+    applications(sessionId = null) { return Object.values(store.read().applications).filter((row) => owns(row, sessionId)).map(publicRecord); },
+    getApplication(id, sessionId = null) {
+      const application = store.read().applications[id];
+      if (!owns(application, sessionId)) throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
+      return publicRecord(application);
+    },
     list(kind, sessionId, pagination) {
       if (kind === 'plans') return Object.values(store.read().plans).filter((row) => owns(row, sessionId)).reverse().map((row) => structuredClone(row.public));
       const { records, hasMore, total } = store.operationPage(kind, sessionId, pagination);
@@ -267,6 +291,7 @@ export async function createProductService({ service, directory, target, provide
     targets(sessionId = null) {
       const state = store.read();
       const ids = new Set(sharedTargets);
+      for (const id of Object.keys(applicationAdapter?.targets || {})) ids.add(id);
       for (const operation of Object.values(state.operations)) {
         const id = operation.kind === 'environments' ? operation.runtime_target_id : operation.environment?.runtime_target_id;
         if (registeredEnvironment(state, id, sessionId)) ids.add(id);
@@ -275,11 +300,12 @@ export async function createProductService({ service, directory, target, provide
         const staticTarget = deployPublished?.targets?.[id];
         const staticAvailable = Boolean(deployPublished && (!deployPublished.targets || staticTarget));
         const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id, sessionId);
-        const available = staticAvailable || Boolean(registered);
+        const applicationEnvironment = applicationAdapter?.targets?.[id];
+        const available = Boolean(applicationEnvironment && applicationEnvironment.automaticDelivery !== false) || staticAvailable || Boolean(registered);
         return { id, label: id === targetId ? target?.label || id : id,
-          provider: [...selections].find(([, selected]) => selected === id)?.[0] || registered?.provider || null, environment: 'registered',
+          provider: applicationEnvironment?.provider || [...selections].find(([, selected]) => selected === id)?.[0] || registered?.provider || null, environment: 'registered',
           environment_id: registered?.environment_id || null,
-          ...(registered?.applicationName ? { application_name: registered.applicationName, deployment_scope: 'registered_application' } : {}),
+          ...(applicationEnvironment ? { deployment_scope: 'environment' } : registered?.applicationName ? { application_name: registered.applicationName, deployment_scope: 'registered_application' } : {}),
           capabilities: { ci_submission: Boolean(service), application_deployment: available,
             database_configuration: !staticAvailable && registered?.database_configuration === true },
           runtime: { status: 'unknown', observed_at: null }, blockers: available ? [] : ['CD_ADAPTER_NOT_CONFIGURED'] };
@@ -303,9 +329,28 @@ export async function createProductService({ service, directory, target, provide
     async legacyStatus(id, sessionId = null) { const state = store.read(); if (!Object.hasOwn(state.bindings, id) || !owns(state.operations[state.bindings[id].operation_id], sessionId)) throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.'); return service.status(id, store.read().bindings[id].target_id); },
     async createDeployment(input, key, materialize, sessionId = null) {
       input = resolveSelection(input);
+      if (!input.plan_id && applicationAdapter?.targets?.[input.target_id]) {
+        const application = applicationAdapter.describe(input.target_id, input.app);
+        input = { ...input, environment_target_id: input.target_id, target_id: application.target_id };
+      }
       const reserved = await reserve('deployments', input, idempotencyKey(key), materialize, sessionId);
       if (!reserved.replay) launch(async () => {
         try {
+          if (reserved.record.application_id) {
+            const appId = reserved.record.application_id;
+            const application = store.read().applications[appId];
+            await update(reserved.record.id, { status: 'running', stage: 'registration' });
+            await store.transaction((state) => { state.applications[appId].status = 'registering'; });
+            try {
+              const registered = await applicationAdapter.register(application);
+              await store.transaction((state) => { Object.assign(state.applications[appId], registered); });
+            } catch (error) {
+              const unknown = error.outcomeUnknown !== false;
+              await store.transaction((state) => { state.applications[appId].status = unknown ? 'unknown' : 'blocked'; });
+              await update(reserved.record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(error.code || 'APPLICATION_REGISTRATION_FAILED', unknown) });
+              return;
+            }
+          }
           if (reserved.plan) {
             await update(reserved.record.id, { status: 'running', stage: 'environment' });
             const environment = await environmentAdapter.execute(reserved.plan, { id: reserved.record.environment_id,
@@ -365,7 +410,8 @@ export async function createProductService({ service, directory, target, provide
       const current = () => Object.values(store.read().operations).reverse().find((row) => row.kind === 'deployments'
         && row.target_id === record.target_id && row.app === record.app && row.cd?.state !== 'not_started')?.id === id;
       if (!current()) return empty('superseded');
-      const observer = record.environment_id ? environmentAdapter?.observeLogs : observeLogs;
+      const observer = record.application_id ? (value) => applicationAdapter?.observeLogs(store.read().applications[record.application_id], value)
+        : record.environment_id ? environmentAdapter?.observeLogs : observeLogs;
       if (!observer) return empty('not_configured');
       try {
         const logs = await (record.environment_id ? observer(record.environment_id, record) : observer(record));

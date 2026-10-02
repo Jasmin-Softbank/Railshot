@@ -88,6 +88,7 @@ spec:
           volumeMounts:
             - {name: state, mountPath: /var/lib/railshot}
             - {name: config, mountPath: /run/config, readOnly: true}
+            - {name: dns-config, mountPath: /run/dns, readOnly: true}
       containers:
         - name: api
           image: BUILD_REQUIRED/api
@@ -99,6 +100,9 @@ spec:
             - {name: RAILSHOT_API_TOKEN_FILE, value: /run/secrets/api/token}
             - {name: RAILSHOT_STATE_DIR, value: /var/lib/railshot/state}
             - {name: RAILSHOT_CD_CONFIG, value: /var/lib/railshot/config/cd.json}
+            - name: RAILSHOT_APPLICATIONS_FILE
+              valueFrom:
+                configMapKeyRef: {name: railshot-environments, key: applications_file, optional: true}
             - {name: RAILSHOT_OBSERVER_CONFIG, value: /var/lib/railshot/config/observer.json}
             - name: RAILSHOT_OBSERVER_PRODUCT_FILE
               valueFrom:
@@ -113,6 +117,9 @@ spec:
             - {name: AWS_REGION, value: ap-northeast-2}
             - {name: AWS_DEFAULT_REGION, value: ap-northeast-2}
             - {name: AWS_EC2_METADATA_V1_DISABLED, value: 'true'}
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              valueFrom:
+                configMapKeyRef: {name: railshot-environments, key: google_credentials_file, optional: true}
             - {name: GITHUB_TOKEN, valueFrom: {secretKeyRef: {name: railshot-github, key: token}}}
             - {name: GITHUB_OWNER, value: Jasmin-Softbank}
             - {name: GITHUB_REPO, value: railshot-apps}
@@ -145,6 +152,8 @@ spec:
           secret: {secretName: railshot-api, defaultMode: 288}
         - name: config
           secret: {secretName: railshot-executors, defaultMode: 288}
+        - name: dns-config
+          secret: {secretName: railshot-cloudflare, defaultMode: 288, optional: true}
         - name: state
           persistentVolumeClaim: {claimName: railshot-api}
         - name: kubernetes-api

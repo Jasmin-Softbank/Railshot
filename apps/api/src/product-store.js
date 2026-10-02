@@ -84,11 +84,14 @@ export async function createProductStore(directory) {
       for (const value of Object.values(state.plans || {})) delete value.session_id;
     } else {
       state = { version: 1, operations: {}, keys: {}, bindings: {}, plans: {} };
-      for (const table of ['operations', 'plans']) for (const row of db.prepare(`SELECT id, record FROM ${table}`).all()) state[table][row.id] = JSON.parse(row.record);
+      state.applications = {};
+      for (const table of ['operations', 'plans', 'applications']) for (const row of db.prepare(`SELECT id, record FROM ${table}`).all()) state[table][row.id] = JSON.parse(row.record);
       for (const row of db.prepare('SELECT run_id, record FROM bindings').all()) state.bindings[row.run_id] = JSON.parse(row.record);
       for (const row of db.prepare('SELECT key, operation_id FROM idempotency').all()) state.keys[row.key] = row.operation_id;
     }
     if (state.version !== 1 || !state.operations || !state.keys || !state.bindings || !state.plans) throw new Error('Invalid workspace state');
+    state.applications ||= {};
+    for (const app of Object.values(state.applications)) if (app.status === 'registering') app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
       if (['queued', 'running'].includes(operation.status)) {
         operation.status = 'unknown';
@@ -103,11 +106,13 @@ export async function createProductStore(directory) {
     // use row-level updates when the workspace retention limit grows.
     db.exec('BEGIN IMMEDIATE');
     try {
-      db.exec('DELETE FROM bindings; DELETE FROM idempotency; DELETE FROM operations; DELETE FROM plans;');
+      db.exec('DELETE FROM bindings; DELETE FROM idempotency; DELETE FROM operations; DELETE FROM plans; DELETE FROM applications;');
       const operation = db.prepare('INSERT INTO operations VALUES (?, ?, ?, ?, ?, ?)');
       for (const [id, value] of Object.entries(next.operations)) operation.run(id, value.session_id ?? null, value.kind, value.status, value.created_at ?? null, JSON.stringify(value));
       const plan = db.prepare('INSERT INTO plans VALUES (?, ?, ?)');
       for (const [id, value] of Object.entries(next.plans)) plan.run(id, value.session_id ?? null, JSON.stringify(value));
+      const application = db.prepare('INSERT INTO applications VALUES (?, ?, ?, ?, ?)');
+      for (const [id, value] of Object.entries(next.applications || {})) application.run(id, value.session_id ?? null, value.environment_target_id, value.app, JSON.stringify(value));
       const binding = db.prepare('INSERT INTO bindings VALUES (?, ?, ?)');
       for (const [id, value] of Object.entries(next.bindings)) binding.run(id, value.operation_id, JSON.stringify(value));
       const key = db.prepare('INSERT INTO idempotency VALUES (?, ?)');

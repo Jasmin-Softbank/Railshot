@@ -1,4 +1,12 @@
 mock_provider "google" {
+  mock_resource "google_compute_global_address" {
+    defaults = { address = "198.51.100.10" }
+  }
+  mock_resource "google_certificate_manager_dns_authorization" {
+    defaults = {
+      dns_resource_record = [{ name = "_acme-challenge.example.test.", type = "CNAME", data = "authorization.example.test." }]
+    }
+  }
   mock_data "google_compute_instance" {
     defaults = {
       name = "railshot-gcp-poc"
@@ -30,10 +38,123 @@ run "existing_vm_gfe_only" {
     condition     = google_compute_firewall.gfe.source_ranges == toset(["35.191.0.0/16", "130.211.0.0/22"]) && one(google_compute_firewall.gfe.allow).ports == tolist(["30080"]) && google_compute_firewall.gfe.target_service_accounts == toset(["railshot-gcp-poc-node@railshot-poc-20261001.iam.gserviceaccount.com"])
     error_message = "Only GFE sources may enter this VM service account on the allocated NodePort."
   }
+  assert {
+    condition     = length(google_compute_backend_service.routes) == 0 && length(google_compute_network_endpoint_group.routes) == 0 && length(google_certificate_manager_certificate.routes) == 0 && length(google_compute_url_map.app.host_rule) == 1 && length(google_compute_url_map.app.path_matcher) == 1 && length(google_compute_url_map.redirect.host_rule) == 0 && length(output.application_routes) == 0
+    error_message = "Omitting routes must preserve the existing single-app resource addresses and configuration."
+  }
 }
 
 run "wrong_vm_ip_rejected" {
   command = plan
   variables { expected_private_ip = "10.66.0.3" }
   expect_failures = [google_compute_network_endpoint_group.app]
+}
+
+run "two_apps_share_existing_frontend" {
+  command = apply
+  variables {
+    routes = {
+      app-calculator = { hostname = "calculator.railshot.io", node_port = 31001, health_path = "/healthz" }
+      app-notes      = { hostname = "notes.railshot.io", node_port = 31002, health_path = "/ready" }
+    }
+  }
+  assert {
+    condition = alltrue([for id, route in var.routes :
+      google_compute_network_endpoint.routes[id].port == route.node_port &&
+      google_compute_network_endpoint.routes[id].ip_address == "10.66.0.2" &&
+      google_compute_network_endpoint.routes[id].network_endpoint_group == google_compute_network_endpoint_group.routes[id].name &&
+      google_compute_network_endpoint_group.routes[id].default_port == route.node_port &&
+      one(google_compute_backend_service.routes[id].backend).group == google_compute_network_endpoint_group.routes[id].id &&
+      google_compute_backend_service.routes[id].health_checks == toset([google_compute_health_check.routes[id].id]) &&
+      one(google_compute_health_check.routes[id].http_health_check).port == route.node_port &&
+      one(google_compute_health_check.routes[id].http_health_check).host == route.hostname &&
+      one(google_compute_health_check.routes[id].http_health_check).request_path == route.health_path &&
+      one([for rule in google_compute_url_map.app.host_rule : rule.path_matcher if contains(rule.hosts, route.hostname)]) == local.route_names[id] &&
+      one([for matcher in google_compute_url_map.app.path_matcher : matcher.default_service if matcher.name == local.route_names[id]]) == google_compute_backend_service.routes[id].id
+    ])
+    error_message = "Each exact hostname must reach its own backend, private NodePort and app-specific health path."
+  }
+  assert {
+    condition = (
+      one(google_compute_firewall.gfe.allow).ports == tolist(["30080", "31001", "31002"]) &&
+      google_compute_firewall.gfe.source_ranges == toset(["35.191.0.0/16", "130.211.0.0/22"]) &&
+      google_compute_firewall.gfe.target_service_accounts == toset(["railshot-gcp-poc-node@railshot-poc-20261001.iam.gserviceaccount.com"])
+    )
+    error_message = "Add only allocated app ports while retaining the existing GFE and VM service-account restrictions."
+  }
+  assert {
+    condition = alltrue([for id, route in var.routes :
+      output.application_routes[id].frontend_ip == output.frontend_ip &&
+      output.application_routes[id].hostname == route.hostname &&
+      output.application_routes[id].backend_service == google_compute_backend_service.routes[id].name &&
+      output.application_routes[id].dns_authorization_record == google_certificate_manager_dns_authorization.routes[id].dns_resource_record[0] &&
+      google_certificate_manager_certificate_map_entry.routes[id].map == google_certificate_manager_certificate_map.app.name &&
+      google_certificate_manager_certificate_map_entry.routes[id].hostname == route.hostname &&
+      google_certificate_manager_certificate_map_entry.routes[id].certificates == tolist([google_certificate_manager_certificate.routes[id].id]) &&
+      one(google_certificate_manager_certificate.routes[id].managed).dns_authorizations == tolist([google_certificate_manager_dns_authorization.routes[id].id])
+    ]) && google_compute_global_forwarding_rule.https.ip_address == google_compute_global_address.app.id && google_compute_global_forwarding_rule.http.ip_address == google_compute_global_address.app.id
+    error_message = "All applications must reuse the existing frontend IP and certificate map with separate DNS authorizations."
+  }
+  assert {
+    condition = alltrue([for id, route in var.routes :
+      one([for rule in google_compute_url_map.redirect.host_rule : rule.path_matcher if contains(rule.hosts, route.hostname)]) == local.route_names[id] &&
+      one([for matcher in google_compute_url_map.redirect.path_matcher : one(matcher.default_url_redirect).host_redirect if matcher.name == local.route_names[id]]) == route.hostname &&
+      one([for matcher in google_compute_url_map.redirect.path_matcher : one(matcher.default_url_redirect).https_redirect if matcher.name == local.route_names[id]])
+    ])
+    error_message = "An application's HTTP request must redirect to its own HTTPS hostname, never the legacy app."
+  }
+}
+
+run "legacy_hostname_collision_rejected" {
+  command = plan
+  variables {
+    routes = { app-calculator = { hostname = "fixture-npm-js-3feba5a1b1cf.railshot.io", node_port = 31001, health_path = "/healthz" } }
+  }
+  expect_failures = [google_compute_url_map.app]
+}
+
+run "legacy_port_collision_rejected" {
+  command = plan
+  variables {
+    routes = { app-calculator = { hostname = "calculator.railshot.io", node_port = 30080, health_path = "/healthz" } }
+  }
+  expect_failures = [google_compute_url_map.app]
+}
+
+run "app_hostname_collision_rejected" {
+  command = plan
+  variables {
+    routes = {
+      app-calculator = { hostname = "calculator.railshot.io", node_port = 31001, health_path = "/healthz" }
+      app-notes      = { hostname = "calculator.railshot.io", node_port = 31002, health_path = "/ready" }
+    }
+  }
+  expect_failures = [var.routes]
+}
+
+run "app_port_collision_rejected" {
+  command = plan
+  variables {
+    routes = {
+      app-calculator = { hostname = "calculator.railshot.io", node_port = 31001, health_path = "/healthz" }
+      app-notes      = { hostname = "notes.railshot.io", node_port = 31001, health_path = "/ready" }
+    }
+  }
+  expect_failures = [var.routes]
+}
+
+run "unallocated_app_port_rejected" {
+  command = plan
+  variables {
+    routes = { app-calculator = { hostname = "calculator.railshot.io", node_port = 8080, health_path = "/healthz" } }
+  }
+  expect_failures = [var.routes]
+}
+
+run "unsafe_app_health_path_rejected" {
+  command = plan
+  variables {
+    routes = { app-calculator = { hostname = "calculator.railshot.io", node_port = 31001, health_path = "/../ready" } }
+  }
+  expect_failures = [var.routes]
 }
