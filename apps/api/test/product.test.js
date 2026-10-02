@@ -72,6 +72,30 @@ test('concurrent identical keys dispatch once; another intent is refused while a
   assert.equal(calls, 1);
 });
 
+test('CD progress persists revision and HTTP stage before completion while observer failure stays separate', async (t) => {
+  let finish;
+  const waiting = new Promise((resolve) => { finish = resolve; });
+  const images = { web: `ghcr.io/example/demo@sha256:${'c'.repeat(64)}` };
+  const f = await fixture(t, {
+    service: { status: async () => ({ run_id: 123, state: 'published', publication: { ...publication, images } }) },
+    deployPublished: async ({ onProgress }) => {
+      await onProgress({ cd: deployed.cd, public_http: { state: 'unverified', verified_at: null, url: null } });
+      await waiting; return deployed;
+    },
+    observeMetrics: async (record) => ({ deployment_id: record.id, metrics: { pods: { state: 'unavailable', value: null } } }),
+  });
+  const first = await f.product.createDeployment(input, 'progress');
+  try {
+    const progressing = await settle(() => f.product.getDeployment(first.id), (record) => record.stage === 'http');
+    assert.equal(progressing.status, 'running'); assert.equal(progressing.cd.revision, deployed.cd.revision);
+    assert.deepEqual(progressing.ci.images, images); assert.equal(progressing.url, null);
+    assert.equal(progressing.observation.metrics.pods.state, 'unavailable');
+    const disk = JSON.parse(await readFile(join(f.directory, 'state.json')));
+    assert.equal(disk.operations[first.id].stage, 'http');
+  } finally { finish(); }
+  assert.equal((await settle(() => f.product.getDeployment(first.id))).status, 'succeeded');
+});
+
 test('GitHub URL replay keeps the first pinned source without fetching current HEAD', async (t) => {
   const f = await fixture(t);
   let loads = 0;
