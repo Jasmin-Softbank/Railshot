@@ -397,3 +397,5 @@ AWS/GCP는 NodePort까지의 보안 그룹·방화벽·라우팅을 해당 담�
 후속 Release 분리와 16개 Linux 시나리오의 실제 결과는 [최신 Release 검증 기록](scripts/tests/results/RELEASE-VALIDATION-2026-10-02.md)에 정리했습니다.
 
 새 Railshot 위치의 재검증·첫 실패·최종 통과 결과는 [이관 검증 기록](scripts/tests/results/MIGRATION-VALIDATION-2026-10-02.md)을 확인하시면 됩니다.
+
+후속 상태는 [Deployment 통합 준비 점검](scripts/tests/results/DEPLOYMENT-REVIEW-2026-10-02.md)과 [실제 클라우드 smoke test 점검](scripts/tests/results/CLOUD-SMOKE-2026-10-02.md)에 기록했습니다. 이번 unit 재검사는 49개 통과이며, 신규 AWS/GCP Runtime 배포는 현재 controller의 권한·인증 도구 미준비로 미실행입니다. 기존 공개 앱의 HTTP 200 확인과 Runtime 신규 배포 검증은 구분합니다. PR #1은 팀원에 의해 이미 통합된 상태입니다.

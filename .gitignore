@@ -20,3 +20,8 @@ docs/meetings/raw/
 .ruff_cache/
 *.egg-info/
 .DS_Store
+dist/
+*.sqlite
+*.sqlite-*
+/apps/**/AGENTS.md
+/apps/**/CONTRACTS.md

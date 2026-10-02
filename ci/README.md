@@ -1,5 +1,23 @@
 # CI와 이미지 게시
 
+## Railshot 저장소의 PR 검사
+
+사용자 앱을 게시하는 아래 템플릿과 별도로, [Railshot CI](../.github/workflows/railshot-ci.yml)는 PR과 `integration/**` push에서 플랫폼 통합본을 검사한다. GitHub가 workflow를 인식하는 `.github/workflows/`에는 실행 연결만 두고 검사 구현은 `ci/`와 기존 담당 경로에서 재사용한다.
+
+| 검사 | 실행 범위 |
+|---|---|
+| Python / OpenStack contracts | 기존 CI·Ansible·runtime·GitOps·provider 검사와 OpenAPI. 모델·외부 API는 mock |
+| HTTP publication and browser E2E | 실제 HTTP ZIP 업로드 → Python 게시 산출물 → API 읽기. GitHub·registry는 mock. Chromium은 실제 dashboard 선택·검토·탐색을 실행 |
+| Terraform validation | 모든 현재 모듈의 fmt/init/validate 및 기존 계약 검사. credentials/backend/apply 없음 |
+| Linux amd64 runtime E2E and cleanup | 일회성 GitHub runner에 실제 K3s/Cilium 설치 → Pod·서비스·HTTP 검증 → 소유 자원과 클러스터 정리 |
+| Railshot CI gate | 위 검사가 모두 성공해야 통과하는 고정 이름의 합산 검사 |
+
+PR 검사에는 cloud·모델·private registry 자격을 제공하지 않는다. 브라우저 검사는 현재 선택·검토 UI가 요청을 아직 전송하지 않는다는 사실도 확인한다. 통과를 제품 UI에서 AWS/GCP로 자동 배포한 결과로 해석하지 않는다. Vercel preview는 별도 연동이다.
+
+실패 브라우저 trace·스크린샷과 runtime 요청·단계 결과·정리 영수증은 run/attempt별 artifact로 7일 보존한다. runtime은 `finally`와 workflow `always()`에서 정리하며, 정리 실패도 gate를 실패시킨다. [E2E 배포 해제 경로](../docs/integration/e2e-teardown.md)에 재시도와 실제 클라우드 자원 정리 범위를 기록했다.
+
+로컬 Python 의존은 `python -m pip install -r ci/requirements-test.txt`, 브라우저 검사는 [ci/browser](browser/README.md)를 따른다. runtime wrapper는 기존 개발·운영 노드에서 실행하지 못하도록 hosted runner·소유권을 검사한다.
+
 `workflows/railshot-deploy.yml`은 private apps 저장소에서 사용할 workflow 템플릿이다. `loop`와 `release` 두 job만 포함한다. 업로드 원본 → baseline gate → 필요한 adapter/fixer 수정 → 전체 gate → 검증한 이미지 bundle → GHCR 게시를 담당한다. UI·Provider API·클러스터 설치·CD·DB·공개 ingress는 각 담당 영역에서 연결한다. 공통 설계와 역할은 루트 README를 따른다.
 
 ## 실행 경계

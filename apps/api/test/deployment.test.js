@@ -175,10 +175,10 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
     const base = `http://127.0.0.1:${server.address().port}`;
     const index = await fetch(base);
     assert.equal(index.status, 200);
-    assert.match(await index.text(), /CD 인계/);
+    assert.match(await index.text(), /id="deploy-form"/);
     const script = await fetch(`${base}/app.js`);
     assert.equal(script.status, 200);
-    assert.match(await script.text(), /publication_unverified/);
+    assert.match(await script.text(), /#review-panel/);
     const form = new FormData();
     form.set('app', 'my-app');
     form.set('archive', new Blob([await zipOf({ 'index.js': 'test' })]), 'app.zip');
@@ -269,7 +269,7 @@ async function publicationService({ attempt = 1, producer = attempt, files = pub
     }
     throw new Error(`Unexpected URL: ${url}`);
   };
-  return { service: createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fetchImpl), calls };
+  return { service: createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fetchImpl), calls, fetchImpl };
 }
 
 test('실제 producer artifact ID와 해시를 확인한 경우에만 이미지 게시로 표시한다', async () => {
@@ -426,12 +426,54 @@ test('CLI의 폴더 입력은 API가 받는 ZIP으로 만들어진다', async ()
   } finally { await rm(folder, { recursive: true, force: true }); }
 });
 
-// Execute the real CI receipt writer, then consume its bytes through the real API reader.
-test('Python publisher가 만든 인계 파일을 Node 상태 조회에서 읽는다', async () => {
+// Loopback HTTP and publication code are real; GitHub and registry access stay offline.
+test('HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까지 연결한다', async () => {
   const root = await mkdtemp(join(tmpdir(), 'railshot-publication-'));
+  const calls = [];
+  let publicationFetch;
+  const fetchImpl = async (url, options = {}) => {
+    const value = new URL(url);
+    assert.equal(value.origin, 'https://api.github.com');
+    const path = value.pathname;
+    assert.ok(path.startsWith('/repos/org/apps/'));
+    if (publicationFetch) return publicationFetch(url, options);
+    const method = options.method || 'GET';
+    const body = options.body && JSON.parse(options.body);
+    calls.push({ path, method, body });
+    if (path.endsWith('/git/ref/heads/main') && method === 'GET') return Response.json({ object: { sha: 'a'.repeat(40) } });
+    if (path.endsWith(`/git/commits/${'a'.repeat(40)}`)) return Response.json({ tree: { sha: 'base' } });
+    if (path.endsWith('/git/trees/base')) return Response.json({ tree: [] });
+    if (path.endsWith('/git/blobs') && method === 'POST') return Response.json({ sha: `blob-${calls.length}` });
+    if (path.endsWith('/git/trees') && method === 'POST') return Response.json({ sha: 'tree' });
+    if (path.endsWith('/git/commits') && method === 'POST') return Response.json({ sha: 'b'.repeat(40) });
+    if (path.endsWith('/git/refs/heads/main') && method === 'PATCH') return Response.json({});
+    if (path.endsWith('/dispatches') && method === 'POST') return Response.json({ workflow_run_id: 789 });
+    throw new Error(`Unexpected GitHub request: ${method} ${path}`);
+  };
+  const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fetchImpl);
+  const server = createAppServer({ service, sourceLoader: async () => { throw new Error('ZIP upload must not fetch a source'); } });
   try {
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const source = { 'package.json': '{"name":"my-app"}', 'index.js': 'console.log("hello")' };
+    const form = new FormData();
+    form.set('app', 'my-app');
+    form.set('target_id', 'aws-demo');
+    form.set('archive', new Blob([await zipOf(source)]), 'app.zip');
+    const response = await fetch(`${base}/api/deploy`, { method: 'POST', headers: { 'x-jasmin-request': 'deploy' }, body: form });
+    assert.equal(response.status, 202);
+    const submitted = await response.json();
+    assert.equal(submitted.state, 'queued');
+    assert.equal(submitted.run_id, 789);
+    assert.equal(submitted.source_commit, 'b'.repeat(40));
+    assert.equal(submitted.target_id, 'aws-demo');
+    assert.deepEqual(calls.filter((call) => call.path.endsWith('/git/blobs')).map((call) =>
+      Buffer.from(call.body.content, 'base64').toString()), Object.values(source));
+    assert.deepEqual(calls.find((call) => call.path.endsWith('/dispatches')).body,
+      { ref: 'main', inputs: { tenant: submitted.tenant, app: submitted.app,
+        source_commit: submitted.source_commit, target_id: submitted.target_id } });
     const bundle = join(root, 'bundle'); await mkdir(bundle);
-    const files = publishedFiles();
+    const files = publishedFiles({ sourceCommit: submitted.source_commit, targetId: submitted.target_id, app: submitted.app });
     for (const name of ['jasmin.yaml', 'verdict.json', 'manifest.json']) await writeFile(join(bundle, name), files[name]);
     await writeFile(join(root, 'images.json'), files['images.json']);
     const script = fileURLToPath(new URL('../../../ci/scripts/publication.py', import.meta.url));
@@ -449,12 +491,26 @@ with patch.object(publication, 'verify_registry', side_effect=verified_registry)
     publication.prepare(*sys.argv[2:], os.environ)
     verify.assert_called_once()
 `, script, bundle, join(root, 'images.json'), join(root, 'published')], {
-      env: { ...process.env, SOURCE_COMMIT: 'a'.repeat(40), GITHUB_SHA: 'a'.repeat(40), TARGET_ID: 'aws-demo',
-        TENANT: 'demo', APP: 'my-app', GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', BUNDLE_ARTIFACT_ID: '100',
-        REGISTRY_PREFIX: 'ghcr.io/owner', REGISTRY_VISIBILITY: 'public', PYTHONDONTWRITEBYTECODE: '1' },
+      env: { ...process.env, SOURCE_COMMIT: submitted.source_commit, GITHUB_SHA: submitted.source_commit,
+        TARGET_ID: submitted.target_id, TENANT: submitted.tenant, APP: submitted.app,
+        GITHUB_RUN_ID: String(submitted.run_id), GITHUB_RUN_ATTEMPT: '1', BUNDLE_ARTIFACT_ID: '100',
+        REGISTRY_PREFIX: 'ghcr.io/org', REGISTRY_VISIBILITY: 'public', PYTHONDONTWRITEBYTECODE: '1' },
     });
     const published = Object.fromEntries(await Promise.all(Object.keys(files).map(async (name) => [name, await readFile(join(root, 'published', name))])));
-    const { service } = await publicationService({ files: published });
-    assert.equal((await service.status('789')).state, 'published');
-  } finally { await rm(root, { recursive: true, force: true }); }
+    ({ fetchImpl: publicationFetch } = await publicationService({ files: published, headSha: submitted.source_commit }));
+    const status = await fetch(`${base}/api/runs/${submitted.run_id}`);
+    assert.equal(status.status, 200);
+    const result = await status.json();
+    assert.equal(result.state, 'published');
+    for (const field of ['run_id', 'source_commit', 'target_id', 'tenant', 'app']) {
+      assert.equal(result[field], submitted[field], field);
+      assert.equal(result.publication[field], submitted[field], `publication.${field}`);
+    }
+    assert.equal(result.publication.artifact_id, 200);
+    assert.equal(result.publication.producer_attempt, 1);
+    assert.equal(result.url, null); // Image publication does not claim a deployed application URL.
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
 });
