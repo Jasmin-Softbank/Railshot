@@ -786,3 +786,31 @@ test('app logs discard an in-flight read when another session admits CD for the 
     await settle(() => f.product.getDeployment(second.id, other));
   } finally { releaseLogs(); releaseCd(); }
 });
+
+test('agent events are not fabricated before dispatch and require the persisted run binding after restart', async (t) => {
+  let release, reads = 0;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const f = await fixture(t, { service: {
+    deploy: async () => { await waiting; return { run_id: 123, source_commit: publication.source_commit }; },
+    events: async () => { reads++; return { state: 'live', items: [] }; },
+  } });
+  const owner = f.product.dashboard.session().id;
+  const created = await f.product.createDeployment(input, 'event-binding', undefined, owner);
+  try {
+    const pending = await f.product.getDeploymentEvents(created.id, owner);
+    assert.equal(pending.state, 'not_started'); assert.equal(pending.reason, 'not_dispatched');
+    assert.deepEqual(pending.items, []); assert.equal(reads, 0);
+  } finally { release(); }
+  await settle(() => f.product.getDeployment(created.id, owner));
+  await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction((state) => { state.bindings['123'].source_commit = 'd'.repeat(40); });
+  await store.close();
+  const restarted = await createProductService({ service: f.service, directory: f.directory });
+  try {
+    const rejected = await restarted.getDeploymentEvents(created.id, owner);
+    assert.equal(rejected.state, 'unavailable'); assert.equal(rejected.reason, 'binding_mismatch');
+    assert.equal(reads, 0);
+    await assert.rejects(restarted.getDeploymentEvents(created.id, 'foreign'), { status: 404 });
+  } finally { await restarted.close(); }
+});

@@ -305,6 +305,44 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   assert.deepEqual(errors, []);
 });
 
+test('work log reads bound agent events over HTTP and marks stale or failed observations without redeploying', { timeout: 45000 }, async (t) => {
+  const record = { id: 'events-demo', app: 'demo-app', target_id: 'demo-aws', status: 'running',
+    source_commit: 'a'.repeat(40), ci: { run_id: '123', state: 'running', steps: [] } };
+  let mode = 'live', attempt = 1;
+  const { page, origin, errors, requests } = await start(t, { product: {
+    dashboard: { session: () => ({ id: 'events-test', expires_at: '2099-01-01T00:00:00Z' }), preferences: () => ({ view: 'monitor', environment: 'cloud', provider: '' }), connections: () => [] },
+    list: () => [record], targets: () => [], profiles: () => [], getDeployment: () => record,
+    getDeploymentEvents: () => {
+      if (mode === 'error') throw new Error('private event transport details');
+      return { deployment_id: record.id, app: record.app, target_id: record.target_id, source_commit: record.source_commit,
+        run_id: record.ci.run_id, run_attempt: attempt, state: mode === 'empty' ? 'not_started' : 'live',
+        checked_at: new Date().toISOString(), updated_at: new Date(Date.now() - (mode === 'stale' ? 120000 : 0)).toISOString(),
+        truncated: true, items: mode === 'empty' ? [] : [{ sequence: 1, event_name: 'agent.heartbeat', role: 'fixer',
+          progress: { sdk_event_count: 7, elapsed_ms: 1200, last_sdk_event_at_ms: Date.now(), item_counts: { commandExecution: 1 } } }], next_marker: null };
+    },
+  } });
+  const output = page.locator('#console-output');
+  const refresh = async () => { await page.locator('[data-console="work"]').click(); };
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('agent.heartbeat'));
+  assert.match(await output.innerText(), /관측 중/);
+  assert.match(await output.innerText(), /최근 이벤트만/);
+  assert.match(await output.innerText(), /sdk_event_count/);
+  mode = 'stale'; await refresh();
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('갱신이 지연'));
+  mode = 'error'; await refresh();
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('이벤트 조회 실패'));
+  assert.match(await output.innerText(), /agent.heartbeat/);
+  assert.doesNotMatch(await output.innerText(), /private event/);
+  mode = 'empty'; attempt = 2; await refresh();
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('아직 에이전트 이벤트'));
+  assert.doesNotMatch(await output.innerText(), /agent.heartbeat/, 'an earlier attempt is never reused for a new attempt');
+  assert.ok(requests.some((request) => request.path === '/api/v1/deployments/events-demo/events'));
+  assert.equal(requests.some((request) => request.authorization), false);
+  assert.equal(requests.some((request) => request.method === 'POST' && request.path !== '/api/v1/sessions'), false);
+  assert.deepEqual(errors, []);
+});
+
 test('saved connection failure stays local to its panel and does not disable deployment choices', { timeout: 45000 }, async (t) => {
   const { page, origin, errors } = await start(t, { service: null });
   await page.route('**/api/v1/connections*', (route) => route.fulfill({ status: 503, contentType: 'application/json',

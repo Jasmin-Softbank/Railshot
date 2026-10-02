@@ -75,8 +75,21 @@ projects a run/attempt-bound snapshot to GitHub Actions stderr every 20 seconds
 as `agent.heartbeat`; `sdk_activity_since_previous` and `last_sdk_event_age_ms`
 distinguish new SDK activity from a live process waiting without new events.
 `agent.observation` records the process return. These observations never imply
-gate success. Live detail is available in Actions logs; the dashboard currently
-reads job states and final diagnostics, not the private stream.
+gate success. The trusted parent also publishes at most 60 recent safe events to
+a `Railshot agent events` GitHub Check, bound to the source commit, workflow run,
+run attempt, tenant, app and target. Its completion is neutral, not gate success.
+The job's short-lived `checks:write` token is removed from the environment before
+child processes run; transport failure never changes the gate result or repeats
+a model call. Private native logs retain the full history.
+
+The session-owned `GET /api/v1/deployments/{id}/events` API verifies those bindings
+and the GitHub Actions producer against the latest workflow attempt. The existing
+dashboard work-log tab polls it with deployment status and displays content-free
+SDK progress, delayed observations and missing records separately. An older
+attempt is never used as fallback. Runs from before this transport was enabled
+have no fabricated event history. The API's bounded 15-second cache and the
+dashboard's 15-second polling can delay visibility beyond the 20-second producer
+interval; this is progress observation, not a subsecond stream.
 
 `test_source_repair.py` executes generated calculator tests with real Node,
 demonstrates that a wrong arithmetic implementation fails, checks native npm lock
