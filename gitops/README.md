@@ -121,7 +121,7 @@ kubectl --context railshot-control apply -f /private/credentials.json
 kubectl --context railshot-control -n argocd create job --from=cronjob/railshot-credentials railshot-credentials-initial
 ```
 
-선언은 기존 API 이미지의 `/app/gitops/credentials.py`, `argocd/ghcr-pull`, 플랫폼 노드를 사용합니다. 운영 SA는 정책에 등록된 Argo Secret 이름만 `get/patch`할 수 있습니다. 코드와 자격을 ConfigMap에 넣지 않으며 정책만 읽기 전용으로 마운트합니다. CronJob은 동시 실행을 금지하고, 5분 실행 제한과 재시도 0을 사용합니다. 직접 실행은 `python3 gitops/credentials.py renew --policy ...`이며 kubectl의 현재 운영 context 또는 Pod의 projected SA를 사용합니다.
+선언은 기존 API 이미지의 `/app/gitops/credentials.py`, `argocd/ghcr-pull`, 플랫폼 노드를 사용합니다. 운영 SA는 정책에 등록된 Argo Secret 이름만 `get/patch`할 수 있습니다. ConfigMap에는 정책과 projected SA의 CA·token 파일 경로를 참조하는 kubeconfig만 읽기 전용으로 마운트합니다. 실행 코드나 자격 bytes는 넣지 않습니다. `KUBECONFIG`를 명시하여 kubectl이 localhost 기본값으로 연결하지 않도록 합니다. CronJob은 동시 실행을 금지하고, 5분 실행 제한과 재시도 0을 사용합니다. 직접 실행은 `python3 gitops/credentials.py renew --policy ...`이며 kubectl의 현재 운영 context 또는 Pod의 projected SA를 사용합니다.
 
 현재 Secret의 소유권·등록 범위·CA·SA를 확인한 뒤 TokenRequest를 보냅니다. 새 토큰을 원래 CA로 검증한 고객 API에서 SelfSubjectReview의 이름·UID와 각 등록 namespace의 Pod 조회 권한까지 확인한 경우에만 `data.config`의 bearer token을 교체합니다. JSON Patch의 `resourceVersion` test가 동시 변경을 막습니다. 발급·검증 실패 시 기존 값을 보존하고, patch 결과가 불명확하면 읽기 한 번으로 확인하여 `renewed/unchanged/unknown`을 구분합니다. 토큰과 native 오류 원문을 로그에 쓰지 않습니다.
 

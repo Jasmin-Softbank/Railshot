@@ -97,11 +97,53 @@ data "aws_ami" "ubuntu" {
     values = ["x86_64"]
   }
 }
+variable "control_security_group_id" {
+  description = "Reviewed operations cluster peer SG; null keeps this module standalone."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.control_security_group_id == null ? true : can(regex("^sg-[0-9a-f]{17}$", var.control_security_group_id))
+    error_message = "Use an exact reviewed peer security group ID."
+  }
+}
+locals {
+  build_peer_health = var.control_security_group_id == null ? [] : [
+    { protocol = "udp", from_port = 8472, to_port = 8472, description = "Cilium VXLAN node overlay" },
+    { protocol = "tcp", from_port = 4240, to_port = 4240, description = "Cilium node health" },
+    { protocol = "icmp", from_port = 8, to_port = 0, description = "Cilium ICMP echo health; stateful reply" }
+  ]
+  build_peer_api = var.control_security_group_id == null ? [] : [
+    { protocol = "tcp", from_port = 6443, to_port = 6443, description = "K3s agent supervisor/API" }
+  ]
+}
+
 resource "aws_security_group" "ci" {
   name        = local.name
   description = "No ingress. Administrator SSH traverses authenticated SSM only."
   vpc_id      = data.aws_vpc.default.id
-  ingress     = []
+  # Keep rules inline with the existing owner; do not mix standalone SG rules.
+  # Empty by default. A reviewed peer only opens node overlay/health and API.
+  ingress = [for rule in local.build_peer_health : {
+    description      = rule.description
+    from_port        = rule.from_port
+    to_port          = rule.to_port
+    protocol         = rule.protocol
+    security_groups  = [var.control_security_group_id]
+    cidr_blocks      = []
+    ipv6_cidr_blocks = []
+    prefix_list_ids  = []
+    self             = false
+  }]
+  dynamic "egress" {
+    for_each = concat(local.build_peer_health, local.build_peer_api)
+    content {
+      description     = egress.value.description
+      from_port       = egress.value.from_port
+      to_port         = egress.value.to_port
+      protocol        = egress.value.protocol
+      security_groups = [var.control_security_group_id]
+    }
+  }
   dynamic "egress" {
     for_each = [80, 443]
     content {

@@ -158,6 +158,12 @@ def render(policy, image):
     require(re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-api@sha256:[a-f0-9]{64}', image), 'published API digest required')
     name = 'railshot-credentials'
     meta = {'name': name, 'namespace': 'argocd'}
+    sa_path = '/var/run/secrets/kubernetes.io/serviceaccount/'
+    kubeconfig = {'apiVersion': 'v1', 'kind': 'Config', 'current-context': name,
+                  'clusters': [{'name': 'platform', 'cluster': {'server': 'https://kubernetes.default.svc:443',
+                               'certificate-authority': sa_path + 'ca.crt'}}],
+                  'users': [{'name': name, 'user': {'tokenFile': sa_path + 'token'}}],
+                  'contexts': [{'name': name, 'context': {'cluster': 'platform', 'user': name, 'namespace': 'argocd'}}]}
     items = [
         {'apiVersion': 'v1', 'kind': 'ServiceAccount', 'metadata': meta, 'automountServiceAccountToken': False},
         {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role', 'metadata': meta, 'rules': [
@@ -166,7 +172,8 @@ def render(policy, image):
         {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding', 'metadata': meta,
          'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': name},
          'subjects': [{'kind': 'ServiceAccount', 'name': name, 'namespace': 'argocd'}]},
-        {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': meta, 'data': {'policy.json': json.dumps(policy)}}]
+        {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': meta,
+         'data': {'policy.json': json.dumps(policy), 'kubeconfig': json.dumps(kubeconfig)}}]
     pod = {'serviceAccountName': name, 'automountServiceAccountToken': True, 'restartPolicy': 'Never',
            'nodeSelector': {'kubernetes.io/arch': 'amd64', 'railshot.io/node-role': 'platform'},
            'imagePullSecrets': [{'name': 'ghcr-pull'}],
@@ -177,7 +184,8 @@ def render(policy, image):
                            'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                                                'capabilities': {'drop': ['ALL']}},
                            'resources': {'requests': {'cpu': '10m', 'memory': '64Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
-                           'env': [{'name': 'HOME', 'value': '/tmp'}],
+                           'env': [{'name': 'HOME', 'value': '/tmp'},
+                                   {'name': 'KUBECONFIG', 'value': '/etc/railshot/credentials/kubeconfig'}],
                            'volumeMounts': [{'name': 'policy', 'mountPath': '/etc/railshot/credentials', 'readOnly': True},
                                             {'name': 'tmp', 'mountPath': '/tmp'}]}],
            'volumes': [{'name': 'policy', 'configMap': {'name': name}}, {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '16Mi'}}]}
