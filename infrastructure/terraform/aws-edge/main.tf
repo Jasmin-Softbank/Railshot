@@ -68,6 +68,7 @@ resource "aws_security_group" "alb" {
   dynamic "egress" {
     for_each = var.routes
     content {
+      description = ""
       protocol    = "tcp"
       from_port   = egress.value.node_port
       to_port     = egress.value.node_port

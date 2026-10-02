@@ -18,12 +18,16 @@ USER 1000:1000
 
 FROM base AS api
 USER root
+ENV PATH=/opt/railshot-python/bin:${PATH}
 COPY apps/api/runtime-install.sh apps/api/runtime-smoke.py apps/api/runtime-tools.json ./
+COPY apps/api/prepare-state.js ./
 COPY ci/requirements-dev.txt ci/requirements-test.txt /app/ci/
 COPY gitops/bridge.py gitops/argo.py gitops/handoff.py /app/gitops/
+COPY gitops/credentials.py /app/gitops/
 COPY ci/scripts/execution.py ci/scripts/observability.py ci/scripts/process.py ci/scripts/publication.py ci/scripts/storage.py /app/ci/scripts/
 COPY ci/scripts/gate/bundle.py /app/ci/scripts/gate/
 COPY ci/scripts/runner/runtime_boundary.py /app/ci/scripts/runner/
+COPY ci/scripts/runner/replenish.py /app/ci/scripts/runner/
 COPY ci/scripts/schemas/jasmin.schema.json /app/ci/scripts/schemas/
 COPY infrastructure/providers/terraform_tools/provision.py infrastructure/providers/terraform_tools/capabilities.py infrastructure/providers/terraform_tools/costs.py infrastructure/providers/terraform_tools/access.py /app/infrastructure/providers/terraform_tools/
 COPY infrastructure/terraform/aws/ /app/infrastructure/terraform/aws/

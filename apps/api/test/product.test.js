@@ -166,6 +166,43 @@ function form() {
   const value = new FormData(); value.set('app', 'demo-app'); value.set('target_id', 'demo'); value.set('source_type', 'folder');
   value.append('files', new Blob(['hello']), 'app.js'); value.set('paths', '["app.js"]'); return value;
 }
+test('deployment polling preserves normalized CI steps while running and after publication', async (t) => {
+  const runningSteps = [
+    { key: 'loop', status: 'in_progress', conclusion: null, observed_attempt: 2 },
+    { key: 'release', status: 'queued', conclusion: null, observed_attempt: null },
+  ];
+  let upstream = { run_id: 123, state: 'running', status: 'in_progress', conclusion: null, steps: runningSteps };
+  const { base } = await httpFixture(t, { service: {
+    targetId: 'demo', deploy: async () => ({ run_id: '123', source_commit: publication.source_commit }),
+    status: async () => structuredClone(upstream),
+  } });
+  const accepted = await fetch(`${base}/api/v1/deployments`, { method: 'POST', body: form(), headers: { 'Idempotency-Key': 'steps-progress' } });
+  assert.equal(accepted.status, 202);
+  const get = async () => (await fetch(`${base}${accepted.headers.get('location')}`)).json();
+  const running = await settle(get, (record) => record.ci?.steps?.[0]?.status === 'in_progress');
+  assert.equal(running.status, 'running'); assert.equal(running.stage, 'ci');
+  assert.equal(running.ci.run_id, '123'); assert.equal(running.cd.state, 'not_started');
+  assert.deepEqual(running.ci.steps, runningSteps);
+
+  const releasingSteps = [
+    { key: 'loop', status: 'completed', conclusion: 'success', observed_attempt: 2 },
+    { key: 'release', status: 'in_progress', conclusion: null, observed_attempt: 2 },
+  ];
+  upstream = { ...upstream, steps: releasingSteps };
+  const releasing = await settle(get, (record) => record.ci?.steps?.[1]?.status === 'in_progress');
+  assert.equal(releasing.status, 'running'); assert.equal(releasing.stage, 'ci');
+  assert.deepEqual(releasing.ci.steps, releasingSteps);
+
+  const completedSteps = releasingSteps.map((step) => ({ ...step, status: 'completed', conclusion: 'success' }));
+  upstream = { ...upstream, state: 'published', status: 'completed', conclusion: 'success', steps: completedSteps, publication };
+  const complete = await settle(get);
+  assert.equal(complete.status, 'succeeded'); assert.equal(complete.stage, 'complete');
+  assert.deepEqual(complete.ci.steps, completedSteps);
+  assert.equal(complete.ci.producer_attempt, 1); // Observation attempt and verified artifact producer remain distinct.
+  assert.deepEqual((await (await fetch(`${base}/api/v1/builds/123`)).json()).steps, completedSteps);
+  assert.deepEqual((await (await fetch(`${base}/api/runs/123`)).json()).steps, completedSteps);
+});
+
 test('v1 HTTP contract has accepted/error headers, strict fields, preserved legacy and no foreign reads', async (t) => {
   const { base } = await httpFixture(t);
   const targets = await (await fetch(`${base}/api/v1/targets`)).json();
@@ -203,6 +240,24 @@ test('unconfigured server lists empty capabilities without creating state', asyn
   const { base, server } = await httpFixture(t, { service: null, deployPublished: undefined });
   for (const path of ['targets', 'profiles']) assert.deepEqual(await (await fetch(`${base}/api/v1/${path}`)).json(), { items: [], next_marker: null });
   assert.equal(await server.productReady, null);
+});
+
+test('health stays live but not ready when private product state fails initialization', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-unready-'));
+  await chmod(directory, 0o750);
+  let externalCalls = 0;
+  const server = createAppServer({ stateDirectory: directory,
+    service: { targetId: 'demo', deploy: async () => { externalCalls++; }, status: async () => { externalCalls++; } } });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); await rm(directory, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const response = await fetch(`${base}/healthz`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, configured: false, target_id: 'demo' });
+  const api = await fetch(`${base}/api/v1/targets`);
+  assert.equal(api.status, 503);
+  assert.ok(!(await api.text()).includes(directory));
+  assert.equal(externalCalls, 0);
 });
 
 

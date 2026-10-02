@@ -13,10 +13,10 @@ COMPONENTS = ('dashboard', 'api', 'mcp', 'ci-runner')
 SHA = re.compile(r'[0-9a-f]{40}')
 # Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
 API_NATIVE_FILES = {
-    'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py',
+    'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
     'ci/scripts/execution.py', 'ci/scripts/observability.py', 'ci/scripts/process.py',
     'ci/scripts/publication.py', 'ci/scripts/storage.py', 'ci/scripts/gate/bundle.py',
-    'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/schemas/jasmin.schema.json',
+    'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/jasmin.schema.json',
     'ci/requirements-dev.txt', 'ci/requirements-test.txt',
     'infrastructure/ansible/run.py', 'infrastructure/ansible/transport.py',
     'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/guest.yml',
@@ -67,7 +67,7 @@ def container_components(paths):
             components.add('ci-runner')  # The runner image COPYs all CI scripts.
         elif path == 'deployment/manifests/build-runner.yaml' or path == 'infrastructure/ansible/ci.yml':
             components.add('ci-runner')
-        elif path in {'deployment/scripts/render-platform.py', 'deployment/scripts/tests/test_platform.py'}:
+        elif path in {'deployment/scripts/render-platform.py', 'deployment/scripts/tests/test_platform.py', 'deployment/manifests/build-controller.yaml'}:
             components.update(COMPONENTS)
         elif path in {'deployment/compose.yaml', 'deployment/.env.example',
                       'deployment/manifests/platform.yaml',
@@ -116,7 +116,7 @@ def select(paths):
             if path == 'infrastructure/ansible/ci.yml':
                 selected.add('terraform')  # CI VM bootstrap consumes this playbook.
         elif path in {'deployment/compose.yaml', 'deployment/.env.example',
-                      'deployment/manifests/platform.yaml', 'deployment/manifests/build-runner.yaml', 'deployment/scripts/render-platform.py',
+                      'deployment/manifests/platform.yaml', 'deployment/manifests/build-runner.yaml', 'deployment/manifests/build-controller.yaml', 'deployment/scripts/render-platform.py',
                       'deployment/scripts/tests/test_platform.py'}:
             selected.add('contracts')  # Platform workloads do not install the customer runtime.
         elif path.startswith('deployment/'):

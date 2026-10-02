@@ -168,7 +168,9 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       try { url = new URL(request.url, 'http://localhost'); } catch { throw new ServiceError('요청 경로가 잘못되었습니다.', 400); }
       versioned = url.pathname.startsWith('/api/v1');
       if (request.method === 'GET' && url.pathname === '/healthz') {
-        json(response, 200, { ok: true, configured: Boolean(service), ...(!access.remote && { target_id: service?.targetId || null }) }); return;
+        // Liveness remains local; readiness also requires usable durable state and operator config.
+        const configured = Boolean(await productReady.catch(() => null));
+        json(response, 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
       if (url.pathname.startsWith('/api/')) {
         if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
