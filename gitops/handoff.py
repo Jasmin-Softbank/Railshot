@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'ci/scripts'))
 from gate.bundle import contract, require, REPO, ID, TRUST
 from execution import pod_security, container_security
+from publication import validate_registry
 import yaml
 from jsonschema import ValidationError
 
@@ -32,7 +33,7 @@ def read_artifact(directory, target_id):
                 'small regular artifact file required: ' + name)
         raw[name] = path.read_bytes()
     receipt = json.loads(raw['handoff.json'])
-    require(receipt.get('version') == 1 and receipt.get('status') == 'published', 'published receipt v1 required')
+    require(receipt.get('version') == 2 and receipt.get('status') == 'published', 'published receipt v2 required')
     require(all(type(receipt.get(k)) is int and receipt[k] > 0 for k in
                 ('run_id', 'producer_attempt', 'bundle_artifact_id')), 'positive producer identifiers required')
     require(receipt.get('target_id') == target_id, 'artifact target mismatch')
@@ -40,6 +41,7 @@ def read_artifact(directory, target_id):
     for name in FILES:
         require(receipt.get('files', {}).get(name) == hashlib.sha256(raw[name]).hexdigest(),
                 'published receipt hash mismatch: ' + name)
+    validate_registry(receipt.get('registry'), receipt['files']['images.json'])
     verdict = contract(raw['jasmin.yaml'], raw['verdict.json'])
     manifest = json.loads(raw['manifest.json'])
     require(manifest.get('version') == 1 and manifest.get('trust') == TRUST, 'bundle manifest contract mismatch')
@@ -86,6 +88,10 @@ def render(directory, target):
         require(int(resources['requests'][kind].removesuffix(unit)) <= int(resources['limits'][kind].removesuffix(unit)),
                 'request exceeds limit')
     spec, images, receipt = read_artifact(directory, target['id'])
+    pull_secret = receipt['registry']['image_pull_secret']
+    if receipt['registry']['visibility'] == 'private':
+        require(target.get('image_pull_secret') == pull_secret and pull_secret['namespace'] == target['namespace'],
+                'private registry requires the published pull Secret in the target namespace')
     require(len(spec['services']) == 1 and not spec.get('resources') and not spec.get('egress'),
             'initial CD handoff supports one stateless service without external egress')
     svc = spec['services'][0]
@@ -107,6 +113,8 @@ def render(directory, target):
                              'automountServiceAccountToken': False, 'nodeSelector': {'kubernetes.io/arch': 'amd64'},
                              'securityContext': pod_security(), 'containers': [container],
                              'volumes': [{'name': 'tmp', 'emptyDir': {'sizeLimit': '64Mi'}}]}}}}
+    if pull_secret is not None:
+        workload['spec']['template']['spec']['imagePullSecrets'] = [{'name': pull_secret['name']}]
     service = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': name, 'namespace': namespace},
                'spec': {'type': 'NodePort', 'selector': labels, 'externalTrafficPolicy': 'Local',
                         'ports': [{'port': svc['port'], 'targetPort': svc['port'], 'nodePort': target['node_port']}]}}
@@ -124,7 +132,7 @@ def render(directory, target):
     return {'workload': {'apiVersion': 'v1', 'kind': 'List', 'items': [workload, service, policy]},
             'application': app, 'status': 'rendered_for_review', 'deployed': False,
             'source_commit': receipt['source_commit'], 'target_id': target['id'],
-            **{k: receipt[k] for k in ('tenant', 'app', 'run_id', 'producer_attempt', 'bundle_artifact_id')}}
+            **{k: receipt[k] for k in ('tenant', 'app', 'run_id', 'producer_attempt', 'bundle_artifact_id', 'registry')}}
 
 
 def main():

@@ -3,8 +3,11 @@ import { APP_NAME, SOURCE_COMMIT, TARGET_ID, TENANT_NAME } from './contract.js';
 
 const HASH = /^[a-f0-9]{64}$/;
 const IMAGE = /^ghcr\.io\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/;
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const LAYERS = ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'];
 const FILES = ['images.json', 'jasmin.yaml', 'verdict.json', 'manifest.json'];
+const HANDOFF_FIELDS = ['version', 'status', 'source_commit', 'target_id', 'tenant', 'app',
+  'run_id', 'producer_attempt', 'bundle_artifact_id', 'files', 'registry'];
 const sameKeys = (a, b) => JSON.stringify(Object.keys(a || {}).sort()) === JSON.stringify(Object.keys(b || {}).sort());
 
 // These hashes check the trusted workflow artifact channel, not a detached signature.
@@ -13,7 +16,8 @@ export function readPublished(files, { runId, attempt, headSha, targetId, tenant
   const require = (ok, message) => { if (!ok) throw new Error(`게시 산출물 확인 실패: ${message}`); };
   require(entries.size === 5 && [...FILES, 'handoff.json'].every((name) => entries.has(name)), '파일 구성');
   const handoff = JSON.parse(entries.get('handoff.json'));
-  require(handoff.version === 1 && handoff.status === 'published', '인계 상태');
+  require(sameKeys(handoff, Object.fromEntries(HANDOFF_FIELDS.map((name) => [name, true]))), '인계 필드');
+  require(handoff.version === 2 && handoff.status === 'published', '인계 상태');
   require(handoff.run_id === Number(runId) && handoff.producer_attempt === attempt, 'run/attempt 불일치');
   require(SOURCE_COMMIT.test(handoff.source_commit) && handoff.source_commit === headSha, 'source commit 불일치');
   require(typeof handoff.target_id === 'string' && TARGET_ID.test(handoff.target_id) && handoff.target_id === targetId, 'target 불일치');
@@ -23,6 +27,15 @@ export function readPublished(files, { runId, attempt, headSha, targetId, tenant
   for (const name of FILES) {
     require(HASH.test(handoff.files[name]) && createHash('sha256').update(entries.get(name)).digest('hex') === handoff.files[name], `${name} 해시`);
   }
+  const registry = handoff.registry;
+  require(sameKeys(registry, { visibility: true, verification: true, images_sha256: true, image_pull_secret: true }), 'registry 필드');
+  require(registry.images_sha256 === handoff.files['images.json'], 'registry 이미지 해시');
+  require(['public', 'private'].includes(registry.visibility) && registry.verification ===
+    (registry.visibility === 'private' ? 'authenticated_manifest_read' : 'anonymous_manifest_read'), 'registry 검증 방식');
+  const secret = registry.image_pull_secret;
+  require(registry.visibility === 'public' ? secret === null :
+    sameKeys(secret, { namespace: true, name: true }) && Object.values(secret).every((value) =>
+      typeof value === 'string' && DNS_LABEL.exec(value)?.[0] === value), 'image pull Secret 참조');
   const images = JSON.parse(entries.get('images.json'));
   const manifest = JSON.parse(entries.get('manifest.json'));
   const verdict = JSON.parse(entries.get('verdict.json'));

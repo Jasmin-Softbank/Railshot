@@ -234,8 +234,10 @@ function publishedFiles({ attempt = 1, sourceCommit = 'a'.repeat(40), targetId =
   files['manifest.json'] = JSON.stringify({ version: 1, trust: 'trusted-ci-artifact-not-a-signature',
     source_sha256: verdict.source_sha256, images: { web: { local_ref: verdict.images.web, id: verdict.image_ids.web } },
     files: { 'jasmin.yaml': hash(files['jasmin.yaml']), 'verdict.json': hash(files['verdict.json']), 'images.tar': 'f'.repeat(64) } });
-  files['handoff.json'] = JSON.stringify({ version: 1, status: 'published', run_id: 789, producer_attempt: attempt,
+  files['handoff.json'] = JSON.stringify({ version: 2, status: 'published', run_id: 789, producer_attempt: attempt,
     source_commit: sourceCommit, target_id: targetId, tenant: 'demo', app, bundle_artifact_id: 100,
+    registry: { visibility: 'public', verification: 'anonymous_manifest_read',
+      images_sha256: hash(files['images.json']), image_pull_secret: null },
     files: Object.fromEntries(Object.entries(files).map(([name, value]) => [name, hash(value)])) });
   return files;
 }
@@ -277,10 +279,63 @@ test('실제 producer artifact ID와 해시를 확인한 경우에만 이미지 
   assert.equal(result.url, null);
   assert.equal(result.publication.artifact_id, 200);
   assert.equal(result.publication.producer_attempt, 1);
+  assert.equal(result.publication.version, 2);
+  assert.equal(result.publication.registry.verification, 'anonymous_manifest_read');
+  assert.equal(result.publication.registry.image_pull_secret, null);
   assert.equal(result.target_id, 'aws-demo');
   assert.deepEqual(result.steps.map((step) => step.key), ['loop', 'release']);
   assert.ok(calls.some((url) => url.endsWith('/artifacts/200/zip')));
   assert.ok(calls.every((url) => url.startsWith('https://api.github.com/')));
+});
+
+test('private registry 검증과 pull Secret 참조가 있는 v2 인계를 읽는다', async () => {
+  const files = publishedFiles();
+  const handoff = JSON.parse(files['handoff.json']);
+  handoff.registry = { ...handoff.registry, visibility: 'private', verification: 'authenticated_manifest_read',
+    image_pull_secret: { namespace: 'demo', name: 'ghcr-pull' } };
+  files['handoff.json'] = JSON.stringify(handoff);
+  const { service } = await publicationService({ files });
+  const result = await service.status('789');
+  assert.equal(result.state, 'published');
+  assert.equal(result.url, null);
+  assert.deepEqual(result.publication.registry, handoff.registry);
+});
+
+test('구버전·registry 계약 불일치·추가 credential 필드는 게시 확인을 차단한다', async () => {
+  const mutations = [
+    (h) => { h.version = 1; },
+    (h) => { h.token = 'must-not-return'; },
+    (h) => { delete h.registry; },
+    (h) => { h.registry = null; },
+    (h) => { h.registry = []; },
+    (h) => { h.registry.visibility = 'internal'; },
+    (h) => { h.registry.verification = 'anonymous_manifest_read'; },
+    (h) => { h.registry.images_sha256 = '0'.repeat(64); },
+    (h) => { delete h.registry.images_sha256; },
+    (h) => { h.registry.auth = 'must-not-return'; },
+    (h) => { h.registry.image_pull_secret = null; },
+    (h) => { h.registry.image_pull_secret = []; },
+    (h) => { delete h.registry.image_pull_secret.name; },
+    (h) => { h.registry.image_pull_secret.token = 'must-not-return'; },
+    (h) => { h.registry.visibility = 'public'; },
+    (h) => { h.registry.visibility = 'public'; h.registry.verification = 'anonymous_manifest_read'; },
+    ...['', 'Bad', '-bad', 'bad-', 'a'.repeat(64), 'bad\n', 123].flatMap((value) =>
+      ['namespace', 'name'].map((key) => (h) => { h.registry.image_pull_secret[key] = value; })),
+  ];
+  for (const [index, mutate] of mutations.entries()) {
+    const files = publishedFiles();
+    const handoff = JSON.parse(files['handoff.json']);
+    handoff.registry = { ...handoff.registry, visibility: 'private', verification: 'authenticated_manifest_read',
+      image_pull_secret: { namespace: 'demo', name: 'ghcr-pull' } };
+    mutate(handoff);
+    files['handoff.json'] = JSON.stringify(handoff);
+    const { service } = await publicationService({ files });
+    const result = await service.status('789');
+    assert.equal(result.state, 'publication_unverified', `mutation ${index}`);
+    assert.equal(result.publication, null);
+    assert.equal(result.url, null);
+    assert.ok(!JSON.stringify(result).includes('must-not-return'));
+  }
 });
 
 test('실패 job 재시도는 현재 attempt 별칭 대신 실제 이전 release producer를 읽는다', async () => {
@@ -362,9 +417,22 @@ test('Python publisher가 만든 인계 파일을 Node 상태 조회에서 읽�
     await writeFile(join(root, 'images.json'), files['images.json']);
     const script = fileURLToPath(new URL('../../../ci/scripts/publication.py', import.meta.url));
     // test/ is under apps/api, so the repository is three parents above that directory.
-    execFileSync('python3', [script, bundle, join(root, 'images.json'), join(root, 'published')], {
+    execFileSync('python3', ['-c', `
+import hashlib, os, sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, str(Path(sys.argv[1]).parent))
+import publication
+def verified_registry(images_bytes, env):
+    return {'visibility': 'public', 'verification': 'anonymous_manifest_read',
+            'images_sha256': hashlib.sha256(images_bytes).hexdigest(), 'image_pull_secret': None}
+with patch.object(publication, 'verify_registry', side_effect=verified_registry) as verify:
+    publication.prepare(*sys.argv[2:], os.environ)
+    verify.assert_called_once()
+`, script, bundle, join(root, 'images.json'), join(root, 'published')], {
       env: { ...process.env, SOURCE_COMMIT: 'a'.repeat(40), GITHUB_SHA: 'a'.repeat(40), TARGET_ID: 'aws-demo',
-        TENANT: 'demo', APP: 'my-app', GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', BUNDLE_ARTIFACT_ID: '100' },
+        TENANT: 'demo', APP: 'my-app', GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', BUNDLE_ARTIFACT_ID: '100',
+        REGISTRY_PREFIX: 'ghcr.io/owner', REGISTRY_VISIBILITY: 'public', PYTHONDONTWRITEBYTECODE: '1' },
     });
     const published = Object.fromEntries(await Promise.all(Object.keys(files).map(async (name) => [name, await readFile(join(root, 'published', name))])));
     const { service } = await publicationService({ files: published });

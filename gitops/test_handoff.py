@@ -28,22 +28,28 @@ class HandoffTest(unittest.TestCase):
                 data['manifest.json'] = json.dumps(manifest)
                 for name, content in data.items():
                     (root / name).write_text(content)
-                receipt = {'version': 1, 'status': 'published', 'run_id': 1, 'producer_attempt': 1, 'bundle_artifact_id': 2,
+                receipt = {'version': 2, 'status': 'published', 'run_id': 1, 'producer_attempt': 1, 'bundle_artifact_id': 2,
                            'source_commit': 'd' * 40, 'target_id': 'aws-demo', 'tenant': 'team', 'app': 'demo',
                            'files': {k: hashlib.sha256((root / k).read_bytes()).hexdigest() for k in FILES}}
+                receipt['registry'] = {'visibility': 'public', 'verification': 'anonymous_manifest_read',
+                                       'images_sha256': receipt['files']['images.json'], 'image_pull_secret': None}
                 (root / 'handoff.json').write_text(json.dumps(receipt))
+                return receipt
 
             target = {'id': 'aws-demo', 'namespace': 'tenant-demo', 'argocd_namespace': 'argocd', 'project': 'railshot',
                       'architecture': 'amd64', 'repo_url': 'https://github.com/example/config.git',
                       'cluster_server': 'https://kubernetes.default.svc', 'path': 'targets/aws-demo/demo',
                       'revision': 'e' * 40, 'node_port': 30080, 'ingress_cidrs': ['10.20.0.0/24'],
                       'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
-            prepare()
+            receipt = prepare()
             result = render(root, target)
             self.assertFalse(result['deployed'])
             self.assertEqual(result['bundle_artifact_id'], 2)
             self.assertEqual(result['producer_attempt'], 1)
             self.assertNotIn('syncPolicy', result['application']['spec'])
+            self.assertEqual(result['status'], 'rendered_for_review')
+            self.assertNotIn('imagePullSecrets', result['workload']['items'][0]['spec']['template']['spec'])
+            self.assertEqual(result['registry'], receipt['registry'])
             self.assertEqual(result['workload']['items'][0]['spec']['template']['spec']['containers'][0]['image'],
                              'ghcr.io/example/web@sha256:' + 'c' * 64)
             for field, value in [('id', 'onprem-demo'), ('architecture', 'arm64'), ('revision', 'main'),
@@ -52,6 +58,42 @@ class HandoffTest(unittest.TestCase):
                 bad[field] = value
                 with self.subTest(field=field), self.assertRaises(ValueError):
                     render(root, bad)
+
+            private = copy.deepcopy(receipt)
+            private['registry'].update(visibility='private', verification='authenticated_manifest_read',
+                                       image_pull_secret={'namespace': target['namespace'], 'name': '1-ghcr-pull'})
+            private_target = {**target, 'image_pull_secret': copy.deepcopy(private['registry']['image_pull_secret'])}
+            (root / 'handoff.json').write_text(json.dumps(private))
+            result = render(root, private_target)
+            self.assertEqual(result['workload']['items'][0]['spec']['template']['spec']['imagePullSecrets'],
+                             [{'name': '1-ghcr-pull'}])
+            self.assertFalse(result['deployed'])
+            self.assertEqual(result['status'], 'rendered_for_review')
+            self.assertEqual(result['registry'], private['registry'])
+            for pull_secret in (None, {'namespace': 'other', 'name': '1-ghcr-pull'},
+                                {'namespace': target['namespace'], 'name': 'other'},
+                                {**private_target['image_pull_secret'], 'token': 'synthetic-secret'}):
+                with self.subTest(target_pull_secret=pull_secret), self.assertRaises(ValueError):
+                    render(root, {**target, 'image_pull_secret': pull_secret})
+            with self.assertRaises(ValueError):
+                render(root, {**private_target, 'namespace': 'other'})
+
+            for changes in ({'visibility': 'public'}, {'verification': 'anonymous_manifest_read'},
+                            {'images_sha256': '0' * 64}, {'image_pull_secret': None},
+                            {'image_pull_secret': {'namespace': target['namespace'], 'name': '../credential'}},
+                            {'image_pull_secret': {'namespace': target['namespace'], 'name': 'a' * 64}},
+                            {'image_pull_secret': {**private_target['image_pull_secret'], 'token': 'synthetic-secret'}},
+                            {'token': 'synthetic-secret'}):
+                bad = copy.deepcopy(private)
+                bad['registry'].update(changes)
+                (root / 'handoff.json').write_text(json.dumps(bad))
+                with self.subTest(registry_changes=changes), self.assertRaises(ValueError):
+                    render(root, private_target)
+            for changes in ({'version': 1}, {'registry': None}):
+                (root / 'handoff.json').write_text(json.dumps({**receipt, **changes}))
+                with self.subTest(receipt_changes=changes), self.assertRaises(ValueError):
+                    render(root, target)
+            prepare()
             (root / 'images.json').write_text('{}')
             with self.assertRaisesRegex(ValueError, 'hash mismatch'):
                 render(root, target)
