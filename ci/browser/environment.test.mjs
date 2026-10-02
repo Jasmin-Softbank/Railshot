@@ -76,7 +76,8 @@ test('original cloud card binds a DB plan, blocks invalid and unknown execution,
     }
     if (path === '/api/v1/environments/environment-1') return respond(response, 200, { id: 'environment-1',
       status: 'succeeded', runtime_target_id: 'ha-runtime', deployment_supported: true });
-    const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'] };
+    const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'],
+      '/contracts/application.mjs': ['../../contracts/application.mjs', 'text/javascript'] };
     if (!files[path]) return respond(response, 404, { error: 'fixture path unavailable' });
     response.writeHead(200, { 'content-type': files[path][1] });
     response.end(await readFile(new URL('../../apps/dashboard/' + files[path][0], import.meta.url)));
@@ -112,6 +113,7 @@ test('original cloud card binds a DB plan, blocks invalid and unknown execution,
   assert.deepEqual(plans[0], { name: 'my-new-app', runtime: { profile_id: 'ha-profile', node_count: 1 },
     database: { mode: 'patroni', placements: [{ profile_id: 'ha-profile', database_nodes: 2, dcs_voters: 3, proxy_nodes: 1 }] } });
   assert.equal(deployments.length, 0, 'review must not create resources or submit source');
+  assert.equal(await page.locator('#review-app').innerText(), 'my-new-app');
   assert.match(await page.locator('#review-note').innerText(), /추가 비용 예상 4.00 USD.*29.36.*30.00/);
   if (process.env.CI_OUTPUT_DIR) {
     await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
@@ -134,7 +136,14 @@ test('original cloud card binds a DB plan, blocks invalid and unknown execution,
   await page.locator('#repository-url').fill('https://github.com/example/my-new-app');
   assert.equal(await page.locator('#deployment-database-field').isVisible(), false);
   await review();
+  await page.waitForFunction(() => document.querySelector('#form-error').textContent.includes('plain-app 앱 전용'));
+  assert.equal(await page.locator('#deploy-button').isDisabled(), true);
+  assert.equal(plans.length, 1, 'a fixed profile cannot replace the source app with its registered app');
+  assert.equal(deployments.length, 1);
+  await page.locator('#repository-url').fill('https://github.com/example/plain-app');
+  await review();
   await page.waitForFunction(() => !document.querySelector('#review-panel').hidden);
+  assert.equal(await page.locator('#review-app').innerText(), 'plain-app');
   assert.deepEqual(plans[1].database, { mode: 'none' });
   await page.locator('#deploy-button').click();
   await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('execution-2') && document.querySelector('#run-state').textContent === '앱 배포 완료');

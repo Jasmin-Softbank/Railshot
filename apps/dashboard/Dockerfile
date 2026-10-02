@@ -8,6 +8,7 @@ COPY apps/dashboard/package.json apps/dashboard/package.json
 COPY apps/api/package.json apps/api/package.json
 RUN npm ci --ignore-scripts --no-audit --no-fund --workspace=apps/dashboard --include-workspace-root=false
 COPY apps/dashboard/ apps/dashboard/
+COPY contracts/application.mjs contracts/application.mjs
 RUN npm run build --workspace=apps/dashboard
 
 FROM ${NGINX_IMAGE} AS dashboard

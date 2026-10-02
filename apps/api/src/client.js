@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import yazl from 'yazl';
-import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
+import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from './contract.js';
 import { readApiToken } from './access.js';
 import { cookieToken, SESSION_COOKIE } from './sessions.js';
 
@@ -43,10 +43,8 @@ async function sessionFetch(url, options = {}) {
 export function inferredAppName(source) {
   const raw = /^https?:\/\//i.test(source)
     ? new URL(source).pathname.split('/')[2]?.replace(/\.git$/i, '')
-    : basename(resolve(source)).replace(/\.zip$/i, '');
-  const name = (raw || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30).replace(/-+$/g, '');
-  if (!APP_NAME.test(name)) throw new Error(APP_NAME_MESSAGE);
-  return name;
+    : basename(resolve(source));
+  return sourceAppName(raw);
 }
 
 async function sendDeploy(form, baseUrl) {
