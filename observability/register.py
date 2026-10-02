@@ -154,6 +154,31 @@ def sync_observer(config, request, document, ansible, native):
         require(json.loads(native([*prefix, 'cat ' + directory + '/prometheus.json'])) == document)
 
 
+def wait_network_policy(kube, pod, document):
+    observed = kube('default', 'get', document['kind'], document['metadata']['name'], '-o', 'json')
+    require(observed and observed.get('spec') == document['spec'])
+    uid = observed['metadata']['uid']
+    binding = document['spec']['labels'][0]['value']
+    command = ('exec', pod['metadata']['name'], '-c', 'cilium-agent', '--')
+    deadline = time.monotonic() + 60
+    while True:
+        repository = kube('kube-system', *command, 'cilium-dbg', 'policy', 'get', '-o', 'json')
+        imported = []
+        for rule in json.loads(repository['policy']):
+            labels = {(v['source'], v['key']): v['value'] for v in rule.get('Labels', [])}
+            if labels.get(('k8s', 'io.cilium.k8s.policy.uid')) == uid:
+                imported.append(labels)
+        if len(imported) == 1 and imported[0].get(('unspec', 'railshot.io/observer-policy-sha256')) == binding:
+            break
+        require(time.monotonic() < deadline)
+        time.sleep(1)
+    revision = repository['revision']
+    require(type(revision) is int and revision > 0)
+    # Same pinned native policy-import/revision gate as bootstrap-platform.metadata_policy.
+    kube('kube-system', *command, 'sh', '-c',
+         'cilium-dbg policy wait "$1" --max-wait-time 15 --fail-wait-time 10 >/dev/null && printf null', 'sh', str(revision))
+
+
 def register(config, request, output):
     # Supplied by the runtime registration owner (PR27); imports make no cloud calls.
     from environment import read_private, runtime_kubectl
@@ -180,6 +205,10 @@ def register(config, request, output):
         save()  # Record an uncertain outcome before the first mutation.
         labels = {'app.kubernetes.io/managed-by': 'railshot-observer', 'railshot.io/observer': config['owner']}
         with runtime_kubectl(runtime) as kube:
+            cilium = kube('kube-system', 'get', 'pods', '-l', 'k8s-app=cilium', '-o', 'json')['items']
+            cilium = [pod for pod in cilium if not pod['metadata'].get('deletionTimestamp')]
+            require(len(cilium) == 1 and any(condition.get('type') == 'Ready' and condition.get('status') == 'True'
+                                           for condition in cilium[0].get('status', {}).get('conditions', [])))
             services = kube('default', 'get', 'services', '-A', '-o', 'json')['items']
             for service in services:
                 if any(port.get('nodePort') in (config['node_metrics_port'], config['cluster_metrics_port']) for port in service['spec']['ports']):
@@ -192,6 +221,8 @@ def register(config, request, output):
                 if existing:
                     require(not existing['metadata'].get('ownerReferences') and all(existing['metadata'].get('labels', {}).get(k) == v for k, v in labels.items()))
                 kube(namespace, 'apply', '--server-side', '--field-manager=railshot-observer', '-f', '-', '-o', 'json', document=document)
+                if document['kind'] == 'CiliumClusterwideNetworkPolicy':
+                    wait_network_policy(kube, cilium[0], document)
         receipt['steps'].append('exporters_applied'); save()
         sync_observer(config, observer, scrape_config(rows), ansible, native)
         receipt['steps'].append('collector_registered'); save()
