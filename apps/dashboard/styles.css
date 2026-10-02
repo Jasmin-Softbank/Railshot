@@ -194,5 +194,5 @@ button:disabled { cursor: default; opacity: .5; }
 
 .stages-panel li { flex-wrap: wrap; }
 .stages-panel li ul { flex-basis: 100%; margin: 4px 0 0; padding-left: 20px; }
-.stages-panel li ul li { display: list-item; padding: 3px 0; list-style: disc; }
+.stages-panel li ul li { display: list-item; padding: 3px 0; list-style: disc; counter-increment: none; }
 .stages-panel li ul li::before { content: none; }
