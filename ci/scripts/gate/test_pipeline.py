@@ -529,7 +529,7 @@ class GateNetworkTest(unittest.TestCase):
         installer = next(t["ansible.builtin.copy"]["content"] for t in tasks
                          if t.get("ansible.builtin.copy", {}).get("dest") == gate.CI_NETWORK_HELPER)
         self.assertIn("railshot-runtime-host-block", installer)
-        self.assertIn("--ctstate ESTABLISHED,RELATED", installer)
+        self.assertIn('reply_states = {"set": ["established", "related"]}', installer)
         self.assertIn("network-verified.sha256", installer)
         subprocess.run(["bash", "-n"], input=installer, text=True, check=True, capture_output=True)
         subprocess.run(["bash", "-n", str(infra / "test-ci-network.sh")], check=True, capture_output=True)

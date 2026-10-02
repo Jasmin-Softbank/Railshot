@@ -3,10 +3,11 @@
 
 Run in an ephemeral, clean Actions checkout at the reviewed source SHA. The
 dedicated deployment branch preserves its existing tree and only fast-forwards.
-This publishes desired state; Argo and live HTTP verification remain separate.
+This publishes desired state; the following verification job checks live state.
 """
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -60,6 +61,9 @@ def publish(artifacts, source_sha, target, port):
         raise ValueError("release requires a clean ephemeral checkout")
     # Render before switching branches so the checked source manifest is used.
     declaration = render(artifacts, target, port)
+    digests = {container["name"] + "_digest": container["image"].rsplit(":", 1)[1]
+               for item in json.loads(declaration)["items"] if item["kind"] == "Deployment"
+               for container in item["spec"]["template"]["spec"]["containers"]}
     reference = f"refs/heads/{BRANCH}"
     remote = git("ls-remote", "--exit-code", "origin", reference, check=False)
     if remote.returncode == 0:
@@ -76,7 +80,7 @@ def publish(artifacts, source_sha, target, port):
     git("add", "--", WORKLOAD)
     changed = git("diff", "--cached", "--name-only").stdout.splitlines()
     if not changed and remote.returncode == 0:
-        return {"status": "unchanged", "revision": base, "branch": BRANCH, "source_sha": source_sha}
+        return {"status": "unchanged", "revision": base, "branch": BRANCH, "source_sha": source_sha, **digests}
     if changed and changed != [WORKLOAD]:
         raise ValueError("release must change only the platform workload")
     if changed:
@@ -88,7 +92,7 @@ def publish(artifacts, source_sha, target, port):
     observed = git("ls-remote", "--exit-code", "origin", reference).stdout.split()
     if not observed or observed[0] != revision:
         raise ValueError("deployment branch changed; verify its current revision")
-    return {"status": "published", "revision": revision, "branch": BRANCH, "source_sha": source_sha}
+    return {"status": "published", "revision": revision, "branch": BRANCH, "source_sha": source_sha, **digests}
 
 
 if __name__ == "__main__":
@@ -99,6 +103,11 @@ if __name__ == "__main__":
     parser.add_argument("--dashboard-node-port", type=int, required=True)
     args = parser.parse_args()
     try:
-        print(json.dumps(publish(args.artifacts, args.source_sha, args.target_id, args.dashboard_node_port)))
+        result = publish(args.artifacts, args.source_sha, args.target_id, args.dashboard_node_port)
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                for key in ("revision", "dashboard_digest", "api_digest"):
+                    output.write(f"{key}={result[key]}\n")
+        print(json.dumps(result))
     except (OSError, ValueError, TypeError) as error:
         parser.exit(2, f"BLOCKED: {error}\n")

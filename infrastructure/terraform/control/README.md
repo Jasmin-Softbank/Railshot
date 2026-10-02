@@ -29,7 +29,13 @@
 1. `aws_security_group.edge` 한 개 생성. 인라인 ingress/egress 없이 만들고 규칙은 별도 `aws-edge` 모듈이 소유한다.
 2. `aws_instance.control`을 제자리에서 수정. `source_dest_check: true → false`, 보안 그룹 목록에 위 edge SG 추가.
 
-기존 base SG `sg-01a71e8be9a585b5a`의 ingress/egress·설명, AMI, user-data, instance profile은 유지한다. IAM 변경은 위의 registry 경로와 전용 OIDC 역할에 한정한다. 새 SG 출력만 `aws-edge.wireguard_security_group_id`로 넘긴다. Base SG를 edge 입력으로 사용하면 inline/외부 rule 소유권이 충돌한다.
+최초 복원 시 기존 base SG `sg-01a71e8be9a585b5a`의 ingress/egress·설명, AMI, user-data, instance profile을 유지했다. IAM 변경은 위의 registry 경로와 전용 OIDC 역할에 한정한다. 새 SG 출력만 `aws-edge.wireguard_security_group_id`로 넘긴다. Base SG를 edge 입력으로 사용하면 inline/외부 rule 소유권이 충돌한다.
+
+## 전용 build agent 연결
+
+선택적 `build_worker_security_group_id`는 검토한 build SG만 허용한다. 기본값 null은 기존 정책이다. 값을 지정하면 control ingress에 TCP6443과 Cilium UDP8472/TCP4240/ICMP echo(type8/code0), control egress에 같은 Cilium 3개 경로를 추가한다. CI 모듈의 `control_security_group_id`가 반대편 ingress/egress를 선언한다. 기존 SG 설명과 resource 주소는 보존하며 인터넷 ingress, SSH, etcd, kubelet 포트는 열지 않는다. Edge SG와 기존 고객 API 규칙은 별도 소유 그대로다.
+
+2026-10-02 승인된 가입 작업은 control base SG `sg-01a71e8be9a585b5a`와 build SG `sg-06bee6c9cb9c1bb74` 사이 14개 규칙을 EC2 API로 추가하고 rule ID와 전후 snapshot을 private `product-release-20261002/build-readiness`에 기록했다. 기존 inline Terraform 선언으로 apply하면 이 규칙이 삭제될 수 있으므로 두 모듈의 peer 입력과 최신 선언으로 saved plan을 검토해야 한다. 현재 작업에서 Terraform apply는 수행하지 않았다. CI 인스턴스의 public-IP replacement drift를 해결하기 전 전체 apply는 금지하며, 기존 volume과 2026-10-05 14:59 UTC STOP 기한을 보존한다.
 
 ## 관리자 명령
 

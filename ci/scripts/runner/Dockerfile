@@ -4,7 +4,7 @@ ARG RUNNER_IMAGE=ghcr.io/actions/actions-runner:2.337.0@sha256:e5496277be5d09bc9
 FROM ${RUNNER_IMAGE} AS runner
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-yaml iptables iproute2 procps util-linux ca-certificates \
+      python3 python3-venv python3-yaml iptables nftables iproute2 procps util-linux ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && install -d -m 0755 /opt/hostedtoolcache \
     && install -d -m 0700 /var/lib/railshot-runner/work/_temp
