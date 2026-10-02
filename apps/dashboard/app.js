@@ -440,6 +440,10 @@ function renderMetrics() {
   }
   document.querySelector('#observation-status').textContent = observationError ? '관측 조회 실패 · 재시도 중'
     : bound ? `조회 ${new Date(observation.checked_at).toLocaleTimeString()}` : '관측 연결 대기';
+  const collector = bound && observation.collector;
+  document.querySelector('#collector-note').textContent = collector
+    ? `공유 관측 서버 · ${collector.lifecycle === 'acceptance' ? '임시 인수용' : '운영용'} · 만료 ${new Date(collector.expires_at).toLocaleString()}`
+    : '수집기 수명 정보 미제공';
 }
 // Even after polling is stopped, expire old samples on screen.
 const freshnessTimer = setInterval(renderMetrics, 15000);

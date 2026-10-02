@@ -23,7 +23,9 @@ COPY apps/api/runtime-install.sh apps/api/runtime-smoke.py apps/api/runtime-tool
 COPY apps/api/prepare-state.js ./
 COPY ci/requirements-dev.txt ci/requirements-test.txt /app/ci/
 COPY gitops/bridge.py gitops/argo.py gitops/handoff.py /app/gitops/
+COPY gitops/edge.py gitops/service_name.py /app/gitops/
 COPY gitops/credentials.py /app/gitops/
+COPY observability/register.py observability/bootstrap.py observability/render.py observability/compose.yaml /app/observability/
 COPY ci/scripts/execution.py ci/scripts/observability.py ci/scripts/process.py ci/scripts/publication.py ci/scripts/storage.py /app/ci/scripts/
 COPY ci/scripts/gate/bundle.py /app/ci/scripts/gate/
 COPY ci/scripts/runner/runtime_boundary.py /app/ci/scripts/runner/
@@ -33,6 +35,7 @@ COPY infrastructure/providers/terraform_tools/provision.py infrastructure/provid
 COPY infrastructure/providers/terraform_tools/budget.py /app/infrastructure/providers/terraform_tools/
 COPY infrastructure/terraform/aws/ /app/infrastructure/terraform/aws/
 COPY infrastructure/terraform/gcp/ /app/infrastructure/terraform/gcp/
+COPY infrastructure/terraform/aws-edge/ /app/infrastructure/terraform/aws-edge/
 COPY infrastructure/ansible/run.py infrastructure/ansible/transport.py infrastructure/ansible/ansible.cfg infrastructure/ansible/guest.yml infrastructure/ansible/runtime.yml /app/infrastructure/ansible/
 COPY infrastructure/ansible/cluster.py infrastructure/ansible/database.py infrastructure/ansible/inputs.py infrastructure/ansible/application_database.py infrastructure/ansible/database.yml infrastructure/ansible/application-database.yml /app/infrastructure/ansible/
 COPY infrastructure/ansible/playbooks/ /app/infrastructure/ansible/playbooks/
@@ -40,7 +43,7 @@ COPY infrastructure/ansible/roles/ /app/infrastructure/ansible/roles/
 COPY infrastructure/ansible/tasks/guest-checks.yml /app/infrastructure/ansible/tasks/
 COPY infrastructure/ansible/group_vars/all.yml /app/infrastructure/ansible/group_vars/
 COPY contracts/ansible-request.schema.json contracts/ansible-job.schema.json /app/contracts/
-COPY deployment/scripts/common.sh /app/deployment/scripts/
+COPY deployment/scripts/common.sh deployment/scripts/environment.py /app/deployment/scripts/
 COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh /app/deployment/bootstrap/
 COPY deployment/cilium/install.sh deployment/cilium/preflight.py deployment/cilium/health.sh /app/deployment/cilium/
 COPY deployment/airgap/versions.json /app/deployment/airgap/

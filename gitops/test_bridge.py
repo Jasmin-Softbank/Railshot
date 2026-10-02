@@ -196,6 +196,32 @@ class BridgeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             bridge.public_probe({'url': local, 'expected_json': {}}, '/health')
 
+    def test_edge_allocation_is_bound_and_only_initial_apply_can_mutate_routes(self):
+        registered = self.config['targets']['k3s-aws']
+        registered['edge'] = {'config_path': '/private/edge.json', 'allocation_path': '/private/allocation.json',
+                              'config_sha256': 'a' * 64}
+        verified = {'state': 'succeeded', 'verified_at': '2026-10-02T00:00:00Z',
+                    'url': 'https://new-app.railshot.io/health', 'site_url': 'https://new-app.railshot.io/'}
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('edge.validate_binding') as bind, patch('edge.ensure') as ensure, \
+                patch('edge.observe', return_value=verified) as observe, patch('bridge.public_probe') as legacy:
+            result = bridge.execute(self.config, self.request)
+            self.assertEqual(result['public_http'], verified)
+            ensure.assert_called_once_with(registered['edge'])
+            state = json.loads((self.root / 'state/deployment-1/state.json').read_bytes())
+            self.assertEqual(state['edge_request']['deployment_id'], self.request['deployment_id'])
+            ensure.reset_mock()
+            bridge.execute(self.config, {**self.request, 'action': 'observe'})
+            ensure.assert_not_called(); legacy.assert_not_called()
+            self.assertEqual(observe.call_args.args[1]['publication']['source_commit'], self.request['publication']['source_commit'])
+            self.assertEqual(bind.call_count, 2)
+            observe.side_effect = ValueError('route binding differs')
+            self.assertIsNone(bridge.execute(self.config, {**self.request, 'action': 'observe'})['public_http']['url'])
+        with patch('edge.validate_binding', side_effect=ValueError('mismatch')), patch('argo.native') as native:
+            with self.assertRaises(ValueError):
+                bridge.execute(self.config, self.request)
+            native.assert_not_called()
+
     def test_node_adapter_calls_apply_once_then_read_only_observe(self):
         executable = self.root / 'synthetic-python'
         executable.write_text('#!' + sys.executable + '\n' + '''import json,sys

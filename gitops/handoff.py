@@ -49,6 +49,11 @@ def document_hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def application_name(target_id, namespace, app):
+    name = target_id + '-' + namespace + '-' + app
+    return name if len(name) <= 63 else name[:50].rstrip('-') + '-' + hashlib.sha256(name.encode()).hexdigest()[:12]
+
+
 def http_path(value):
     require(isinstance(value, str) and re.fullmatch(r'/[A-Za-z0-9/._~-]*', value) and
             '//' not in value and not {'.', '..'} & set(value.split('/')),
@@ -196,9 +201,7 @@ def render(directory, target):
                 'name': migration_name, 'namespace': namespace, 'annotations': dict(MIGRATION_ANNOTATIONS)},
                 'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 300, 'template': pod}})
             migration = {'name': migration_name, 'image': images[svc['name']]}
-    app_name = target['id'] + '-' + namespace + '-' + name
-    if len(app_name) > 63:
-        app_name = app_name[:50].rstrip('-') + '-' + hashlib.sha256(app_name.encode()).hexdigest()[:12]
+    app_name = application_name(target['id'], namespace, name)
     app = {'apiVersion': 'argoproj.io/v1alpha1', 'kind': 'Application',
            'metadata': {'name': app_name, 'namespace': target['argocd_namespace'],
                         'labels': {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/target': target['id']}},

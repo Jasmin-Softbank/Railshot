@@ -12,6 +12,22 @@ from publication import prepare, verify_registry, validate_registry, validate_ta
 
 
 class PublicationTest(unittest.TestCase):
+    def test_registered_application_binding_selects_private_pull_namespace(self):
+        binding = {'app': 'new-app', 'tenant': 'demo',
+                   'image_pull_secret': {'namespace': 'new-namespace', 'name': 'ghcr-pull'}}
+        configured = {'CONFIGURED_BINDINGS': json.dumps({'new-target': binding}),
+                      'TARGET_ID': 'new-target', 'APP': 'new-app', 'TENANT': 'demo'}
+        self.assertEqual(validate_target(configured), binding)
+        for field in ('APP', 'TENANT', 'TARGET_ID'):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                validate_target({**configured, field: 'another'})
+        env = {**configured, 'REGISTRY_PREFIX': 'ghcr.io/owner', 'REGISTRY_VISIBILITY': 'private',
+               'GHCR_PULL_USERNAME': 'reader', 'GHCR_PULL_TOKEN': 'synthetic-token',
+               'PULL_SECRET_NAMESPACE': 'old-namespace', 'PULL_SECRET_NAME': 'old-secret'}
+        with patch('publication.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            result = verify_registry(json.dumps({'web': 'ghcr.io/owner/web@sha256:' + 'a' * 64}).encode(), env)
+        self.assertEqual(result['image_pull_secret'], binding['image_pull_secret'])
+
     def test_operator_target_allowlist_and_legacy_single_target_fail_closed(self):
         configured = {'CONFIGURED_TARGET': 'legacy-target',
                       'CONFIGURED_TARGETS': '["k3s-aws","k3s-gcp"]'}

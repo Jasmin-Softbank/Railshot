@@ -228,7 +228,7 @@ def read_own_pod():
 
 
 def check_image():
-    for command in ("python3", "git", "curl", "jq", "docker", "iptables", "ip6tables", "flock", "sysctl"):
+    for command in ("python3", "git", "curl", "jq", "docker", "iptables", "ip6tables", "nft", "flock", "sysctl"):
         if not shutil.which(command):
             raise ValueError("missing executable: " + command)
     subprocess.run(["docker", "buildx", "version"], check=True)

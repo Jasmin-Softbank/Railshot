@@ -90,7 +90,8 @@ def installed(rows):
         run('ansible-playbook', '--version')
         run('ansible-vault', '--version')
         run('openssl', 'version')
-        for script in ['gitops/bridge.py', 'gitops/credentials.py', 'ci/scripts/runner/replenish.py',
+        for script in ['observability/register.py', 'observability/bootstrap.py', 'gitops/bridge.py', 'gitops/edge.py',
+                       'gitops/credentials.py', 'deployment/scripts/environment.py', 'ci/scripts/runner/replenish.py',
                        'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py',
                        'infrastructure/providers/terraform_tools/budget.py',
                        'infrastructure/ansible/cluster.py', 'infrastructure/providers/terraform_tools/access.py']:
