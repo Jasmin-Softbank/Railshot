@@ -4,6 +4,24 @@
 
 Python 표준 라이브러리만 사용한다. 생성물은 ServiceAccount·ConfigMap·Deployment 세 개이며, API 호출이나 cloudflared 실행·배포를 자동으로 수행하지 않는다. namespace·터널·DNS·기존 credential Secret·CA ConfigMap·Octavia·K3s·DB·네트워크 정책은 생성하거나 삭제하지 않는다. 제품 API와 runtime 설치 호출에도 자동 연결하지 않는다.
 
+`register.py`는 설치된 connector에 앱 hostname을 추가하는 별도 호출점이다. 기존 `environment`의 registry·SSH·kubectl helper와 의존성(`PyYAML`, `jsonschema`)을 재사용한다. 터널 생성·인증은 운영자가 한 번 준비하며, 앱마다 다시 로그인하거나 connector VM을 만들지 않는다.
+
+## 기존 connector에 앱 등록
+
+제품 배포 호출자는 `ensure(private_config_path, request)`를 호출한다. `request`는 `environment_id`, `application_id`, `app`, `tenant`, `hostname` 다섯 문자열만 받는다. hostname과 application ID는 기존 서비스 이름·앱 식별 규칙에서 계산한 값과 일치해야 한다. CLI는 같은 요청을 소유자 전용 JSON 파일로 받는다.
+
+```sh
+python3 deployment/cloudflared/register.py \
+  --config /var/lib/railshot/config/openstack-tunnel.json \
+  --request /private/path/application-request.json
+```
+
+운영 설정에는 `version: 1`, `state_dir`, `registry_file`, `environment_id`, `resource_id`, `runtime_private_address`, `base_domain`과 renderer의 `namespace`, `name`, `tunnel_id`, `credentials_secret`, `origin_vip`, `ca_configmap`, 그리고 설치 후 확인한 `configmap_uid`, `deployment_uid`를 기록한다. 파일은 절대 경로의 소유자 전용 파일이어야 한다. 기존 ConfigMap의 `railshot.io/application-owners` annotation에는 hostname → application ID JSON 매핑을 초기화한다.
+
+writer는 단일 writer 잠금 아래 registry의 OpenStack VM과 기존 Kubernetes UID를 검증하고, 다른 앱의 ingress를 보존해 hostname을 합친다. TLS·SNI·VIP·Deployment 설정이 달라졌거나 hostname 소유자가 다르면 변경 전에 멈춘다. resourceVersion을 함께 검사하는 JSON Patch로 config·owners·template hash만 갱신한다. ConfigMap만 반영된 부분 실패는 같은 요청을 재시도하면 복구한다.
+
+성공 결과의 `phase`는 `tunnel_configured`이고 `https_verified`는 항상 `false`다. `dns`에는 해당 터널의 CNAME과 `proxied: true`를 반환한다. 호출자가 기존 DNS writer에 이를 전달하고 앱 배포 후 외부 HTTPS 응답을 확인해야 한다. connector Ready만으로 backend나 공개 URL 성공을 기록하지 않는다. 잠금 충돌·변경 전 검증 실패는 `blocked`, 변경 시도 이후 불확실한 실패는 `unknown`으로 반환한다.
+
 ## 입력과 실행 경계
 
 - 대상 namespace와 **locally managed** 터널 UUID가 있어야 한다. 같은 namespace의 기존 Secret에는 해당 터널의 `credentials.json` 한 키가 필요하다. 원격 관리 터널 token은 이 입력 형식이 아니다. account 관리용 `cert.pem`, API token 또는 비밀번호를 Pod에 넣지 않는다.
@@ -60,4 +78,4 @@ Kubernetes Deployment/Pod가 사라졌는지와 Cloudflare의 해당 터널 conn
 - 공식 `cloudflare/cloudflared:2026.9.3` Docker Hub index를 2026-10-02 조회하고 body SHA256을 검증했다. amd64/arm64를 포함한 multiarch index digest는 `sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c`이며 이미지에 고정했다.
 - [로컬 설정/ingress 검사](https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/configuration-file/), [origin TLS·CA 설정](https://developers.cloudflare.com/tunnel/troubleshooting/https-origins/), [Kubernetes 운영](https://developers.cloudflare.com/tunnel/guides/kubernetes/)을 참고했다.
 
-로컬 7개 검사에 공식 Darwin arm64 바이너리의 native 검사 두 개를 포함해 통과했다. 바이너리 archive SHA256은 공식 release의 `587c2cfb1c230fe36c7fa7727da78be459dae028cabe8c001291999350f07095`와 대조했다. **클러스터 배포, Secret mount 실제 실행, Cloudflare 연결, origin TLS/HTTP는 아직 이 모듈로 검증하지 않았다.**
+renderer 검사는 공식 Darwin arm64 바이너리의 native 검사 두 개를 포함한다. 바이너리 archive SHA256은 공식 release의 `587c2cfb1c230fe36c7fa7727da78be459dae028cabe8c001291999350f07095`와 대조했다. writer 검사는 기존 host 보존, 소유권·UID·TLS 경계, 부분 실패 복구, 요청·runtime 검증, 잠금과 rollout 시간 제한을 확인한다. 2026-10-03 운영 설치에서는 기존 OpenStack runtime의 Deployment Ready 1개와 Cloudflare 연결 4개를 확인했다. 이는 실제 앱의 외부 HTTPS 응답 검증과 구분한다.
