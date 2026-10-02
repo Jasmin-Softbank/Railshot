@@ -7,7 +7,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl unzip git openssh-client \
+apt-get install -y --no-install-recommends ca-certificates curl unzip git openssh-client openssl \
   python3 python3-venv groff-base less
 python3 -m venv /opt/railshot-python
 python3 "$ROOT/apps/api/runtime-smoke.py" --requirements > /tmp/railshot-runtime-requirements.txt

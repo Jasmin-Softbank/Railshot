@@ -79,6 +79,11 @@
                 </select>
                 <p class="field-note">등록된 인프라 연결 상태를 확인한 뒤 배포합니다.</p>
               </div>
+              <div id="deployment-database-field" class="provider-field" hidden>
+                <label class="field-label" for="deployment-database">데이터베이스</label>
+                <select id="deployment-database"><option value="none">DB 없음</option><option value="patroni">PostgreSQL HA 포함</option></select>
+                <p class="field-note" id="deployment-database-note"></p>
+              </div>
               <p class="field-note" id="connection-status" role="status">인프라 연결을 확인하고 있습니다.</p>
             </section>
 

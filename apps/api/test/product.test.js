@@ -25,8 +25,11 @@ async function fixture(t, overrides = {}) {
   return { product, service, directory, dispatches: () => dispatches, reads: () => reads, cdCalls: () => cdCalls };
 }
 async function settle(get, predicate = (record) => !['queued', 'running'].includes(record.status)) {
-  for (let attempt = 0; attempt < 100; attempt++) { const record = await get(); if (predicate(record)) return record; await pause(5); }
-  assert.fail('Operation did not settle');
+  const deadline = performance.now() + 10000;
+  let record;
+  // Durable writes and HTTP polling take longer on shared CI runners than local fixtures.
+  do { record = await get(); if (predicate(record)) return record; await pause(5); } while (performance.now() < deadline);
+  assert.fail(`Operation did not settle: status=${record?.status}, stage=${record?.stage}`);
 }
 
 test('snapshot and intent are durable before one dispatch; replay returns the same completed deployment', async (t) => {
@@ -355,6 +358,153 @@ test('build POST preserves string run IDs and plan/environment HTTP use 201 then
   assert.equal(complete.deployment_supported, false);
 });
 
+test('one deployment consumes its app-bound plan before CI, and replay never repeats the DB stack', async (t) => {
+  const sequence = [];
+  const environmentAdapter = {
+    plan: async (value, { id }) => ({ public: { ...value, id, executable: true }, private: { profile: { target: { target_id: input.target_id }, deployment: {} } } }),
+    verifyPlan: async () => sequence.push('verify'),
+    execute: async (plan, { onProgress }) => { sequence.push('environment'); await onProgress({ status: 'running', stage: 'database' }); return { status: 'succeeded', database: { status: 'succeeded' }, deployment_supported: true, runtime_target_id: input.target_id }; },
+    deployPublished: async () => { sequence.push('cd'); return deployed; },
+  };
+  const f = await fixture(t, { environmentAdapter, service: { deploy: async () => { sequence.push('ci'); return { run_id: 123, source_commit: publication.source_commit }; } } });
+  const plan = await f.product.createPlan({ name: input.app, runtime: {}, database: { mode: 'patroni' } });
+  await assert.rejects(f.product.createDeployment({ ...input, app: 'wrong-app', plan_id: plan.id }, 'wrong'), { code: 'INVALID_INPUT' });
+  const request = { ...input, plan_id: plan.id };
+  const created = await f.product.createDeployment(request, 'combined');
+  const result = await settle(() => f.product.getDeployment(created.id));
+  assert.equal(result.status, 'succeeded'); assert.equal(result.environment.database.status, 'succeeded');
+  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  await f.product.createDeployment(request, 'combined');
+  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  await assert.rejects(f.product.createDeployment(request, 'different'), { code: 'CONFLICT' });
+});
+
+test('failed database environment never dispatches CI or CD', async (t) => {
+  const f = await fixture(t, { environmentAdapter: {
+    plan: async (value, { id }) => ({ public: { ...value, id }, private: { profile: { target: { target_id: input.target_id }, deployment: {} } } }),
+    verifyPlan: async () => {}, deployPublished: async () => assert.fail('must not deploy'),
+    execute: async () => ({ status: 'unknown', database: { status: 'unknown' }, deployment_supported: false, error: { code: 'DATABASE_OUTCOME_UNKNOWN', outcome_unknown: true } }),
+  } });
+  const plan = await f.product.createPlan({ name: input.app });
+  const created = await f.product.createDeployment({ ...input, plan_id: plan.id }, 'db-failed');
+  const result = await settle(() => f.product.getDeployment(created.id));
+  assert.equal(result.status, 'unknown'); assert.equal(f.dispatches(), 0); assert.equal(f.cdCalls(), 0);
+});
+
+for (const origin of ['environments', 'deployments']) {
+  test(`successful ${origin} registration reuses the app-bound environment through restart`, async (t) => {
+    const request = { ...input, app: 'another-app', target_id: 'request-aws-123' };
+    let executions = 0, verifications = 0, dispatches = 0, registrations = 0, registrationComplete = false, unknownCd = false;
+    const cdEnvironments = [];
+    const environmentAdapter = {
+      plan: async (value, { id }) => ({ public: { ...value, id, runtime_target_id: request.target_id },
+        private: { profile: { create_per_request: true, target: { target_id: request.target_id }, deployment: {} } } }),
+      verifyPlan: async () => { verifications++; },
+      execute: async () => {
+        executions++; registrationComplete = true;
+        return { status: 'succeeded', deployment_supported: true, runtime_target_id: request.target_id, database: { status: 'succeeded' } };
+      },
+      deployPublished: async (id) => {
+        cdEnvironments.push(id);
+        return unknownCd ? { cd: { state: 'unknown', deployed: false }, public_http: { state: 'not_run' }, error: { outcome_unknown: true } } : deployed;
+      },
+    };
+    function ciService() {
+      const targetIds = ['demo'];
+      return { targetId: 'demo', targetIds,
+        allowTarget: (id) => { assert.equal(registrationComplete, true); registrations++; if (!targetIds.includes(id)) targetIds.push(id); },
+        deploy: async ({ app, target_id }) => {
+          assert.ok(targetIds.includes(target_id)); assert.equal(app, request.app); dispatches++;
+          return { run_id: 122 + dispatches, source_commit: publication.source_commit };
+        },
+        status: async (id, target_id) => {
+          assert.ok(targetIds.includes(target_id));
+          return { state: 'published', publication: { ...publication, run_id: Number(id), app: request.app, target_id } };
+        },
+      };
+    }
+    const f = await fixture(t, { deployPublished: undefined, environmentAdapter, service: ciService() });
+    assert.equal(f.product.targets().some(({ id }) => id === request.target_id), false);
+    await assert.rejects(f.product.createDeployment(request, 'unregistered'), { code: 'INVALID_INPUT' });
+    const plan = await f.product.createPlan({ name: request.app });
+    const first = origin === 'environments'
+      ? await f.product.createEnvironment({ plan_id: plan.id }, 'environment')
+      : await f.product.createDeployment({ ...request, plan_id: plan.id }, 'initial');
+    const ready = await settle(() => origin === 'environments' ? f.product.getEnvironment(first.id) : f.product.getDeployment(first.id));
+    assert.equal(ready.status, 'succeeded');
+    const environmentId = origin === 'environments' ? first.id : first.environment_id;
+    const registered = f.product.targets().find(({ id }) => id === request.target_id);
+    assert.equal(registered.application_name, request.app);
+    assert.deepEqual(registered.capabilities, { ci_submission: true, application_deployment: true, database_configuration: true });
+    await assert.rejects(f.product.createDeployment({ ...request, app: 'wrong-app' }, 'wrong-app'), { code: 'INVALID_INPUT' });
+    await assert.rejects(f.product.createBuild({ ...request, app: 'wrong-app' }), { code: 'INVALID_INPUT' });
+    await assert.rejects(f.product.createDeployment({ ...request, target_id: 'unknown-target' }, 'unknown'), { code: 'INVALID_INPUT' });
+    const reused = await f.product.createDeployment(request, 'reuse');
+    assert.equal(reused.environment_id, environmentId);
+    assert.equal(Object.hasOwn(reused, 'environment'), false); assert.equal(Object.hasOwn(reused, 'plan_id'), false);
+    const reusedComplete = await settle(() => f.product.getDeployment(reused.id));
+    assert.equal(reusedComplete.status, 'succeeded');
+    assert.equal((await f.product.createDeployment(request, 'reuse')).id, reused.id);
+    assert.equal(executions, 1); assert.equal(verifications, 1); assert.equal(registrations, 1);
+    await f.product.close();
+
+    const restartedService = ciService();
+    const restarted = await createProductService({ service: restartedService, directory: f.directory, environmentAdapter, pollInterval: 5 });
+    try {
+      assert.deepEqual(restartedService.targetIds, ['demo', request.target_id]);
+      assert.equal(restarted.targets().find(({ id }) => id === request.target_id).capabilities.database_configuration, true);
+      assert.equal((await restarted.getBuild(reusedComplete.ci.run_id)).status, 'published');
+      assert.equal((await restarted.legacyStatus(reusedComplete.ci.run_id)).state, 'published');
+      const afterRestart = await restarted.createDeployment(request, 'after-restart');
+      assert.equal(afterRestart.environment_id, environmentId);
+      assert.equal((await settle(() => restarted.getDeployment(afterRestart.id))).status, 'succeeded');
+      assert.equal(executions, 1); assert.equal(verifications, 1);
+      assert.ok(cdEnvironments.length >= 2 && cdEnvironments.every((id) => id === environmentId));
+      unknownCd = true;
+      const uncertain = await restarted.createDeployment(request, 'uncertain');
+      assert.equal((await settle(() => restarted.getDeployment(uncertain.id))).status, 'unknown');
+      const dispatchesBeforeRetry = dispatches;
+      assert.equal((await restarted.createDeployment(request, 'uncertain')).id, uncertain.id);
+      await assert.rejects(restarted.createDeployment(request, 'new-after-unknown'), { code: 'EXECUTOR_BUSY' });
+      assert.equal(dispatches, dispatchesBeforeRetry); assert.equal(executions, 1);
+    } finally { await restarted.close(); }
+  });
+}
+
+test('dynamic target admission requires the exact private and public plan binding before provisioning', async (t) => {
+  for (const mismatch of ['private-target', 'public-target', 'not-per-request', 'invalid-id']) {
+    const targetId = mismatch === 'invalid-id' ? '../invalid' : 'request-aws-new';
+    const f = await fixture(t, { deployPublished: undefined, service: { allowTarget: () => assert.fail('No registration') }, environmentAdapter: {
+      plan: async (value, { id }) => ({ public: { ...value, id, runtime_target_id: mismatch === 'public-target' ? 'different-target' : targetId },
+        private: { profile: { create_per_request: mismatch !== 'not-per-request',
+          target: { target_id: mismatch === 'private-target' ? 'different-target' : targetId }, deployment: {} } } }),
+      verifyPlan: async () => assert.fail('Invalid binding must fail before verification'),
+      execute: async () => assert.fail('No provisioning'), deployPublished: async () => assert.fail('No deployment'),
+    } });
+    const plan = await f.product.createPlan({ name: input.app });
+    await assert.rejects(f.product.createDeployment({ ...input, target_id: targetId, plan_id: plan.id }, 'invalid'), { code: 'INVALID_INPUT' });
+    assert.equal(f.dispatches(), 0);
+  }
+});
+
+test('incomplete or mismatched environment registration never admits the dynamic CI target', async (t) => {
+  for (const patch of [{ status: 'unknown' }, { status: 'failed' }, { deployment_supported: false }, { runtime_target_id: 'wrong-target' }]) {
+    const targetId = 'request-aws-new';
+    const f = await fixture(t, { deployPublished: undefined, service: { allowTarget: () => assert.fail('No registration') }, environmentAdapter: {
+      plan: async (value, { id }) => ({ public: { ...value, id, runtime_target_id: targetId },
+        private: { profile: { create_per_request: true, target: { target_id: targetId }, deployment: {} } } }),
+      verifyPlan: async () => {},
+      execute: async () => ({ status: 'succeeded', deployment_supported: true, runtime_target_id: targetId, ...patch }),
+      deployPublished: async () => assert.fail('No deployment'),
+    } });
+    const plan = await f.product.createPlan({ name: input.app });
+    const created = await f.product.createDeployment({ ...input, target_id: targetId, plan_id: plan.id }, 'incomplete');
+    const completed = await settle(() => f.product.getDeployment(created.id));
+    assert.notEqual(completed.status, 'succeeded'); assert.equal(f.dispatches(), 0);
+    assert.equal(f.product.targets().some(({ id }) => id === targetId || id === 'wrong-target'), false);
+  }
+});
+
 test('original UI environment selection is resolved server-side and never falls back to a different provider', async (t) => {
   const submitted = [];
   const deployPublished = async () => deployed;
@@ -371,6 +521,7 @@ test('original UI environment selection is resolved server-side and never falls 
     [(value) => value.set('provider', 'gcp'), 422],
     [(value) => value.set('target_id', 'foreign'), 422],
     [(value) => value.set('app', 'foreign-app'), 422],
+    [(value) => value.set('plan_id', 'foreign-plan'), 422],
     [(value) => value.append('provider', 'proxmox'), 422],
     [(value) => value.set('source_name', 'x'.repeat(256)), 422],
   ]) {
@@ -389,4 +540,40 @@ test('original UI environment selection is resolved server-side and never falls 
   assert.ok(unregistered.product.deploymentOptions().every((option) => !option.available), 'unknown provider never becomes AWS');
   const onprem = await fixture(t, { target: { provider: 'openstack' } });
   assert.deepEqual(onprem.product.deploymentOptions().filter((option) => option.available).map((option) => option.provider), ['openstack']);
+});
+
+test('HTTP deployment accepts a dynamic app-bound plan alongside existing environment options and replays once', async (t) => {
+  const app = 'fresh-app', targetId = 'request-aws-new', targetIds = ['demo'];
+  const sequence = [];
+  const deployPublished = async () => assert.fail('Dynamic plan uses its environment CD binding');
+  deployPublished.targets = { demo: { applicationName: 'demo-app' } };
+  const environmentAdapter = {
+    plan: async (value, { id }) => ({ public: { ...value, id, runtime_target_id: targetId, executable: true },
+      private: { profile: { create_per_request: true, target: { target_id: targetId }, deployment: {} } } }),
+    verifyPlan: async () => sequence.push('verify'),
+    execute: async () => { sequence.push('environment'); return { status: 'succeeded', deployment_supported: true,
+      runtime_target_id: targetId, database: { status: 'succeeded' } }; },
+    deployPublished: async () => { sequence.push('cd'); return deployed; },
+  };
+  const { base } = await httpFixture(t, { target: { provider: 'aws' }, deployPublished, environmentAdapter,
+    service: { targetId: 'demo', targetIds, allowTarget: (id) => targetIds.push(id),
+      deploy: async (value) => { assert.equal(value.app, app); assert.equal(value.target_id, targetId);
+        assert.ok(targetIds.includes(targetId)); sequence.push('ci'); return { run_id: 123, source_commit: publication.source_commit }; },
+      status: async () => ({ state: 'published', publication: { ...publication, app, target_id: targetId } }) } });
+  const options = await (await fetch(`${base}/api/v1/deployment-options`)).json();
+  assert.equal(options.items.find(({ provider }) => provider === 'aws').available, true);
+  const planned = await fetch(`${base}/api/v1/plans`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: app }) });
+  assert.equal(planned.status, 201);
+  const plan = await planned.json();
+  const source = () => { const value = form(); value.set('app', plan.name); value.set('target_id', plan.runtime_target_id); value.set('plan_id', plan.id); return value; };
+  assert.equal((await fetch(`${base}/api/v1/builds`, { method: 'POST', body: source() })).status, 422);
+  assert.deepEqual(sequence, []);
+  const post = () => fetch(`${base}/api/v1/deployments`, { method: 'POST', body: source(), headers: { 'Idempotency-Key': 'dynamic-plan' } });
+  const accepted = await post(); assert.equal(accepted.status, 202);
+  const complete = await settle(async () => (await fetch(`${base}${accepted.headers.get('location')}`)).json());
+  assert.equal(complete.status, 'succeeded'); assert.equal(complete.app, app); assert.equal(complete.target_id, targetId);
+  assert.equal(complete.plan_id, plan.id); assert.equal(complete.environment.database.status, 'succeeded');
+  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  const replay = await post(); assert.equal(replay.status, 200); assert.equal((await replay.json()).id, complete.id);
+  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
 });

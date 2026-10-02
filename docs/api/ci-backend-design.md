@@ -16,7 +16,7 @@
 | CI 실행 | 제품 API → GitHub Actions → 게시 검증 | 소스 snapshot·commit·target 고정, 검사·AI 수정, 검증 이미지 게시. CI 완료를 앱 배포 완료로 바꾸지 않음 |
 | 자원 준비 | `environments.js` → `terraform_tools/provision.py` | 등록 AWS/GCP 단일 runtime의 saved plan 생성·digest 고정·apply. 기존 자원 변경·삭제·유지보수는 공개 생성에서 차단 |
 | 서버 구성 | `environments.js` → `infrastructure/ansible/run.py` | Provider descriptor를 환경별 등록 snapshot으로 고정하고 입력 검사→guest→runtime 실행·결과 확인 |
-| DB 구성 | 별도 내부 Ansible HTTP → 팀 DB 플레이북 | 승인 HA profile의 PostgreSQL·Patroni·etcd·HAProxy 실행 연결. 제품 환경 API의 DB 실행에는 연결하지 않음 |
+| DB 구성 | 환경 API → cluster.py → 팀 DB 플레이북 | 별도 VM의 PostgreSQL·Patroni·etcd·HAProxy 준비, TLS·앱별 계정 binding 생성. 내부 Ansible HTTP 경로도 유지 |
 | 앱 적용 | `cd.js` → `gitops/bridge.py` → 기존 GitOps/Argo | 검증한 게시 파일·image digest·고정 target 설정으로 선언 commit·sync·검증. 기대 공개 HTTP 확인 후 전체 성공 |
 | 관측 | 담당 관측 소스 → 운영자 | 노드·워크로드·HTTP 관측. 범용 PromQL·집계 API를 제품에 추가하지 않음 |
 
@@ -31,7 +31,7 @@
 | 배포 | `POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | 202 접수 후 CI·CD·공개 HTTP 단계를 조회. 동일 source/target/digest와 고정 revision의 검증이 완료되어야 `succeeded`와 최상위 `url` 제공 |
 | profile | `GET /api/v1/profiles` | 등록 사양의 `id`, `label`, `provider`, `site`, `purposes`, `supported`, `blockers`. 자격·내부 경로 제외 |
 | 계획 | `POST /api/v1/plans`, `GET /api/v1/plans/{id}` | 계산·저장한 계획은 201 + Location. 실행 불가 계획도 `executable=false`·`blockers`로 표시 |
-| 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | `plan_id`만 받아 202 접수. 자원·guest·runtime을 별도 기록하고 DB는 현재 skipped |
+| 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | `plan_id`만 받아 202 접수. 자원·guest·runtime·선택적 Patroni DB·등록 결과를 별도로 기록 |
 
 목록은 `{items, next_marker}`, 상세는 자원 객체를 직접 반환한다. 비동기 접수는 화균 님의 `{resource_id, action:"create", status:"accepted", request_id}`와 `Location`, `Retry-After: 2`, `X-Request-ID`를 사용한다. 오류는 `{error:{code,message,request_id,retryable,outcome_unknown}}`다. JSON 필드의 세부 타입·허용 값·입력 한도는 OpenAPI를 따른다.
 

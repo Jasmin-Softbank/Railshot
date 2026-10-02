@@ -48,7 +48,7 @@ export async function createProductService({ service, directory, target, deployP
   }
   function resolveSelection(input) {
     if (!input.deployment_selection) return input;
-    if (input.app !== undefined || input.target_id !== undefined) throw invalid('환경 선택과 직접 대상 지정을 함께 사용할 수 없습니다.');
+    if (input.app !== undefined || input.target_id !== undefined || input.plan_id !== undefined) throw invalid('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
     const { environment, provider } = input.deployment_selection;
     const option = deploymentOptions().find((item) => item.environment === environment && item.provider === provider);
     if (!option) throw invalid('배포 환경과 인프라 종류를 확인하세요.');
@@ -74,10 +74,32 @@ export async function createProductService({ service, directory, target, deployP
   function validateInput(input) {
     if (!service || !targetId) throw unavailable();
     if (typeof input.app !== 'string' || !APP_NAME.test(input.app)) throw invalid('앱 이름이 잘못되었습니다.');
-    if (input.target_id !== targetId) throw invalid('등록된 배포 대상만 사용할 수 있습니다.');
+    if (typeof input.target_id !== 'string' || !TARGET_ID.test(input.target_id)) throw invalid('등록된 배포 대상 ID가 잘못되었습니다.');
+  }
+  function registeredEnvironment(state, id) {
+    if (typeof environmentAdapter?.deployPublished !== 'function' || typeof id !== 'string' || !TARGET_ID.test(id)) return null;
+    for (const operation of Object.values(state.operations).reverse()) {
+      const standalone = operation.kind === 'environments';
+      const environment = standalone ? operation : operation.kind === 'deployments' ? operation.environment : null;
+      const environmentId = standalone ? operation.id : operation.environment_id;
+      const plan = Object.hasOwn(state.plans, operation.plan_id || '') ? state.plans[operation.plan_id] : null;
+      if (environment?.status !== 'succeeded' || environment.deployment_supported !== true
+          || environment.runtime_target_id !== id || !environmentId || plan?.environment_id !== environmentId
+          || plan.private?.profile?.target?.target_id !== id || !plan.private.profile.deployment
+          || !APP_NAME.test(plan.public?.name || '') || (!standalone && operation.app !== plan.public.name)) continue;
+      return { environment_id: environmentId, applicationName: plan.public.name,
+        database_configuration: environment.database?.status === 'succeeded' };
+    }
+    return null;
+  }
+  // Restore only successful registrations; interrupted intents still occupy checkFree admission.
+  const restored = store.read();
+  for (const operation of Object.values(restored.operations)) {
+    const id = operation.kind === 'environments' ? operation.runtime_target_id : operation.environment?.runtime_target_id;
+    if (registeredEnvironment(restored, id)) service?.allowTarget?.(id);
   }
   function inputFingerprint(input) {
-    return digest({ app: input.app, target_id: input.target_id, type: input.source_type,
+    return digest({ app: input.app, target_id: input.target_id, type: input.source_type, ...(input.plan_id ? { plan_id: input.plan_id } : {}),
       ...(input.deployment_selection ? { selection: input.deployment_selection } : {}),
       ...(input.repository_url ? { repository_url: input.repository_url } : {
         files: input.files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort(([a], [b]) => a.localeCompare(b)),
@@ -93,17 +115,34 @@ export async function createProductService({ service, directory, target, deployP
         if (existing.fingerprint !== fingerprint) throw new ProductError(409, 'IDEMPOTENCY_CONFLICT', '같은 키로 다른 입력을 보낼 수 없습니다.');
         return { record: existing, replay: true };
       }
-      if (kind === 'deployments' && !cdAvailable) throw unavailable();
+      const selectedCdTarget = deployPublished?.targets?.[input.target_id];
+      const selectedCdAvailable = Boolean(deployPublished && (!deployPublished.targets || selectedCdTarget));
+      const savedEnvironment = registeredEnvironment(state, input.target_id);
+      const registered = !selectedCdAvailable && !input.plan_id && kind === 'deployments' ? savedEnvironment : null;
+      const admittedTarget = (service.targetIds || [targetId]).includes(input.target_id);
+      const plan = input.plan_id && Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
+      if (input.plan_id) {
+        if (kind !== 'deployments' || !plan || !environmentAdapter?.deployPublished) throw invalid('실행 가능한 환경 계획이 필요합니다.');
+        if (plan.environment_id) throw new ProductError(409, 'CONFLICT', '이미 실행에 사용된 계획입니다.');
+        if (plan.public.name !== input.app || plan.private?.profile?.target?.target_id !== input.target_id
+            || !plan.private.profile.deployment) throw invalid('계획의 앱·배포 대상과 일치해야 합니다.');
+        if (!admittedTarget && (plan.private.profile.create_per_request !== true || plan.public.runtime_target_id !== input.target_id
+            || typeof service.allowTarget !== 'function')) throw invalid('요청별 실행 대상이 승인된 계획이어야 합니다.');
+        await environmentAdapter.verifyPlan(plan);
+      }
+      if (!admittedTarget && !plan && !savedEnvironment) throw invalid('등록된 배포 대상만 사용할 수 있습니다.');
+      if (kind === 'deployments' && !input.plan_id && !selectedCdAvailable && !registered) throw unavailable();
       checkFree(state);
       checkCapacity(state);
-      if (kind === 'deployments' && cdTarget?.applicationName && input.app !== cdTarget.applicationName) throw invalid('등록된 배포 앱 이름과 일치하지 않습니다.');
+      const applicationName = selectedCdTarget?.applicationName || savedEnvironment?.applicationName;
+      if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid('등록된 배포 앱 이름과 일치하지 않습니다.');
       const source = input.files ? input : { ...input, ...await materialize(input.repository_url) };
       const files = validateFiles(source.files);
       const sourceBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.path) + Math.ceil(file.content.length / 3) * 4 + 128, 0);
       checkCapacity(state, sourceBytes);
       const id = randomUUID(), now = new Date().toISOString();
       await store.snapshot(id, files);
-      const record = { id, kind, app: input.app, target_id: targetId, status: 'queued', stage: 'ci',
+      const record = { id, kind, app: input.app, target_id: input.target_id, ...(plan ? { plan_id: input.plan_id, environment_id: `${id}.environment`, environment: { status: 'queued' } } : registered ? { environment_id: registered.environment_id } : {}), status: 'queued', stage: plan ? 'environment' : 'ci',
         ci: { run_id: null, state: 'queued', steps: [], publication_artifact_id: null, producer_attempt: null },
         cd: { state: 'not_started', revision: null, deployed: false },
         public_http: { state: 'not_run', verified_at: null, url: null }, url: null,
@@ -111,19 +150,25 @@ export async function createProductService({ service, directory, target, deployP
         source: source.source || null, source_bytes: sourceBytes, source_digest: digest(files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort()),
       };
       state.operations[id] = record;
+      if (plan) plan.environment_id = record.environment_id;
       if (key) state.keys[`${kind}:${key}`] = id;
-      return { record, input: { app: input.app, target_id: targetId, files, source: source.source } };
+      return { record, plan, input: { app: input.app, target_id: input.target_id, files, source: source.source } };
     });
   }
   async function submit(record, input) {
-    await update(record.id, { status: 'running' });
+    await update(record.id, { status: 'running', stage: 'ci' });
     try {
+      if (!(service.targetIds || [targetId]).includes(record.target_id)) {
+        const registered = registeredEnvironment(store.read(), record.target_id);
+        if (!registered || registered.applicationName !== record.app || typeof service.allowTarget !== 'function') throw unavailable();
+        service.allowTarget(record.target_id);
+      }
       const result = await service.deploy(input);
       const runId = String(result.run_id);
       if (!/^\d+$/.test(runId) || typeof result.run_id === 'number' && !Number.isSafeInteger(result.run_id)) throw new Error('Invalid upstream run id');
       await store.transaction((state) => {
         if (state.bindings[runId]) throw new Error('Duplicate upstream run id');
-        state.bindings[runId] = { operation_id: record.id, app: record.app, target_id: targetId, source_commit: result.source_commit || null };
+        state.bindings[runId] = { operation_id: record.id, app: record.app, target_id: record.target_id, source_commit: result.source_commit || null };
         Object.assign(state.operations[record.id], { legacy: result, actions_url: result.actions_url || null,
           source_commit: result.source_commit || null, ci: { ...record.ci, run_id: runId } });
       });
@@ -137,7 +182,7 @@ export async function createProductService({ service, directory, target, deployP
     const state = store.read(), binding = /^\d+$/.test(runId) && Object.hasOwn(state.bindings, runId) ? state.bindings[runId] : null;
     if (!binding) throw new ProductError(404, 'NOT_FOUND', '이 workspace에서 접수한 빌드를 찾을 수 없습니다.');
     let observed;
-    try { observed = await service.status(runId); }
+    try { observed = await service.status(runId, binding.target_id); }
     catch { throw new ProductError(502, 'UPSTREAM_FAILURE', 'CI 상태를 확인하지 못했습니다.', { retryable: true }); }
     if (observed.publication && (String(observed.publication.run_id) !== runId || observed.publication.target_id !== binding.target_id || observed.publication.app !== binding.app || binding.source_commit && observed.publication.source_commit !== binding.source_commit)) {
       throw new ProductError(502, 'UPSTREAM_FAILURE', '게시 결과와 접수 기록이 일치하지 않습니다.');
@@ -156,7 +201,8 @@ export async function createProductService({ service, directory, target, deployP
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
           await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
-          const result = await deployPublished({ deploymentId: record.id, app: record.app, targetId,
+          const deploy = record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
+          const result = await deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
             sourceCommit: build.source_commit, publication: build.publication, signal: abort.signal,
             onProgress: (progress) => update(record.id, { stage: progress.cd?.deployed ? 'http' : 'cd', cd: progress.cd, public_http: progress.public_http }) });
           const succeeded = result.cd?.deployed === true && typeof result.cd.revision === 'string' && result.cd.revision.length > 0 && result.public_http?.state === 'succeeded' && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
@@ -177,10 +223,24 @@ export async function createProductService({ service, directory, target, deployP
   return {
     deploymentOptions,
     targets() {
-      return targetId ? [{ id: targetId, label: target?.label || targetId, provider: target?.provider || null, environment: target?.environment || 'registered',
-        ...(cdTarget?.applicationName ? { application_name: cdTarget.applicationName, deployment_scope: 'registered_application' } : {}),
-        capabilities: { ci_submission: Boolean(service), application_deployment: Boolean(service && cdAvailable), database_configuration: false },
-        runtime: { status: 'unknown', observed_at: null }, blockers: cdAvailable ? [] : ['CD_ADAPTER_NOT_CONFIGURED'] }] : [];
+      const state = store.read();
+      const ids = new Set(service?.targetIds || (targetId ? [targetId] : []));
+      for (const operation of Object.values(state.operations)) {
+        const id = operation.kind === 'environments' ? operation.runtime_target_id : operation.environment?.runtime_target_id;
+        if (registeredEnvironment(state, id)) ids.add(id);
+      }
+      return [...ids].map((id) => {
+        const staticTarget = deployPublished?.targets?.[id];
+        const staticAvailable = Boolean(deployPublished && (!deployPublished.targets || staticTarget));
+        const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id);
+        const available = staticAvailable || Boolean(registered);
+        return { id, label: id === targetId ? target?.label || id : id,
+          provider: id === targetId ? target?.provider || null : null, environment: 'registered',
+          ...(registered?.applicationName ? { application_name: registered.applicationName, deployment_scope: 'registered_application' } : {}),
+          capabilities: { ci_submission: Boolean(service), application_deployment: available,
+            database_configuration: !staticAvailable && registered?.database_configuration === true },
+          runtime: { status: 'unknown', observed_at: null }, blockers: available ? [] : ['CD_ADAPTER_NOT_CONFIGURED'] };
+      });
     },
     async createBuild(input, materialize) {
       const reserved = await reserve('builds', input, null, materialize);
@@ -189,12 +249,23 @@ export async function createProductService({ service, directory, target, deployP
       return result;
     },
     getBuild: readBuild,
-    async legacyStatus(id) { if (!Object.hasOwn(store.read().bindings, id)) throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.'); return service.status(id); },
+    async legacyStatus(id) { if (!Object.hasOwn(store.read().bindings, id)) throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.'); return service.status(id, store.read().bindings[id].target_id); },
     async createDeployment(input, key, materialize) {
       input = resolveSelection(input);
       const reserved = await reserve('deployments', input, idempotencyKey(key), materialize);
       if (!reserved.replay) launch(async () => {
-        try { const result = await submit(reserved.record, reserved.input); await observe(reserved.record, String(result.run_id)); } catch { /* submit persists unknown */ }
+        try {
+          if (reserved.plan) {
+            await update(reserved.record.id, { status: 'running', stage: 'environment' });
+            const environment = await environmentAdapter.execute(reserved.plan, { id: reserved.record.environment_id,
+              onProgress: (value) => update(reserved.record.id, { environment: value }) });
+            await update(reserved.record.id, { environment });
+            if (environment.status !== 'succeeded' || environment.deployment_supported !== true || environment.runtime_target_id !== reserved.record.target_id) {
+              await update(reserved.record.id, { status: environment.status === 'succeeded' ? 'blocked' : environment.status,
+                error: environment.error || operationError('DEPLOYMENT_TARGET_NOT_REGISTERED', false) }); return;
+            }
+          }
+          const result = await submit(reserved.record, reserved.input); await observe(reserved.record, String(result.run_id)); } catch (error) { await update(reserved.record.id, { status: 'unknown', error: operationError('STACK_OUTCOME_UNKNOWN', true) }); }
       });
       return publicRecord(reserved.record);
     },

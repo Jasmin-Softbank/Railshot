@@ -47,6 +47,8 @@ class BridgeTest(unittest.TestCase):
                         'files': {name: base64.b64encode((directory / name).read_bytes()).decode() for name in bridge.FILES}}
         self.native = argo.native
         self.calls = []
+        self.active_deployment = 'deployment-1'
+        self.retained_jobs = []
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), '-c', 'core.hooksPath=/dev/null', *args],
@@ -64,8 +66,13 @@ class BridgeTest(unittest.TestCase):
         self.calls.append(['kubectl', *args])
         if args[0:2] == ('get', 'appproject'):
             return argo.projects([self.fixture.review])['items'][0]
-        review = argo.load_review(self.root / 'state/deployment-1/review')
-        return self.fixture.healthy(review)
+        review = argo.load_review(self.root / 'state' / self.active_deployment / 'review')
+        live = self.fixture.healthy(review)
+        for job in self.retained_jobs:
+            live['status']['resources'].append({'group': 'batch', 'kind': 'Job', 'namespace': job['metadata']['namespace'],
+                'name': job['metadata']['name'], 'status': 'OutOfSync', 'requiresPruning': True, 'health': {'status': 'Healthy'}})
+            live['status']['summary']['images'].append(job['spec']['template']['spec']['containers'][0]['image'])
+        return live
 
     def test_apply_pins_git_argo_and_public_receipt_then_replay_only_observes(self):
         verified = {'state': 'succeeded', 'verified_at': '2026-10-02T12:00:00+00:00', 'url': 'https://app.example/health'}
@@ -107,6 +114,43 @@ class BridgeTest(unittest.TestCase):
         with patch('argo.native') as native, self.assertRaisesRegex(ValueError, 'config changed'):
             bridge.execute(changed, self.request)
         native.assert_not_called()
+
+    def test_database_migration_redeploys_new_images_and_commands_without_replaying_old_jobs(self):
+        self.fixture.prepare(database=True)
+        self.config['targets']['k3s-aws']['target']['database'] = self.fixture.review['receipt']['database']
+        directory = self.root / 'published'
+        publication = json.loads((directory / 'handoff.json').read_bytes())
+        publication.update(images=json.loads((directory / 'images.json').read_bytes()), artifact_id=3)
+        self.request.update(publication=publication, files={name: base64.b64encode((directory / name).read_bytes()).decode()
+                                                           for name in bridge.FILES})
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value={'state': 'unverified', 'verified_at': None, 'url': None}):
+            result = bridge.execute(self.config, self.request)
+            self.assertEqual(result['cd']['migration']['state'], 'succeeded')
+            self.calls.clear()
+            self.assertTrue(bridge.execute(self.config, self.request)['cd']['deployed'])
+            self.assertFalse(any('push' in args or 'patch' in args or 'apply' in args for args in self.calls))
+            for index, command in enumerate((['python', 'migrate.py'], ['python', 'next.py']), start=2):
+                previous = argo.load_review(self.root / 'state' / self.active_deployment / 'review')['workload']['items'][-1]
+                self.retained_jobs.append(previous)
+                self.fixture.prepare(database=True, image_digest='f' * 64, migration_command=command)
+                publication = json.loads((directory / 'handoff.json').read_bytes())
+                publication.update(images=json.loads((directory / 'images.json').read_bytes()), artifact_id=3)
+                self.active_deployment = 'deployment-' + str(index)
+                self.request.update(deployment_id=self.active_deployment, publication=publication,
+                    files={name: base64.b64encode((directory / name).read_bytes()).decode() for name in bridge.FILES})
+                self.calls.clear()
+                result = bridge.execute(self.config, self.request)
+                self.assertTrue(result['cd']['deployed'])
+                self.assertEqual(result['cd']['migration']['state'], 'succeeded')
+                self.assertNotIn(result['cd']['migration']['name'], [job['metadata']['name'] for job in self.retained_jobs])
+                self.assertTrue(any('push' in args for args in self.calls))
+                self.assertFalse(any('delete' in args or '--force' in args for args in self.calls))
+                self.assertEqual(self.git('status', '--porcelain'), '')
+                revision = result['cd']['revision']; self.calls.clear()
+                repeated = bridge.execute(self.config, self.request)
+                self.assertEqual(repeated['cd']['revision'], revision); self.assertTrue(repeated['cd']['deployed'])
+                self.assertFalse(any('push' in args or 'patch' in args or 'apply' in args for args in self.calls))
 
     def test_foreign_git_workload_is_not_overwritten_or_pushed(self):
         directory = self.repo / 'targets/k3s-aws/demo'; directory.mkdir(parents=True)
