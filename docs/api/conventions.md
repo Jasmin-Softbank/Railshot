@@ -16,7 +16,7 @@
 
 위 구현의 HTTP 형식을 신규 제품 API에 적용한다. Node 서비스를 FastAPI로 바꾸거나 Python 계층 구조·Protocol을 그대로 복제할 필요는 없다. 기존 Ansible·OpenStack 내부 계약은 담당 구현을 유지하고 제품 API 경계에서 변환한다.
 
-제품은 **사용자 계정·로그인·팀원 allowlist 없는 공유 workspace**다. 모든 사용자가 소스를 업로드하고, 서버에 등록한 대상의 지원 범위에서 빌드·배포를 요청한다. 사용자별 소유권이나 user/auth 도메인을 추가하지 않는다. 운영자만 target·profile·실행 도구·자격을 설정하며, 공개 입력에는 이 등록 항목의 ID와 제품 입력만 받는다. 내부 서비스 인증과 Host/Origin 검사는 사용자 로그인과 별개다.
+제품은 **사용자 계정·로그인·팀원 allowlist 없는 공유 workspace**다. 모든 사용자가 소스를 업로드하고, 서버에 등록한 대상의 지원 범위에서 빌드·배포를 요청한다. user/auth 도메인은 추가하지 않으며, 해커톤 대시보드의 기록과 설정은 익명 쿠키 세션으로 분리한다. 운영자 지정 공용 대상은 공유한다. 운영자만 target·profile·실행 도구·자격을 설정하며, 공개 입력에는 이 등록 항목의 ID와 제품 입력만 받는다. 내부 서비스 인증과 Host/Origin 검사는 사용자 로그인과 별개다.
 
 ## 2. REST 원칙·HTTP 표준·로컬 이름 규칙
 
@@ -35,7 +35,7 @@ HTTP 메서드·상태는 [RFC 9110 §9·§15](https://www.rfc-editor.org/rfc/rf
 - 제품 상태는 소문자로 정의한다. 공급자 원본 `ACTIVE`, `BUILD` 등을 바꾸거나 제품 성공 상태로 치환하지 않는다. 시간은 UTC 문자열(`2026-10-02T09:00:00Z`)로 반환한다.
 - 일반 본문은 `application/json`, 소스 업로드는 기존 `multipart/form-data`를 사용한다. ZIP·파일을 JSON base64로 다시 감싸지 않는다.
 - 요청의 알 수 없는 필드, 중복 단일 필드, 알 수 없는 query와 중복 query는 `422 INVALID_INPUT`이다. 스키마에서 반복을 선언한 multipart `files`만 예외다. JSON의 잘못된 문법은 `400 INVALID_INPUT`, 지원하지 않는 Content-Type은 `415 UNSUPPORTED_MEDIA_TYPE`, 업로드 한도 초과는 `413 PAYLOAD_TOO_LARGE`로 정한다. 마지막 세 매핑은 제품 API에 추가하는 규칙이다.
-- CI의 기존 tenant 값, Provider account/project, target·profile·자격은 서버 설정으로 결정한다. 요청 본문으로 이 값을 바꾸거나 임의 Provider URL·명령·자격·로컬 경로를 지정하지 못한다. 이름·파일 경로·업로드 크기의 기존 검증 한도를 재사용한다.
+- CI의 기존 tenant 값, Provider account/project, target·profile·자격은 서버 설정으로 결정한다. 실행 요청 본문으로 이 값을 바꾸거나 임의 Provider URL·명령·자격·로컬 경로를 지정하지 못한다. 별도 connections 자원은 OpenStack 콘솔 링크·접속 ID·암호화할 비밀번호만 보관하며 실행 설정이나 서버의 외부 접속에 사용하지 않는다. 이름·파일 경로·업로드 크기의 기존 검증 한도를 재사용한다.
 
 각 요청은 대상 자원·필요 입력을 스스로 제공한다. 이전 화면에서 선택한 target을 서버의 숨은 대화 상태로 추측하지 않는다. 배포·계획·job 기록을 자원으로 영속 저장하는 것은 이 요청 독립성과 구분한다. 제품 API의 동적 응답은 [RFC 9111의 no-store](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.5)에 따라 `Cache-Control: no-store`로 캐시 정책을 명시한다. 공개 정적 Dashboard 자산의 캐시는 별도 배치 규약이다.
 
@@ -91,7 +91,7 @@ Content-Type: application/json
 | `Idempotency-Key` | 클라이언트가 동일한 생성 의도를 재접수할 때 재사용. 인증·자원 ID·HTTP 추적 ID를 대신하지 않음 |
 | 기존 Ansible `request_id` | 내부 API의 영속 job 식별자/중복 방지 값. 제품 HTTP `request_id`와 의미가 다르므로 제품 기록의 `ansible_job_id`로 매핑 |
 
-제품 `POST /api/v1/deployments`와 `POST /api/v1/environments`에는 `Idempotency-Key`를 요구한다. 1–128자의 영문·숫자·`.`·`_`·`-`만 허용하고 공유 workspace의 자원 종류별로 관리한다. 같은 키·같은 정규화 입력이면 같은 자원을, 다른 입력이면 `409 IDEMPOTENCY_CONFLICT`를 반환한다. 기존 자원이 queued/running이면 같은 `resource_id`의 202 접수 형식, succeeded/failed/blocked/unknown이면 같은 자원 객체의 200 형식과 Location을 반환한다. unknown을 다시 접수하거나 실행하지 않으며 신규 작업 한도는 계속 점유한다. HTTP `request_id`는 매번 새 값이다.
+제품 `POST /api/v1/deployments`와 `POST /api/v1/environments`에는 `Idempotency-Key`를 요구한다. 1–128자의 영문·숫자·`.`·`_`·`-`만 허용하고 익명 세션과 자원 종류별로 관리한다. 같은 키·같은 정규화 입력이면 같은 자원을, 다른 입력이면 `409 IDEMPOTENCY_CONFLICT`를 반환한다. 기존 자원이 queued/running이면 같은 `resource_id`의 202 접수 형식, succeeded/failed/blocked/unknown이면 같은 자원 객체의 200 형식과 Location을 반환한다. unknown을 다시 접수하거나 실행하지 않으며 신규 작업 한도는 계속 점유한다. HTTP `request_id`는 매번 새 값이다.
 
 재시작 후에도 키·소스 snapshot·입력 digest·외부 실행 식별자를 복구해야 한다. 원문 multipart boundary/ZIP 시각을 입력 의미로 비교하지 않는다. TTL이 있는 구현은 보존 기간과 만료 후 동작을 계약에 명시하고 미완료/unknown 기록을 자동 만료시키지 않는다.
 

@@ -38,6 +38,7 @@ async function serving(access, check) {
   };
   // Isolate access checks from worker polling/storage; product.test.js verifies real run binding.
   const product = {
+    dashboard: { session: () => ({ id: 'access-test', expires_at: '2099-01-01T00:00:00Z' }) },
     createBuild: async (input, loadSource) => service.deploy(input.files ? input : { ...input, ...await loadSource(input.repository_url) }),
     legacyStatus: service.status,
   };

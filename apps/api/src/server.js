@@ -11,6 +11,7 @@ import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
 import { createProductService, ProductError, idempotencyKey } from './product.js';
 import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
 import { createEnvironmentAdapter, EnvironmentError } from './environments.js';
+import { DashboardError, cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
 const assets = new Map([
@@ -130,10 +131,10 @@ function page(items, parameters) {
 function apiError(response, error, requestId, versioned) {
   const status = error instanceof EnvironmentError && error.status === 400 ? 422 : Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
   const codes = { 400: 'INVALID_INPUT', 401: 'UNAUTHENTICATED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 405: 'METHOD_NOT_ALLOWED', 409: 'CONFLICT', 413: 'PAYLOAD_TOO_LARGE', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'INVALID_INPUT', 502: 'UPSTREAM_FAILURE', 503: 'UPSTREAM_UNAVAILABLE' };
-  const message = error instanceof ServiceError || error instanceof ProductError ? error.message : '요청을 처리하지 못했습니다.';
+  const message = error instanceof ServiceError || error instanceof ProductError || error instanceof DashboardError ? error.message : '요청을 처리하지 못했습니다.';
   const headers = { 'X-Request-ID': requestId, ...(error.allow ? { Allow: error.allow } : {}), ...(error.retryable ? { 'Retry-After': '2' } : {}) };
   const code = error instanceof EnvironmentError && error.status === 400 ? 'INVALID_INPUT'
-    : (error instanceof ProductError || error instanceof EnvironmentError) && error.code || codes[status] || 'INTERNAL_ERROR';
+    : (error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError) && error.code || codes[status] || 'INTERNAL_ERROR';
   json(response, status, versioned ? { error: { code, message,
     request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown) } } : { error: message }, headers);
 }
@@ -159,7 +160,6 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
     if (product) return product;
-    if (!service?.targetId && !environmentAdapter && !process.env.RAILSHOT_PROFILES_FILE) return null;
     let cd = deployPublished;
     if (!cd && service && process.env.RAILSHOT_CD_CONFIG) {
       const { createCdAdapter } = await import('./cd.js');
@@ -185,17 +185,58 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       versioned = url.pathname.startsWith('/api/v1');
       if (request.method === 'GET' && url.pathname === '/healthz') {
         // Liveness remains local; readiness also requires usable durable state and operator config.
-        const configured = Boolean(await productReady.catch(() => null));
+        const configured = Boolean(await productReady.catch(() => null))
+          && Boolean(product || service?.targetId || environmentAdapter || process.env.RAILSHOT_PROFILES_FILE);
         json(response, 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
       if (url.pathname.startsWith('/api/')) {
+        if (request.headers['sec-fetch-site'] === 'cross-site') throw new ServiceError('다른 사이트에서 보낸 요청은 허용되지 않습니다.', 403);
         if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);
         }
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
+        // Public visitors are anonymous cookie sessions. Existing localhost maintenance clients
+        // without a cookie retain their private maintenance channel and legacy contracts.
+        const dashboardRoute = /^\/api\/v1\/(sessions|preferences|connections)(?:\/|$)/.test(url.pathname);
+        const scoped = access.remote || access.publicDemo || dashboardRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
+        const session = scoped ? products.dashboard.session(cookieToken(request.headers.cookie)) : null;
+        const sessionId = session?.id ?? null;
+        if (session?.token) response.setHeader('Set-Cookie', sessionCookie(session.token, access.remote));
+        response.setHeader('Vary', 'Cookie');
         if (versioned) {
+          if (dashboardRoute) {
+            const route = /^\/api\/v1\/(sessions|preferences|connections)(?:\/([a-f0-9-]{36}))?$/.exec(url.pathname);
+            if (!route) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+            const [, kind, id] = route;
+            if (id && kind !== 'connections') throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+            const methods = kind === 'preferences' ? ['GET', 'PUT'] : id ? ['GET', 'PUT', 'DELETE'] : ['GET', 'POST'];
+            if (!methods.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = methods.join(', '); throw error; }
+            if ([...url.searchParams].length && !(kind === 'connections' && !id && request.method === 'GET')) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (kind === 'sessions' && !id && ['GET', 'POST'].includes(request.method)) {
+              json(response, request.method === 'POST' && session.token ? 201 : 200, { expires_at: session.expires_at }, { 'X-Request-ID': requestId }); return;
+            }
+            if (kind === 'preferences' && !id && ['GET', 'PUT'].includes(request.method)) {
+              json(response, 200, products.dashboard.preferences(sessionId, request.method === 'PUT' ? await jsonInput(request) : undefined)); return;
+            }
+            if (kind === 'connections') {
+              if (!id && request.method === 'GET') { json(response, 200, page(products.dashboard.connections(sessionId), url.searchParams)); return; }
+              if (id && request.method === 'GET') {
+                const connection = products.dashboard.connections(sessionId).find((row) => row.id === id);
+                if (!connection) throw new DashboardError('이 세션에서 자원을 찾을 수 없습니다.', 404, 'NOT_FOUND');
+                json(response, 200, connection); return;
+              }
+              if (!id && request.method === 'POST' || id && request.method === 'PUT') {
+                const connection = products.dashboard.saveConnection(sessionId, id, await jsonInput(request));
+                json(response, id ? 200 : 201, connection, id ? {} : { Location: `/api/v1/connections/${connection.id}` }); return;
+              }
+              if (id && request.method === 'DELETE') {
+                products.dashboard.deleteConnection(sessionId, id); response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return;
+              }
+            }
+            throw new ServiceError('지원하지 않는 메서드입니다.', 405);
+          }
           if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
@@ -203,43 +244,44 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           const routes = /^(?:\/api\/v1\/(targets|builds|deployments|profiles|plans|environments))(?:\/([A-Za-z0-9._-]+))?$/.exec(url.pathname);
           if (!routes) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
           const [, kind, id] = routes;
-          const methods = id ? ['builds', 'deployments', 'plans', 'environments'].includes(kind) ? ['GET'] : [] : ['targets', 'profiles'].includes(kind) ? ['GET'] : ['POST'];
+          const methods = id ? ['builds', 'deployments', 'plans', 'environments'].includes(kind) ? ['GET'] : [] : ['targets', 'profiles'].includes(kind) ? ['GET'] : ['GET', 'POST'];
           if (!methods.length) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
           if (!methods.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = methods.join(', '); throw error; }
           if (['targets', 'profiles'].includes(kind)) {
-            json(response, 200, page(products ? await products[kind]() : [], url.searchParams)); return;
+            json(response, 200, page(products ? await products[kind](sessionId) : [], url.searchParams)); return;
           }
+          if (!id && request.method === 'GET') { json(response, 200, page(products.list(kind, sessionId), url.searchParams)); return; }
           if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
           if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
           if (request.method === 'GET') {
             const getter = { builds: 'getBuild', deployments: 'getDeployment', plans: 'getPlan', environments: 'getEnvironment' }[kind];
-            json(response, 200, await products[getter](id)); return;
+            json(response, 200, await products[getter](id, sessionId)); return;
           }
           if (kind === 'builds') {
-            const result = await products.createBuild(await uploadedSource(request, true), sourceLoader);
+            const result = await products.createBuild(await uploadedSource(request, true), sourceLoader, sessionId);
             accepted(response, kind, { id: String(result.run_id), status: 'queued' }, requestId); return;
           }
           if (kind === 'deployments') {
             const key = requestKey(request);
-            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true, true), key, sourceLoader), requestId); return;
+            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true, true), key, sourceLoader, sessionId), requestId); return;
           }
           if (kind === 'plans') {
-            const plan = await products.createPlan(await jsonInput(request));
+            const plan = await products.createPlan(await jsonInput(request), sessionId);
             json(response, 201, plan, { Location: `/api/v1/plans/${plan.id}` }); return;
           }
           const key = requestKey(request);
-          accepted(response, kind, await products.createEnvironment(await jsonInput(request), key), requestId); return;
+          accepted(response, kind, await products.createEnvironment(await jsonInput(request), key, sessionId), requestId); return;
         }
         if (!service) throw new ServiceError('CI 실행 기능이 설정되지 않았습니다.', 503);
         if (request.method === 'POST' && url.pathname === '/api/deploy') {
           if ((request.headers['x-railshot-request'] ?? request.headers['x-jasmin-request']) !== 'deploy') throw new ServiceError('요청 헤더가 필요합니다.', 403);
           const input = await uploadedSource(request);
           input.target_id ??= service.targetId;
-          const result = products ? await products.createBuild(input, sourceLoader) : await service.deploy(input.files ? input : { ...input, ...await sourceLoader(input.repository_url) });
+          const result = products ? await products.createBuild(input, sourceLoader, sessionId) : await service.deploy(input.files ? input : { ...input, ...await sourceLoader(input.repository_url) });
           json(response, 202, result); return;
         }
         const match = request.method === 'GET' && /^\/api\/runs\/(\d+)$/.exec(url.pathname);
-        if (match) { json(response, 200, products ? await products.legacyStatus(match[1]) : await service.status(match[1])); return; }
+        if (match) { json(response, 200, products ? await products.legacyStatus(match[1], sessionId) : await service.status(match[1])); return; }
         throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
       }
       const asset = request.method === 'GET' && assets.get(url.pathname);

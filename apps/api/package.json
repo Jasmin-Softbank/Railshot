@@ -11,7 +11,7 @@
     "mcp": "node src/mcp.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.2.0",

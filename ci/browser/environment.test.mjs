@@ -27,6 +27,12 @@ test('original cloud card binds a DB plan, blocks invalid and unknown execution,
     const body = [];
     for await (const chunk of request) body.push(chunk);
     const bytes = Buffer.concat(body);
+    if (path === '/api/v1/sessions') return respond(response, 200, { expires_at: '2099-01-01T00:00:00Z' });
+    if (path === '/api/v1/preferences') return respond(response, 200, { view: 'deploy', environment: 'cloud', provider: '' });
+    if (path === '/api/v1/connections') return respond(response, 200, { items: [] });
+    if (path === '/api/v1/deployments' && request.method === 'GET') return respond(response, 200, { items: deployments.map(({ input }, index) => ({
+      id: `execution-${index + 1}`, app: input.app, status: outcomes.get(`execution-${index + 1}`), target_id: input.target_id,
+    })).reverse() });
     if (path === '/api/v1/targets') return respond(response, 200, { items: [{ id: 'ready-runtime', label: 'Existing runtime',
       capabilities: { ci_submission: true, application_deployment: true } }] });
     if (path === '/api/v1/profiles') return respond(response, 200, { items: activeProfiles });
