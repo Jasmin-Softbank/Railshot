@@ -184,15 +184,35 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(verdict["error"]["retry_policy"], "after_reconcile")
         self.assertFalse(verdict["release_eligible"])
 
-    def test_quality_prevents_build(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(gate, "l0", return_value=([], [])), \
-                patch.object(gate, "l1", return_value=([], {"services": []})), \
-                patch.object(gate, "require_ci_network"), \
-                patch.object(gate, "run_quality", return_value=quality.blocked("NO_TESTS")), patch.object(gate, "l2") as build:
-            verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.ORDER))
-        build.assert_not_called()
-        self.assertEqual([r["layer"] for r in verdict["layers"]], ["L0", "L1", "Q"])
-        self.assertEqual(verdict["layers"][-1]["blocked"], "NO_TESTS")
+    def test_quality_advisories_continue_but_runtime_and_boundary_failures_stop(self):
+        missing = quality.blocked("NO_TESTS")
+        failed = quality.quality_failure("assert actual == expected", 204)
+        cleanup = quality.blocked("QUALITY_CLEANUP_FAILED", error=gate.OperationError(
+            "GATE_EXECUTION_FAILED", component="gate", phase="Q.cleanup", outcome="UNKNOWN"))
+        for result, build_errors, runtime_errors, expected in (
+                (missing, [], [], "PASS"), (failed, [], [], "PASS"),
+                (missing, ["COPY failed"], [], "FAIL"), (missing, [], ["health returned 500"], "FAIL"),
+                (cleanup, [], [], "UNKNOWN")):
+            with self.subTest(expected=expected, result=result), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(gate, "l0", return_value=([], [])), \
+                    patch.object(gate, "l1", return_value=([], {"services": []})), \
+                    patch.object(gate, "require_ci_network"), patch.object(gate, "docker_ok", return_value=True), \
+                    patch.object(gate, "run_quality", return_value=result), \
+                    patch.object(gate, "l2", return_value=(build_errors, {})) as build, \
+                    patch.object(gate, "l4", return_value=[]), patch.object(gate, "l3", return_value=runtime_errors) as runtime:
+                verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.ORDER))
+            self.assertEqual(verdict["status"], expected)
+            self.assertEqual(verdict["release_eligible"], expected == "PASS")
+            q = verdict["layers"][2]
+            self.assertFalse(q["ok"])
+            self.assertEqual(q["advisory"], expected != "UNKNOWN")
+            self.assertEqual(build.call_count, int(expected != "UNKNOWN"))
+            self.assertEqual(runtime.call_count, int(not build_errors and expected != "UNKNOWN"))
+            if build_errors:
+                self.assertEqual(verdict["failure"]["layer"], "L2")
+                self.assertIsNone(loop.decide(verdict, None, set(), "source"))
+            if expected == "PASS":
+                self.assertEqual(loop.decide(verdict, None, set()), "passed")
 
     def test_missing_manifest_or_lock_never_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -238,12 +258,12 @@ class PipelineTest(unittest.TestCase):
         verdict["failure"]["class"] = "F2"
         self.assertEqual(loop.decide(verdict, None, {"q"}), "stop: same failure twice")
 
-    def test_approved_source_scope_only_repairs_actual_quality_failures(self):
+    def test_quality_never_triggers_source_repair(self):
         failure = {"layer": "Q", "class": "QUALITY", "signature": "lint-1", "source_repair_eligible": True}
         verdict = {"ok": False, "failure": failure, "layers": [{"layer": "Q", "ok": False}]}
         self.assertIn("reviewed application", loop.decide(verdict, None, set()))
-        self.assertIsNone(loop.decide(verdict, None, set(), "source"))
-        self.assertEqual(loop.decide(verdict, None, {"lint-1"}, "source"), "stop: same failure twice")
+        self.assertIn("reviewed application", loop.decide(verdict, None, set(), "source"))
+        self.assertIn("reviewed application", loop.decide(verdict, None, {"lint-1"}, "source"))
         verdict["layers"][0]["blocked"] = "MISSING_LOCK"
         self.assertIn("blocked", loop.decide(verdict, None, set(), "source"))
 

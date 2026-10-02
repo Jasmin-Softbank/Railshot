@@ -36,7 +36,7 @@ from run_agent import path_ok, writable_rules, source_change_allowed  # noqa: E4
 from quality import run_quality  # noqa: E402
 from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
-from execution import APP_UID, GATE_ORDER, docker_security, docker_command  # noqa: E402
+from execution import APP_UID, GATE_ORDER, docker_security, docker_command, quality_advisory  # noqa: E402
 from progress import Progress  # noqa: E402
 
 ORDER = GATE_ORDER
@@ -799,6 +799,10 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
             else:
                 result["blocked"] = error.code
         results.append(observe_layer(result, observation_id, attempt_id, error))
+        if layer == "Q":
+            results[-1]["advisory"] = True
+            results[-1]["advisory"] = quality_advisory(results[-1])
+            results[-1]["event"]["attributes"]["advisory"] = results[-1]["advisory"]
         try:
             progress.complete(results[-1])
         except (OperationError, KeyError) as exc:
@@ -806,6 +810,8 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
             results[-1] = observe_layer({'layer': layer, 'ok': False, 'blocked': observation_error.code},
                                         observation_id, attempt_id, observation_error)
             break
+        if quality_advisory(results[-1]):
+            continue
         if results[-1].get("blocked"):
             break
         if results[-1].get("errors"):
@@ -839,10 +845,11 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
             "GATE_EXECUTION_FAILED", component="gate", phase="EVIDENCE", outcome="UNKNOWN",
             retry_policy="after_reconcile", side_effect="unknown", cause=exc)
         results.append(observe_layer({"layer": "EVIDENCE", "ok": False, "blocked": error.code}, observation_id, attempt_id, error))
-    checks_ok = failure is None and all(r["ok"] for r in results) and len(results) == len(layers)
+    required = [r for r in results if not quality_advisory(r)]
+    checks_ok = failure is None and all(r["ok"] for r in required) and len(results) == len(layers)
     ok = checks_ok and tuple(layers) == ORDER
-    status = ("PASS" if ok else "INCOMPLETE" if checks_ok else "UNKNOWN" if any(r["outcome"] == "UNKNOWN" for r in results)
-              else "BLOCKED" if any(r["outcome"] == "BLOCKED" for r in results) else "FAIL")
+    status = ("PASS" if ok else "INCOMPLETE" if checks_ok else "UNKNOWN" if any(r["outcome"] == "UNKNOWN" for r in required)
+              else "BLOCKED" if any(r["outcome"] == "BLOCKED" for r in required) else "FAIL")
     verdict = {"ok": ok, "release_eligible": ok, "checks_ok": checks_ok, "status": status, "layers": results, "failure": failure,
                "source_sha256": after, "images": images, "image_ids": image_ids, "repair_scope": repair_scope, "selected_root": selected_root, "app_id": app_id}
     return finish_verdict(verdict, run, observation_id, attempt_id)
