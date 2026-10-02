@@ -99,14 +99,16 @@ class PlatformTests(unittest.TestCase):
                                  ({namespace: 'railshot-build'}, False), ({namespace: 'tenant-demo'}, False)]:
             with self.subTest(labels=labels):
                 self.assertEqual(denied(labels), expected)
-        # This exact document passed AWS ValidatePolicy and 57 IAM simulations.
+        # These exact documents passed AWS ValidatePolicy on 2026-10-03 (KST).
+        # SSM context/target/document and edge-read simulations were refreshed;
+        # the earlier 57-check receipt applies to the prior policy bytes only.
         # Changing privileges requires a new policy review, not an unbound fixture.
         policy = (ROOT / 'infrastructure/terraform/control/product-executor-policy.json').read_bytes()
         self.assertEqual(hashlib.sha256(policy).hexdigest(),
-                         '4776362c0f3b6cf5c9b453490906660a08972933bcbe2689858fa6079079e7a2')
+                         '0ab96416ae2537a339b5f2fbe7a3d1331b9f7063ca56596c53dedcf66602f814')
         edge_policy = (ROOT / 'infrastructure/terraform/control/product-edge-policy.json').read_bytes()
         self.assertEqual(hashlib.sha256(edge_policy).hexdigest(),
-                         '07048d681945f14f0948b6f30c475e41780eba6fbfd3ba8440ab15035989851a')
+                         '2b7a9b9a1586a86553648e74f0e22fb3f1430f54b2a2f0b2e007fb2821b84606')
         self.assertLessEqual(len(json.dumps(json.loads(edge_policy), separators=(',', ':'))), 6144)
 
     @unittest.skipUnless(os.environ.get("RAILSHOT_ARGO_SCHEMA_MANIFEST"),

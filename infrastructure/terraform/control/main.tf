@@ -176,7 +176,7 @@ resource "aws_iam_role_policy" "registered_runtimes" {
       Resource = [for id in var.registered_runtime_instance_ids : "arn:aws:ec2:${var.region}:${var.account_id}:instance/${id}"]
       Condition = {
         StringEquals = { "aws:RequestedRegion" = var.region }
-        Bool         = { "ssm:SessionDocumentAccessCheck" = "true" }
+        BoolIfExists = { "ssm:SessionDocumentAccessCheck" = "true" }
       }
     }]
   })

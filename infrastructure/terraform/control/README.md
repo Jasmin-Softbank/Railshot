@@ -67,3 +67,5 @@ terraform -chdir=infrastructure/terraform/control plan -input=false \
 `registered_runtime_instance_ids`는 앱 등록에 인계된 기존 runtime EC2 ID 목록이다. 기본값은 빈 목록이며 `enable_product_executor=true`일 때만 이 목록에 SSM StartSession 권한을 부여한다. 기존 노드에 `ProjectOwner` 태그를 덧씌워 신규 생성 자원으로 취급하지 않는다. Session document 권한은 기존 고정 port-forwarding 문서 정책을 재사용하며 SSH host key와 전용 사용자 검증을 유지한다.
 
 2026-10-03 운영 점검에서 API의 IMDSv2 자격 조회가 실패했고 실행자 opt-in이 적용되지 않았음을 확인했다. metadata 사전 검사에서는 `crictl inspectp` 옵션을 Pod ID 앞에 전달해야 했다. 수정 뒤 Argo·dashboard·CoreDNS·local-path의 실제 Cilium policy drop을 확인했다. 이 사전 검사만으로 IAM 활성화 또는 앱 E2E 완료를 주장하지 않는다.
+
+2026-10-03 실제 API 역할로 SSM 연결과 AWS edge 무변경 plan을 확인했다. SSM document 조건은 AWS 공식 예시의 `BoolIfExists`를 사용한다. `Bool`은 EC2 resource 평가에 키가 없는 요청을 거부했다. AWS provider가 사용하는 `DescribeListenerAttributes` 읽기도 추가했다. 변경 정책은 Access Analyzer findings 0, 권한 허용·거부 시뮬레이션 12개를 통과했다. 기존 VM·문서·리전 범위는 그대로다.

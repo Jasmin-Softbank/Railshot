@@ -94,7 +94,7 @@ run "enabled_executor_grants_exact_instances_and_document_check" {
         ]
         Condition = {
           StringEquals = { "aws:RequestedRegion" = "ap-northeast-2" }
-          Bool         = { "ssm:SessionDocumentAccessCheck" = "true" }
+          BoolIfExists = { "ssm:SessionDocumentAccessCheck" = "true" }
         }
       }]
     }
@@ -112,6 +112,20 @@ run "enabled_executor_grants_exact_instances_and_document_check" {
         }
     }]
     error_message = "The executor's document grant must remain the fixed port-forwarding document in the registered region."
+  }
+  assert {
+    condition = length([for statement in jsondecode(aws_iam_role_policy.product_executor[0].policy).Statement : statement
+      if try(statement.Sid == "StartForwardingOnOwnedInstances" &&
+      statement.Condition.BoolIfExists["ssm:SessionDocumentAccessCheck"] == "true" && !contains(keys(statement.Condition), "Bool"), false)
+    ]) == 1
+    error_message = "Owned-instance forwarding must tolerate absent document-check context while rejecting an explicit false value."
+  }
+  assert {
+    condition = length([for statement in jsondecode(aws_iam_policy.product_edge[0].policy).Statement : statement
+      if try(statement.Sid == "ReadEdgeRegion" && contains(statement.Action, "elasticloadbalancing:DescribeListenerAttributes") &&
+      statement.Condition.StringEquals["aws:RequestedRegion"] == "ap-northeast-2", false)
+    ]) == 1
+    error_message = "The registered-region edge read grant must support the provider's listener-attribute refresh."
   }
 }
 
