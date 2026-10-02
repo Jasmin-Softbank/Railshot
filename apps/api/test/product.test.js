@@ -869,14 +869,14 @@ test('HTTP target observations authorize IDs before collecting and need no deplo
   assert.equal(method.status, 405); assert.equal(method.headers.get('allow'), 'GET'); assert.equal(calls.length, 3);
 });
 
-async function applicationFixture(t, { registrationStatus = 'succeeded', publicationChange = {} } = {}) {
+async function applicationFixture(t, { registrationStatus = 'succeeded', publicationChange = {}, openstackIngress } = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'railshot-product-apps-')));
   t.after(() => rm(home, { recursive: true, force: true }));
   const configPath = join(home, 'environments.json');
   await writeFile(configPath, JSON.stringify({ version: 1, state_dir: join(home, 'registrations'), environments: {
     'runtime-aws': { provider: 'aws', tenant: 'team', source_repository: 'example/apps', ingress: { edge_config_file: '/private/aws-edge.json', dns_config_file: '/private/dns.json' } },
     'runtime-gcp': { provider: 'gcp', tenant: 'team', source_repository: 'example/apps', ingress: { edge_config_file: '/private/gcp-edge.json', dns_config_file: '/private/dns.json' } },
-    'runtime-openstack': { provider: 'openstack', tenant: 'team', source_repository: 'example/apps' },
+    'runtime-openstack': { provider: 'openstack', tenant: 'team', source_repository: 'example/apps', ingress: openstackIngress },
   } }), { mode: 0o600 });
   const registrations = [], submissions = [], deliveries = [], runs = new Map(), allowed = [];
   const adapter = await createApplicationAdapter({ configPath, ciIdentity: { tenant: 'team', sourceRepository: 'example/apps' }, loadPublished: async () => assert.fail('CD stub consumes the bound publication'),
@@ -969,6 +969,20 @@ test('application names are session-owned while separate providers receive separ
     { status: 409, code: 'CAPABILITY_UNAVAILABLE' });
   assert.equal(new Set(f.submissions.map((row) => row.target_id)).size, 2);
   assert.deepEqual(f.registrations.map((row) => row.environment_id), ['runtime-aws', 'runtime-gcp']);
+});
+
+test('configured OpenStack accepts the uploaded app and binds its publication to that environment', async (t) => {
+  const f = await applicationFixture(t, { openstackIngress: { edge_config_file: '/private/openstack.json',
+    dns_config_file: '/private/dns.json', tunnel_config_file: '/private/tunnel.json' } });
+  const owner = f.product.dashboard.session().id;
+  assert.equal(f.product.deploymentOptions().find((row) => row.provider === 'openstack').available, true);
+  const accepted = await f.product.createDeployment(applicationSource('calculator', 'openstack'), 'onprem', undefined, owner);
+  const result = await settle(() => f.product.getDeployment(accepted.id, owner));
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.environment_target_id, 'runtime-openstack');
+  assert.equal(result.target_id, result.application_id);
+  assert.deepEqual(f.registrations.map((row) => row.environment_id), ['runtime-openstack']);
+  assert.equal(f.deliveries[0].args.targetId, result.application_id);
 });
 
 test('unknown application registration survives restart without CI or CD dispatch', async (t) => {

@@ -93,6 +93,7 @@ def installed(rows):
         for script in ['observability/register.py', 'observability/bootstrap.py', 'gitops/bridge.py', 'gitops/edge.py',
                        'gitops/credentials.py', 'deployment/scripts/environment.py', 'ci/scripts/runner/replenish.py',
                        'deployment/scripts/applications.py', 'deployment/scripts/application_routes.py',
+                       'deployment/cloudflared/register.py',
                        'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py',
                        'infrastructure/providers/terraform_tools/budget.py',
                        'infrastructure/ansible/cluster.py', 'infrastructure/providers/terraform_tools/access.py']:

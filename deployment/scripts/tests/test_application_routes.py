@@ -40,6 +40,17 @@ class ApplicationRoutesTest(unittest.TestCase):
             elif provider == 'openstack':
                 case.fixture.use_openstack()
                 case.fixture.write('registry.json', case.fixture.registry)
+                profile['ingress'].setdefault('tunnel_config_file', str(case.root / 'tunnel.json'))
+                case.fixture.write('edge.json', {'version': 1, 'provider': 'openstack', 'base_domain': 'railshot.io',
+                    'runtime_private_address': '10.26.1.5', 'controller': {}, 'proxy': {}})
+                case.fixture.write('tunnel.json', {'version': 1, 'state_dir': str(case.root / 'tunnel-state'),
+                    'registry_file': case.config['registry_file'], 'environment_id': case.env_id,
+                    'resource_id': 'server-1', 'runtime_private_address': '10.26.1.5', 'base_domain': 'railshot.io',
+                    'namespace': 'railshot-edge', 'name': 'railshot-tunnel',
+                    'tunnel_id': '11111111-2222-4333-8444-555555555555', 'credentials_secret': 'tunnel-credentials',
+                    'origin_vip': '10.26.1.51', 'ca_configmap': 'origin-ca',
+                    'configmap_uid': '22222222-2222-4333-8444-555555555555',
+                    'deployment_uid': '33333333-2222-4333-8444-555555555555'})
             case.write_config()
 
         case = release_fixtures.ApplicationReleaseTest(methodName='runTest')
@@ -65,8 +76,23 @@ class ApplicationRoutesTest(unittest.TestCase):
                     'name': '_acme-challenge_123.' + case.registered['hostname'] + '.', 'type': 'CNAME',
                     'data': 'token.project.authorize.certificatemanager.goog.'}}
             case.gcp = case.enterContext(patch.object(gcp_routes, 'ensure', return_value=case.gcp_result))
+            case.order = []
+            case.openstack_result = {'status': 'configured', 'https_verified': False,
+                'application_id': case.registered['application_id'], 'hostname': case.registered['hostname'],
+                'private_address': '10.26.1.5', 'node_port': case.registered['node_port'], 'health_path': '/alive',
+                'resources': {name: '12345678-1234-1234-1234-123456789abc' for name in ('pool', 'member', 'monitor', 'policy', 'rule')},
+                'network_rule_id': '12345678-1234-1234-1234-123456789abd'}
+            case.openstack = case.enterContext(patch.object(routes.openstack_routes, 'ensure',
+                side_effect=lambda *_: case.order.append('octavia') or case.openstack_result))
+            tunnel_id = '11111111-2222-4333-8444-555555555555'
+            case.connector_result = {'status': 'succeeded', 'phase': 'tunnel_configured', 'https_verified': False,
+                'hostname': case.registered['hostname'], 'tunnel_id': tunnel_id,
+                'dns': {'type': 'CNAME', 'content': tunnel_id + '.cfargotunnel.com', 'proxied': True}}
+            case.connector = case.enterContext(patch.object(routes.tunnel, 'ensure',
+                side_effect=lambda *_: case.order.append('tunnel') or case.connector_result))
 
             def dns_boundary(config_path, request):
+                case.order.append('dns')
                 # Keep the real hostname/zone/certificate ownership validator inside the boundary.
                 routes.dns.request_at(routes.dns.config_at(config_path), request)
                 return {'record_id': 'f' * 32}
@@ -136,6 +162,56 @@ class ApplicationRoutesTest(unittest.TestCase):
             ])
             case.edge.assert_not_called(); case.registration.native.assert_not_called()
 
+    def test_openstack_finalized_binding_runs_octavia_then_tunnel_then_proxied_dns(self):
+        with self.fixture('openstack') as case:
+            result = routes.ensure(case.config_path, case.request)
+            self.assert_configured_only(case, result)
+            self.assertIs(result['backend_verified'], False)
+            self.assertEqual(case.order, ['octavia', 'tunnel', 'dns'])
+            request = runtime.read_private(case.prepared_dir / 'route-request.json')
+            ingress = request['ingress']
+            case.openstack.assert_called_once_with(ingress['edge_config_file'], {
+                'application_id': request['application_id'], 'hostname': request['hostname'],
+                'private_address': request['resource']['private_address'], 'node_port': request['node_port'],
+                'health_path': request['health_path']})
+            case.connector.assert_called_once_with(ingress['tunnel_config_file'], {
+                key: request[key] for key in ('environment_id', 'application_id', 'app', 'tenant', 'hostname')})
+            case.dns.assert_called_once_with(ingress['dns_config_file'], {
+                'application_id': request['application_id'], 'hostname': request['hostname'],
+                'type': 'CNAME', 'content': '11111111-2222-4333-8444-555555555555.cfargotunnel.com', 'proxied': True})
+            self.assertEqual(result['edge']['resources'], case.openstack_result['resources'])
+            case.edge.assert_not_called(); case.gcp.assert_not_called()
+
+    def test_openstack_operator_configs_cannot_retarget_registered_resource_or_address(self):
+        for file, key, value in (
+                ('tunnel.json', 'resource_id', 'other-resource'), ('tunnel.json', 'runtime_private_address', '10.26.1.99'),
+                ('tunnel.json', 'environment_id', 'other-environment'), ('tunnel.json', 'base_domain', 'railshot.com'),
+                ('edge.json', 'runtime_private_address', '10.26.1.99'), ('edge.json', 'base_domain', 'railshot.com')):
+            with self.subTest(file=file, key=key), self.fixture('openstack') as case:
+                config_file = case.registration.root / file
+                config = runtime.read_private(config_file)
+                runtime.save(config_file, {**config, key: value})
+                with self.assertRaises(applications.RegistrationError) as raised:
+                    routes.ensure(case.config_path, case.request)
+                self.assertFalse(raised.exception.unknown)
+                case.openstack.assert_not_called(); case.connector.assert_not_called(); case.dns.assert_not_called()
+
+    def test_openstack_native_readback_and_tunnel_dns_must_match_before_dns(self):
+        for boundary, key, value in (
+                ('native', 'hostname', 'other.railshot.io'), ('native', 'node_port', 32123),
+                ('native', 'private_address', '10.26.1.99'), ('native', 'https_verified', True),
+                ('tunnel', 'hostname', 'other.railshot.io'), ('tunnel', 'https_verified', True),
+                ('dns', 'type', 'A'), ('dns', 'content', 'other.cfargotunnel.com'), ('dns', 'proxied', False)):
+            with self.subTest(boundary=boundary, key=key), self.fixture('openstack') as case:
+                receipt = case.openstack_result if boundary == 'native' else case.connector_result
+                if boundary == 'dns': receipt = receipt['dns']
+                receipt[key] = value
+                with self.assertRaises(applications.RegistrationError) as raised:
+                    routes.ensure(case.config_path, case.request)
+                self.assertTrue(raised.exception.unknown)
+                case.dns.assert_not_called()
+                if boundary == 'native': case.connector.assert_not_called()
+
     def test_foreign_certificate_suffix_or_challenge_hostname_never_registers_app_a(self):
         for field, value, error in (
                 ('data', 'foreign.example.com.', 'APPLICATION_CERTIFICATE_DNS_INVALID'),
@@ -175,16 +251,18 @@ class ApplicationRoutesTest(unittest.TestCase):
                 routes.ensure(case.config_path, case.request)
             case.edge.assert_not_called(); case.gcp.assert_not_called(); case.dns.assert_not_called()
 
-    def test_missing_native_configuration_and_unsupported_openstack_stop_before_mutation(self):
+    def test_missing_native_or_tunnel_configuration_stop_before_mutation(self):
         for provider, ingress, error in (
                 ('aws', {'edge_config_file': None}, 'APPLICATION_ROUTE_NOT_CONFIGURED'),
                 ('gcp', {'dns_config_file': 'relative.json'}, 'APPLICATION_ROUTE_NOT_CONFIGURED'),
-                ('openstack', {}, 'APPLICATION_ROUTE_PROVIDER_UNAVAILABLE')):
+                ('openstack', {'tunnel_config_file': None}, 'APPLICATION_ROUTE_NOT_CONFIGURED'),
+                ('openstack', {'tunnel_config_file': 'relative.json'}, 'APPLICATION_ROUTE_NOT_CONFIGURED')):
             with self.subTest(provider=provider), self.fixture(provider, ingress) as case:
                 with self.assertRaisesRegex(applications.RegistrationError, error):
                     routes.ensure(case.config_path, case.request)
                 case.edge.assert_not_called(); case.gcp.assert_not_called(); case.dns.assert_not_called()
                 case.registration.native.assert_not_called()
+                case.openstack.assert_not_called(); case.connector.assert_not_called()
 
     def test_dns_zone_must_match_registered_application_domain(self):
         with self.fixture() as case:
@@ -221,6 +299,30 @@ class ApplicationRoutesTest(unittest.TestCase):
                 self.assertNotIn('private-provider-response', output.getvalue())
                 self.assertFalse((case.prepared_dir / 'route-result.json').exists())
                 if failure != 'dns-unknown': case.dns.assert_not_called()
+
+    def test_cli_preserves_openstack_worker_and_tunnel_blocked_unknown_without_diagnostics(self):
+        for boundary in ('worker', 'tunnel'):
+            for unknown in (False, True):
+                with self.subTest(boundary=boundary, unknown=unknown), self.fixture('openstack') as case:
+                    if boundary == 'worker':
+                        case.openstack.side_effect = routes.openstack_routes.RouteError(unknown=unknown)
+                    else:
+                        case.connector_result.clear()
+                        case.connector_result.update(status='unknown' if unknown else 'blocked',
+                            error={'code': 'private-remote-diagnostic', 'outcome_unknown': unknown})
+                    path = case.registration.root / 'publication.json'
+                    runtime.save(path, case.request)
+                    output = io.StringIO()
+                    with patch.object(sys, 'argv', ['application_routes', '--config', str(case.config_path), '--request', str(path)]), \
+                            patch.object(routes.os, 'umask'), redirect_stdout(output):
+                        self.assertEqual(routes.main(), 3)
+                    result = json.loads(output.getvalue())
+                    self.assertEqual(result['status'], 'unknown' if unknown else 'blocked')
+                    self.assertIs(result['error']['outcome_unknown'], unknown)
+                    self.assertNotIn('private-remote', output.getvalue())
+                    case.dns.assert_not_called()
+                    if boundary == 'worker': case.connector.assert_not_called()
+                    self.assertFalse((case.prepared_dir / 'route-result.json').exists())
 
 
 if __name__ == '__main__':
