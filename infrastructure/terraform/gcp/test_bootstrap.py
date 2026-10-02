@@ -1,10 +1,11 @@
-"""Offline render checks: Terraform + PyYAML; no credentials, API, VM, or shell execution.
+"""Offline render and temporary apt-source checks; no credentials, cloud API or VM.
 
 Run directly: python3 test_bootstrap.py; evaluates a fresh source-only directory.
 """
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -127,6 +128,49 @@ class BootstrapRenderTests(unittest.TestCase):
             with self.subTest(duration=duration):
                 with self.assertRaisesRegex(ValueError, "max_run_duration_seconds must be null or an integer"):
                     evaluate("local.runtime_limit", overrides={"max_run_duration_seconds": duration})
+
+    def test_host_egress_allows_https_before_denying_other_public_traffic(self):
+        source = (MODULE / 'main.tf').read_text()
+        self.assertRegex(source, r'https_ports\s*=\s*\["443"\]')
+        self.assertIn('google-platform-always-allowed', source)
+        for name, priority in (('host_https', 1000), ('host_deny_other', 2000)):
+            rule = source.split(f'resource "google_compute_firewall" "{name}" {{', 1)[1].split('\n}', 1)[0]
+            self.assertRegex(rule, r'direction\s*=\s*"EGRESS"')
+            self.assertRegex(rule, rf'priority\s*=\s*{priority}\b')
+            self.assertRegex(rule, r'destination_ranges\s*=\s*\["0.0.0.0/0"\]')
+            self.assertRegex(rule, r'target_service_accounts\s*=\s*\[google_service_account.node.email\]')
+            if name == 'host_https':
+                self.assertRegex(rule, r'allow\s*\{\s*protocol\s*=\s*"tcp"\s+ports\s*=\s*local.host_egress.https_ports')
+            else:
+                self.assertRegex(rule, r'deny\s*\{\s*protocol\s*=\s*"all"')
+
+    def test_apt_boot_payload_rewrites_approved_mirrors_and_rejects_unknown_http(self):
+        self.assertTrue(self.git['apt']['preserve_sources_list'])
+        code = self.git['bootcmd'][0].split("<<'PYBOOT'\n", 1)[1].rsplit('\nPYBOOT', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            apt = Path(directory) / 'apt'
+            (apt / 'sources.list.d').mkdir(parents=True)
+            fixtures = {'sources.list': 'deb http://security.ubuntu.com/ubuntu noble-security main\n',
+                        'sources.list.d/ubuntu.sources': 'URIs: http://region.cloud.archive.ubuntu.com/ubuntu\n',
+                        'sources.list.d/extra.list': 'deb https://approved.example/repo noble main\n'}
+            for path, content in fixtures.items():
+                (apt / path).write_text(content)
+            script = code.replace('/etc/apt', str(apt))
+            result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for path, content in fixtures.items():
+                expected = content.replace('http://security.', 'https://security.').replace(
+                    'http://region.cloud.archive.', 'https://archive.')
+                self.assertEqual((apt / path).read_text(), expected)
+            for content in ('URIs: http://unreviewed.example/repo\n',
+                            'deb http://unreviewed.example/repo noble main\n'):
+                with self.subTest(source=content):
+                    path = apt / 'sources.list.d/ubuntu.sources'
+                    path.write_text(content)
+                    failed = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=5)
+                    self.assertNotEqual(failed.returncode, 0)
+                    self.assertIn('bootstrap blocked', failed.stderr)
+                    self.assertEqual(path.read_text(), content)
 
 
 if __name__ == "__main__":
