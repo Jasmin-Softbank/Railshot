@@ -1,6 +1,6 @@
 # 사용자 API · CLI · MCP
 
-홍진기의 `feature/fe-mcp-jingi@6840d1387798d375234bbf97919210eec96709a3`를 바탕으로 통합했다. 정적 화면은 `../dashboard`, Node 서버·CLI·MCP는 이 package에 있다. API는 기본적으로 `127.0.0.1:4173`만 수신하며 localhost Host/Origin 검사를 유지한다. ALB 뒤 운영 인증·허용 Origin 연결은 아직 구현하지 않았다.
+홍진기의 `feature/fe-mcp-jingi@6840d1387798d375234bbf97919210eec96709a3`를 바탕으로 통합했다. 정적 화면은 `../dashboard`, Node 서버·CLI·MCP는 이 package에 있다. API는 기본적으로 `127.0.0.1:4173`만 수신하며 localhost Host/Origin 검사를 유지한다. 컨테이너 내부 접근에는 아래 명시적 설정과 운영자 Bearer 인증을 사용한다. 사용자 로그인·유저별 target 인가·공개 API는 구현하지 않았다.
 
 ## 로컬 시작
 
@@ -21,6 +21,29 @@ Node 22 이상에서 `npm ci --ignore-scripts`, `npm start`를 실행한다. 이
 `npm run cli -- deploy <폴더 또는 ZIP 또는 공개 GitHub URL> --app my-app --target aws-demo`, `npm run cli -- status <run_id>`가 같은 HTTP API를 사용한다. target 생략 시 API의 운영자 설정을 사용한다. 임의 target은 거부한다. 이 제출 명령은 실제 설정이 있을 때 GitHub에 소스를 등록하고 CI를 실행하므로 로컬 검증 과정에서는 실행하지 않는다.
 
 MCP는 `npm run mcp`로 stdio transport를 사용한다. 기존 deploy/status 도구를 유지하며 CI의 published 상태를 앱 deployed로 바꾸지 않는다.
+
+## 컨테이너와 내부 접근
+
+저장소 루트에서 `docker build -f apps/api/Dockerfile --target api -t railshot-api .`와 `--target mcp -t railshot-mcp`로 두 이미지를 만든다. 두 이미지는 Node 22와 lockfile의 production 의존성을 사용하고 UID 1000으로 실행한다. `NODE_IMAGE` build argument에는 검토한 base image digest를 전달할 수 있다. 소스 코드, Terraform, SSH 키, Docker socket을 추가로 mount할 필요가 없다.
+
+| 변수 | 컨테이너 계약 |
+| --- | --- |
+| `RAILSHOT_BIND_HOST` | 기본 `127.0.0.1`. 내부 컨테이너 네트워크에서는 명시적으로 `0.0.0.0` |
+| `PORT` | API 포트. 기본 `4173` |
+| `RAILSHOT_ALLOWED_HOSTS` | 포트를 제외한 정확한 hostname의 쉼표 목록. 예: `localhost,127.0.0.1,railshot-api`. 와일드카드 미지원 |
+| `RAILSHOT_ALLOWED_ORIGINS` | 정확한 HTTPS origin의 쉼표 목록. 로컬 개발용 HTTP localhost도 허용. 컨테이너 모드에서 생략하면 Origin이 있는 요청 거부 |
+| `RAILSHOT_API_TOKEN_FILE` | 권장: 읽기 전용 Secret 파일. 32–4096자의 공백 없는 ASCII 토큰. API 시작 시 읽고 CLI/MCP는 요청마다 읽음 |
+| `RAILSHOT_API_TOKEN` | Secret 환경변수 대안. `_FILE`과 동시에 설정하면 시작/요청 실패 |
+| `JASMIN_API_URL` | MCP/CLI가 접근하는 내부 API URL. Compose에서는 `http://api:4173`처럼 실제 Service 이름 사용 |
+| `JASMIN_SOURCE_ROOT` | MCP 컨테이너 안에 읽기 전용으로 mount한 소스 디렉터리. 호스트 경로가 자동 전달되지는 않음 |
+
+비로컬 bind 또는 비로컬 Host를 허용하면 명시한 Host 목록과 API 토큰이 없을 때 시작을 거부한다. `/api/*`는 해당 토큰을 `Authorization: Bearer ...`로 요구하며 CLI/MCP가 이를 전달한다. `x-jasmin-request: deploy`는 계속 필요한 교차 사이트 요청 방어 헤더이며 인증을 대신하지 않는다. Host/Origin은 프록시의 `X-Forwarded-*`를 신뢰하지 않고 실제 요청 헤더로 검사한다. CORS endpoint나 브라우저 토큰 배포는 추가하지 않았다.
+
+`/healthz`는 Host/Origin 검사 후 Bearer 없이 조회한다. 비로컬 모드에서는 `ok`와 `configured`만 반환하며, `configured: true`도 GitHub 권한·CI worker·배포 대상의 실시간 준비 상태를 보장하지 않는다. 이미지의 자체 healthcheck에는 `127.0.0.1`을 Host 목록에 포함해야 한다. Kubernetes HTTP probe도 허용된 Host를 명시한다. 토큰을 교체하면 API를 재시작하고 클라이언트의 파일도 교체한다.
+
+MCP 이미지는 `docker run --rm -i ... railshot-mcp` 또는 Compose의 `run --rm -T mcp`로 시작한다. stdin/stdout JSON-RPC만 제공하며 HTTP 포트·Service·Ingress를 만들지 않는다. `GITHUB_TOKEN`은 API에만 주입한다. API 토큰은 운영자 클라이언트 인증이며 사용자별 로그인·target 인가를 대체하지 않으므로 API는 내부 ClusterIP 또는 루프백 포트로 먼저 배치한다.
+
+제품 API는 기존 source HTML 경로를 유지한다. 배포용 Vite `dist/`는 별도 dashboard 이미지가 제공하며 아직 `/api` 프록시나 UI 제출 연결은 없다. 나중에 프록시를 연결할 때 `/api` 경로를 보존하고 최대 101 MiB multipart 본문·업스트림 처리 시간·HTTPS Origin·사용자 인증을 함께 검토한다.
 
 ## 연결한 동작
 

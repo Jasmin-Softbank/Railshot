@@ -12,3 +12,4 @@ ansible-playbook -i localhost, tests/render.yml
 ansible-lint --offline playbooks roles inventories/example
 python3 "$repo_root/ci/scripts/check_contract.py"
 python3 -m pytest "$repo_root/ci/tests" -q
+python3 -m unittest test_database.NativeBoundaries -v

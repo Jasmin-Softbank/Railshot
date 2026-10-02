@@ -10,15 +10,15 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import stat
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 
 import run as ansible
 import inputs
+import database
 
 sys.path.insert(0, str(ansible.ROOT / 'ci/scripts'))
 from storage import durable_write
@@ -59,30 +59,27 @@ def private_directory(path):
 
 
 def execute_request(request, state_dir):
-    """CLI owns its deadline, target locks and durable native readiness receipts."""
+    """Use the same bounded adapter as the CLI without an orphanable nested CLI."""
     log_path = state_dir / 'http-jobs' / (hashlib.sha256(request['request_id'].encode()).hexdigest() + '.log')
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'wb') as log, tempfile.TemporaryFile() as output:
-        completed = subprocess.run([sys.executable, str(ansible.HERE / 'run.py'), '--request', '-',
-                                    '--state-dir', str(state_dir)], input=encoded(request),
-                                   stdout=output, stderr=log, timeout=request['timeout_seconds'] + 120,
-                                   start_new_session=True)
-        output.seek(0)
-        raw = output.read(ansible.MAX_BYTES + 1)
-    if completed.returncode not in (0, 2, 3, 4) or len(raw) > ansible.MAX_BYTES:
-        raise ValueError('invalid executor response')
-    result = parsed(raw)
-    if not isinstance(result, dict) or completed.returncode != {
-            'succeeded': 0, 'invalid': 2, 'blocked': 3, 'failed': 4}.get(result.get('status')):
-        raise ValueError('executor exit code and result disagree')
+    with os.fdopen(fd, 'wb') as log:
+        runner = database.run if request['operation'] == 'database.configure' else ansible.run
+        result = runner(request, state_dir=state_dir)
+        log.write(encoded({'status': result['status'], 'stage': result['stage']}))
     return result
 
 
 class Jobs:
     def __init__(self, targets_file, state_dir, executor=execute_request):
         config = private_json(targets_file)
-        if not isinstance(config, dict) or set(config) != {'version', 'targets'} or config['version'] != 1:
+        if (not isinstance(config, dict) or not {'version', 'targets'} <= set(config)
+                or set(config) - {'version', 'targets', 'database_profiles'} or config['version'] != 1):
             raise ValueError('registered target configuration required')
+        self.database_profiles = config.get('database_profiles', {})
+        if not isinstance(self.database_profiles, dict) or any(
+                not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', key) or not isinstance(path, str) or not Path(path).is_absolute()
+                for key, path in self.database_profiles.items()):
+            raise ValueError('invalid registered database profile')
         self.targets = config['targets']
         if not isinstance(self.targets, dict) or not self.targets:
             raise ValueError('registered target allowlist required')
@@ -108,8 +105,9 @@ class Jobs:
         try:
             for path in self.directory.glob('*.json'):
                 record = private_json(path)
-                if (not isinstance(record, dict) or set(record) != {'request_id', 'target_id', 'operation',
-                        'request_sha256', 'status', 'created_at', 'updated_at', 'result', 'error'}
+                required = {'request_id', 'target_id', 'operation', 'request_sha256', 'status',
+                            'created_at', 'updated_at', 'result', 'error'}
+                if (not isinstance(record, dict) or not required <= set(record) or set(record) - required - {'lock_keys'}
                         or not isinstance(record.get('request_id'), str)
                         or path.name != self.path(record['request_id']).name
                         or record.get('status') not in {'queued', 'running', 'succeeded', 'failed', 'blocked', 'unknown'}):
@@ -141,8 +139,10 @@ class Jobs:
         except (ValueError, TypeError, KeyError):
             raise APIError('INVALID_JOB_REQUEST')
         if body['operation'] == 'database.configure':
-            self.preview(body)
-            raise APIError('DATABASE_PLAYBOOK_UNAVAILABLE', 501)
+            plan, request = self.database_request(body)
+            if request is None:
+                raise APIError(plan['blockers'][0]['code'], 501)
+            return request
         request = self.resolve(body['target_id'], body['request_id'], body['operation'],
                                purpose='runtime' if body['operation'] == 'runtime.install' else None)
         if parameters:
@@ -177,9 +177,19 @@ class Jobs:
         try:
             parameters = inputs.validate_job(body)
             if body['operation'] == 'database.configure':
-                return inputs.database_plan(body, parameters, lambda target_id:
-                    self.resolve(target_id, body['request_id'], purpose='database'))
+                return self.database_request(body)[0]
             return inputs.runtime_plan(self.prepare(body))
+        except (ValueError, TypeError, KeyError) as exc:
+            if isinstance(exc, APIError):
+                raise
+            raise APIError('INVALID_JOB_REQUEST') from None
+
+    def database_request(self, body):
+        try:
+            return database.prepare(body, self.database_profiles, lambda target_id:
+                self.resolve(target_id, body['request_id'], purpose='database'))
+        except database.ProfileError as exc:
+            raise APIError(exc.code, exc.status) from None
         except (ValueError, TypeError, KeyError) as exc:
             if isinstance(exc, APIError):
                 raise
@@ -197,7 +207,9 @@ class Jobs:
                     self.reconcile(prior)
                 return (202 if prior['status'] in ('queued', 'running') else 200), self.public(prior)
             for prior in self.records.values():
-                if prior['target_id'] == body['target_id'] and prior['status'] == 'unknown':
+                # Old records without physical identities cannot safely exclude an alias.
+                overlap = not prior.get('lock_keys') or set(ansible.normalize_lock_keys(prior['lock_keys'])) & set(ansible.lock_keys(request))
+                if overlap and prior['status'] == 'unknown':
                     self.reconcile(prior)
                     if prior['status'] == 'unknown':
                         raise APIError('TARGET_RECONCILE_REQUIRED', 409)
@@ -206,7 +218,8 @@ class Jobs:
                 raise APIError('EXECUTOR_BUSY', 409)
             record = {**{key: body[key] for key in ('request_id', 'target_id', 'operation')},
                       'request_sha256': digest, 'status': 'queued', 'created_at': time.time(),
-                      'updated_at': time.time(), 'result': None, 'error': None}
+                      'updated_at': time.time(), 'result': None, 'error': None,
+                      'lock_keys': ansible.lock_keys(request)}
             self.save(record)  # Durable acceptance precedes any executor dispatch.
             self.active = body['request_id']
             try:
@@ -229,12 +242,18 @@ class Jobs:
         if result['status'] == 'succeeded' and (not result['guest_ready'] or (
                 record['operation'] == 'runtime.install' and not result['runtime_ready'])):
             raise ValueError('executor success without readiness')
+        if record['operation'] == 'database.configure' and (
+                type(result.get('database_ready')) is not bool or result['runtime_ready'] or
+                (result['status'] == 'succeeded' and not result['database_ready'])):
+            raise ValueError('database result binding mismatch')
         error = result.get('error')
         unknown = isinstance(error, dict) and error.get('outcome_unknown') is True
         public_result = {key: result[key] for key in ('status', 'guest_ready', 'runtime_ready',
                                                     'application_ready', 'public_http_verified', 'replayed')}
         public_result['stage'] = result['stage'] if result.get('stage') in (
-            'validation', 'executor_preflight', 'guest', 'runtime') else 'unknown'
+            'validation', 'executor_preflight', 'guest', 'runtime', 'database') else 'unknown'
+        if record['operation'] == 'database.configure':
+            public_result['database_ready'] = result['database_ready']
         record.update(status='unknown' if unknown else 'failed' if result['status'] == 'invalid' else result['status'],
                       result=public_result, error=None)
         if error:
@@ -400,6 +419,9 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error('port must be 1..65535')
+    def drain(signum, frame):
+        raise KeyboardInterrupt
+    previous = signal.signal(signal.SIGTERM, drain)
     try:
         with create_server(**vars(args)) as server:
             server.serve_forever()
@@ -408,6 +430,8 @@ def main():
     except Exception:
         print('Ansible API configuration or private state is unavailable.', file=sys.stderr)
         return 2
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     return 0
 
 

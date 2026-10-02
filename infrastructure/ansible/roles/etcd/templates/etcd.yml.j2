@@ -9,6 +9,8 @@ initial-cluster-token: {{ (cluster_name ~ '-etcd') | to_json }}
 # Bootstrap flags are ignored once this member has initialized its data directory.
 initial-cluster-state: new
 strict-reconfig-check: true
+# Patroni uses the v3 JSON API; etcd 3.4 config-file defaults disable this gateway.
+enable-grpc-gateway: true
 client-transport-security:
   cert-file: /etc/etcd/tls/server.crt
   key-file: /etc/etcd/tls/server.key

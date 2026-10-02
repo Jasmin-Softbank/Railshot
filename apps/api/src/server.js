@@ -157,15 +157,22 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
   const server = createServer(async (request, response) => {
-    const requestId = randomUUID(), url = new URL(request.url, 'http://localhost'), versioned = url.pathname.startsWith('/api/v1');
+    const requestId = randomUUID();
+    let versioned = request.url.startsWith('/api/v1');
     response.setHeader('X-Request-ID', requestId);
     try {
       if (!allowsHost(request.headers.host, access) || !allowsOrigin(request.headers.origin, access)) throw new ServiceError('요청의 Host 또는 Origin이 허용되지 않습니다.', 403);
+      let url;
+      try { url = new URL(request.url, 'http://localhost'); } catch { throw new ServiceError('요청 경로가 잘못되었습니다.', 400); }
+      versioned = url.pathname.startsWith('/api/v1');
       if (request.method === 'GET' && url.pathname === '/healthz') {
-        json(response, 200, { ok: true, configured: Boolean(service), target_id: service?.targetId || null }); return;
+        json(response, 200, { ok: true, configured: Boolean(service), ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
       if (url.pathname.startsWith('/api/')) {
-        if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) throw new ServiceError('운영자 인증이 필요합니다.', 401);
+        if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
+          response.setHeader('www-authenticate', 'Bearer');
+          throw new ServiceError('API authentication required', 401);
+        }
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
         if (versioned) {

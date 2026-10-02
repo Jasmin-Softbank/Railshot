@@ -6,6 +6,10 @@ The instance role has SSM agent permissions with an explicit deny for all Parame
 
 Optional `name` (default `railshot-ci-poc`) identifies this dedicated CI VM, separately from the CD handoff target.
 
+`instance_name` optionally overrides only the EC2 `Name` tag. Keep `name` unchanged when renaming an existing worker because it also identifies its IAM role, instance profile, security group and target descriptor. The retained build worker is `i-09955d23ad1d8dbe2`, displayed as `railshot-build-worker-aws-01` from 2026-10-02; its stable `name` remains `railshot-ci-k3s-aws`. Set `instance_name = "railshot-build-worker-aws-01"` in that instance's private Terraform inputs. The target architecture makes it a dedicated operations K3s agent for app checks, bounded AI repair and builds. It is currently stopped and has not joined K3s. This module still provisions the standalone host baseline; follow the [build-agent preparation and network requirements](../../../ci/scripts/runner/README.md) before joining. In particular, this module's current security group does not permit the required Kubernetes node traffic.
+
+The 2026-10-02 read-only plan confirmed matching `Name` tags after the rename, but proposed instance replacement for `associate_public_ip_address` (observed `false`, configured `true`) while the instance was stopped. That plan was not applied. Resolve this unrelated drift before any full apply; do not replace the worker to change its display name.
+
 Required variables: registered `account_id`, exact Canonical Ubuntu 24.04 amd64 `ami_id`, published `platform_ref`, SHA256 of `https://codeload.github.com/Jasmin-Softbank/Railshot/tar.gz/<platform_ref>`, administrator Ed25519 **public** key without comment, and UTC `stop_at`. No private key is copied to the VM or Terraform state. Bootstrap arms an absolute systemd STOP timer before network installs and refuses already-expired reuse. This guest timer is a bounded PoC cutoff, not cloud-enforced orchestration or job draining. Stopping retains disk data and disk cost. Review and set a new deadline before intentional reuse.
 
 ```sh

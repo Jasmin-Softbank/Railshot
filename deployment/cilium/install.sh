@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 source "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/common.sh"
+# Callers hold /run/railshot-deployment.lock. No argument is the customer profile.
+[[ $# -le 1 ]] || die 'usage: install.sh [customer|control]'
+profile=${1:-customer}
+pod_cidr=$(python3 "$ROOT_DIR/cilium/preflight.py" "$profile")
 TEMP_DIR=$(mktemp -d)
 case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) die '지원하지 않는 CPU' ;; esac
 # 전역 cilium 바이너리를 덮어쓰지 않고 PoC 전용 경로에 checksum 검증 후 설치.
@@ -19,7 +23,7 @@ fi
 options=(--version "$CILIUM_VERSION" --namespace kube-system
   --set kubeProxyReplacement=false
   --set ipam.mode=cluster-pool
-  --set 'ipam.operator.clusterPoolIPv4PodCIDRList=10.42.0.0/16'
+  --set "ipam.operator.clusterPoolIPv4PodCIDRList=$pod_cidr"
   --set operator.replicas=1
   --set routingMode=tunnel --set tunnelProtocol=vxlan
   --set hubble.enabled=false)
@@ -68,8 +72,9 @@ else
 fi
 "$CILIUM" status --wait --wait-duration "$WAIT_TIMEOUT"
 kubectl wait --for=condition=Ready nodes --all --timeout="$WAIT_TIMEOUT"
-nodes=$(kubectl get nodes -o name)
-[[ $(printf '%s\n' "$nodes" | wc -l) -eq 1 ]] || die '단일 노드만 지원합니다.'
+# Recheck the same profile after rollout; a newly joined arbitrary node must
+# not pass merely because every node became Ready.
+python3 "$ROOT_DIR/cilium/preflight.py" "$profile" >/dev/null
 kubectl -n kube-system rollout status deployment/coredns --timeout="$WAIT_TIMEOUT"
 kubectl get nodes -o wide
 kubectl -n kube-system get pods -l k8s-app=cilium -o wide
