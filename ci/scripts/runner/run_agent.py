@@ -46,6 +46,35 @@ def validate_read_roots(roots, deny):
                 raise OperationError("SDK_POLICY_DENIED", component="runner", phase="policy")
 
 
+PROGRESS_ITEMS = {'userMessage', 'hookPrompt', 'agentMessage', 'functionCallOutput', 'plan', 'reasoning',
+                  'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'collabAgentToolCall',
+                  'subAgentActivity', 'webSearch', 'imageView', 'sleep', 'imageGeneration',
+                  'enteredReviewMode', 'exitedReviewMode', 'contextCompaction', 'other'}
+PROGRESS_STATUSES = {'inProgress', 'completed', 'failed', 'declined', 'interrupted', 'unknown'}
+PROGRESS_TOKENS = {'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens',
+                   'reasoning_output_tokens', 'total_tokens'}
+
+
+def validated_progress(value):
+    """Exact content-free contract shared with the parent process's log projection."""
+    required = {'elapsed_ms', 'sdk_event_count', 'last_sdk_event_at_ms', 'item_counts'}
+    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - {'last_item', 'token_usage'}:
+        raise ValueError('invalid SDK progress fields')
+    number = lambda v: type(v) is int and 0 <= v <= 2**53 - 1
+    if not all(number(value[k]) for k in required - {'item_counts'}):
+        raise ValueError('invalid SDK progress count')
+    for key, allowed in (('item_counts', PROGRESS_ITEMS), ('token_usage', PROGRESS_TOKENS)):
+        values = value.get(key, {})
+        if not isinstance(values, dict) or values.keys() - allowed or not all(number(v) for v in values.values()):
+            raise ValueError('invalid SDK progress counters')
+    if 'last_item' in value:
+        item = value['last_item']
+        if (not isinstance(item, dict) or set(item) != {'kind', 'status'}
+                or item['kind'] not in PROGRESS_ITEMS or item['status'] not in PROGRESS_STATUSES):
+            raise ValueError('invalid SDK item metadata')
+    return copy.deepcopy(value)
+
+
 def lifecycle(run, role, provider, model):
     """A private, content-free SDK receipt; loop checkpoint owns scheduling and recovery."""
     run_id = os.environ.get("RAILSHOT_RUN_ID") or str(uuid.uuid4())
@@ -69,15 +98,18 @@ def lifecycle(run, role, provider, model):
 
     def emit(kind, *, error=None, **fields):
         nonlocal seq
-        allowed = {"status", "sdk_status", "session_id", "thread_id", "turn_id", "sdk_failure", "sandbox_preflight"}
+        allowed = {"status", "sdk_status", "session_id", "thread_id", "turn_id", "sdk_failure", "sandbox_preflight", "progress"}
         if set(fields) - allowed:
             raise OperationError("INTERNAL_ERROR", component="runner", phase="observation")
+        if 'progress' in fields:
+            fields['progress'] = validated_progress(fields['progress'])
         state.update(fields)
         seq += 1
         attributes = {key: state[key] for key in ("role", "provider", "model", "status", "sdk_status",
                       "session_id", "thread_id", "turn_id", "conversation_resume", "resume_reason")}
         if state.get("sdk_failure"): attributes["sdk_failure"] = state["sdk_failure"]
         if state.get("sandbox_preflight"): attributes["sandbox_preflight"] = state["sandbox_preflight"]
+        if state.get("progress"): attributes["progress"] = state["progress"]
         sdk_finished = kind == "session.finished"
         outcome = error.outcome if error else "PASS" if state["status"] == "completed" or sdk_finished else "RUNNING"
         phase = error.phase if error else "invoke" if kind.startswith(("session.", "turn.")) else "agent"
@@ -140,16 +172,27 @@ def source_change_allowed(rel, content, previous):
         # report positive tests. Never accept assert-true-only smoke as unit tests.
         reference_pattern = (r"(?:from\s+(?!unittest|pytest)\w+\s+import|import\s+(?!unittest|pytest)\w+)" if rel.endswith(".py") else
                              r"new\s+[A-Z]\w*\(" if rel.endswith(".java") else
-                             r"(?:from\s+['\"]\.{1,2}/|require\(['\"]\.{1,2}/|import\s*\(?['\"]\.{1,2}/)")
+                             r"(?:from\s+['\"]\.{1,2}/|require\(['\"]\.{1,2}/|import\s*\(?['\"]\.{1,2}/|"
+                             r"import\s*\(\s*new\s+URL\s*\(\s*['\"]\.{1,2}/|"
+                             r"\.ssrLoadModule\s*\(\s*['\"](?:\.{1,2}/|/src/))")
         reference = re.search(reference_pattern, content)
-        assertion = re.search(r"\b(?:assert\s+(?!True\b|true\b|1\b)|assert\.(?:strictEqual|deepStrictEqual|throws|rejects|equal|ok)\s*\(|expect\s*\(|assert[A-Z]\w*\s*\()", content)
-        if not reference or not assertion:
-            raise ValueError("new tests must exercise application code with assertions: " + rel)
+        named_assertions = []
         if re.search(r"\.[cm]?[jt]sx?$", rel):
-            actuals = re.findall(r"\b(?:assert\.(?:strictEqual|deepStrictEqual|equal|ok)|expect)\s*\(([^,\n]*)", content)
+            for imports in re.findall(r"import\s*\{([^}]+)\}\s*from\s*['\"]node:assert(?:/strict)?['\"]", content):
+                named_assertions.extend(name.strip() for name in imports.split(',')
+                                        if name.strip() in {"strictEqual", "deepStrictEqual", "throws", "rejects", "equal", "ok"})
+        named_pattern = "|".join(named_assertions) or r"(?!)"
+        assertion = re.search(r"\b(?:assert\s+(?!True\b|true\b|1\b)|assert\.(?:strictEqual|deepStrictEqual|throws|rejects|equal|ok)\s*\(|expect\s*\(|assert[A-Z]\w*\s*\(|(?:" + named_pattern + r")\s*\()", content)
+        if not reference:
+            raise ValueError("new tests need a supported local application import: " + rel)
+        if not assertion:
+            raise ValueError("new tests need supported behavioral assertions: " + rel)
+        if re.search(r"\.[cm]?[jt]sx?$", rel):
+            actuals = re.findall(r"\b(?:assert\.(?:strictEqual|deepStrictEqual|equal|ok)|expect|(?:" + named_pattern + r"))\s*\(([^,\n]*)", content)
             constant = r"\s*(?:true|false|null|undefined|[\d.]+|['\"][^'\"]*['\"])(?:\s*(?:\)|,|$))"
             behavioral = any(not re.match(constant, argument) for argument in actuals)
-            behavioral |= bool(re.search(r"\bassert\.(?:throws|rejects)\s*\(", content))
+            behavioral |= bool(re.search(r"\bassert\.(?:throws|rejects)\s*\(", content)) or any(
+                name in {"throws", "rejects"} and re.search(r"\b" + name + r"\s*\(", content) for name in named_assertions)
             if not behavioral:
                 raise ValueError("constant-only assertions do not test application behavior: " + rel)
     if PurePosixPath(rel).name == "package.json":
@@ -409,22 +452,59 @@ def codex_sandbox_failure(result):
     return None
 
 
-def collect_codex_turn(turn):
+def collect_codex_turn(turn, emit=None):
     """Use public typed stream notifications: run() raises before returning failed turns."""
     from openai_codex import TurnResult
-    from openai_codex.models import ItemCompletedNotification, ThreadTokenUsageUpdatedNotification, TurnCompletedNotification
-    from openai_codex.generated.v2_all import AgentMessageThreadItem, MessagePhase
+    from openai_codex.models import ItemStartedNotification, ItemCompletedNotification, ThreadTokenUsageUpdatedNotification, TurnCompletedNotification
+    from openai_codex.generated.v2_all import (AgentMessageThreadItem, MessagePhase, AgentMessageDeltaNotification,
+        CommandExecutionOutputDeltaNotification, ReasoningTextDeltaNotification, ReasoningSummaryTextDeltaNotification,
+        PlanDeltaNotification, FileChangeOutputDeltaNotification)
     completed = None; items = []; usage = None
+    started = time.monotonic()
+    last_emitted = None
+    progress = {'elapsed_ms': 0, 'sdk_event_count': 0, 'last_sdk_event_at_ms': 0, 'item_counts': {}}
+    delta_types = (AgentMessageDeltaNotification, CommandExecutionOutputDeltaNotification,
+                   ReasoningTextDeltaNotification, ReasoningSummaryTextDeltaNotification,
+                   PlanDeltaNotification, FileChangeOutputDeltaNotification)
+
+    def observed(payload, terminal=False):
+        nonlocal last_emitted
+        now = time.monotonic()
+        progress['elapsed_ms'] = max(0, int((now - started) * 1000))
+        progress['sdk_event_count'] += 1
+        progress['last_sdk_event_at_ms'] = int(time.time() * 1000)
+        if isinstance(payload, (ItemStartedNotification, ItemCompletedNotification)):
+            item = payload.item.root
+            kind = item.type if item.type in PROGRESS_ITEMS else 'other'
+            status = getattr(item, 'status', 'completed' if isinstance(payload, ItemCompletedNotification) else 'inProgress')
+            status = getattr(status, 'value', status)
+            progress['last_item'] = {'kind': kind, 'status': status if status in PROGRESS_STATUSES else 'unknown'}
+            if isinstance(payload, ItemCompletedNotification):
+                progress['item_counts'][kind] = progress['item_counts'].get(kind, 0) + 1
+        elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
+            progress['token_usage'] = {key: count for key in PROGRESS_TOKENS
+                                      if type(count := getattr(payload.token_usage.total, key, None)) is int and 0 <= count <= 2**53 - 1}
+        # Deltas prove native SDK activity; never inspect or serialize their text.
+        # Bound durable writes even when the provider sends a token-by-token stream.
+        if emit is not None and (last_emitted is None or now - last_emitted >= 5 or terminal):
+            emit('turn.progress', progress=progress)
+            last_emitted = now
+
     stream = turn.stream()
     try:
         for event in stream:
             payload = event.payload
             if isinstance(payload, ItemCompletedNotification) and payload.turn_id == turn.id:
                 items.append(payload.item)
+                observed(payload)
+            elif isinstance(payload, (ItemStartedNotification, *delta_types)) and payload.turn_id == turn.id:
+                observed(payload)
             elif isinstance(payload, ThreadTokenUsageUpdatedNotification) and payload.turn_id == turn.id:
                 usage = payload.token_usage
+                observed(payload)
             elif isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn.id:
                 completed = payload.turn
+                observed(payload, terminal=True)
     finally:
         stream.close()
     if completed is None:
@@ -491,7 +571,7 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
             emit("session.started", session_id=thread.id, thread_id=thread.id)
             turn = thread.turn(task, effort=cfg["reasoning_effort"], output_schema=strict_variant(schema))
             emit("turn.started", turn_id=turn.id)
-            result = collect_codex_turn(turn)
+            result = collect_codex_turn(turn, emit=emit)
             status = getattr(result.status, "value", result.status)
             failure = OperationError("SDK_EXECUTION_FAILED", component="runner", phase="invoke",
                                      outcome="FAIL", side_effect="completed") if status != "completed" else None
@@ -603,8 +683,12 @@ def proposal_rejection(exc):
         "planned files": ("PLAN_FILES_MISMATCH", "List the exact proposed file paths and reasons in files_changed."),
         "file proposal needs": ("ROOT_CAUSE_REQUIRED", "Return an evidence-backed root_cause for the proposal."),
         "existing tests": ("TEST_IMMUTABLE", "Preserve existing test bytes; fix application source instead."),
+        "new tests need a supported local": ("TEST_REFERENCE_REQUIRED", "Load real application code using a literal relative import/require, import(new URL('../src/module.mjs', import.meta.url)), or Vite server.ssrLoadModule('/src/module.ts'). No external or computed module paths."),
+        "new tests need supported behavioral": ("ASSERTION_REQUIRED", "Use assert.strictEqual/deepStrictEqual/equal/ok/throws/rejects or expect(...) against actual application results; named imports of those functions from node:assert/strict are also supported."),
         "new tests": ("BEHAVIOR_TEST_REQUIRED", "Import application code and assert its expected behavior."),
         "constant-only": ("BEHAVIOR_TEST_REQUIRED", "Replace constant-only tests with assertions against application behavior."),
+        "use a supported test runner": ("TEST_SCRIPT_UNSUPPORTED", "Use exactly node --test (optional .js/.mjs/.cjs test paths), vitest, vitest run (optional --environment node or jsdom), or jest. Runtime flags such as --experimental-strip-types, shell wrappers and filters are unsupported. For TypeScript with existing Vite, use a .test.mjs that loads real modules via Vite ssrLoadModule; keep the script node --test."),
+        "use the full TypeScript checker": ("TYPECHECK_SCRIPT_UNSUPPORTED", "Add only tsc --noEmit or tsc -b as a missing typecheck script; preserve existing scripts and compiler configuration."),
         "proposal exceeds": ("PATCH_LIMIT", "Keep the proposal within eight files and 20000 bytes."),
         "rejected patch path": ("PATH_SCOPE", "Return only clean relative paths within the trusted writable scope."),
         "duplicate patch path": ("DUPLICATE_PATH", "Return each file path only once."),

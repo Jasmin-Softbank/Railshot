@@ -17,6 +17,7 @@ import time
 
 from bundle import source_digest
 from quality import java_failure_kind
+from execution import quality_advisory
 
 HERE = Path(__file__).resolve().parent
 PLATFORM = HERE.parent
@@ -219,7 +220,7 @@ def execute(fixtures, output, stack, case, mode, network, timeout):
         matches = matches_quality(stack, case, expected, q, diagnostic)
         if mode == "full" and expected == "PASS":
             matches = matches and verdict.get("ok") is True and result["release_eligible"]
-        elif mode == "quality" or expected != "PASS":
+        elif mode == "quality" or not q or not quality_advisory(q):
             matches = matches and not result["release_eligible"]
         result["assertion"] = "MATCH" if matches else "MISMATCH"
     except (OSError, ValueError, KeyError, TypeError) as exc:

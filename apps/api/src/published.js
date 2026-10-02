@@ -9,6 +9,15 @@ const HANDOFF_FIELDS = ['version', 'status', 'source_commit', 'target_id', 'tena
   'run_id', 'producer_attempt', 'bundle_artifact_id', 'files', 'registry'];
 const sameKeys = (a, b) => JSON.stringify(Object.keys(a || {}).sort()) === JSON.stringify(Object.keys(b || {}).sort());
 
+function qualityAdvisory(row) {
+  const error = row.error || {};
+  return row.layer === 'Q' && row.advisory === true && row.ok === false
+    && ['FAIL', 'BLOCKED'].includes(row.outcome) && error.outcome === row.outcome
+    && (error.code === 'GATE_CONFIG_INVALID' && error.phase === 'Q.discovery'
+      || ['GATE_CHECK_FAILED', 'GATE_ENVIRONMENT_UNAVAILABLE'].includes(error.code)
+        && ['Q', 'Q.discovery', 'Q.prepare', 'Q.lint', 'Q.type', 'Q.unit', 'Q.report'].includes(error.phase));
+}
+
 // These hashes check the trusted workflow artifact channel, not a detached signature.
 export function readPublished(files, { runId, attempt, headSha, targetId, tenant }) {
   const entries = new Map(files.map(({ path, content }) => [path, content]));
@@ -47,7 +56,7 @@ export function readPublished(files, { runId, attempt, headSha, targetId, tenant
   require(HASH.test(manifest.source_sha256) && manifest.source_sha256 === verdict.source_sha256, 'source digest');
   require(manifest.files?.[spec] === handoff.files[spec] && manifest.files?.['verdict.json'] === handoff.files['verdict.json'], 'bundle 파일 해시');
   require(verdict.ok === true && verdict.release_eligible === true && verdict.status === 'PASS', 'gate 판정');
-  require(Array.isArray(verdict.layers) && verdict.layers.length === LAYERS.length && verdict.layers.every((row, index) => row.layer === LAYERS[index] && row.ok === true && !row.blocked && !row.errors?.length), 'gate 단계');
+  require(Array.isArray(verdict.layers) && verdict.layers.length === LAYERS.length && verdict.layers.every((row, index) => row.layer === LAYERS[index] && (qualityAdvisory(row) || row.ok === true && !row.blocked && !row.errors?.length)), 'gate 단계');
   require(sameKeys(images, manifest.images) && sameKeys(images, verdict.images) && sameKeys(images, verdict.image_ids), 'service 목록');
   for (const name of Object.keys(images)) {
     require(manifest.images[name]?.local_ref === verdict.images[name] && manifest.images[name]?.id === verdict.image_ids[name], '검사 이미지 ID');

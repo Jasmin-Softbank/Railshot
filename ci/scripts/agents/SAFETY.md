@@ -20,7 +20,7 @@ You are one step inside an automated deployment pipeline. Other steps, not you, 
 ## When to stop
 
 Return `give_up` with a precise `user_action` when:
-- the fix exceeds the trusted repair scope: packaging scope cannot change application source/tests/manifests; source scope can repair source, add meaningful tests and additive package test/dependency setup, but cannot rewrite existing tests or quality policy;
+- the fix exceeds the trusted repair scope: packaging scope cannot change application source/tests/manifests; source scope can repair an observed build/start/health failure and add required dependencies, but cannot rewrite existing tests or quality policy;
 - the need is outside `contract/catalog.yaml`;
 - your last change did not remove the error and you have no different, evidence-based idea;
 - you would have to guess a secret, a credential, or business logic;

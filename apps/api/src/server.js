@@ -118,14 +118,19 @@ async function jsonInput(request) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ServiceError('JSON 객체가 필요합니다.', 422);
   return value;
 }
-function page(items, parameters) {
+function pagination(parameters) {
   for (const key of parameters.keys()) if (!['limit', 'marker'].includes(key) || parameters.getAll(key).length !== 1) throw new ServiceError('조회 조건이 잘못되었습니다.', 422);
   const rawLimit = parameters.get('limit') ?? '20';
   if (!/^[1-9]\d?$|^100$/.test(rawLimit)) throw new ServiceError('limit는 1–100이어야 합니다.', 422);
   const marker = parameters.get('marker');
+  if (marker !== null && (!/^[A-Za-z0-9._-]{1,128}$/.test(marker))) throw new ServiceError('marker가 잘못되었습니다.', 422);
+  return { limit: Number(rawLimit), marker };
+}
+function page(items, parameters) {
+  const { limit, marker } = pagination(parameters);
   const start = marker === null ? 0 : items.findIndex((item) => item.id === marker) + 1;
   if (marker !== null && start === 0) throw new ServiceError('marker가 잘못되었습니다.', 422);
-  const visible = items.slice(start, start + Number(rawLimit));
+  const visible = items.slice(start, start + limit);
   return { items: visible, next_marker: start + visible.length < items.length ? visible.at(-1).id : null };
 }
 function apiError(response, error, requestId, versioned) {
@@ -244,6 +249,12 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
           }
+          const observationRoute = /^\/api\/v1\/targets\/([A-Za-z0-9._-]+)\/observations$/.exec(url.pathname);
+          if (observationRoute) {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            json(response, 200, await products.getTargetObservation(observationRoute[1], sessionId)); return;
+          }
           const logRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/logs$/.exec(url.pathname);
           if (logRoute) {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
@@ -260,7 +271,10 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           if (['targets', 'profiles'].includes(kind)) {
             json(response, 200, page(products ? await products[kind](sessionId) : [], url.searchParams)); return;
           }
-          if (!id && request.method === 'GET') { json(response, 200, page(products.list(kind, sessionId), url.searchParams)); return; }
+          if (!id && request.method === 'GET') {
+            json(response, 200, kind === 'plans' ? page(products.list(kind, sessionId), url.searchParams)
+              : products.list(kind, sessionId, pagination(url.searchParams))); return;
+          }
           if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
           if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
           if (request.method === 'GET') {

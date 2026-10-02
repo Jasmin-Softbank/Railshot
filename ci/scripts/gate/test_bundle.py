@@ -226,6 +226,31 @@ class BundleTest(unittest.TestCase):
         self.assertEqual(bundle.TRUST, manifest["trust"])
         self.assertEqual(manifest, bundle.verify(self.out))
 
+    def test_only_quality_advisories_are_publishable_and_their_failure_is_preserved(self):
+        q = self.verdict["layers"][2]
+        q.update(ok=False, advisory=True, outcome="BLOCKED", blocked="NO_TESTS",
+                 error={"code": "GATE_CONFIG_INVALID", "phase": "Q.discovery", "outcome": "BLOCKED"})
+        self.write_verdict()
+        self.export()
+        bundle.verify(self.out)
+        self.assertFalse(json.loads((self.out / "verdict.json").read_bytes())["layers"][2]["ok"])
+        for phase, code, outcome in (("Q.snapshot", "GATE_CONFIG_INVALID", "BLOCKED"),
+                                     ("Q.cleanup", "GATE_EXECUTION_FAILED", "UNKNOWN"),
+                                     ("network", "GATE_ENVIRONMENT_UNAVAILABLE", "BLOCKED"),
+                                     ("Q.evidence-write", "OBSERVATION_WRITE_FAILED", "UNKNOWN")):
+            q.update(outcome=outcome, error={"code": code, "phase": phase, "outcome": outcome})
+            with self.subTest(phase=phase), self.assertRaisesRegex(ValueError, "required release layers"):
+                bundle.contract((self.ws / ".railshot/railshot.yaml").read_bytes(), json.dumps(self.verdict))
+        q.update(ok=True, advisory=False, blocked=None, error=None)
+        for row in self.verdict["layers"]:
+            if row["layer"] == "Q":
+                continue
+            row.update(ok=False, advisory=True, outcome="FAIL", errors=["failed"],
+                       error={"code": "GATE_CHECK_FAILED", "phase": "Q.unit", "outcome": "FAIL"})
+            with self.subTest(layer=row["layer"]), self.assertRaises(ValueError):
+                bundle.contract((self.ws / ".railshot/railshot.yaml").read_bytes(), json.dumps(self.verdict))
+            row.update(ok=True, errors=[], error=None)
+
     def test_gate_image_retag_is_rejected(self):
         self.tag_ids[LOCAL] = "sha256:" + "c" * 64
         with self.assertRaisesRegex(ValueError, "image changed"):

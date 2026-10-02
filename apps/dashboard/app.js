@@ -15,7 +15,9 @@ function showView(name) {
   }
   document.title = `RailShot · ${views[name].querySelector('h1').textContent}`;
   savePreferences({ view: name });
-  if (sessionReady && name === 'history') loadHistory().catch(showHistoryError);
+  if (sessionReady && name === 'history') loadHistory();
+  if (sessionReady && name === 'monitor') loadEnvironments();
+  else stopEnvironmentPolling();
   if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
 }
 
@@ -50,6 +52,14 @@ let submitting = false;
 let current = null;
 let sessionReady = false, preferenceTimer;
 let history = [], connections = [], editingConnection = null;
+let historyMarkers = [null], historyNext = null, historyTotal = null, historyController, historyError = null;
+const savedHistory = window.history.state?.railshotHistory;
+let historyKind = savedHistory?.kind === 'builds' ? 'builds' : 'deployments';
+if (Array.isArray(savedHistory?.markers) && savedHistory.markers.length <= 100 && savedHistory.markers[0] === null
+    && savedHistory.markers.slice(1).every((value) => typeof value === 'string' && value.length <= 1024)) historyMarkers = savedHistory.markers;
+document.querySelector('#history-kind').value = historyKind;
+let targets = [], observations = new Map(), environmentController, environmentTimer;
+
 let preferences = { view: 'deploy', environment: 'cloud', provider: '' };
 // The cookie is HttpOnly; no session token, credential, or execution locator enters localStorage.
 try { localStorage.removeItem('railshot.lastExecution'); } catch { /* Storage may be disabled. */ }
@@ -123,6 +133,7 @@ sourceBox.addEventListener('drop', (event) => {
 const terminal = new Set(['succeeded', 'failed', 'blocked', 'unknown', 'published', 'publication_unverified']);
 const labels = { queued: '실행 대기 중', running: '실행 중', succeeded: '앱 배포 완료', published: '이미지 게시 완료',
   failed: '실행 실패', blocked: '실행 조건 확인 필요', unknown: '실행 결과 확인 필요', publication_unverified: '게시 결과 확인 필요' };
+function executionLabel(row) { return row.kind === 'builds' && row.status === 'succeeded' ? '이미지 게시 완료' : labels[row.status] || row.status || '실행 상태 확인 중'; }
 function activeRun() { return current && (current.status === 'unknown' || !terminal.has(current.status)); }
 function deploymentSelection() {
   const environment = document.querySelector('[name="environment"]:checked').value;
@@ -273,7 +284,7 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
 document.querySelector('#edit-selection').addEventListener('click', () => { if (!submitting) invalidateReview(); });
 
 function remember() {
-  history = [current, ...history.filter((row) => row.id !== current.id)];
+  history = history.map((row) => row.id === current.id && row.kind === current.kind ? { ...row, ...current } : row);
   renderHistory();
 }
 function safeLink(selector, value, enabled, github = false) {
@@ -287,9 +298,14 @@ function safeLink(selector, value, enabled, github = false) {
     }
   } catch { /* Only a verified HTTPS link is shown. */ }
 }
+function taskList(tasks = []) {
+  const list = document.createElement('ul');
+  for (const task of tasks) list.append(element('li', `${task.number}. ${task.name}: ${task.conclusion || task.status}`));
+  return list;
+}
 function renderRun() {
   document.querySelector('#run-panel').hidden = false;
-  const label = labels[current.status] || '실행 상태 확인 중';
+  const label = executionLabel(current);
   document.querySelector('#run-freshness').textContent = lastReadAt ? `마지막 상태 조회: ${new Date(lastReadAt).toLocaleString()}${observationError ? ' · 조회 실패, 마지막 기록입니다.' : ''}` : '서버 상태 조회 전';
   document.querySelector('#run-meta').textContent = `${current.app || '앱'} · ${current.id} · ${current.target_id || ''}`;
   document.querySelector('#run-state').textContent = label;
@@ -301,6 +317,7 @@ function renderRun() {
   document.querySelector('#run-steps').replaceChildren(...steps.map((step) => {
     const item = document.createElement('li');
     item.textContent = `${({ loop: '앱 검사 및 수정', release: '검증 이미지 게시' })[step.key] || step.key}: ${step.conclusion || step.status}`;
+    if (step.tasks?.length) item.append(taskList(step.tasks));
     return item;
   }));
   if (current.environment) {
@@ -322,8 +339,11 @@ function renderRun() {
   document.querySelector('#run-binding').textContent = binding;
   const stageStates = ['접수 완료', steps.find((step) => step.key === 'loop')?.conclusion || steps.find((step) => step.key === 'loop')?.status,
     steps.find((step) => step.key === 'release')?.conclusion || steps.find((step) => step.key === 'release')?.status, current.cd?.state, current.public_http?.state];
-  document.querySelector('#monitor-steps').replaceChildren(...['소스 접수', '앱 검사 및 수정', '이미지 빌드', 'GitOps 반영', 'URL 및 앱 상태 확인'].map((label, index) => {
-    const item = document.createElement('li'); item.textContent = `${label} · ${stageStates[index] || '대기'}`; return item;
+  document.querySelector('#monitor-steps').replaceChildren(...['소스 접수', '앱 검사 및 수정', '검증 이미지 게시', 'GitOps 반영', 'URL 및 앱 상태 확인'].map((label, index) => {
+    const item = document.createElement('li'); item.textContent = `${label} · ${stageStates[index] || '대기'}`;
+    const step = steps.find((step) => step.key === ({ 1: 'loop', 2: 'release' })[index]);
+    if (step?.tasks?.length) item.append(taskList(step.tasks));
+    return item;
   }));
   renderHistory();
   document.querySelector('#monitor-state').textContent = observationError ? `${label} · 상태 조회 실패` : label;
@@ -369,6 +389,8 @@ deployButton.addEventListener('click', async () => {
     current = { ...data, id, kind: draft.kind, status: data.status === 'accepted' ? 'queued' : data.status };
     lastReadAt = null; observationError = false; remember(); renderRun();
     reviewed = null;
+    historyKind = draft.kind; document.querySelector('#history-kind').value = historyKind;
+    loadHistory([null]);
     document.querySelector('#run-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     refreshRun();
   } catch (cause) {
@@ -411,7 +433,7 @@ async function refreshRun() {
 }
 document.querySelector('#stop-polling').addEventListener('click', () => { stopPolling(); renderMetrics(); document.querySelector('#run-message').textContent = '상태 조회를 중지했습니다. 서버의 실행은 계속됩니다.'; });
 document.querySelector('#refresh-run').addEventListener('click', refreshRun);
-window.addEventListener('pagehide', () => { stopPolling(); for (const controller of requests) controller.abort(); });
+window.addEventListener('pagehide', () => { stopPolling(); stopEnvironmentPolling(); for (const controller of requests) controller.abort(); });
 let consoleTab = 'work';
 const logLabels = { loading: '앱 로그를 조회하고 있습니다.', not_deployed: '앱 적용 전입니다. 작업 로그에서 CI 진행과 실패 원인을 확인하세요.',
   not_configured: '이 배포 대상의 로그 조회 설정이 없습니다.', unavailable: '앱 로그 조회에 실패했습니다. 다음 조회에서 다시 확인합니다.',
@@ -449,7 +471,7 @@ function renderMetrics() {
   const bound = observation && observation.deployment_id === current.id && observation.target_id === current.target_id && observation.app === current.app;
   for (const name of ['pods', 'cpu_percent', 'memory_percent', 'http']) {
     const metric = bound ? observation.metrics?.[name] : null;
-    let state = observationError ? 'unavailable' : metric?.state || (current?.kind === 'builds' ? 'unsupported' : 'not_configured');
+    let state = observationError ? 'unavailable' : metric ? metricState(metric, observation) : current?.kind === 'builds' ? 'unsupported' : 'not_configured';
     const time = Date.parse(metric?.observed_at);
     if (state === 'ready' && (!Number.isFinite(time) || Date.now() - time > Math.min(observation.stale_after_seconds || 90, 90) * 1000 || time > Date.now() + 5000)) state = 'stale';
     const field = document.querySelector(`#metric-${name}`);
@@ -467,7 +489,7 @@ function renderMetrics() {
     : '수집기 수명 정보 미제공';
 }
 // Even after polling is stopped, expire old samples on screen.
-const freshnessTimer = setInterval(renderMetrics, 15000);
+const freshnessTimer = setInterval(() => { renderMetrics(); renderEnvironments(); }, 15000);
 window.addEventListener('pagehide', () => clearInterval(freshnessTimer));
 document.querySelectorAll('[data-console]').forEach((button) => button.addEventListener('click', () => {
   consoleTab = button.dataset.console;
@@ -482,23 +504,191 @@ function savePreferences(patch) {
   preferenceTimer = setTimeout(() => request('/api/v1/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(preferences) }).catch(() => { document.querySelector('#session-note').textContent = '화면 설정을 저장하지 못했습니다. 연결을 확인하세요.'; }), 200);
 }
-function showHistoryError(cause) { document.querySelector('#history-detail').textContent = cause.message; }
+function formatTime(value) {
+  return Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('ko-KR') : '관측 시각 없음';
+}
+function element(tag, text, className) {
+  const node = document.createElement(tag); node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+function showHistoryError(cause) { historyError = cause.message; document.querySelector('#history-detail').textContent = `내역 조회 실패: ${cause.message} 최신 내역을 눌러 다시 확인하세요.`; }
+function openExecution(row, tab = 'work') {
+  stopPolling(); logController?.abort(); logSnapshot = null;
+  current = row; lastReadAt = null; observationError = false; consoleTab = tab;
+  document.querySelectorAll('[data-console]').forEach((button) => button.setAttribute('aria-selected', String(button.dataset.console === tab)));
+  showView('monitor'); renderRun(); refreshRun();
+  document.querySelector('.execution-heading').scrollIntoView({ block: 'start' });
+}
 function renderHistory() {
-  document.querySelector('#history-summary').textContent = history.length ? `이 세션의 배포 ${history.length}건` : '아직 배포 내역이 없습니다';
-  document.querySelector('#history-detail').textContent = '같은 브라우저의 세션이 유지되는 동안 서버에서 다시 불러올 수 있습니다.';
+  const kindLabel = historyKind === 'builds' ? '빌드' : '배포';
+  document.querySelector('#history-summary').textContent = historyError ? '실행 내역을 확인하지 못했습니다' : history.length
+    ? `이 세션의 ${kindLabel}${Number.isInteger(historyTotal) ? ` · 전체 ${historyTotal}건` : ''}` : `아직 ${kindLabel} 내역이 없습니다`;
+  document.querySelector('#history-page').textContent = `${historyMarkers.length}페이지 · ${history.length}건`;
+  document.querySelector('#history-prev').disabled = Boolean(historyController) || historyMarkers.length < 2;
+  document.querySelector('#history-next').disabled = Boolean(historyController) || !historyNext;
   document.querySelector('#history-list').replaceChildren(...history.map((row) => {
-    const item = document.createElement('li'), button = document.createElement('button');
-    button.type = 'button'; button.className = 'text-button';
-    button.textContent = `${row.app || '앱'} · ${labels[row.status] || row.status} · ${row.created_at ? new Date(row.created_at).toLocaleString() : '접수 중'}`;
-    button.addEventListener('click', () => { stopPolling(); current = row; lastReadAt = null; observationError = false; showView('monitor'); renderRun(); refreshRun(); });
-    item.append(button); return item;
+    const item = document.createElement('li'), header = element('div', '', 'history-row'), content = document.createElement('div');
+    const badge = element('span', executionLabel(row), 'state-badge');
+    badge.dataset.state = ['failed', 'blocked'].includes(row.status) ? 'failed' : row.status === 'succeeded' ? 'ready' : 'unknown';
+    content.append(element('strong', row.app || '앱 이름 미제공'), element('small', `환경 ${row.target_id || '미지정'} · ${formatTime(row.created_at)}`, 'history-meta'));
+    header.append(content, badge);
+    const actions = element('div', '', 'history-actions');
+    for (const [label, tab] of [['실행 상세·작업 로그', 'work'], ...(row.kind === 'deployments' ? [['앱 로그', 'app']] : [])]) {
+      const button = element('button', label, 'text-button'); button.type = 'button';
+      button.setAttribute('aria-label', `${row.app || '앱'} ${label}`);
+      button.addEventListener('click', () => openExecution(row, tab)); actions.append(button);
+    }
+    item.append(header, element('small', `실행 ${row.id}`, 'history-meta'), actions); return item;
   }));
 }
-async function loadHistory() {
-  const { data } = await request('/api/v1/deployments?limit=100');
-  if (!Array.isArray(data.items)) throw new Error('배포 내역 응답을 확인하지 못했습니다.');
-  history = data.items.map((row) => ({ ...row, kind: 'deployments' })); renderHistory();
+async function loadHistory(markers = historyMarkers) {
+  historyController?.abort();
+  const controller = new AbortController(), kind = historyKind; historyController = controller;
+  history = []; historyNext = null; historyError = null; renderHistory();
+  document.querySelector('#history-summary').textContent = '실행 내역을 불러오는 중입니다';
+  document.querySelector('#history-detail').textContent = '이 브라우저 세션의 기록을 서버에서 조회합니다.';
+  document.querySelector('#history-list').setAttribute('aria-busy', 'true');
+  const query = new URLSearchParams({ limit: '10' });
+  if (markers.at(-1)) query.set('marker', markers.at(-1));
+  try {
+    const { data } = await request(`/api/v1/${kind}?${query}`, {}, controller);
+    if (historyController !== controller) return;
+    if (!Array.isArray(data.items) || data.items.some((row) => typeof row.id !== 'string')
+        || (data.next_marker != null && typeof data.next_marker !== 'string')) throw new Error('내역 응답을 확인하지 못했습니다.');
+    history = data.items.map((row) => ({ ...row, kind })); historyNext = data.next_marker || null;
+    historyTotal = Number.isInteger(data.total) ? data.total : null; historyMarkers = markers;
+    window.history.replaceState({ ...window.history.state, railshotHistory: { kind, markers } }, '');
+    document.querySelector('#history-detail').textContent = '최신 접수 순 · 페이지 이동 중 새 실행이 생기면 최신 내역에서 확인하세요.';
+  } catch (cause) {
+    if (historyController !== controller) return;
+    showHistoryError(cause);
+  } finally {
+    if (historyController === controller) {
+      historyController = null; renderHistory();
+      document.querySelector('#history-list').setAttribute('aria-busy', 'false');
+    }
+  }
 }
+document.querySelector('#history-kind').addEventListener('change', (event) => { historyKind = event.target.value; loadHistory([null]); });
+document.querySelector('#history-refresh').addEventListener('click', () => loadHistory([null]));
+document.querySelector('#history-prev').addEventListener('click', () => loadHistory(historyMarkers.slice(0, -1)));
+document.querySelector('#history-next').addEventListener('click', () => { if (historyNext) loadHistory([...historyMarkers, historyNext]); });
+
+const metricNames = { node_up: '노드 수집', cpu_percent: 'CPU', memory_percent: '메모리', disk_percent: '디스크',
+  network_receive_bytes_per_second: '네트워크 수신', network_transmit_bytes_per_second: '네트워크 송신', pods: '실행 중 Pod', http: '앱 HTTP' };
+const providerNames = { aws: 'AWS', gcp: 'GCP', openstack: 'OpenStack' };
+function metricState(metric, observation) {
+  if (metric?.state !== 'ready') return metric?.state || 'not_configured';
+  const time = Date.parse(metric.observed_at), value = metric.value;
+  if (!Number.isFinite(time) || Date.now() - time > Math.min(observation?.stale_after_seconds || 90, 90) * 1000 || time > Date.now() + 5000) return 'stale';
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? 'ready' : 'no_data';
+}
+function metricText(name, observation) {
+  const metric = observation?.metrics?.[name], state = metricState(metric, observation);
+  if (state !== 'ready') return metricLabels[state] || '확인 불가';
+  if (name === 'http') return metric.value === 1 ? '2xx 응답' : '검사 실패';
+  if (name === 'node_up') return metric.value === 1 ? '수집 중' : '수집 실패';
+  if (name.endsWith('_percent')) return `${metric.value.toFixed(1)}%`;
+  if (name.endsWith('_per_second')) return `${(metric.value / 1024).toFixed(1)} KiB/s`;
+  return `${metric.value}개`;
+}
+function environmentState(observation) {
+  if (!observation) return 'missing';
+  if (observation.failed) return 'failed';
+  const metrics = Object.entries(observation.metrics || {}), states = metrics.map(([, metric]) => metricState(metric, observation));
+  if (states.some((state) => ['collection_failed', 'unavailable'].includes(state))
+      || metrics.some(([name, metric]) => ['node_up', 'http'].includes(name) && metricState(metric, observation) === 'ready' && metric.value === 0)) return 'failed';
+  if (states.includes('stale')) return 'stale';
+  if (metricState(observation.metrics?.node_up, observation) === 'ready') return 'ready';
+  return 'missing';
+}
+function visibleTargets() {
+  const provider = document.querySelector('#monitor-provider').value, target = document.querySelector('#monitor-target').value;
+  return targets.filter((row) => (!provider || row.provider === provider) && (!target || row.id === target));
+}
+function renderEnvironments() {
+  const opened = new Set([...document.querySelectorAll('#environment-detail details[open]')].map((item) => item.dataset.target));
+  const focused = document.activeElement?.closest('#environment-detail details')?.dataset.target;
+  const rows = visibleTargets(), stateNames = { ready: '노드 수집 정상', failed: '수집·응답 실패', missing: '미수집', stale: '오래된 관측' };
+  document.querySelector('#environment-summary').replaceChildren(...Object.entries(stateNames).map(([state, label]) => {
+    const count = rows.filter((row) => environmentState(observations.get(row.id)) === state).length;
+    const node = element('span', label); node.append(element('strong', String(count))); return node;
+  }));
+  document.querySelector('#environment-list').replaceChildren(...rows.map((row) => {
+    const observation = observations.get(row.id), state = environmentState(observation), tr = document.createElement('tr');
+    const name = element('td', row.label || row.id);
+    name.append(element('small', `${providerNames[row.provider] || row.provider || '종류 미제공'} · ${row.application_name || '앱 미지정'}`));
+    const status = document.createElement('td'), badge = element('span', stateNames[state], 'state-badge'); badge.dataset.state = state; status.append(badge);
+    tr.append(name, status, ...['cpu_percent', 'memory_percent', 'disk_percent', 'http'].map((metric) => element('td', observation?.failed ? '조회 실패' : metricText(metric, observation))));
+    const times = Object.values(observation?.metrics || {}).map((metric) => Date.parse(metric.observed_at)).filter(Number.isFinite);
+    tr.append(element('td', times.length ? formatTime(new Date(Math.min(...times)).toISOString()) : '수집 시각 없음'));
+    return tr;
+  }));
+  document.querySelector('#environment-detail').replaceChildren(...rows.map((row) => {
+    const observation = observations.get(row.id), details = element('details', '', 'environment-detail');
+    details.dataset.target = row.id; details.open = opened.has(row.id);
+    details.append(element('summary', `${row.label || row.id} · 전체 지표와 수집 시각`));
+    const list = element('dl', '', 'metric-details');
+    for (const [key, label] of Object.entries(metricNames)) {
+      const cell = document.createElement('div'), value = element('dd', observation?.failed ? '조회 실패' : metricText(key, observation));
+      value.append(element('small', formatTime(observation?.metrics?.[key]?.observed_at))); cell.append(element('dt', label), value); list.append(cell);
+    }
+    details.append(list); return details;
+  }));
+  if (focused) [...document.querySelectorAll('#environment-detail details')].find((item) => item.dataset.target === focused)?.querySelector('summary').focus();
+}
+function stopEnvironmentPolling() {
+  clearTimeout(environmentTimer);
+  const controller = environmentController; environmentController = null; controller?.abort();
+}
+async function loadEnvironments() {
+  stopEnvironmentPolling();
+  renderEnvironments();
+  const controller = new AbortController(); environmentController = controller;
+  document.querySelector('#environment-message').textContent = '실행 환경과 관측 지표를 조회하고 있습니다.';
+  try {
+    const { data } = await request('/api/v1/targets?limit=100', {}, controller);
+    if (environmentController !== controller) return;
+    if (!Array.isArray(data.items) || data.items.some((row) => typeof row.id !== 'string') || data.next_marker) throw new Error('환경 목록을 모두 확인하지 못했습니다.');
+    targets = data.items;
+    const select = document.querySelector('#monitor-target'), selected = select.value, provider = document.querySelector('#monitor-provider').value;
+    const options = targets.filter((row) => !provider || row.provider === provider);
+    select.replaceChildren(new Option('전체 환경', ''), ...options.map((row) => new Option(row.label || row.id, row.id)));
+    if (options.some((row) => row.id === selected)) select.value = selected;
+    const rows = visibleTargets();
+    // Bound observer fan-out to four requests; targets are capped at 100 by the API.
+    for (let index = 0; index < rows.length; index += 4) {
+      await Promise.all(rows.slice(index, index + 4).map(async (row) => {
+        try {
+          const { data: observation } = await request(`/api/v1/targets/${encodeURIComponent(row.id)}/observations`, {}, controller);
+          if (observation.target_id !== row.id || (row.application_name && observation.app !== row.application_name)) throw new Error('관측 대상 불일치');
+          if (environmentController === controller) observations.set(row.id, observation);
+        } catch {
+          if (environmentController === controller) observations.set(row.id, { failed: true });
+        }
+      }));
+      if (environmentController !== controller) return;
+      if (controller.signal.aborted) throw new Error('지표 조회 시간이 초과되었습니다.');
+    }
+    renderEnvironments();
+    document.querySelector('#environment-message').textContent = rows.length
+      ? `마지막 조회 ${formatTime(new Date().toISOString())} · 30초마다 갱신 · 수집 실패는 0으로 표시하지 않습니다.`
+      : '선택한 조건에 등록된 환경이 없습니다. 다른 클라우드를 선택하거나 앱을 배포하세요.';
+  } catch (cause) {
+    if (environmentController !== controller) return;
+    observations = new Map(targets.map((row) => [row.id, { failed: true }])); renderEnvironments();
+    document.querySelector('#environment-message').textContent = `환경 조회 실패: ${cause.name === 'AbortError' ? '조회 시간이 초과되었습니다.' : cause.message} 30초 후 다시 확인합니다.`;
+  } finally {
+    if (environmentController === controller) {
+      environmentController = null;
+      if (!views.monitor.hidden) environmentTimer = setTimeout(loadEnvironments, 30000);
+    }
+  }
+}
+document.querySelector('#monitor-provider').addEventListener('change', () => { document.querySelector('#monitor-target').value = ''; loadEnvironments(); });
+document.querySelector('#monitor-target').addEventListener('change', loadEnvironments);
+document.querySelector('#monitor-refresh').addEventListener('click', loadEnvironments);
 function resetConnectionForm() {
   editingConnection = null; document.querySelector('#connection-form').reset();
   document.querySelector('#connection-cancel').hidden = true;
@@ -565,6 +755,7 @@ async function initializeDashboard() {
       document.querySelector('#connection-message').textContent = cause.message;
     })]);
     if (history.length) { current = history[0]; renderRun(); refreshRun(); }
+    if (!views.monitor.hidden) loadEnvironments();
   } catch (cause) {
     connectionError = cause.message; updateSelection();
     document.querySelector('#session-note').textContent = '세션을 불러오지 못했습니다. 새로고침하세요.';
