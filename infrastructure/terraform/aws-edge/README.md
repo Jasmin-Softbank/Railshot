@@ -54,7 +54,7 @@ ALB는 서로 다른 두 AZ의 지정 VPC subnet을 확인한다. 운영자는 �
 
 새 도메인은 private backend/입력을 준비한 후 먼저 `terraform plan -target=aws_route53_zone.app -out=<private-zone-plan>`으로 zone만 계획하고, 그 saved plan을 검토·적용한다. 출력 `zone_id`와 `name_servers`를 확인해 registrar에서 정확한 NS로 위임한다. 그 다음 **target 옵션 없이 전체 plan을 새로 만들고** 검토·적용해 ACM/ALB를 구성한다. 부분 apply는 NS 위임을 준비하는 단계이며 edge 전체 적용이나 앱 공개 완료가 아니다.
 
-`certificate_arn`이 null이면 `*.base_domain` ACM 인증서, DNS 검증 record와 검증 대기를 만든다. Route host는 base domain 바로 아래 한 label만 허용한다. 기존 ARN을 쓰면 같은 region/account와 모든 host coverage를 운영자가 검증한다. 도메인의 실제 NS 위임이 끝나지 않으면 ACM DNS 검증이 완료되지 않는다. DNS 등록과 TLS 설정은 앱 준비 완료 증거가 아니다.
+`certificate_arn`이 null이면 `*.base_domain` ACM 인증서, DNS 검증 record와 검증 대기를 만든다. Route host는 기본적으로 base domain 바로 아래 한 label만 허용한다. `railshot.io` 같은 apex route는 같은 region/account에서 발급·DNS 검증을 마친 `apex_certificate_arn`을 명시해야 한다. 모듈은 기존 wildcard/default 인증서를 교체하지 않고 추가 SNI 인증서만 연결한다. Apex 인증서와 DNS 검증 receipt는 운영자가 보관하고, 기존 검증 CNAME을 재사용할 때 중복 Terraform 소유자를 만들지 않는다. 기존 ARN을 쓰면 같은 region/account와 모든 host coverage를 운영자가 검증한다. 도메인의 실제 NS 위임이 끝나지 않으면 ACM DNS 검증이 완료되지 않는다. DNS 등록과 TLS 설정은 앱 준비 완료 증거가 아니다.
 
 ## 보안 그룹과 WireGuard 소유권
 

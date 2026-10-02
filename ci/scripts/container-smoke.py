@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
-"""Exercise real container entrypoints; never dispatch CI or touch a cluster."""
+"""Exercise real container entrypoints against local fixtures; never dispatch CI or touch a cluster."""
 import argparse
+from contextlib import contextmanager
 from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import secrets
 import subprocess
 import tempfile
+import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-def docker(*args, **kwargs):
-    return subprocess.run(["docker", *args], check=True, text=True, capture_output=True, timeout=90, **kwargs).stdout.strip()
+def docker(*args, timeout=90, **kwargs):
+    return subprocess.run(["docker", *args], check=True, text=True, capture_output=True, timeout=timeout, **kwargs).stdout.strip()
+
+
+def remove_container(name):
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
 
 
 class Assets(HTMLParser):
@@ -28,77 +35,172 @@ class Assets(HTMLParser):
             self.paths.append(path)
 
 
-def smoke(component, image):
-    if component == "ci-runner":
-        # Registration and host firewall integration need the dedicated CI VM.
-        output = docker("run", "--rm", "--network", "none", image, "--check-image")
-        print(output)
-        return
-    if component == "mcp":
-        # stdin stays open until the initialize response arrives; stderr is not MCP data.
-        name = "railshot-mcp-smoke-" + secrets.token_hex(6)
-        process = subprocess.Popen(["docker", "run", "--rm", "-i", "--name", name, "--network", "none", image],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        import selectors
-        try:
-            request = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "container-smoke", "version": "1"}}}
-            process.stdin.write(json.dumps(request) + "\n")
-            process.stdin.flush()
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                assert selector.select(30), "MCP initialize timed out"
-                response = json.loads(process.stdout.readline())
-            assert response.get("id") == 1 and response.get("result", {}).get("serverInfo"), response
-        finally:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=15)
-            process.communicate(timeout=15)
-        return
-    port = "8080" if component == "dashboard" else "4173"
-    token = secrets.token_hex(32)
-    secret_dir = tempfile.TemporaryDirectory(prefix="railshot-container-smoke-")
-    options = ["--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "-p", f"127.0.0.1::{port}"]
-    if component == "api":
-        token_file = Path(secret_dir.name) / "token"
-        token_file.write_text(token)
-        # Random test token only; private parent directory, readable nonroot mount.
-        token_file.chmod(0o444)
-        options += ["-e", "RAILSHOT_BIND_HOST=0.0.0.0", "-e", "RAILSHOT_ALLOWED_HOSTS=localhost,127.0.0.1", "-e", "RAILSHOT_API_TOKEN_FILE=/run/secrets/api-token", "-v", f"{token_file}:/run/secrets/api-token:ro"]
-    container = docker("run", "-d", *options, image)
+def http(url, headers=None, data=None):
     try:
-        endpoint = "http://" + docker("port", container, port).splitlines()[0]
+        response = urlopen(Request(url, headers=headers or {}, data=data), timeout=5)
+    except HTTPError as error:
+        response = error
+    with response:
+        return response.status, dict(response.headers), response.read()
+
+
+@contextmanager
+def mock_api(token):
+    """A host fixture reachable through Docker's host gateway. No credentials or cloud clients."""
+    calls = []
+    marker = secrets.token_hex(16)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+            calls.append({"path": self.path, "method": self.command, "host": self.headers.get('Host'),
+                          "origin": self.headers.get('Origin'), "body": body,
+                          "authenticated": self.headers.get('Authorization') == 'Bearer ' + token,
+                          "idempotency_key": self.headers.get('Idempotency-Key')})
+            code = 200 if calls[-1]['authenticated'] else 401
+            content = json.dumps({"proxy_smoke": marker}).encode()
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        do_POST = do_GET
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(('0.0.0.0', 0), Handler)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        yield server.server_port, calls, marker
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
+
+
+def verify_dashboard(endpoint, token, calls, marker):
+    status, _, document = http(endpoint)
+    assert status == 200 and token.encode() not in document, 'Dashboard HTML must not expose the server token'
+    assets = Assets()
+    assets.feed(document.decode())
+    assert assets.paths, 'Vite output assets missing'
+    for path in assets.paths:
+        status, _, content = http(endpoint + path)
+        assert status == 200 and content and token.encode() not in content, 'Asset missing or contains server credentials'
+    # This request has no browser Authorization. The actual Nginx entrypoint injects its mounted token.
+    headers = {'Host': 'console.example.test', 'Origin': 'https://console.example.test'}
+    status, _, content = http(endpoint + '/api/v1/targets', headers)
+    assert status == 200 and json.loads(content) == {'proxy_smoke': marker}, 'Same-origin API proxy did not reach fixture'
+    assert token.encode() not in content, 'Proxy response exposed its internal token'
+    assert calls[-1]['authenticated'], 'Nginx did not supply the internal bearer'
+    assert calls[-1]['host'] == headers['Host'] and calls[-1]['origin'] == headers['Origin'], 'Proxy lost Host/Origin'
+    # Client credentials cannot override the server-owned credential, and request bodies/keys reach the backend.
+    status, _, _ = http(endpoint + '/api/v1/deployments',
+                        {**headers, 'Authorization': 'Bearer browser-value-must-be-replaced',
+                         'Idempotency-Key': 'proxy-smoke', 'Content-Type': 'application/octet-stream'}, b'local-source-fixture')
+    assert status == 200 and calls[-1]['authenticated'], 'Browser supplied authorization reached the private API'
+    assert calls[-1]['path'] == '/api/v1/deployments' and calls[-1]['method'] == 'POST'
+    assert calls[-1]['body'] == b'local-source-fixture' and calls[-1]['idempotency_key'] == 'proxy-smoke'
+    for path in ['/railshot-proxy.conf', '/start.sh', '/run/secrets/api-token', '/.env', '/.git/config']:
+        status, _, content = http(endpoint + path)
+        assert status == 404 and token.encode() not in content, 'Private configuration is reachable as a static asset'
+
+
+def native_api_smoke(image):
+    name = 'railshot-native-smoke-' + secrets.token_hex(6)
+    try:
+        print(docker('run', '--rm', '--name', name, '--network', 'none', '--read-only', '--tmpfs', '/tmp',
+                     '--user', '1000:1000', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                     '-e', 'RAILSHOT_STATE_DIR=/tmp/railshot-state', '--entrypoint', 'python3',
+                     image, '/app/apps/api/runtime-smoke.py', timeout=180))
+    finally:
+        remove_container(name)
+
+
+def web_smoke(component, image, token_file, token, upstream=None):
+    port = '8080' if component == 'dashboard' else '4173'
+    options = ['--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+               '-p', f'127.0.0.1::{port}', '-e', 'RAILSHOT_API_TOKEN_FILE=/run/secrets/api-token',
+               '-v', f'{token_file}:/run/secrets/api-token:ro']
+    if component == 'dashboard':
+        options += ['--add-host', 'host.docker.internal:host-gateway',
+                    '-e', f'RAILSHOT_API_UPSTREAM=host.docker.internal:{upstream[0]}']
+    else:
+        options += ['-e', 'RAILSHOT_BIND_HOST=0.0.0.0', '-e', 'RAILSHOT_ALLOWED_HOSTS=localhost,127.0.0.1',
+                    '-e', 'RAILSHOT_STATE_DIR=/tmp/railshot-state', '-e', 'RAILSHOT_TARGET_ID=container-smoke',
+                    '-e', 'GITHUB_TOKEN=synthetic-container-fixture-no-network-use']
+    name = 'railshot-' + component + '-smoke-' + secrets.token_hex(6)
+    try:
+        container = docker('run', '-d', '--name', name, *options, image)
+        endpoint = 'http://' + docker('port', container, port).splitlines()[0]
         for attempt in range(50):
             try:
-                with urlopen(endpoint + "/healthz", timeout=2) as response:
-                    assert response.status == 200
+                if http(endpoint + '/healthz')[0] != 200:
+                    raise ConnectionError('Health check not ready')
                 break
             except (URLError, ConnectionError):
                 if attempt == 49:
                     raise
                 time.sleep(0.2)
-        if component == "dashboard":
-            with urlopen(endpoint) as response:
-                assets = Assets()
-                assets.feed(response.read().decode())
-            assert assets.paths, "Vite output assets missing"
-            for path in assets.paths:
-                with urlopen(endpoint + path) as response:
-                    assert response.status == 200 and response.read(), path
+        if component == 'dashboard':
+            verify_dashboard(endpoint, token, upstream[1], upstream[2])
         else:
-            for headers, expected in [({}, 401), ({"Authorization": "Bearer " + token}, 503), ({"Host": "untrusted.invalid"}, 403)]:
-                try:
-                    urlopen(Request(endpoint + "/api/runs/1", headers=headers), timeout=3)
-                    raise AssertionError("unexpectedly accepted request")
-                except HTTPError as error:
-                    assert error.code == expected, (error.code, expected)
+            # The synthetic GitHub value initializes durable state but no dispatch/foreign lookup is allowed.
+            for headers, expected in [({}, 401), ({'Authorization': 'Bearer ' + token}, 404), ({'Host': 'untrusted.invalid'}, 403)]:
+                assert http(endpoint + '/api/runs/1', headers)[0] == expected, 'API access or run-binding boundary failed'
+            status, _, content = http(endpoint + '/api/v1/targets', {'Authorization': 'Bearer ' + token})
+            assert status == 200 and json.loads(content)['items'][0]['id'] == 'container-smoke', 'Product state did not initialize'
+            docker('exec', container, 'node', '-e', "const fs=require('node:fs');if(process.getuid()!==1000||(fs.statSync('/tmp/railshot-state').mode&0o777)!==0o700)process.exit(1)")
     finally:
-        docker("rm", "-f", container)
-        secret_dir.cleanup()
+        remove_container(name)
 
 
-if __name__ == "__main__":
+def smoke(component, image):
+    if component == 'ci-runner':
+        # Registration and host firewall integration need the dedicated CI VM.
+        print(docker('run', '--rm', '--network', 'none', image, '--check-image'))
+        return
+    if component == 'mcp':
+        # stdin stays open until the initialize response arrives; stderr is not MCP data.
+        name = 'railshot-mcp-smoke-' + secrets.token_hex(6)
+        process = subprocess.Popen(['docker', 'run', '--rm', '-i', '--name', name, '--network', 'none', image],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        import selectors
+        try:
+            request = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-03-26', 'capabilities': {}, 'clientInfo': {'name': 'container-smoke', 'version': '1'}}}
+            process.stdin.write(json.dumps(request) + '\n')
+            process.stdin.flush()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                assert selector.select(30), 'MCP initialize timed out'
+                response = json.loads(process.stdout.readline())
+            assert response.get('id') == 1 and response.get('result', {}).get('serverInfo'), response
+        finally:
+            remove_container(name)
+            process.communicate(timeout=15)
+        return
+    if component == 'api':
+        native_api_smoke(image)
+    token = secrets.token_hex(32)
+    with tempfile.TemporaryDirectory(prefix='railshot-container-smoke-') as directory:
+        token_file = Path(directory) / 'token'
+        token_file.write_text(token)
+        # Random test token only; private parent directory, readable nonroot bind mount.
+        token_file.chmod(0o444)
+        if component == 'dashboard':
+            with mock_api(token) as upstream:
+                web_smoke(component, image, token_file, token, upstream)
+        else:
+            web_smoke(component, image, token_file, token)
+
+
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("component", choices=("dashboard", "api", "mcp", "ci-runner"))
-    parser.add_argument("image")
+    parser.add_argument('component', choices=('dashboard', 'api', 'mcp', 'ci-runner'))
+    parser.add_argument('image')
     args = parser.parse_args()
     smoke(args.component, args.image)
-    print(f"{args.component}: container smoke passed")
+    print(f'{args.component}: container smoke passed')

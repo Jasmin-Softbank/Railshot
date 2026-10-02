@@ -11,6 +11,7 @@ spec:
   namespaceResourceWhitelist:
     - {group: apps, kind: Deployment}
     - {group: '', kind: Service}
+    - {group: '', kind: PersistentVolumeClaim}
     - {group: networking.k8s.io, kind: NetworkPolicy}
 ---
 apiVersion: argoproj.io/v1alpha1

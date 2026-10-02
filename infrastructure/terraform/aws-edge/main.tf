@@ -10,6 +10,10 @@ provider "aws" {
 }
 
 locals {
+  route_hosts_valid = alltrue([for r in values(var.routes) :
+    (r.host == var.base_domain && var.apex_certificate_arn != null) ||
+    (endswith(r.host, ".${var.base_domain}") && length(split(".", r.host)) == length(split(".", var.base_domain)) + 1)
+  ])
   gcp_targets                  = toset([for r in values(var.routes) : r.target_private_ip if r.provider_kind == "gcp"])
   wireguard_routing_configured = length(local.gcp_targets) == 0 || (length(var.wireguard_peer_cidrs) > 0 && length(var.wireguard_route_table_ids) > 0)
   aws_target_rules = { for pair in toset([for r in values(var.routes) : "${r.target_security_group_id}:${r.node_port}" if r.provider_kind == "aws"]) :
@@ -98,10 +102,8 @@ resource "aws_lb" "app" {
       error_message = "The existing Route53 zone must be public and match base_domain."
     }
     precondition {
-      condition = alltrue([for r in values(var.routes) :
-        endswith(r.host, ".${var.base_domain}") && length(split(".", r.host)) == length(split(".", var.base_domain)) + 1
-      ])
-      error_message = "Each app host must be one DNS label immediately under base_domain."
+      condition     = local.route_hosts_valid
+      error_message = "Use a direct child hostname, or base_domain with an explicit apex certificate."
     }
   }
 }
@@ -172,6 +174,17 @@ resource "aws_lb_listener" "http_redirect" {
       port        = "443"
       protocol    = "HTTPS"
       status_code = "HTTP_301"
+    }
+  }
+}
+resource "aws_lb_listener_certificate" "apex" {
+  count           = var.apex_certificate_arn == null ? 0 : 1
+  listener_arn    = aws_lb_listener.https.arn
+  certificate_arn = var.apex_certificate_arn
+  lifecycle {
+    precondition {
+      condition     = startswith(var.apex_certificate_arn, "arn:aws:acm:${var.region}:${var.account_id}:certificate/")
+      error_message = "The apex certificate must belong to the registered account and ALB region."
     }
   }
 }

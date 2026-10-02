@@ -12,9 +12,9 @@ RUN npm run build --workspace=apps/dashboard
 
 FROM ${NGINX_IMAGE} AS dashboard
 COPY apps/dashboard/nginx.conf /etc/nginx/nginx.conf
+COPY --chmod=0555 apps/dashboard/start.sh /usr/local/bin/railshot-dashboard
 COPY --from=build /build/apps/dashboard/dist/ /usr/share/nginx/html/
 USER 101:101
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
-ENTRYPOINT ["nginx"]
-CMD ["-g", "daemon off;"]
+ENTRYPOINT ["/usr/local/bin/railshot-dashboard"]

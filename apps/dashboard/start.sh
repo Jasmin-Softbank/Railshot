@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+umask 077
+token=$(cat "${RAILSHOT_API_TOKEN_FILE:-/run/secrets/api/token}")
+case "$token" in ''|*[!a-zA-Z0-9._~-]*) echo 'A private URL-safe API token is required' >&2; exit 1 ;; esac
+test "${#token}" -ge 32
+upstream=${RAILSHOT_API_UPSTREAM:-railshot-api:4173}
+case "$upstream" in ''|*[!a-zA-Z0-9.:-]*) echo 'Invalid API upstream' >&2; exit 1 ;; esac
+# This file is outside the web root and readable only by the Nginx process user.
+cat > /tmp/railshot-proxy.conf <<EOF
+location /api/ {
+    proxy_pass http://$upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$http_host;
+    proxy_set_header Authorization "Bearer $token";
+    proxy_set_header Connection "";
+    proxy_request_buffering off;
+    proxy_read_timeout 130s;
+    proxy_hide_header X-Powered-By;
+}
+EOF
+unset token
+exec nginx -g 'daemon off;'

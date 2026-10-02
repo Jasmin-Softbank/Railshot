@@ -54,7 +54,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(project["spec"]["sourceRepos"], ["https://github.com/Jasmin-Softbank/Railshot.git"])
         self.assertEqual(project["spec"]["clusterResourceWhitelist"], [])
         self.assertEqual({(item["group"], item["kind"]) for item in project["spec"]["namespaceResourceWhitelist"]},
-                         {("apps", "Deployment"), ("", "Service"), ("networking.k8s.io", "NetworkPolicy")})
+                         {("apps", "Deployment"), ("", "Service"), ("", "PersistentVolumeClaim"), ("networking.k8s.io", "NetworkPolicy")})
         destination = {"server": "https://kubernetes.default.svc", "namespace": "railshot-system"}
         self.assertEqual(project["spec"]["destinations"], [destination])
         self.assertEqual(application["spec"]["destination"], destination)
@@ -92,6 +92,10 @@ class PlatformTests(unittest.TestCase):
             if item['kind'] == 'Deployment':
                 self.assertEqual(item['spec']['template']['spec']['nodeSelector']['railshot.io/node-role'], 'platform')
         self.assertEqual(container["image"], images["api"])
+        self.assertEqual(api['spec']['strategy']['type'], 'Recreate')
+        self.assertEqual(api['spec']['replicas'], 1)
+        self.assertEqual(api['spec']['template']['spec']['initContainers'][0]['image'], images['api'])
+        self.assertTrue(any(v.get('persistentVolumeClaim') for v in api['spec']['template']['spec']['volumes']))
         self.assertIn("configured", container["readinessProbe"]["exec"]["command"][-1])
         self.assertTrue(all(item["spec"]["type"] == "ClusterIP" for item in output["items"] if item["kind"] == "Service"))
         public = module.render(images, "k3s-aws", 31080)

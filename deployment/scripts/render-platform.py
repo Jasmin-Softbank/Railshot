@@ -33,6 +33,8 @@ def render(images, target_id, dashboard_node_port=None):
             continue
         container = document["spec"]["template"]["spec"]["containers"][0]
         container["image"] = images[container["name"]]
+        for init in document["spec"]["template"]["spec"].get("initContainers", []):
+            init["image"] = images["api"]
         for item in container.get("env", []):
             if item["name"] == "RAILSHOT_TARGET_ID":
                 item["value"] = target_id
