@@ -61,11 +61,12 @@ jobs:
       - name: Validate inputs
         env:
           CONFIGURED_TARGET: ${{ vars.RAILSHOT_TARGET_ID }}
+          CONFIGURED_TARGETS: ${{ vars.RAILSHOT_TARGET_IDS }}
         run: |
           set -euo pipefail
           [[ "$TENANT" =~ ^[a-z0-9]{1,20}$ && "$APP" =~ ^[a-z][a-z0-9-]{1,28}[a-z0-9]$ ]] || exit 1
           [[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ && "$SOURCE_COMMIT" = "$GITHUB_SHA" && "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ]] || { echo "submitted source commit differs from dispatched checkout"; exit 1; }
-          [[ "$TARGET_ID" =~ ^[a-z][a-z0-9-]{0,62}$ && "$TARGET_ID" = "$CONFIGURED_TARGET" ]] || { echo "target is not the operator-configured target"; exit 1; }
+          python3 -I -c 'import os,sys; sys.path.insert(0,".railshot/ci/scripts"); from publication import validate_target; validate_target(os.environ)'
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: {python-version: "3.13"}
       - name: Baseline gates, then SDK repair only when eligible
@@ -130,7 +131,7 @@ jobs:
     if: needs.loop.outputs.passed == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    permissions: {contents: read, packages: write}
+    permissions: {contents: read, actions: read, packages: write}
     env:
       REGISTRY_PREFIX: ${{ vars.REGISTRY_PREFIX }}
       REGISTRY_VISIBILITY: ${{ vars.REGISTRY_VISIBILITY || 'private' }}
@@ -184,11 +185,12 @@ jobs:
       - name: Validate inputs
         env:
           CONFIGURED_TARGET: ${{ vars.RAILSHOT_TARGET_ID }}
+          CONFIGURED_TARGETS: ${{ vars.RAILSHOT_TARGET_IDS }}
         run: |
           set -euo pipefail
           [[ "$TENANT" =~ ^[a-z0-9]{1,20}$ && "$APP" =~ ^[a-z][a-z0-9-]{1,28}[a-z0-9]$ ]] || exit 1
           [[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ && "$SOURCE_COMMIT" = "$GITHUB_SHA" && "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ]] || { echo "submitted source commit differs from dispatched checkout"; exit 1; }
-          [[ "$TARGET_ID" =~ ^[a-z][a-z0-9-]{0,62}$ && "$TARGET_ID" = "$CONFIGURED_TARGET" ]] || { echo "target is not the operator-configured target"; exit 1; }
+          python3 -I -c 'import os,sys; sys.path.insert(0,".railshot/ci/scripts"); from publication import validate_target; validate_target(os.environ)'
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -200,13 +202,39 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: {python-version: "3.13"}
+      - name: Recover the same workflow run's publication history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir recovered-journals
+          printf '[]\n' > release-history.json
+          if (( GITHUB_RUN_ATTEMPT > 1 )); then
+            gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=all&per_page=100" > release-history.json
+            # A lost/expired journal cannot authorize a second push: native job history
+            # makes the publisher read back every possibly attempted image instead.
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              --pattern 'publish-journal-*' --dir recovered-journals || echo 'Journal unavailable; require registry readback if publishing was attempted.'
+          fi
       - name: Verify bundle and publish tested images
+        env:
+          BUNDLE_ARTIFACT_ID: ${{ needs.loop.outputs.bundle_id }}
+          PLATFORM_REF: ${{ vars.PLATFORM_REF }}
         run: |
           set -euo pipefail
           pip install -q pyyaml jsonschema
           python -c 'import os,yaml; s=yaml.safe_load(open("release-bundle/jasmin.yaml")); assert s["app"]==os.environ["APP"], "APP/spec.app mismatch"'
           python .railshot/ci/scripts/gate/bundle.py publish release-bundle \
-            "$REGISTRY_PREFIX/${TENANT}-${APP}" "${SOURCE_COMMIT::12}" --output images.json
+            "$REGISTRY_PREFIX/${TENANT}-${APP}" "${SOURCE_COMMIT::12}" --output images.json \
+            --journal-dir release-bundle-publish --github-history release-history.json --github-journals recovered-journals
+      - name: Preserve publication journal without credentials
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: publish-journal-${{ github.run_attempt }}
+          path: release-bundle-publish/publish.json
+          if-no-files-found: warn
+          retention-days: 1
       - name: Bind publication to the source and target
         env:
           BUNDLE_ARTIFACT_ID: ${{ needs.loop.outputs.bundle_id }}

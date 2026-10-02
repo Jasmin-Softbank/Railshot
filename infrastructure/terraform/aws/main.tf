@@ -1,9 +1,13 @@
-data "aws_vpc" "default" { default = true }
+data "aws_vpc" "default" {
+  count   = var.vpc_id == null ? 1 : 0
+  default = true
+}
 
 data "aws_subnets" "default" {
+  count = var.subnet_id == null ? 1 : 0
   filter {
     name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
+    values = [data.aws_vpc.default[0].id]
   }
   filter {
     name   = "default-for-az"
@@ -11,7 +15,9 @@ data "aws_subnets" "default" {
   }
 }
 
-data "aws_subnet" "selected" { id = sort(data.aws_subnets.default.ids)[0] }
+data "aws_subnet" "selected" {
+  id = var.subnet_id == null ? sort(data.aws_subnets.default[0].ids)[0] : var.subnet_id
+}
 data "aws_ami" "ubuntu" {
   owners = ["099720109477"] # Canonical
   filter {
@@ -45,10 +51,10 @@ resource "aws_security_group" "node" {
   name = "${var.name}-node"
   # Preserve the legacy description: changing it can replace the security group.
   description = "Web in only, no SSH (SSM). Out: 80/443 only; control plane pulls (platform/ZERO-TRUST.md)"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = var.vpc_id == null ? data.aws_vpc.default[0].id : var.vpc_id
 
   dynamic "ingress" {
-    for_each = var.https_enabled ? [80, 443] : [80]
+    for_each = concat(var.http_enabled ? [80] : [], var.https_enabled ? [443] : [])
     content {
       description = "web ${ingress.value}"
       from_port   = ingress.value
@@ -97,7 +103,7 @@ resource "aws_instance" "node" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnet.selected.id
-  vpc_security_group_ids = [aws_security_group.node.id]
+  vpc_security_group_ids = concat([aws_security_group.node.id], var.additional_security_group_ids)
   iam_instance_profile   = aws_iam_instance_profile.node.name
 
   metadata_options {
@@ -114,26 +120,39 @@ resource "aws_instance" "node" {
   credit_specification { cpu_credits = "standard" }
   user_data_replace_on_change = false # guest changes require a separate approved configuration job
   tags                        = { Name = "${var.name}-node" }
+  lifecycle {
+    precondition {
+      condition     = (var.vpc_id == null) == (var.subnet_id == null)
+      error_message = "Specify both vpc_id and subnet_id, or neither for legacy default selection."
+    }
+    precondition {
+      condition     = var.vpc_id == null ? true : data.aws_subnet.selected.vpc_id == var.vpc_id
+      error_message = "The selected subnet must belong to the registered VPC."
+    }
+  }
 }
 
 resource "aws_eip" "node" {
+  count    = var.allocate_eip ? 1 : 0
   instance = aws_instance.node.id
   domain   = "vpc"
 }
 
 # Read-only role for CI (terraform plan); applies stay with the platform admin for now.
 resource "aws_iam_openid_connect_provider" "github" {
+  count          = var.create_ci_plan_role ? 1 : 0
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
 }
 
 resource "aws_iam_role" "ci_plan" {
-  name = "${var.name}-ci-plan"
+  count = var.create_ci_plan_role ? 1 : 0
+  name  = "${var.name}-ci-plan"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect    = "Allow"
-      Principal = { Federated = aws_iam_openid_connect_provider.github.arn }
+      Principal = { Federated = aws_iam_openid_connect_provider.github[0].arn }
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringEquals = { "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com" }
@@ -144,7 +163,8 @@ resource "aws_iam_role" "ci_plan" {
 }
 
 resource "aws_iam_role_policy_attachment" "ci_plan" {
-  role       = aws_iam_role.ci_plan.name
+  count      = var.create_ci_plan_role ? 1 : 0
+  role       = aws_iam_role.ci_plan[0].name
   policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
@@ -181,6 +201,7 @@ resource "aws_volume_attachment" "data" {
 }
 locals {
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
+    operator_ssh_public_key = var.operator_ssh_public_key
     host_config = yamlencode({
       name           = var.name, node_name = coalesce(var.node_name, var.name), cloud_provider = "aws", region = var.region,
       runtime_status = "not_configured"
@@ -191,4 +212,22 @@ locals {
       initialize_empty_data_disk = var.initialize_empty_data_disk ? "true" : "false"
     })
   })
+}
+
+# Preserve existing resource identities when the legacy defaults remain enabled.
+moved {
+  from = aws_eip.node
+  to   = aws_eip.node[0]
+}
+moved {
+  from = aws_iam_openid_connect_provider.github
+  to   = aws_iam_openid_connect_provider.github[0]
+}
+moved {
+  from = aws_iam_role.ci_plan
+  to   = aws_iam_role.ci_plan[0]
+}
+moved {
+  from = aws_iam_role_policy_attachment.ci_plan
+  to   = aws_iam_role_policy_attachment.ci_plan[0]
 }

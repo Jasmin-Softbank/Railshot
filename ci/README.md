@@ -6,7 +6,7 @@
 
 - `loop`: 임대한 전용 CI worker에서 실행한다. 관리자가 고정한 `PLATFORM_REF`, 입력 경로, 영속 `RAILSHOT_RUN_ROOT`, 설치 네트워크와 SDK 인증 경로를 검사한다. 부분 gate 성공이나 SDK의 자체 보고로 게시를 허용하지 않는다.
 - `release`: 보호된 `railshot-release` environment의 hosted worker에서 실행한다. producer가 반환한 bundle artifact ID로 다운로드하고 `bundle.py publish`로 검증한 이미지만 게시한다. 사용자 source를 다시 빌드하거나 실행하지 않는다.
-- GHCR prefix·visibility·게시 자격은 trusted release 설정이다. 업로드와 모델 출력에서 받지 않는다. 기본 private 모드는 대상의 pull 자격 설치·검증 연결이 없으므로 게시 전에 차단한다. 명시적 public 모드는 이미 public인 package만 지원하며 실제 digest를 별도 빈 인증 설정으로 조회한다.
+- GHCR prefix·visibility·게시 자격은 trusted release 설정이다. 업로드와 모델 출력에서 받지 않는다. 기본 private 모드는 전용 pull 자격과 운영자가 정한 namespace·Secret 이름이 있어야 게시하며, 별도 임시 인증 설정으로 각 digest의 manifest를 조회한다. 명시적 public 모드는 이미 public인 package를 빈 인증 설정으로 조회한다. 어느 모드도 package 공개 설정을 변경하지 않는다.
 - CI worker 등록, 인증 준비와 target runtime 준비가 완료됐다는 뜻은 아니다. 현재 템플릿의 로컬 테스트는 실제 GitHub workflow 실행·registry 게시·배포 성공의 증거가 아니다.
 
 ## CD에 전달하는 산출물
@@ -15,9 +15,14 @@
 |---|---|
 | `release-bundle-<run_attempt>` | `loop.outputs.bundle_id`; 검증한 `images.tar`, spec, verdict와 SHA-256 manifest |
 | `published-<run_attempt>` | `release.outputs.published_id`; `images.json`의 원격 digest, 원본 `jasmin.yaml`, `verdict.json`, `manifest.json` 및 출처 영수증 `handoff.json` |
+| `publish-journal-<run_attempt>` | 같은 run의 게시 복구용 `publish.json`만 보존. 자격·Docker 설정·진단 로그는 포함하지 않음 |
 | bundle 연결 | `release.outputs.bundle_id`는 소비한 원본 artifact ID. manifest는 source digest와 spec/verdict/image archive 해시를 보존 |
 
 소비자는 workflow run 및 producer artifact ID를 기준으로 읽어야 한다. 고정 `rendered` alias나 가장 최근 이름으로 대체하지 않는다. 이 산출물은 게시된 이미지와 CI 검사 근거이며 URL·클러스터 상태·배포 성공을 포함하지 않는다. CD 구현과 완료 조건은 CD 담당이 결정한다.
+
+게시 재실행은 같은 run의 journal과 GitHub job 이력을 읽는다. journal은 repository·run·source commit·target·PLATFORM_REF·원본 bundle artifact ID·manifest hash에 묶이며 다른 입력으로 복원할 수 없다. 이전 게시 단계가 명시적으로 건너뛰어진 경우에만 새 push를 허용한다. 게시가 시작됐거나 이력이 불완전하면 확인하지 못한 이미지는 registry에서 읽어 검증하고 다시 push하지 않는다. worker 소실로 journal이 업로드되지 않아도 이 규칙은 유지한다. 원격 이미지를 확인할 수 없으면 불확실 상태로 멈춘다.
+
+bundle과 게시 journal의 보존 기간은 1일이다. bundle이 만료되면 release만 재실행할 수 없으므로 새로운 CI 실행에서 전체 검사를 다시 해야 한다. private manifest 조회 성공은 고객 노드의 pull·Secret 설치·Pod Ready를 뜻하지 않으며, 이 검증은 CD에서 이어간다.
 
 ## 보존한 AWS 선택 구현
 
@@ -39,3 +44,13 @@ python -m unittest discover -s ci/scripts/runner -p 'test_*.py'
 ## 통합 입력과 게시 계약
 
 source_commit/target_id를 workflow 입력으로 받아 checkout 및 운영자 target과 일치하는지 검사한다. 게시 ZIP은 `images.json`, `jasmin.yaml`, `verdict.json`, `manifest.json`, `handoff.json`의 flat 구조다. 기존 네 evidence 파일은 byte 그대로 유지하며 handoff.json이 source/run/attempt/target과 파일 해시를 연결한다. API는 실제 producer artifact ID로 읽고 published 상태만 표시한다. 자세한 계약은 [CI publication](../docs/api/ci-publication.md)을 따른다.
+
+운영자 변수 `RAILSHOT_TARGET_IDS`에 `["k3s-aws","k3s-gcp"]`처럼 허용할 target을 JSON 배열로 등록할 수 있다. 이 변수가 없을 때만 기존 `RAILSHOT_TARGET_ID` 한 개를 사용한다. 빈 배열·중복·잘못된 ID는 차단하며, loop와 release가 동일한 검증 함수를 호출한다. target 선택으로 registry·게시 자격·pull Secret 정책을 바꿀 수는 없다.
+
+## Private pull 자격 배송
+
+`workflows/railshot-pull-credential.yml`은 `Jasmin-Softbank/railshot-apps`의 보호된 `railshot-release` 환경에서 수동 실행하는 별도 workflow다. 같은 환경의 `GHCR_PULL_TOKEN`을 GitHub OIDC로 AWS 계정 `721622471953`, 서울 리전의 `/railshot/registry/ghcr/pull_token`에 `SecureString`으로 전달한다. 운영자 변수는 `GHCR_PULL_SYNC_ROLE_ARN`, `GHCR_PULL_USERNAME`이며 사용자가 role·region·parameter 경로를 입력할 수 없다. OIDC role은 해당 저장소·environment subject만 신뢰하고, 이 parameter의 `ssm:PutParameter`만 허용해야 한다. workflow도 동일한 session policy를 적용하며 SSM 읽기 권한은 갖지 않는다.
+
+토큰은 environment secret → 0600 임시 JSON → AWS CLI 파일 입력으로만 전달하고, 성공·실패·시간 초과 모두 파일을 삭제한다. 토큰을 CLI 인수·로그·artifact에 넣지 않는다. 운영 노드는 별도 IAM으로 이 parameter 하나의 `GetParameter`만 허용받아 대상 namespace의 pull Secret을 설치한다. 이 workflow의 성공은 SSM 저장 접수이며 실제 노드의 private image pull은 별도로 검증한다.
+
+현재 관리 중인 GHCR 자격은 classic PAT의 `read:packages` 권한만 가지며 기록된 만료일은 **2026-10-09**다. 만료 전에 보호된 GitHub secret을 교체하고 이 workflow를 다시 실행한 뒤 대상 Secret과 실제 pull을 확인한다. SSM parameter의 설명은 만료 메타데이터이며 토큰을 자동 갱신하지 않는다.

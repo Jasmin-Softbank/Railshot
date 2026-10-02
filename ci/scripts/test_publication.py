@@ -8,10 +8,26 @@ from unittest.mock import patch
 import subprocess
 from pathlib import Path
 
-from publication import prepare, verify_registry, validate_registry
+from publication import prepare, verify_registry, validate_registry, validate_target
 
 
 class PublicationTest(unittest.TestCase):
+    def test_operator_target_allowlist_and_legacy_single_target_fail_closed(self):
+        configured = {'CONFIGURED_TARGET': 'legacy-target',
+                      'CONFIGURED_TARGETS': '["k3s-aws","k3s-gcp"]'}
+        for target in ('k3s-aws', 'k3s-gcp'):
+            validate_target({**configured, 'TARGET_ID': target})
+        validate_target({'CONFIGURED_TARGET': 'legacy-target', 'TARGET_ID': 'legacy-target'})
+        for target in ('legacy-target', 'onprem', '', 'k3s-aws; false'):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                validate_target({**configured, 'TARGET_ID': target})
+        for raw in ('[]', 'null', '{}', '"k3s-aws"', '["k3s-aws",false]',
+                    '["k3s-aws","k3s-aws"]', '["k3s-aws","../bad"]', 'bad json'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                validate_target({**configured, 'CONFIGURED_TARGETS': raw, 'TARGET_ID': 'k3s-aws'})
+        with self.assertRaises(ValueError):
+            validate_target({'TARGET_ID': 'k3s-aws'})
+
     @patch('publication.subprocess.run', return_value=subprocess.CompletedProcess([], 0))
     def test_handoff_preserves_publisher_bytes_and_producer_identity(self, run):
         with tempfile.TemporaryDirectory() as directory:

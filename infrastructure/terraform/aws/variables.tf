@@ -40,9 +40,67 @@ variable "budget_email" {
 }
 
 variable "https_enabled" {
-  description = "Open 443 once the app domain and its certificate exist; until then only 80 is reachable"
+  description = "Legacy direct public HTTPS. Disable with http_enabled for nodes reached through the separately managed ALB."
   type        = bool
   default     = false
+}
+
+variable "http_enabled" {
+  type        = bool
+  default     = true
+  description = "Legacy direct public HTTP. Set false for ALB-only customer nodes."
+}
+
+variable "vpc_id" {
+  type        = string
+  default     = null
+  description = "Existing registered VPC. Set together with subnet_id; null preserves legacy default VPC selection."
+  validation {
+    condition     = var.vpc_id == null ? true : can(regex("^vpc-[0-9a-f]{8,17}$", var.vpc_id))
+    error_message = "vpc_id must be null or an AWS VPC ID."
+  }
+}
+
+variable "subnet_id" {
+  type        = string
+  default     = null
+  description = "Explicit existing subnet in vpc_id. Its egress route/public address policy must support SSM and HTTPS bootstrap."
+  validation {
+    condition     = var.subnet_id == null ? true : can(regex("^subnet-[0-9a-f]{8,17}$", var.subnet_id))
+    error_message = "subnet_id must be null or an AWS subnet ID."
+  }
+}
+
+variable "additional_security_group_ids" {
+  type        = list(string)
+  default     = []
+  description = "Separately reviewed same-VPC groups, for ALB NodePort ingress and trusted management/cluster paths. This module never opens public SSH."
+  validation {
+    condition     = length(var.additional_security_group_ids) <= 4 && alltrue([for id in var.additional_security_group_ids : can(regex("^sg-[0-9a-f]{8,17}$", id))])
+    error_message = "Supply at most four existing security group IDs."
+  }
+}
+
+variable "allocate_eip" {
+  type        = bool
+  default     = true
+  description = "Legacy stable public IP; false uses the subnet-assigned public IP, if any. Neither option creates NAT or a route."
+}
+
+variable "create_ci_plan_role" {
+  type        = bool
+  default     = true
+  description = "Legacy account-level GitHub OIDC/read-only role. Set false for customer app hosts; reuse the existing platform identity separately."
+}
+
+variable "operator_ssh_public_key" {
+  type        = string
+  default     = null
+  description = "Optional OpenSSH public key for railshot-operator, used over trusted SSM forwarding. Never pass a private key. Applied at first boot only."
+  validation {
+    condition     = var.operator_ssh_public_key == null ? true : can(regex("^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+={0,3}( [^\\r\\n]+)?$", var.operator_ssh_public_key))
+    error_message = "Supply one supported OpenSSH public key on a single line, or null."
+  }
 }
 
 variable "ami_id" {

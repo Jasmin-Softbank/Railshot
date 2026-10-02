@@ -8,7 +8,7 @@ def capabilities(provider):
     if provider not in SIZE_FIELDS:
         return {'provider_kind': provider, 'supported': False, 'actions': {}}
     return {'provider_kind': provider, 'supported': True, 'kind': 'app_cluster',
-            'verification': 'target_unverified', 'billing_reservation_supported': provider in {'gcp', 'azure'},
+            'verification': 'target_unverified', 'billing_reservation_supported': provider in {'aws', 'gcp', 'azure'},
             'actions': {'plan': True, 'apply_saved_plan': True, 'resize': 'maintenance_required',
                         'start': False, 'stop': False, 'delete': False, 'node_scale_out': False,
                         'automatic_resize': False, 'snapshot_restore': False}}

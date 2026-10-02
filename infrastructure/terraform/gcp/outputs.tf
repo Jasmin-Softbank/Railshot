@@ -18,6 +18,7 @@ output "node_descriptor" {
       public  = google_compute_address.node.address
     }
     transport_ref = local.iap_ssh == null ? null : local.iap_ssh.transport_ref
+    wireguard     = { peer_public_cidrs = var.wireguard_peer_public_cidrs, port = 51820, readiness = "unconfigured" }
     runtime_limit = local.runtime_limit
     data_disk = {
       resource_id  = google_compute_disk.data.id

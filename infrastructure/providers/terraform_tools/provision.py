@@ -114,8 +114,8 @@ def reserve_budget(target, receipt):
         if not path.is_absolute() or not path.is_file() or REPO == path.resolve() or REPO in path.resolve().parents:
             raise ValueError('existing private billing ledger required')
         provider = target['provider_kind']
-        scope_field = {'gcp': 'project_id', 'azure': 'subscription_id'}.get(provider)
-        if scope_field is None: # No AWS importer yet; no fake price/zero-budget escape hatch.
+        scope_field = {'aws': 'account_id', 'gcp': 'project_id', 'azure': 'subscription_id'}.get(provider)
+        if scope_field is None:
             raise ValueError('billing provider unsupported')
         with closing(costs.ledger(path)) as db:
             report = costs.report(db, budget['scope'], now=now)
@@ -192,7 +192,7 @@ def execute(action, target_path, state_root, plan_sha256=None, *, maintenance=No
                 write_private(work / name, content)
             write_private(work / 'inputs.tfvars.json', encoded(variables))
             # Explicit local backend keeps state outside checkout and separate per target.
-            write_private(work / 'executor_backend.tf', b'terraform { backend "local" {} }\n')
+            write_private(work / 'executor_backend.tf', b'terraform {\n  backend "local" {}\n}\n')
             manifest.unlink(missing_ok=True)
             command(['init', '-input=false', '-lockfile=readonly', '-reconfigure', '-backend-config=path=' + str(state)], work, log)
             version = json.loads(command(['version', '-json'], work, log))['terraform_version']
