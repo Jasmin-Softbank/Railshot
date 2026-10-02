@@ -116,57 +116,126 @@ class HostPolicyTest(unittest.TestCase):
         dropins.symlink_to(self.root / "missing")
         self.assertNotEqual(self.run_guard(approved=True), 0)
 
+    def test_failed_native_policy_update_invalidates_receipt_and_stops_before_migration(self):
+        profile = self.path("/etc/railshot/ci-executor.yaml")
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        profile.write_text("{}")
+        profile.chmod(0o644)
+        receipt = self.path("/var/lib/railshot-ci/network-verified.sha256")
+        receipt.parent.mkdir(parents=True)
+        receipt.write_text("old-success")
+        self.path("/run").mkdir()
+        self.executable("jq", "pass\n")
+        self.executable("flock", "pass\n")
+        self.executable("nft", "import sys\nsys.exit(42)\n")
+        self.executable("iptables", "raise RuntimeError('Migration must not run after an nft failure')\n")
+        source = INSTALLER
+        for prefix in ("/var/lib/", "/etc/", "/run/"):
+            source = source.replace(prefix, str(self.root) + prefix)
+        result = subprocess.run(["bash", "-c", source], capture_output=True, text=True, env={
+            **os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"]})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(receipt.exists())
+        self.assertNotIn("Migration must not run", result.stderr)
+
 
 class NetworkPolicyTest(unittest.TestCase):
     def setUp(self):
-        self.rules = {
-            ("iptables", "FORWARD"): ["-A FORWARD -j DOCKER-USER"],
-            ("iptables", "DOCKER-USER"): ["-A DOCKER-USER -i br-railshot -j RAILSHOT-CI-EGRESS"],
-            ("iptables", "INPUT"): [
-                "-A INPUT -i rsrun+ -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
-                "-A INPUT -i rsrun+ -m comment --comment railshot-runtime-host-block -j DROP",
-                "-A INPUT -i br-railshot -m comment --comment railshot-ci-host-block -j DROP"],
-            ("ip6tables", "INPUT"): ["-A INPUT -i rsrun+ -j DROP", "-A INPUT -i br-railshot -j DROP"],
-            ("ip6tables", "FORWARD"): ["-A FORWARD -i rsrun+ -j DROP", "-A FORWARD -i br-railshot -j DROP"],
-            ("iptables", "RAILSHOT-CI-EGRESS"): ["-A RAILSHOT-CI-EGRESS -d 10.0.0.0/8 -j DROP",
-                                                   "-A RAILSHOT-CI-EGRESS -j DROP"],
-        }
+        self.definitions = {}
+        exec(compile(POLICY.split("expected = canonical(objects)")[0], "ci.yml:policy", "exec"), self.definitions)
+        self.objects = copy.deepcopy(self.definitions["objects"])
 
-    def policy_digest(self, rules):
+    def policy_digest(self, objects, mode="--check", install_error=False):
         def output(command, **kwargs):
-            self.assertEqual(command[1:4], ["-w", "10", "-S"])
-            return "\n".join(rules[(command[0], command[-1])]) + "\n"
-        with patch("subprocess.check_output", side_effect=output), contextlib.redirect_stdout(io.StringIO()) as stream:
+            self.assertEqual(command, ["nft", "-j", "list", "table", "inet", "railshot_ci"])
+            return json.dumps({"nftables": objects})
+        with patch("sys.argv", ["-", mode]), patch("subprocess.check_output", side_effect=output), \
+             patch("subprocess.run") as run, contextlib.redirect_stdout(io.StringIO()) as stream:
+            if install_error:
+                run.side_effect = subprocess.CalledProcessError(1, ["nft"])
             exec(compile(POLICY, "ci.yml:policy", "exec"), {})
-        # This serialized policy is an input to the installed helper fingerprint.
         json.loads(stream.getvalue())
-        return hashlib.sha256(stream.getvalue().encode()).hexdigest()
+        return hashlib.sha256(stream.getvalue().encode()).hexdigest(), run
 
-    def test_cni_rules_after_hooks_do_not_invalidate_policy(self):
-        baseline = self.policy_digest(self.rules)
-        for key in self.rules:
-            if key[1] != "RAILSHOT-CI-EGRESS":
-                self.rules[key].append("-A " + key[1] + " -j CILIUM_FORWARD")
-        self.assertEqual(baseline, self.policy_digest(self.rules))
+    def test_kernel_handles_counters_and_set_order_do_not_invalidate_policy(self):
+        baseline, _ = self.policy_digest(self.objects)
+        for index, item in enumerate(self.objects):
+            value = next(iter(item.values()))
+            value["handle"] = index + 100
+            for expr in value.get("expr", []):
+                if "counter" in expr:
+                    expr["counter"] = {"packets": 120, "bytes": 30000}
+                right = expr.get("match", {}).get("right")
+                if isinstance(right, dict) and isinstance(right.get("set"), list):
+                    right["set"].reverse()
+        self.assertEqual(baseline, self.policy_digest(self.objects)[0])
 
-    def test_accept_before_any_hook_fails_closed(self):
-        for key in self.rules:
-            if key[1] == "RAILSHOT-CI-EGRESS":
-                continue
-            with self.subTest(chain=key):
-                rules = copy.deepcopy(self.rules)
-                rules[key].insert(0, "-A " + key[1] + " -j ACCEPT")
+    def test_drifted_hook_priority_missing_table_and_dormant_fail_closed(self):
+        for change in ("priority", "hook", "missing", "dormant"):
+            with self.subTest(change=change):
+                objects = copy.deepcopy(self.objects)
+                if change == "missing":
+                    objects = []
+                elif change == "dormant":
+                    objects[0]["table"]["flags"] = ["dormant"]
+                elif change == "priority":
+                    objects[1]["chain"]["prio"] = 0
+                else:
+                    objects[1]["chain"]["hook"] = "output"
                 with self.assertRaises(SystemExit):
-                    self.policy_digest(rules)
+                    self.policy_digest(objects)
 
-    def test_owned_policy_tamper_changes_fingerprint_and_final_drop_is_required(self):
-        baseline = self.policy_digest(self.rules)
-        egress = self.rules[("iptables", "RAILSHOT-CI-EGRESS")]
-        egress[0] = egress[0].replace("DROP", "ACCEPT")
-        self.assertNotEqual(baseline, self.policy_digest(self.rules))
-        egress[-1] = egress[-1].replace("DROP", "RETURN")
+    def test_accept_inserted_into_owned_chains_and_deleted_drop_fail_closed(self):
+        for chain in ("input", "forward", "egress"):
+            with self.subTest(chain=chain):
+                objects = copy.deepcopy(self.objects)
+                index = next(i for i, item in enumerate(objects) if item.get("rule", {}).get("chain") == chain)
+                rule = copy.deepcopy(objects[index])
+                rule["rule"]["expr"] = [{"accept": None}]
+                objects.insert(index, rule)
+                with self.assertRaises(SystemExit):
+                    self.policy_digest(objects)
+        objects = copy.deepcopy(self.objects)
+        objects[-1]["rule"]["expr"][-1] = {"return": None}
         with self.assertRaises(SystemExit):
-            self.policy_digest(self.rules)
+            self.policy_digest(objects)
+
+    def test_atomic_update_owns_only_one_table_and_failure_does_not_read_success(self):
+        _, run = self.policy_digest(self.objects, mode="install")
+        call = run.call_args
+        self.assertEqual(call.args[0], ["nft", "-j", "-f", "-"])
+        commands = json.loads(call.kwargs["input"])["nftables"]
+        self.assertEqual(commands[:2], [{"add": {"table": {"family": "inet", "name": "railshot_ci"}}},
+                                       {"delete": {"table": {"family": "inet", "name": "railshot_ci"}}}])
+        self.assertTrue(all(next(iter(next(iter(command.values())).values())).get("table", "railshot_ci") == "railshot_ci"
+                            for command in commands))
+        self.assertNotIn("flush", json.dumps(commands))
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.policy_digest(self.objects, mode="install", install_error=True)
+
+    def test_policy_has_expected_host_ipv6_and_private_destination_drops(self):
+        rules = [item["rule"] for item in self.objects if "rule" in item]
+        comments = {rule.get("comment"): rule for rule in rules}
+        for name in ("railshot-runtime-host-block", "railshot-ci-host-block",
+                     "railshot-runtime-ipv6-host-block", "railshot-runtime-ipv6-forward-block",
+                     "railshot-ci-ipv6-block", "railshot-deny-169.254.0.0/16", "railshot-deny-10.0.0.0/8",
+                     "railshot-deny-other-egress"):
+            self.assertEqual(comments[name]["expr"][-1], {"drop": None})
+        hooks = [item["chain"] for item in self.objects if "chain" in item and "hook" in item["chain"]]
+        self.assertEqual({(chain["hook"], chain["prio"], chain["policy"]) for chain in hooks},
+                         {("input", -10, "accept"), ("forward", -10, "accept")})
+
+    def test_native_probe_exercises_prior_and_later_accept_without_weakening_owned_table(self):
+        # The actual packet verdict/counter check runs in the existing root
+        # native acceptance script, never by mutating the developer's host.
+        probe = (ROOT / "infrastructure/ansible/test-ci-network.sh").read_text()
+        self.assertIn("for priority in -20 0", probe)
+        self.assertIn('add chain inet "%s"', probe)
+        self.assertIn('nft delete table inet "$probe_table"', probe)
+        self.assertIn('counter railshot-deny-169.254.0.0/16', probe)
+        self.assertIn('counter railshot-ci-host-block', probe)
+        self.assertIn('policy_fingerprint=$(/usr/local/sbin/railshot-ci-network --fingerprint)', probe)
+        self.assertNotIn('--fingerprint > /var/lib/railshot-ci/network-verified.sha256', probe)
 
 
 if __name__ == "__main__":
