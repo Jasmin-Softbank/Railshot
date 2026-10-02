@@ -1,0 +1,104 @@
+{
+  "status": "failed",
+  "results": [
+    {
+      "test": "01-online-clean",
+      "status": "FAIL",
+      "error": "{'schema_version': '0.2', 'action': 'deploy', 'provider': 'aws', 'environment_id': 'railshot-airgap-test', 'status': 'failed', 'cluster_status': 'api_ready', 'cilium_status': 'failed', 'workload_status': 'unknown', 'endpoint': None, 'endpoint_scope': None, 'error': {'code': 'COMMAND_FAILED', 'stage': 'CILIUM_INSTALLING', 'message': '-250-10-11                    Node ip-10-250-10-11 event: Registered Node ip-10-250-10-11 in Controller\\nkube-system   3m3s        Normal    AppliedManifest                  addon/coredns                           Applied manifest at \"/var/lib/rancher/k3s/server/manifests/coredns.yaml\"\\nkube-system   3m2s        Normal    AppliedManifest                  addon/runtimes                          Applied manifest at \"/var/lib/rancher/k3s/server/manifests/runtimes.yaml\"\\nkube-system   3m2s        Normal    ApplyingManifest                 addon/runtimes                          Applying manifest at \"/var/lib/rancher/k3s/server/manifests/runtimes.yaml\"\\nkube-system   3m2s        Normal    ScalingReplicaSet                deployment/coredns                      Scaled up replica set coredns-fddcf74bb from 0 to 1\\nkube-system   3m2s        Normal    AppliedManifest                  addon/rolebindings                      Applied manifest at \"/var/lib/rancher/k3s/server/manifests/rolebindings.yaml\"\\nkube-system   3m2s        Normal    SuccessfulCreate                 replicaset/coredns-fddcf74bb            Created pod: coredns-fddcf74bb-hn5dt\\nkube-system   3m2s        Normal    ApplyingManifest                 addon/rolebindings                      Applying manifest at \"/var/lib/rancher/k3s/server/manifests/rolebindings.yaml\"\\nkube-system   3m2s        Normal    DeletingManifest                 addon/local-storage                     Deleting manifest at \"/var/lib/rancher/k3s/server/manifests/local-storage.yaml\"\\nkube-system   3m1s        Normal    SuccessfulCreate                 daemonset/cilium                        Created pod: cilium-l5pv6\\nkube-system   3m1s        Normal    SuccessfulCreate                 daemonset/cilium-envoy                  Created pod: cilium-envoy-zh4fp\\nkube-system   3m1s        Normal    ScalingReplicaSet                deployment/cilium-operator              Scaled up replica set cilium-operator-5ccfb4f5c8 from 0 to 1\\nkube-system   3m1s        Normal    SuccessfulCreate                 replicaset/cilium-operator-5ccfb4f5c8   Created pod: cilium-operator-5ccfb4f5c8-mn2gr\\nkube-system   3m1s        Normal    DeletingManifest                 addon/traefik                           Deleting manifest at \"/var/lib/rancher/k3s/server/manifests/traefik.yaml\"\\nkube-system   2m57s       Normal    Pulling                          pod/cilium-operator-5ccfb4f5c8-mn2gr    Pulling image \"quay.io/cilium/operator-generic@sha256:64d8798350e8569b8e7622563fed6e44dce2625f311e4651b774816516c744fc\"\\nkube-system   2m57s       Normal    Pulling                          pod/cilium-envoy-zh4fp                  Pulling image \"quay.io/cilium/cilium-envoy@sha256:af7382699576b9e65e9184efa52eeca0b58aea70ad6e511bf260c91d9f740463\"\\nkube-system   2m57s       Normal    Pulling                          pod/cilium-l5pv6                        Pulling image \"quay.io/cilium/cilium@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01\"\\nkube-system   109s        Warning   FailedCreatePodSandBox           pod/coredns-fddcf74bb-hn5dt             Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"08da641a87ee014a7dc5b404b532c214399bd67c52d6445e6784bcfc32c75238\": plugin type=\"cilium-cni\" failed (add): unable to connect to Cilium agent: failed to create cilium agent client after 30.000000 seconds timeout: Get \"http://localhost/v1/config\": dial unix /var/run/cilium/cilium.sock: connect: no such file or directory...\\nkube-system   99s         Normal    Started                          pod/cilium-envoy-zh4fp                  Started container cilium-e"
+    },
+    {
+      "test": "02-online-with-bundle",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "03-registry-fallback",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "04-no-bundle",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "05-offline-clean",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "06-corrupt-bundle",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "07-wrong-checksum",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "08-missing-image",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "09-offline-repeat",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "10-offline-cleanup-redeploy",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "11-offline-update",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "12-network-restored",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "13-cloudflare-unavailable",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "14-preflight-timeout",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "15-architecture-mismatch",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    },
+    {
+      "test": "16-no-duplicate-import",
+      "status": "SKIP",
+      "reason": "prior scenario failed"
+    }
+  ],
+  "errors": [
+    {
+      "stage": "01-online-clean",
+      "message": "{'schema_version': '0.2', 'action': 'deploy', 'provider': 'aws', 'environment_id': 'railshot-airgap-test', 'status': 'failed', 'cluster_status': 'api_ready', 'cilium_status': 'failed', 'workload_status': 'unknown', 'endpoint': None, 'endpoint_scope': None, 'error': {'code': 'COMMAND_FAILED', 'stage': 'CILIUM_INSTALLING', 'message': '-250-10-11                    Node ip-10-250-10-11 event: Registered Node ip-10-250-10-11 in Controller\\nkube-system   3m3s        Normal    AppliedManifest                  addon/coredns                           Applied manifest at \"/var/lib/rancher/k3s/server/manifests/coredns.yaml\"\\nkube-system   3m2s        Normal    AppliedManifest                  addon/runtimes                          Applied manifest at \"/var/lib/rancher/k3s/server/manifests/runtimes.yaml\"\\nkube-system   3m2s        Normal    ApplyingManifest                 addon/runtimes                          Applying manifest at \"/var/lib/rancher/k3s/server/manifests/runtimes.yaml\"\\nkube-system   3m2s        Normal    ScalingReplicaSet                deployment/coredns                      Scaled up replica set coredns-fddcf74bb from 0 to 1\\nkube-system   3m2s        Normal    AppliedManifest                  addon/rolebindings                      Applied manifest at \"/var/lib/rancher/k3s/server/manifests/rolebindings.yaml\"\\nkube-system   3m2s        Normal    SuccessfulCreate                 replicaset/coredns-fddcf74bb            Created pod: coredns-fddcf74bb-hn5dt\\nkube-system   3m2s        Normal    ApplyingManifest                 addon/rolebindings                      Applying manifest at \"/var/lib/rancher/k3s/server/manifests/rolebindings.yaml\"\\nkube-system   3m2s        Normal    DeletingManifest                 addon/local-storage                     Deleting manifest at \"/var/lib/rancher/k3s/server/manifests/local-storage.yaml\"\\nkube-system   3m1s        Normal    SuccessfulCreate                 daemonset/cilium                        Created pod: cilium-l5pv6\\nkube-system   3m1s        Normal    SuccessfulCreate                 daemonset/cilium-envoy                  Created pod: cilium-envoy-zh4fp\\nkube-system   3m1s        Normal    ScalingReplicaSet                deployment/cilium-operator              Scaled up replica set cilium-operator-5ccfb4f5c8 from 0 to 1\\nkube-system   3m1s        Normal    SuccessfulCreate                 replicaset/cilium-operator-5ccfb4f5c8   Created pod: cilium-operator-5ccfb4f5c8-mn2gr\\nkube-system   3m1s        Normal    DeletingManifest                 addon/traefik                           Deleting manifest at \"/var/lib/rancher/k3s/server/manifests/traefik.yaml\"\\nkube-system   2m57s       Normal    Pulling                          pod/cilium-operator-5ccfb4f5c8-mn2gr    Pulling image \"quay.io/cilium/operator-generic@sha256:64d8798350e8569b8e7622563fed6e44dce2625f311e4651b774816516c744fc\"\\nkube-system   2m57s       Normal    Pulling                          pod/cilium-envoy-zh4fp                  Pulling image \"quay.io/cilium/cilium-envoy@sha256:af7382699576b9e65e9184efa52eeca0b58aea70ad6e511bf260c91d9f740463\"\\nkube-system   2m57s       Normal    Pulling                          pod/cilium-l5pv6                        Pulling image \"quay.io/cilium/cilium@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01\"\\nkube-system   109s        Warning   FailedCreatePodSandBox           pod/coredns-fddcf74bb-hn5dt             Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox \"08da641a87ee014a7dc5b404b532c214399bd67c52d6445e6784bcfc32c75238\": plugin type=\"cilium-cni\" failed (add): unable to connect to Cilium agent: failed to create cilium agent client after 30.000000 seconds timeout: Get \"http://localhost/v1/config\": dial unix /var/run/cilium/cilium.sock: connect: no such file or directory...\\nkube-system   99s         Normal    Started                          pod/cilium-envoy-zh4fp                  Started container cilium-e"
+    }
+  ],
+  "counts": {
+    "PASS": 0,
+    "FAIL": 1,
+    "SKIP": 15
+  },
+  "scope": "Disposable Linux VM only; nft restored; no host/CSP firewall changes",
+  "not_verified": [
+    "amd64",
+    "real AWS/GCP/OpenStack networks",
+    "authenticated WireGuard",
+    "QUIC/Cloudflare tunnel provisioning",
+    "private registry credentials"
+  ]
+}

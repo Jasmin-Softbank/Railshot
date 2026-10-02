@@ -1,0 +1,44 @@
+🔥 Deleting pods in cilium-test namespace...
+🔥 Deleting cilium-test namespace...
+⌛ Waiting for cilium-test namespace to be terminated...
+⌛ Waiting to disable Hubble before uninstalling Cilium
+⚠ ️ Failed to disable Hubble prior to uninstalling Cilium: release: not found
+⌛ Uninstalling Cilium
+🔥 Deleting pods in cilium-test namespace...
+🔥 Deleting cilium-test namespace...
+⌛ Waiting for cilium-test namespace to be terminated...
+
+Error: Unable to uninstall Cilium:  uninstall: Release not loaded: cilium: release: not found
+[2026-10-02T01:53:13Z] [cleanup] ERROR: 단계=cleanup, line=15, exit=1
+[2026-10-02T01:53:13Z] [cleanup] FAILED: 단계=cleanup, exit=1. JSON error와 로그의 원인을 확인한 뒤 runtime 명령을 재실행하세요.
+[2026-10-02T01:53:13Z] [cleanup] 실패 원인 진단: Pod 상태·Service·최근 이벤트
+NAMESPACE          NAME                                 READY   STATUS    RESTARTS   AGE    IP       NODE              NOMINATED NODE   READINESS GATES
+kube-system        coredns-fddcf74bb-wpzn5              0/1     Unknown   0          170m   <none>   ip-10-250-10-11   <none>           <none>
+railshot-sim-aws   railshot-workload-68989d4fb8-xs8pq   0/1     Unknown   0          168m   <none>   ip-10-250-10-11   <none>           <none>
+No resources found in railshot-demo namespace.
+default            5m13s       Normal    Starting                         node/ip-10-250-10-11                      Starting kubelet.
+default            5m13s       Normal    CertificateExpirationOK          node/ip-10-250-10-11                      Node and Certificate Authority certificates managed by k3s are OK
+default            5m12s       Warning   Rebooted                         node/ip-10-250-10-11                      Node ip-10-250-10-11 has been rebooted, boot id: 0ce559a4-496c-4f69-8bda-3bb872164e43
+default            5m12s       Normal    NodeHasSufficientPID             node/ip-10-250-10-11                      Node ip-10-250-10-11 status is now: NodeHasSufficientPID
+default            5m12s       Normal    NodeHasNoDiskPressure            node/ip-10-250-10-11                      Node ip-10-250-10-11 status is now: NodeHasNoDiskPressure
+default            5m12s       Normal    NodeHasSufficientMemory          node/ip-10-250-10-11                      Node ip-10-250-10-11 status is now: NodeHasSufficientMemory
+kube-system        5m12s       Normal    ApplyingManifest                 addon/ccm                                 Applying manifest at "/var/lib/rancher/k3s/server/manifests/ccm.yaml"
+default            5m12s       Normal    NodeAllocatableEnforced          node/ip-10-250-10-11                      Updated Node Allocatable limit across pods
+kube-system        5m11s       Normal    AppliedManifest                  addon/ccm                                 Applied manifest at "/var/lib/rancher/k3s/server/manifests/ccm.yaml"
+kube-system        5m11s       Normal    ApplyingManifest                 addon/coredns                             Applying manifest at "/var/lib/rancher/k3s/server/manifests/coredns.yaml"
+default            5m11s       Normal    RegisteredNode                   node/ip-10-250-10-11                      Node ip-10-250-10-11 event: Registered Node ip-10-250-10-11 in Controller
+default            5m10s       Normal    NodePasswordValidationComplete   node/ip-10-250-10-11                      Deferred node password secret validation complete
+kube-system        5m10s       Normal    AppliedManifest                  addon/coredns                             Applied manifest at "/var/lib/rancher/k3s/server/manifests/coredns.yaml"
+kube-system        5m9s        Normal    ApplyingManifest                 addon/rolebindings                        Applying manifest at "/var/lib/rancher/k3s/server/manifests/rolebindings.yaml"
+kube-system        5m9s        Normal    DeletingManifest                 addon/local-storage                       Deleting manifest at "/var/lib/rancher/k3s/server/manifests/local-storage.yaml"
+kube-system        5m8s        Normal    AppliedManifest                  addon/rolebindings                        Applied manifest at "/var/lib/rancher/k3s/server/manifests/rolebindings.yaml"
+kube-system        5m8s        Normal    ApplyingManifest                 addon/runtimes                            Applying manifest at "/var/lib/rancher/k3s/server/manifests/runtimes.yaml"
+kube-system        5m7s        Normal    AppliedManifest                  addon/runtimes                            Applied manifest at "/var/lib/rancher/k3s/server/manifests/runtimes.yaml"
+kube-system        5m6s        Normal    DeletingManifest                 addon/traefik                             Deleting manifest at "/var/lib/rancher/k3s/server/manifests/traefik.yaml"
+railshot-sim-aws   3m37s       Warning   FailedCreatePodSandBox           pod/railshot-workload-68989d4fb8-xs8pq    Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "3cecef74a7b54a9f1b7f0bf6da68372e436cc233ee2994ca396983a7c5f68770": plugin type="cilium-cni" failed (add): unable to connect to Cilium agent: failed to create cilium agent client after 30.000000 seconds timeout: Get "http://localhost/v1/config": dial unix /var/run/cilium/cilium.sock: connect: no such file or directory...
+kube-system        3m17s       Warning   FailedCreatePodSandBox           pod/coredns-fddcf74bb-wpzn5               Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "d1d8ec51325315807abf75f0cd14881b8fd1bb83e11ed25e8b0edd0093d66074": plugin type="cilium-cni" failed (add): unable to connect to Cilium agent: failed to create cilium agent client after 30.000000 seconds timeout: Get "http://localhost/v1/config": dial unix /var/run/cilium/cilium.sock: connect: no such file or directory...
+railshot-sim-aws   102s        Warning   FailedCreatePodSandBox           pod/railshot-workload-68989d4fb8-xs8pq    Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "b8019db4234d43b2b325a6103811a50a41d41337121439c704245818e6a52da7": plugin type="cilium-cni" failed (add): unable to connect to Cilium agent: failed to create cilium agent client after 30.000000 seconds timeout: Get "http://localhost/v1/config": dial unix /var/run/cilium/cilium.sock: connect: no such file or directory...
+railshot-sim-aws   101s        Normal    SandboxChanged                   pod/railshot-workload-68989d4fb8-xs8pq    Pod sandbox changed, it will be killed and re-created.
+kube-system        83s         Warning   FailedCreatePodSandBox           pod/coredns-fddcf74bb-wpzn5               Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "688da0812bacbefb677d6add1af1ae9f13af81292706a8279b87d3cce7bfd45f": plugin type="cilium-cni" failed (add): unable to connect to Cilium agent: failed to create cilium agent client after 30.000000 seconds timeout: Get "http://localhost/v1/config": dial unix /var/run/cilium/cilium.sock: connect: no such file or directory...
+kube-system        82s         Normal    SandboxChanged                   pod/coredns-fddcf74bb-wpzn5               Pod sandbox changed, it will be killed and re-created.
+[2026-10-02T01:53:13Z] [cleanup] 진단: journalctl -u k3s -n 100; k3s kubectl get pods -A -o wide; k3s kubectl get events -A --sort-by=.lastTimestamp

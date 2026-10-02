@@ -18,9 +18,9 @@ def render_policy(spec):
     return policy
 
 
-def render(spec):
+def render(spec, image_override=None, pull_policy=None):
     values = {'name': NAME, 'namespace': spec.workload.namespace, 'replicas': spec.workload.replicas,
-              'image': spec.workload.image, 'container_port': spec.workload.container_port,
+              'image': image_override or spec.workload.image, 'container_port': spec.workload.container_port,
               'health_path': spec.workload.health_path, 'node_port': spec.exposure.node_port}
 
     def resolve(value):
@@ -38,6 +38,8 @@ def render(spec):
         item['metadata']['labels'] = labels(spec)
     pod = items[1]['spec']['template']
     pod['metadata']['labels'].update(labels(spec))
+    if pull_policy:
+        pod['spec']['containers'][0]['imagePullPolicy'] = pull_policy
     if spec.workload.sample_content:
         items.append({'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {
             'name': NAME, 'namespace': spec.workload.namespace, 'labels': labels(spec)},

@@ -1,0 +1,2 @@
+k3s version v1.34.11+k3s1 (93126580)
+go version go1.26.7

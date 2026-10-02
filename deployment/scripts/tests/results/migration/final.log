@@ -1,0 +1,16 @@
+[PASS] 01-online-clean
+[PASS] 02-online-with-bundle
+[PASS] 03-registry-fallback
+[PASS] 04-no-bundle
+[PASS] 05-offline-clean
+[PASS] 06-corrupt-bundle
+[PASS] 07-wrong-checksum
+[PASS] 08-missing-image
+[PASS] 09-offline-repeat
+[PASS] 10-offline-cleanup-redeploy
+[PASS] 11-offline-update
+[PASS] 12-network-restored
+[PASS] 13-cloudflare-unavailable
+[PASS] 14-preflight-timeout
+[PASS] 15-architecture-mismatch
+[PASS] 16-no-duplicate-import

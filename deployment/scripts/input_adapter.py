@@ -40,8 +40,9 @@ IMAGE = r'[a-z0-9][a-z0-9./:_-]*(?:@sha256:[a-f0-9]{64})?'
 def parse_input(data):
     obj(data, 'input', ('schema_version', 'provider', 'environment_id', 'node', 'workload', 'exposure', 'runtime'),
         ('provider', 'environment_id', 'node', 'workload'))
-    if data.get('schema_version', '0.1') != '0.1':
-        raise InputError('schema_version: only 0.1 is supported (provisional contract)')
+    schema_version = data.get('schema_version', '0.1')
+    if schema_version not in ('0.1', '0.2'):
+        raise InputError('schema_version: expected 0.1 or 0.2 (provisional contract)')
     provider = data['provider']
     if provider not in ('aws', 'gcp', 'openstack'):
         raise InputError('provider: expected aws, gcp or openstack')
@@ -68,9 +69,12 @@ def parse_input(data):
         raise InputError('workload.sample_content: expected boolean')
     if sample and (port != 80 or health != '/' or not re.fullmatch(r'(?:docker.io/library/)?nginx:[A-Za-z0-9_.-]+', image)):
         raise InputError('sample_content is only for tagged nginx on port 80 with health_path /')
-    exposure = obj(data.get('exposure', {}), 'exposure', ('type', 'node_port', 'verification_url'))
-    if exposure.get('type', 'nodeport') != 'nodeport':
-        raise InputError('exposure.type: only nodeport is implemented')
+    exposure = obj(data.get('exposure', {}), 'exposure', ('type', 'node_port', 'verification_url', 'public_url'))
+    exposure_type = exposure.get('type', 'nodeport')
+    if exposure_type not in ('nodeport', 'cloudflare-tunnel'):
+        raise InputError('exposure.type: expected nodeport or cloudflare-tunnel (existing URL hook only)')
+    if schema_version == '0.1' and (exposure_type != 'nodeport' or 'public_url' in exposure):
+        raise InputError('extended exposure requires schema_version 0.2')
     node_port = integer(exposure.get('node_port', 30080), 'exposure.node_port', 30000, 32767)
     url = exposure.get('verification_url')
     if url is not None:
@@ -83,7 +87,22 @@ def parse_input(data):
             valid = False
         if not valid or any(c.isspace() for c in url):
             raise InputError('exposure.verification_url: expected HTTP(S) URL without credentials/query/fragment')
-    runtime = obj(data.get('runtime', {}), 'runtime', ('k3s_version', 'cilium_version', 'cilium_cli_version', 'timeout_seconds', 'node_ip'))
+    public_url = exposure.get('public_url')
+    if public_url is not None:
+        string(public_url, 'exposure.public_url', maximum=1024)
+        try:
+            parsed = urlsplit(public_url)
+            parsed.port
+        except ValueError:
+            raise InputError('exposure.public_url: invalid URL/port') from None
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
+                or parsed.query or parsed.fragment or parsed.path not in ('', '/') or any(c.isspace() for c in public_url)):
+            raise InputError('exposure.public_url: expected HTTPS base URL without credentials/query/path')
+    legacy_runtime = ('k3s_version', 'cilium_version', 'cilium_cli_version', 'timeout_seconds', 'node_ip')
+    new_runtime = ('mode', 'bundle_path', 'bundle_sha256', 'preflight_timeout_seconds', 'endpoint_overrides')
+    runtime = obj(data.get('runtime', {}), 'runtime', legacy_runtime + new_runtime)
+    if schema_version == '0.1' and any(k in runtime for k in new_runtime):
+        raise InputError('extended runtime options require schema_version 0.2 or CLI --mode/--bundle')
     defaults = RuntimeSpec()
     versions = [string(runtime.get(k, getattr(defaults, k)), f'runtime.{k}', pattern, 64) for k, pattern in (
         ('k3s_version', r'v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+'),
@@ -98,6 +117,38 @@ def parse_input(data):
             ipaddress.IPv4Address(node_ip)
         except ValueError:
             raise InputError('runtime.node_ip: expected IPv4 address') from None
+    mode = runtime.get('mode', 'auto')
+    if mode not in ('auto', 'online', 'offline'):
+        raise InputError('runtime.mode: expected auto, online or offline')
+    bundle = runtime.get('bundle_path')
+    if bundle is not None:
+        string(bundle, 'runtime.bundle_path', maximum=4096)
+        if not bundle.startswith('/') or '\x00' in bundle:
+            raise InputError('runtime.bundle_path: expected absolute local directory')
+    checksum = runtime.get('bundle_sha256')
+    if checksum is not None:
+        string(checksum, 'runtime.bundle_sha256', r'[a-f0-9]{64}', 64)
+        if not bundle:
+            raise InputError('runtime.bundle_sha256 requires bundle_path')
+    probe_timeout = integer(runtime.get('preflight_timeout_seconds', 3), 'runtime.preflight_timeout_seconds', 1, 10)
+    overrides = runtime.get('endpoint_overrides', {})
+    allowed = ('k3s_source', 'github', 'cilium_cli_source', 'cilium_chart', 'quay', 'registry_k8s', 'docker_hub', 'ghcr', 'workload_registry', 'cloudflare_tunnel')
+    obj(overrides, 'runtime.endpoint_overrides', allowed)
+    for key, value in overrides.items():
+        string(value, 'runtime.endpoint_overrides.' + key, maximum=1024)
+        try:
+            parsed = urlsplit(value)
+            parsed.port
+        except ValueError:
+            raise InputError('endpoint override: invalid URL/port') from None
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query
+                or parsed.fragment or any(c.isspace() for c in value)):
+            raise InputError('endpoint overrides must be HTTPS URLs without credentials/query/fragment')
+        try:
+            parsed.port
+        except ValueError:
+            raise InputError('endpoint override: invalid port') from None
     return AdaptedRequest(DeploymentSpec(environment, WorkloadSpec(image, namespace, replicas, port, health, sample),
-                                        RuntimeSpec(*versions, timeout, node_ip), ExposureSpec(node_port, url)),
-                          RequestContext(provider, host, user))
+                                        RuntimeSpec(*versions, timeout, node_ip, mode, bundle, checksum, probe_timeout, overrides),
+                                        ExposureSpec(node_port, url, exposure_type, public_url)),
+                          RequestContext(provider, host, user, schema_version))

@@ -24,3 +24,9 @@ Vercel Preview는 별도 웹 배포 연동이다. 런타임·Ansible·CI 검증�
 기준 integration은 `adda5c7532c22da95e938a3cf1a7ba4c05e4ca47`, 개인 feature는 `efa4d7c599bf9af512112a353b3d5324c036db68`이다. 개인 feature의 210개 파일 중 208개는 통합본과 내용·mode가 동일하다. 나머지는 개인 범위를 설명하는 README와 Ansible 문서 상단 안내뿐이다.
 
 이미 반영된 CI·CSP·네트워크·Ansible·GitOps 구현을 다시 복사하지 않고 merge로 계보를 연결했다. README와 Ansible 문서는 통합 범위의 설명을 유지했다. 통합본에만 있는 팀 구현과 실제 앱 선언은 보존했다.
+
+## 승민 runtime 통합
+
+[원본 PR #1](https://github.com/Jasmin-Softbank/Railshot/pull/1)의 `c732b3bc83ad1b9cab416f1d763cfee9be26ea05`를 merge했다. `deployment/`는 원본과 byte 단위로 동일하게 유지한다. 새 Cilium 설치 코드가 online 경로에서도 읽는 `airgap/versions.json`을 Ansible 전달 목록에 추가했다. 버전 정책 누락을 잡는 기존 경계 검사를 보강했고, 수정 전 실패·수정 후 통과를 확인했다.
+
+통합 checkout에서 runtime 단위·계약 검사 49개, Ansible 검사 26개를 통과했다. 전달할 7개 파일의 존재와 Ansible 실행 버전·팀 정책 버전의 일치도 확인했다. 이 결과는 오프라인 통합 검사이며 새 코드로 AWS/GCP를 재설치하거나 기존 서비스를 재배포한 결과가 아니다. 원본 PR의 Linux 실검증 기록은 그 PR에 보존한다.

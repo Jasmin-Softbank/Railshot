@@ -1,0 +1,93 @@
+[2026-10-02T03:19:45Z] [preflight] Linux node prerequisites ready
+[NODE_READY]
++ id -u
++ [ 0 -eq 0 ]
++ K3S_DATA_DIR=/var/lib/rancher/k3s
++ /usr/local/bin/k3s-killall.sh
++ [ -s /etc/systemd/system/k3s.service ]
++ basename /etc/systemd/system/k3s.service
++ systemctl stop k3s.service
++ [ -x /etc/init.d/k3s* ]
++ killtree 14462 19571
++ kill -9 14462 14485 14562 19571 19596 19623 19658 19659
++ do_unmount_and_remove /run/k3s
++ set +x
+sh -c 'umount -f "$0" && rm -rf "$0"' /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io/e4680c02629054d72c4a6798e88f05a20e944a5613191c3b13fc10ec868a8d99/rootfs
+sh -c 'umount -f "$0" && rm -rf "$0"' /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io/63b37c34b7ed20f6ce07b48491b7e8877373395cc7c010b6b343adfbe78088e6/rootfs
+sh -c 'umount -f "$0" && rm -rf "$0"' /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io/5887824eec6e9b7cb24493153b253a4e5d09b40aa789c0c5d9352bf4d2637a9c/rootfs
+sh -c 'umount -f "$0" && rm -rf "$0"' /run/k3s/containerd/io.containerd.runtime.v2.task/k8s.io/3f83285fac37bbd78fd580c826f5bb8bf3e44c740059e2693655fcb6d725962d/rootfs
+sh -c 'umount -f "$0" && rm -rf "$0"' /run/k3s/containerd/io.containerd.grpc.v1.cri/sandboxes/5887824eec6e9b7cb24493153b253a4e5d09b40aa789c0c5d9352bf4d2637a9c/shm
+sh -c 'umount -f "$0" && rm -rf "$0"' /run/k3s/containerd/io.containerd.grpc.v1.cri/sandboxes/3f83285fac37bbd78fd580c826f5bb8bf3e44c740059e2693655fcb6d725962d/shm
++ do_unmount_and_remove /var/lib/kubelet/pods
++ set +x
+sh -c 'umount -f "$0" && rm -rf "$0"' /var/lib/kubelet/pods/f090def7-55f5-4bae-97a5-1ae06c4c8e0f/volumes/kubernetes.io~projected/kube-api-access-tmk6j
++ do_unmount_and_remove /var/lib/kubelet/plugins
++ set +x
++ do_unmount_and_remove /run/netns/cni-
++ set +x
+sh -c 'umount -f "$0" && rm -rf "$0"' /run/netns/cni-38f11380-d1e4-5a99-fde2-fea6ea8c5569
+sh -c 'umount -f "$0" && rm -rf "$0"' /run/netns/cni-09c3a150-e43a-17a6-4cbd-c639b8d38d43
++ ip netns show
++ grep cni-
++ xargs -r -t -n 1 ip netns delete
++ remove_interfaces
++ + read ignore iface ignoregrep
+ master cni0
++ ip link show
++ ip link delete cni0
+Cannot find device "cni0"
++ ip link delete flannel.1
+Cannot find device "flannel.1"
++ ip link delete flannel-v6.1
+Cannot find device "flannel-v6.1"
++ ip link delete kube-ipvs0
+Cannot find device "kube-ipvs0"
++ ip link delete flannel-wg
+Cannot find device "flannel-wg"
++ ip link delete flannel-wg-v6
+Cannot find device "flannel-wg-v6"
++ command -v tailscale
++ [ -n  ]
++ rm -rf /var/lib/cni/
++ iptables-save
++ grep -iv flannel
++ grep -v KUBE-
++ grep -v CNI-
++ iptables-restore
++ grep -v CNI-
++ ip6tables-save
++ grep -v KUBE-
++ ip6tables-restore
++ grep -iv flannel
++ command -v systemctl
++ systemctl disable k3s
+Removed "/etc/systemd/system/multi-user.target.wants/k3s.service".
++ systemctl reset-failed k3s
+Failed to reset failed state of unit k3s.service: Unit k3s.service not loaded.
++ systemctl daemon-reload
++ command -v rc-update
++ rm -f /etc/systemd/system/k3s.service
++ rm -f /etc/systemd/system/k3s.service.env
++ trap remove_uninstall EXIT
++ [ -L /usr/local/bin/kubectl ]
++ rm -f /usr/local/bin/kubectl
++ [ -L /usr/local/bin/crictl ]
++ rm -f /usr/local/bin/crictl
++ [ -L /usr/local/bin/ctr ]
++ rm -f /usr/local/bin/ctr
++ rm -rf /etc/rancher/k3s
++ rm -rf /run/k3s
++ rm -rf /run/flannel
++ clean_mounted_directory /var/lib/rancher/k3s
++ grep -q  /var/lib/rancher/k3s /proc/mounts
++ rm -rf /var/lib/rancher/k3s
++ return 0
++ rm -rf /var/lib/kubelet
++ rm -f /usr/local/bin/k3s
++ rm -f /usr/local/bin/k3s-killall.sh
++ type yum
++ type rpm-ostree
++ type zypper
++ remove_uninstall
++ rm -f /usr/local/bin/k3s-uninstall.sh
+[2026-10-02T03:20:00Z] [cleanup] K3s / Cilium removed

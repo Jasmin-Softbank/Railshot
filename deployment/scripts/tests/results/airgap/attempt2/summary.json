@@ -1,0 +1,89 @@
+{
+  "status": "passed",
+  "results": [
+    {
+      "test": "01-online-clean",
+      "status": "PASS",
+      "duration_seconds": 136.017
+    },
+    {
+      "test": "02-online-with-bundle",
+      "status": "PASS",
+      "duration_seconds": 23.753
+    },
+    {
+      "test": "03-registry-fallback",
+      "status": "PASS",
+      "duration_seconds": 32.643
+    },
+    {
+      "test": "04-no-bundle",
+      "status": "PASS",
+      "duration_seconds": 0.404
+    },
+    {
+      "test": "05-offline-clean",
+      "status": "PASS",
+      "duration_seconds": 73.776
+    },
+    {
+      "test": "06-corrupt-bundle",
+      "status": "PASS",
+      "duration_seconds": 0.27
+    },
+    {
+      "test": "07-wrong-checksum",
+      "status": "PASS",
+      "duration_seconds": 0.057
+    },
+    {
+      "test": "08-missing-image",
+      "status": "PASS",
+      "duration_seconds": 0.754
+    },
+    {
+      "test": "09-offline-repeat",
+      "status": "PASS",
+      "duration_seconds": 20.982
+    },
+    {
+      "test": "10-offline-cleanup-redeploy",
+      "status": "PASS",
+      "duration_seconds": 27.926
+    },
+    {
+      "test": "11-offline-update",
+      "status": "PASS",
+      "duration_seconds": 29.004
+    },
+    {
+      "test": "12-network-restored",
+      "status": "PASS",
+      "duration_seconds": 33.809
+    },
+    {
+      "test": "13-cloudflare-unavailable",
+      "status": "PASS",
+      "duration_seconds": 10.862
+    },
+    {
+      "test": "14-preflight-timeout",
+      "status": "PASS",
+      "duration_seconds": 2.574
+    }
+  ],
+  "errors": [],
+  "counts": {
+    "PASS": 14,
+    "FAIL": 0,
+    "SKIP": 0
+  },
+  "scope": "Disposable Linux VM only; nft restored; no host/CSP firewall changes",
+  "not_verified": [
+    "amd64",
+    "real AWS/GCP/OpenStack networks",
+    "authenticated WireGuard",
+    "QUIC/Cloudflare tunnel provisioning",
+    "private registry credentials"
+  ]
+}

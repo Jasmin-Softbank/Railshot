@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.2",
+  "provider": "aws",
+  "environment_id": "railshot-airgap-test",
+  "node": {
+    "host": "localhost",
+    "ssh_user": "ubuntu"
+  },
+  "workload": {
+    "image": "nginx:1.28.0-alpine",
+    "namespace": "railshot-airgap-test",
+    "replicas": 1,
+    "container_port": 80,
+    "health_path": "/",
+    "sample_content": true
+  },
+  "exposure": {
+    "type": "nodeport",
+    "node_port": 30080
+  },
+  "runtime": {
+    "timeout_seconds": 180,
+    "preflight_timeout_seconds": 2,
+    "mode": "auto",
+    "endpoint_overrides": {
+      "k3s_source": "https://127.0.0.1:47929/",
+      "github": "https://127.0.0.1:47929/",
+      "cilium_cli_source": "https://127.0.0.1:47929/",
+      "cilium_chart": "https://127.0.0.1:47929/",
+      "quay": "https://127.0.0.1:47929/",
+      "registry_k8s": "https://127.0.0.1:47929/",
+      "docker_hub": "https://127.0.0.1:47929/",
+      "ghcr": "https://127.0.0.1:47929/"
+    }
+  }
+}
