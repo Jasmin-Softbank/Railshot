@@ -25,7 +25,7 @@ class PlatformReleaseTests(unittest.TestCase):
         self.artifacts = self.home / "platform-published"
         self.artifacts.mkdir()
         for name in ("deployment/scripts/publish-platform.py", "deployment/scripts/render-platform.py",
-                     "deployment/manifests/platform.yaml", "ci/scripts/ci_scope.py"):
+                     "deployment/manifests/platform.yaml"):
             destination = self.repo / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, destination)
@@ -54,11 +54,13 @@ class PlatformReleaseTests(unittest.TestCase):
         step = next(step for step in self.workflow["jobs"][job]["steps"] if step.get("name") == name)
         env = {**os.environ, "RUNNER_TEMP": str(self.home), "GITHUB_SHA": self.source_sha,
                "GITHUB_REF": "refs/heads/integration/test", "PUBLISH": "true", "DEPLOY": "true",
-               "SKIP_BUILD": "false", "GITHUB_EVENT_NAME": "workflow_dispatch",
+               "SKIP_BUILD": "false", "AUTO_RELEASE": "false", "MULTICLOUD": "false", "MULTICLOUD_ENABLED": "",
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_RUN_ID": "123", "CI_RUN_ID": "123",
                "GITHUB_REPOSITORY": "Jasmin-Softbank/Railshot", "GITHUB_REPOSITORY_ID": "1400202256",
                "GITHUB_OUTPUT": str(self.home / "github-output"), "VERIFY_REF": "refs/heads/integration/test",
                "VERIFY_ROLE": "arn:aws:iam::721622471953:role/railshot-platform-verifier",
                "VERIFY_VERSION": "1", "VERIFY_HASH": "e" * 64,
+               "RELEASE_VERSION": "", "RELEASE_HASH": "",
                "COMPONENTS": '["dashboard","api"]', "PLATFORM_TARGET": "k3s-aws", "PLATFORM_PORT": "31080",
                "PROVIDER_TARGETS": "{}",
                **(overrides or {})}
@@ -97,83 +99,98 @@ class PlatformReleaseTests(unittest.TestCase):
                 self.assertNotEqual(self.run_step("admission", name, overrides).returncode, 0)
         self.assertIsNone(self.remote_revision())
         verification = self.workflow["jobs"]["verify"]
-        self.assertEqual(verification["if"], "${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.deploy.result == 'success' }}")
+        self.assertEqual(verification['if'], "${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.deploy.result == 'success' }}")
         self.assertEqual(verification["needs"], "deploy")
         self.assertEqual(verification["permissions"], {"contents": "read", "id-token": "write"})
 
-    def test_ci_reuses_same_run_images_only_after_opted_in_trusted_push_gate(self):
-        ci = yaml.safe_load((ROOT / '.github/workflows/railshot-ci.yml').read_text())
-        jobs = ci['jobs']
-        self.assertEqual(ci['permissions'], {'contents': 'read'})
-        self.assertEqual(jobs['containers']['if'], "needs.changes.outputs.containers == 'true'")
-        trusted_push = "vars.RAILSHOT_AUTO_RELEASE == 'true' && github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF"
-        components = '["dashboard","api","mcp","ci-runner"]'
-        self.assertEqual(jobs['containers']['with'], {
-            'components': "${{ " + trusted_push + " && '" + components + "' || needs.changes.outputs.container_components }}",
-            'export_image': '${{ ' + trusted_push + ' }}',
-        })
-        release = jobs['release']
-        self.assertEqual(release['needs'], ['changes', 'gate'])
-        self.assertEqual(release['if'], "${{ always() && !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.containers == 'true' && " + trusted_push + ' }}')
-        self.assertEqual(release['uses'], './.github/workflows/platform-publish.yml')
-        self.assertEqual(release['with'], {'components': components, 'publish': True, 'deploy': True, 'skip_build': True})
-        self.assertEqual(release['permissions'], {'contents': 'write', 'actions': 'read', 'packages': 'write', 'id-token': 'write'})
-        self.assertEqual(jobs['containers']['permissions'], {'contents': 'read'})
+    def test_same_run_reuse_requires_opted_in_trusted_complete_image_set(self):
         triggers = self.workflow.get('on', self.workflow.get(True))
         self.assertIs(triggers['workflow_call']['inputs']['skip_build']['default'], False)
         self.assertNotIn('skip_build', triggers['workflow_dispatch']['inputs'])
-        self.assertEqual(self.workflow['jobs']['build']['if'], '${{ !inputs.skip_build }}')
-        publish = self.workflow['jobs']['publish']
-        self.assertEqual(publish['needs'], ['admission', 'build'])
-        self.assertEqual(publish['if'], "${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}")
-        for job in ('publish', 'deploy'):
-            downloads = [step for step in self.workflow['jobs'][job]['steps'] if step.get('uses', '').startswith('actions/download-artifact@')]
+        jobs = self.workflow['jobs']
+        self.assertEqual(jobs['build']['if'], '${{ !inputs.skip_build }}')
+        self.assertEqual(jobs['publish']['needs'], ['admission', 'build'])
+        self.assertEqual(jobs['publish']['if'], "${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}")
+        self.assertEqual(jobs['multicloud']['needs'], ['deploy', 'verify'])
+        self.assertEqual(jobs['multicloud']['if'], "${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' }}")
+        admission = next(step for step in jobs['admission']['steps'] if step.get('name') == 'Require the exact trusted source CI gate before deployment')
+        self.assertEqual(admission['env']['CI_RUN_ID'], '${{ inputs.ci_run_id }}')
+        self.assertIn('release_admission.py', admission['run'])
+        for job in ('publish', 'deploy', 'multicloud'):
+            downloads = [step for step in jobs[job]['steps'] if step.get('uses', '').startswith('actions/download-artifact@')]
             self.assertEqual(len(downloads), 1)
-            self.assertFalse(set(downloads[0]['with']) & {'run-id', 'repository', 'github-token'}, 'artifacts must come from the calling run')
-        publish_shell = next(step['run'] for step in publish['steps'] if step.get('name') == 'Publish exactly the tested image')
-        self.assertIn('org.opencontainers.image.revision', publish_shell)
-        self.assertIn('= "$GITHUB_SHA"', publish_shell)
-        self.assertNotIn('docker build', publish_shell)
-        valid = {'SKIP_BUILD': 'true', 'GITHUB_EVENT_NAME': 'push', 'COMPONENTS': components}
+            self.assertFalse(set(downloads[0]['with']) & {'run-id', 'repository', 'github-token'}, 'reuse must read the calling run artifacts')
+        publish = next(step['run'] for step in jobs['publish']['steps'] if step.get('name') == 'Publish exactly the tested image')
+        self.assertNotIn('docker build', publish)
+        self.assertIn('org.opencontainers.image.revision', publish)
+        self.assertIn('= "$GITHUB_SHA"', publish)
+        valid = {'SKIP_BUILD': 'true', 'AUTO_RELEASE': 'true', 'MULTICLOUD': 'true', 'MULTICLOUD_ENABLED': 'true',
+                 'GITHUB_EVENT_NAME': 'push', 'COMPONENTS': '["dashboard","api","mcp","ci-runner"]',
+                 'RELEASE_VERSION': '2', 'RELEASE_HASH': 'f' * 64,
+                 'PROVIDER_TARGETS': '{"aws":"k3s-aws","gcp":"k3s-gcp","openstack":"k3s-openstack"}'}
         name = 'Validate publication and deployment inputs'
-        self.assertEqual(self.run_step('admission', name, valid).returncode, 0)
+        result = self.run_step('admission', name, valid)
+        self.assertEqual(result.returncode, 0, result.stderr)
         for changes in ({'GITHUB_EVENT_NAME': 'pull_request'}, {'GITHUB_EVENT_NAME': 'workflow_dispatch'},
-                        {'GITHUB_REF': 'refs/heads/integration/other'}, {'PUBLISH': 'false'}, {'DEPLOY': 'false'},
-                        {'COMPONENTS': '["dashboard","api"]'}, {'GITHUB_REPOSITORY_ID': '1'}):
+                        {'GITHUB_REF': 'refs/heads/integration/other'}, {'AUTO_RELEASE': 'false'},
+                        {'CI_RUN_ID': '124'}, {'PUBLISH': 'false'}, {'DEPLOY': 'false'},
+                        {'COMPONENTS': '["dashboard","api","ci-runner"]'}, {'GITHUB_REPOSITORY_ID': '1'},
+                        {'PROVIDER_TARGETS': '{"aws":"k3s-aws","gcp":"k3s-gcp"}'}):
             with self.subTest(changes=changes):
                 self.assertNotEqual(self.run_step('admission', name, {**valid, **changes}).returncode, 0)
 
-    def test_superseded_source_is_rejected_before_deployment(self):
-        name = 'Reject superseded source before deployment'
-        names = [step.get('name') for step in self.workflow['jobs']['deploy']['steps']]
-        self.assertEqual(names.index(name) + 1, names.index('Commit the tested digest declaration to the platform branch'))
-        settings = {'GITHUB_REF': 'refs/heads/main'}
-        current = self.run_step('deploy', name, settings)
-        self.assertEqual(current.returncode, 0, current.stderr)
-        (self.repo / 'README.md').write_text('newer source waiting for CI\n')
-        self.git('commit', '-am', 'advance trusted source')
-        self.git('push', 'origin', 'main')
-        self.git('switch', '--detach', self.source_sha)
-        docs_only = self.run_step('deploy', name, settings)
-        self.assertEqual(docs_only.returncode, 0, docs_only.stderr)
-        self.assertEqual(self.git('status', '--porcelain').stdout, '')
-        self.git('switch', 'main')
-        api = self.repo / 'apps/api/new-source.js'
-        api.parent.mkdir(parents=True)
-        api.write_text('export const updated = true;\n')
-        self.git('add', 'apps/api/new-source.js')
-        self.git('commit', '-m', 'newer container source')
-        self.git('push', 'origin', 'main')
-        self.git('switch', '--detach', self.source_sha)
-        old = self.run_step('deploy', name, settings)
-        self.assertNotEqual(old.returncode, 0)
-        self.assertIn('refusing to roll back', old.stderr)
-        self.assertIsNone(self.remote_revision())
-        unrelated = self.git('commit-tree', f'{self.source_sha}^{{tree}}', '-m', 'unrelated source').stdout.strip()
-        self.git('push', '--force', 'origin', f'{unrelated}:refs/heads/main')
-        self.assertNotEqual(self.run_step('deploy', name, settings).returncode, 0)
-        self.assertIsNone(self.remote_revision())
-        self.assertNotEqual(self.run_step('deploy', name, {'GITHUB_REF': 'refs/heads/missing'}).returncode, 0)
+    def test_platform_automatic_release_does_not_require_multicloud_activation(self):
+        triggers = self.workflow.get('on', self.workflow.get(True))
+        for trigger in ('workflow_call', 'workflow_dispatch'):
+            self.assertIs(triggers[trigger]['inputs']['multicloud']['default'], False)
+        ci = yaml.safe_load((ROOT / '.github/workflows/railshot-ci.yml').read_text())
+        release = ci['jobs']['release']
+        self.assertEqual(release['with']['multicloud'], "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}")
+        self.assertIn("vars.RAILSHOT_AUTO_RELEASE == 'true'", release['if'])
+        self.assertNotIn('RAILSHOT_MULTICLOUD_RELEASE', release['if'])
+        automatic = {'SKIP_BUILD': 'true', 'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push',
+                     'COMPONENTS': '["dashboard","api","mcp","ci-runner"]'}
+        name = 'Validate publication and deployment inputs'
+        result = self.run_step('admission', name, automatic)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        multicloud = {**automatic, 'MULTICLOUD': 'true', 'MULTICLOUD_ENABLED': 'true', 'RELEASE_VERSION': '2', 'RELEASE_HASH': 'f' * 64,
+                      'PROVIDER_TARGETS': '{"aws":"k3s-aws","gcp":"k3s-gcp","openstack":"k3s-openstack"}'}
+        for missing in ({'PROVIDER_TARGETS': '{}'}, {'RELEASE_VERSION': ''}, {'RELEASE_HASH': ''}):
+            with self.subTest(missing=missing):
+                self.assertNotEqual(self.run_step('admission', name, {**multicloud, **missing}).returncode, 0)
+
+    def test_every_entrypoint_requires_repository_multicloud_activation(self):
+        name = 'Validate publication and deployment inputs'
+        step = next(step for step in self.workflow['jobs']['admission']['steps'] if step.get('name') == name)
+        self.assertEqual(step['env']['MULTICLOUD_ENABLED'], '${{ vars.RAILSHOT_MULTICLOUD_RELEASE }}')
+        for event, skip in (('workflow_dispatch', 'false'), ('push', 'true')):
+            for enabled in ('true', 'false', '', 'TRUE'):
+                for requested in ('true', 'false'):
+                    with self.subTest(event=event, enabled=enabled, requested=requested):
+                        settings = {'GITHUB_EVENT_NAME': event, 'SKIP_BUILD': skip, 'AUTO_RELEASE': 'true',
+                            'MULTICLOUD': requested, 'MULTICLOUD_ENABLED': enabled,
+                            'COMPONENTS': '["dashboard","api","mcp","ci-runner"]',
+                            'PROVIDER_TARGETS': '{"aws":"k3s-aws","gcp":"k3s-gcp","openstack":"k3s-openstack"}',
+                            'RELEASE_VERSION': '2', 'RELEASE_HASH': 'f' * 64}
+                        result = self.run_step('admission', name, settings)
+                        allowed = requested == 'false' or enabled == 'true'
+                        self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                        if not allowed:
+                            self.assertIn('RAILSHOT_MULTICLOUD_RELEASE=true', result.stderr)
+
+    def test_current_source_gate_is_rechecked_immediately_before_each_mutation(self):
+        for job, mutation in (('deploy', 'Commit the tested digest declaration to the platform branch'),
+                              ('multicloud', 'Apply the same approved release and require three verified providers')):
+            steps = self.workflow['jobs'][job]['steps']
+            index = next(i for i, step in enumerate(steps) if step.get('name') == mutation)
+            guard = steps[index - 1]
+            self.assertEqual(guard['env'], {'GITHUB_TOKEN': '${{ github.token }}', 'CI_RUN_ID': '${{ inputs.ci_run_id }}'})
+            self.assertEqual(guard['run'], 'python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"')
+            self.assertNotIn('continue-on-error', guard)
+            self.assertEqual(self.workflow['jobs'][job]['permissions']['actions'], 'read')
+        remote = next(step for step in self.workflow['jobs']['multicloud']['steps']
+                      if step.get('name') == 'Apply the same approved release and require three verified providers')
+        self.assertIn('--publication-run-id "$GITHUB_RUN_ID" --publication-run-attempt "$GITHUB_RUN_ATTEMPT"', remote['run'])
 
     def test_release_keeps_enabled_provider_targets_across_image_updates(self):
         settings = {'PROVIDER_TARGETS': '{"openstack":"k3s-openstack"}'}

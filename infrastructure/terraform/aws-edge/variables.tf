@@ -22,7 +22,7 @@ variable "public_subnet_ids" {
   }
 }
 variable "routes" {
-  description = "Administrator-assigned AWS app routes; one IP target per app. Reuse customer nodes with distinct app NodePorts."
+  description = "Administrator-assigned AWS app routes; one IP target per app. Set manage_dns=false only after explicit DNS state ownership transfer."
   type = map(object({
     host                     = string
     provider_kind            = string
@@ -104,6 +104,43 @@ variable "web_client_cidrs" {
   validation {
     condition     = length(var.web_client_cidrs) > 0 && alltrue([for c in var.web_client_cidrs : can(cidrnetmask(c))])
     error_message = "Provide valid IPv4 client CIDRs."
+  }
+}
+variable "openstack_proxy_egress" {
+  description = "Existing OpenStack HTTPS proxy on the control node; preserve its ALB egress without creating another app route or listener."
+  type = object({
+    target_private_ip = string
+    node_port         = number
+  })
+  default = null
+  validation {
+    condition = var.openstack_proxy_egress == null ? true : (
+      can(cidrnetmask("${var.openstack_proxy_egress.target_private_ip}/32")) &&
+      can(regex("^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)", var.openstack_proxy_egress.target_private_ip)) &&
+      var.openstack_proxy_egress.node_port >= 30000 && var.openstack_proxy_egress.node_port <= 32767 &&
+      floor(var.openstack_proxy_egress.node_port) == var.openstack_proxy_egress.node_port
+    )
+    error_message = "Bind the existing proxy to an RFC1918 IPv4 and integer NodePort, or leave null."
+  }
+}
+variable "openstack_app_egress" {
+  description = "Existing OpenStack app relay on the control node. Preserve the exact live description and TCP port independently of the Skyline proxy."
+  type = object({
+    target_private_ip = string
+    port              = number
+    description       = string
+  })
+  default = null
+  validation {
+    condition = var.openstack_app_egress == null ? true : (
+      can(cidrnetmask("${var.openstack_app_egress.target_private_ip}/32")) &&
+      can(regex("^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)", var.openstack_app_egress.target_private_ip)) &&
+      var.openstack_app_egress.port >= 1 && var.openstack_app_egress.port <= 65535 &&
+      floor(var.openstack_app_egress.port) == var.openstack_app_egress.port &&
+      length(var.openstack_app_egress.description) > 0 && length(var.openstack_app_egress.description) <= 255 &&
+      length(regexall("[\\r\\n]", var.openstack_app_egress.description)) == 0
+    )
+    error_message = "Bind the existing app relay to an RFC1918 IPv4, integer TCP port and its single-line rule description, or leave null."
   }
 }
 

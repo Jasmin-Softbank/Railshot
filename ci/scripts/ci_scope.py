@@ -13,7 +13,7 @@ COMPONENTS = ('dashboard', 'api', 'mcp', 'ci-runner')
 SHA = re.compile(r'[0-9a-f]{40}')
 # Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
 API_NATIVE_FILES = {
-    'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml',
+    'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml', 'observability/runtime_health.py',
     'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
     'gitops/edge.py', 'gitops/service_name.py', 'gitops/logs.py',
     'gitops/dns.py', 'gitops/gcp_routes.py',
@@ -31,7 +31,7 @@ API_NATIVE_FILES = {
     'infrastructure/ansible/application-database.yml',
     'deployment/scripts/common.sh', 'deployment/scripts/environment.py', 'deployment/bootstrap/preflight.sh',
     'deployment/scripts/applications.py', 'deployment/scripts/application_release.py', 'deployment/scripts/application_routes.py',
-    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh',
+    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
 }
@@ -49,6 +49,12 @@ def documentation(path):
     return (path.startswith('docs/') and PurePosixPath(path).suffix in
             {'.md', '.txt', '.svg', '.png', '.jpg', '.jpeg', '.pdf', '.drawio', '.mmd'}
             or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
+
+
+def release_required(paths):
+    """Release common runtime/worker/IaC policy too; only proven docs-only diffs skip."""
+    return paths is None or any(not path or path.startswith('/') or '..' in PurePosixPath(path).parts
+                                or not documentation(path) for path in paths)
 
 
 def container_components(paths):
@@ -210,9 +216,16 @@ def main():
     paths = changed_paths(os.environ['GITHUB_EVENT_NAME'], event, Path.cwd())
     selected = set(JOBS) if paths is None else select(paths)
     components = set(COMPONENTS) if paths is None else container_components(paths)
+    release = release_required(paths)
+    # A trusted automatic release exports all images once, even when only the
+    # native runtime/edge/worker source changes. The gate must require that job.
+    if release and os.environ.get('AUTO_RELEASE') == 'true':
+        selected.add('containers')
+        components = set(COMPONENTS)
     result = json.dumps([job for job in JOBS if job in selected])
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         stream.write(f'selected={result}\n')
+        stream.write(f'release={str(release).lower()}\n')
         stream.write('container_components=' + json.dumps([name for name in COMPONENTS if name in components]) + '\n')
         for job in JOBS:
             stream.write(f'{job}={str(job in selected).lower()}\n')

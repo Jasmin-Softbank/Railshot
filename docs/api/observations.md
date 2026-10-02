@@ -6,7 +6,7 @@ Prometheus 접속 전에 404다. `deployment_id=null`, `environment_id`는 세�
 `app`은 등록 앱이며 앱 바인딩이 없으면 null이다. 이때 노드만 조회하고 Pod·HTTP는 unsupported다.
 provider는 운영자 매핑이나 저장된 환경 profile에서 읽으며 ID 문자열로 추측하지 않는다.
 대상 목록의 `runtime=unknown`은 정적 메타데이터다. observation의 `runtime.status/observed_at`은
-`metrics.node_up.state/observed_at`과 같으며 node exporter 수집 상태를 뜻한다. 앱 준비 상태나 배포 성공을 뜻하지 않는다.
+`metrics.runtime_healthz`에서 결정한다. 등록된 런타임의 native HTTPS `/healthz`를 기존 상시 Blackbox가 30초마다 직접 검사한다. 90초 이내 probe 1은 `healthy`, 0은 `unhealthy`이며, 수집 실패·누락·오래된 값은 `unknown`이다. `runtime.observation_state`에 그 사유를 보존한다. 앱 등록·배포 설정·앱 HTTP 및 node exporter 상태는 연결 판정에 사용하지 않는다.
 
 노드 지표는 `node_up`, `cpu_percent`, `memory_percent`, `disk_percent`,
 `network_receive_bytes_per_second`, `network_transmit_bytes_per_second`다.
@@ -34,7 +34,7 @@ CPU·메모리는 노드 전체 사용률, 디스크는 루트 `/` 파일시스�
 앱 관측 행은 정확한 target/app, 앱 namespace, node/cluster scrape instance, Blackbox의
 정확한 probe URL을 묶는다. 노드만 관측하는 행에는 `target_id`, `prometheus_url`,
 `node_instance`만 필요하다. 이 행은 app/namespace/probe_url을 생략하며 cluster_instance는
-선택 사항이다. 샘플 앱을 만들거나 삭제한 앱의 probe를 되살릴 필요가 없다.
+선택 사항이다. 런타임 연결 관측에는 등록된 관리 API의 `healthz_url`이 필요하며 앱 probe URL을 대신 사용할 수 없다. 샘플 앱을 만들거나 삭제한 앱의 probe를 되살릴 필요가 없다.
 정확한 앱 행이 있으면 우선 사용하고, 없으면 명시적으로 등록된 노드 행으로 노드만 조회한다.
 이때 Pod·HTTP는 unsupported/null이며 다른 앱의 행을 대신 사용하지 않는다.
 노드 행도 없는 미등록 앱의 요청은 외부 질의를 하지 않는다.
@@ -44,7 +44,7 @@ Prometheus 접근은 관리망에서 API 노드에만 허용한다. 기본 Compo
 API 노드 송신 주소에만 제한한다. 공개 Prometheus/Grafana/Blackbox 포트를 만들지 않는다.
 API 컨테이너에 파일을 읽기 전용 마운트하는 배포 설정은 플랫폼 담당이 적용한다.
 
-기존 관측 렌더러는 30초마다 node/cluster/http를 수집한다. Pod 수에는 새로 허용한
+기존 관측 렌더러는 30초마다 node/cluster/http/runtime_healthz를 수집한다. Pod 수에는 새로 허용한
 `kube_pod_status_phase`와 `kube_pod_labels`가 필요하다. 기존 manifest의
 `app.kubernetes.io/name`과 `railshot.io/target` 두 라벨만 수집하며 정확한 앱/대상의 Pod로 제한한다. 기존 exporter에는 렌더된 allowlist 갱신이 필요하다.
 CPU/메모리는 노드 전체의 사용률이며 특정 앱의 소비량이 아니다. Pod는 namespace와 두 앱/대상 라벨이 모두 일치하는
@@ -69,7 +69,7 @@ instant query 평가 시각을 수집 시각으로 사용하지 않는다.
 
 ready 이외에는 value=null이다. 실패 응답으로 이전 정상값을 재사용하지 않는다.
 브라우저도 90초 후 표시값을 만료시키며, API 조회 실패 시 마지막 기록임을 표시한다.
-쿼리는 최대 세 묶음만 사용하며 각각 5초 timeout/64KiB 응답 한도를 가진다.
+쿼리는 최대 네 묶음만 사용하며 각각 5초 timeout/64KiB 응답 한도를 가진다.
 CPU rate에는 두 번 이상의 scrape가 필요하다. namespace 삭제 후 무자료를 0 Pod로 추정하지 않는다.
 
 `작업 단계`, `환경 상태`, `HTTP 검증 기록`은 구조화된 기록이며 raw 앱 로그가 아니다.

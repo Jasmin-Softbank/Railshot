@@ -50,7 +50,7 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   assert.match(await page.locator('#form-error').innerText(), /GitHub 저장소 URL/);
   await page.locator('#repository-url').fill('https://github.com/example/demo');
   await page.locator('#deploy-form button[type="submit"]').click();
-  assert.match(await page.locator('#form-error').innerText(), /인프라가 아직 연결되지/);
+  assert.match(await page.locator('#form-error').innerText(), /앱 배포 설정이 아직 준비되지/);
   assert.equal(await page.locator('#deploy-button').isDisabled(), true);
   await page.locator('[data-view="history"]').click();
   assert.equal(await page.locator('#history-view').isVisible(), true);
@@ -88,7 +88,7 @@ test('original dashboard cards submit three source types through backend selecti
   assert.equal(await page.locator('#target, #operation, #app-name, #environment-panel').count(), 0, 'backend internals do not replace the original UI');
   await page.getByRole('radio', { name: /온프레미스/ }).check();
   await page.locator('#provider').selectOption('openstack');
-  assert.match(await page.locator('#connection-status').innerText(), /OpenStack.*아직 연결되지/);
+  assert.match(await page.locator('#connection-status').innerText(), /OpenStack.*앱 배포 설정.*준비되지/);
   await page.getByRole('radio', { name: /클라우드/ }).check();
   assert.equal(await page.locator('#provider-field').isVisible(), false);
   const review = () => page.locator('#deploy-form button[type="submit"]').click();
@@ -100,7 +100,7 @@ test('original dashboard cards submit three source types through backend selecti
   assert.equal(await page.locator('#review-panel').isVisible(), false, 'changing environment invalidates the reviewed request');
   await page.locator('#provider').selectOption('proxmox');
   await review();
-  assert.match(await page.locator('#form-error').innerText(), /Proxmox.*아직 연결되지/);
+  assert.match(await page.locator('#form-error').innerText(), /Proxmox.*앱 배포 설정.*준비되지/);
   assert.equal(submitted.length, 0);
   await page.getByRole('radio', { name: /클라우드/ }).check();
   const output = process.env.CI_OUTPUT_DIR;

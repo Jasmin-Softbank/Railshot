@@ -107,13 +107,33 @@ locals {
   ]
 }
 
+variable "openstack_app_ingress" {
+  description = "Existing ALB-to-OpenStack relay rule on the inline-owned control SG; preserve its live source SG, port and description."
+  type = object({
+    source_security_group_id = string
+    port                     = number
+    description              = string
+  })
+  default = null
+  validation {
+    condition = var.openstack_app_ingress == null ? true : (
+      can(regex("^sg-[a-f0-9]{8,17}$", var.openstack_app_ingress.source_security_group_id)) &&
+      var.openstack_app_ingress.port >= 1 && var.openstack_app_ingress.port <= 65535 &&
+      floor(var.openstack_app_ingress.port) == var.openstack_app_ingress.port &&
+      length(var.openstack_app_ingress.description) > 0 && length(var.openstack_app_ingress.description) <= 255 &&
+      length(regexall("[\\r\\n]", var.openstack_app_ingress.description)) == 0
+    )
+    error_message = "Bind the existing ALB SG, integer TCP port and single-line ingress description, or leave null."
+  }
+}
+
 resource "aws_security_group" "control" {
   name        = local.name
   description = "Administrator PoC: no ingress; SSM and HTTPS outbound"
   vpc_id      = var.vpc_id
   # Keep rules inline with the existing owner; do not mix standalone SG rules.
   # Empty by default. A reviewed peer only opens node overlay/health and API.
-  ingress = [for rule in concat(local.build_peer_health, local.build_peer_api) : {
+  ingress = concat([for rule in concat(local.build_peer_health, local.build_peer_api) : {
     description      = rule.description
     from_port        = rule.from_port
     to_port          = rule.to_port
@@ -123,7 +143,17 @@ resource "aws_security_group" "control" {
     ipv6_cidr_blocks = []
     prefix_list_ids  = []
     self             = false
-  }]
+    }], var.openstack_app_ingress == null ? [] : [{
+    description      = var.openstack_app_ingress.description
+    from_port        = var.openstack_app_ingress.port
+    to_port          = var.openstack_app_ingress.port
+    protocol         = "tcp"
+    security_groups  = [var.openstack_app_ingress.source_security_group_id]
+    cidr_blocks      = []
+    ipv6_cidr_blocks = []
+    prefix_list_ids  = []
+    self             = false
+  }])
   dynamic "egress" {
     for_each = local.build_peer_health
     content {

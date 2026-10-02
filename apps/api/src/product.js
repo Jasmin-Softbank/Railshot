@@ -79,7 +79,7 @@ export async function createProductService({ service, directory, target, provide
       const { cdTarget, available } = providerSelection(provider);
       return { id: `${environment}-${provider}`, environment, provider, label, available,
         message: available ? `소스 검사부터 앱 배포와 URL 확인까지 진행합니다.${cdTarget?.applicationName ? ` 등록된 앱 ${cdTarget.applicationName}의 소스를 갱신합니다.` : ''}`
-          : `${label}에 배포할 인프라가 아직 연결되지 않았습니다. 운영자의 대상 연결이 필요합니다.` };
+          : `${label}의 앱 배포 설정이 아직 준비되지 않았습니다.` };
     });
   }
   function resolveSelection(input) {
@@ -315,9 +315,10 @@ export async function createProductService({ service, directory, target, provide
       const target = TARGET_ID.test(id) && this.targets(sessionId).find((item) => item.id === id);
       if (!target) throw new ProductError(404, 'NOT_FOUND', '등록된 대상을 찾을 수 없습니다.');
       const observation = await observeMetrics({ target_id: id, app: target.application_name ?? null });
-      const node = observation.metrics.node_up;
+      const health = observation.metrics.runtime_healthz ?? { state: 'not_configured', observed_at: null };
       return { ...observation, environment_id: target.environment_id,
-        runtime: { status: node.state, observed_at: node.observed_at } };
+        runtime: { status: health.state === 'ready' ? (health.value === 1 ? 'healthy' : 'unhealthy') : 'unknown',
+          observation_state: health.state, observed_at: health.observed_at } };
     },
     async createBuild(input, materialize, sessionId = null) {
       const reserved = await reserve('builds', input, null, materialize, sessionId);

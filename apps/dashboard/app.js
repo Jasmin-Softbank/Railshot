@@ -18,7 +18,7 @@ function showView(name) {
   document.title = `RailShot · ${views[name].querySelector('h1').textContent}`;
   savePreferences({ view: name });
   if (sessionReady && name === 'history') loadHistory();
-  if (sessionReady && name === 'monitor') loadEnvironments();
+  if (sessionReady && ['monitor', 'deploy'].includes(name)) loadEnvironments();
   else stopEnvironmentPolling();
   if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
   if (sessionReady && name === 'monitor' && consoleTab === 'work') refreshEvents();
@@ -180,7 +180,8 @@ function updateSelection() {
   document.querySelector('#connection-status').textContent = connectionError || (selectedProfiles().length > 1
     ? '사용할 배포 사양을 운영자가 하나로 지정해야 합니다.'
     : profile ? (profile.supported ? '새 실행 환경과 앱을 함께 준비합니다. 선택 내용을 확인하면 비용과 실행 계획을 표시합니다.' : '환경 생성 사양을 아직 실행할 수 없습니다.')
-    : selectedOption()?.message || (selected.environment === 'onprem' && !selected.provider ? '온프레미스 인프라 종류를 선택하세요.' : '실행 가능한 인프라 연결을 준비 중입니다.'));
+    : selectedOption()?.message || (selected.environment === 'onprem' && !selected.provider ? '온프레미스 인프라 종류를 선택하세요.' : '앱 배포 설정을 확인하고 있습니다.'));
+  renderRuntimeConnection();
   invalidateReview();
   savePreferences(selected);
 }
@@ -205,7 +206,7 @@ async function checkConnection() {
     const [{ data }, { data: catalog }] = await Promise.all([request('/api/v1/options'), request('/api/v1/profiles?limit=100')]);
     if (!Array.isArray(catalog.items) || catalog.next_marker) throw new Error('배포 사양 목록을 확인하지 못했습니다.');
     profiles = catalog.items;
-    if (!Array.isArray(data.items)) throw new Error('인프라 연결 상태를 확인하지 못했습니다.');
+    if (!Array.isArray(data.items)) throw new Error('앱 배포 설정을 확인하지 못했습니다.');
     deploymentOptions = data.items;
     connectionError = null;
   } catch (cause) {
@@ -617,7 +618,7 @@ document.querySelector('#history-refresh').addEventListener('click', () => loadH
 document.querySelector('#history-prev').addEventListener('click', () => loadHistory(historyMarkers.slice(0, -1)));
 document.querySelector('#history-next').addEventListener('click', () => { if (historyNext) loadHistory([...historyMarkers, historyNext]); });
 
-const metricNames = { node_up: '노드 수집', cpu_percent: 'CPU', memory_percent: '메모리', disk_percent: '디스크',
+const metricNames = { runtime_healthz: '런타임 /healthz', node_up: '노드 지표 수집', cpu_percent: 'CPU', memory_percent: '메모리', disk_percent: '디스크',
   network_receive_bytes_per_second: '네트워크 수신', network_transmit_bytes_per_second: '네트워크 송신', pods: '실행 중 Pod', http: '앱 HTTP' };
 const providerNames = { aws: 'AWS', gcp: 'GCP', openstack: 'OpenStack' };
 function metricState(metric, observation) {
@@ -630,6 +631,7 @@ function metricText(name, observation) {
   const metric = observation?.metrics?.[name], state = metricState(metric, observation);
   if (state !== 'ready') return metricLabels[state] || '확인 불가';
   if (name === 'http') return metric.value === 1 ? '2xx 응답' : '검사 실패';
+  if (name === 'runtime_healthz') return metric.value === 1 ? '연결 정상' : '응답 실패';
   if (name === 'node_up') return metric.value === 1 ? '수집 중' : '수집 실패';
   if (name.endsWith('_percent')) return `${metric.value.toFixed(1)}%`;
   if (name.endsWith('_per_second')) return `${(metric.value / 1024).toFixed(1)} KiB/s`;
@@ -637,13 +639,18 @@ function metricText(name, observation) {
 }
 function environmentState(observation) {
   if (!observation) return 'missing';
-  if (observation.failed) return 'failed';
-  const metrics = Object.entries(observation.metrics || {}), states = metrics.map(([, metric]) => metricState(metric, observation));
-  if (states.some((state) => ['collection_failed', 'unavailable'].includes(state))
-      || metrics.some(([name, metric]) => ['node_up', 'http'].includes(name) && metricState(metric, observation) === 'ready' && metric.value === 0)) return 'failed';
-  if (states.includes('stale')) return 'stale';
-  if (metricState(observation.metrics?.node_up, observation) === 'ready') return 'ready';
+  const health = observation.metrics?.runtime_healthz, state = metricState(health, observation);
+  if (state === 'stale') return 'stale';
+  if (state === 'ready' && [0, 1].includes(health.value)) return health.value === 1 ? 'ready' : 'failed';
   return 'missing';
+}
+function renderRuntimeConnection() {
+  const rows = targets.filter((item) => item.provider === deploymentSelection().provider);
+  document.querySelector('#runtime-connection-status').textContent = rows.length ? rows.map((row) => {
+    const observation = observations.get(row.id), health = observation?.metrics?.runtime_healthz, state = environmentState(observation);
+    const label = { ready: '런타임 연결 정상', failed: '런타임 /healthz 응답 실패', stale: '런타임 연결 확인 필요 · 오래된 관측', missing: '런타임 연결 확인 불가' }[state];
+    return `${rows.length > 1 ? `${row.label || row.id}: ` : ''}${label}${state === 'missing' ? ` · ${health ? metricText('runtime_healthz', observation) : '관측 대기'}` : ''}${health?.observed_at ? ` · ${formatTime(health.observed_at)}` : ''}`;
+  }).join(' / ') : '등록된 런타임이 없습니다.';
 }
 function visibleTargets() {
   const provider = document.querySelector('#monitor-provider').value, target = document.querySelector('#monitor-target').value;
@@ -652,7 +659,8 @@ function visibleTargets() {
 function renderEnvironments() {
   const opened = new Set([...document.querySelectorAll('#environment-detail details[open]')].map((item) => item.dataset.target));
   const focused = document.activeElement?.closest('#environment-detail details')?.dataset.target;
-  const rows = visibleTargets(), stateNames = { ready: '노드 수집 정상', failed: '수집·응답 실패', missing: '미수집', stale: '오래된 관측' };
+  const rows = visibleTargets(), stateNames = { ready: '런타임 연결 정상', failed: '런타임 응답 실패', missing: '연결 확인 불가', stale: '오래된 관측' };
+  renderRuntimeConnection();
   document.querySelector('#environment-summary').replaceChildren(...Object.entries(stateNames).map(([state, label]) => {
     const count = rows.filter((row) => environmentState(observations.get(row.id)) === state).length;
     const node = element('span', label); node.append(element('strong', String(count))); return node;
@@ -663,8 +671,7 @@ function renderEnvironments() {
     name.append(element('small', `${providerNames[row.provider] || row.provider || '종류 미제공'} · ${row.application_name || '앱 미지정'}`));
     const status = document.createElement('td'), badge = element('span', stateNames[state], 'state-badge'); badge.dataset.state = state; status.append(badge);
     tr.append(name, status, ...['cpu_percent', 'memory_percent', 'disk_percent', 'http'].map((metric) => element('td', observation?.failed ? '조회 실패' : metricText(metric, observation))));
-    const times = Object.values(observation?.metrics || {}).map((metric) => Date.parse(metric.observed_at)).filter(Number.isFinite);
-    tr.append(element('td', times.length ? formatTime(new Date(Math.min(...times)).toISOString()) : '수집 시각 없음'));
+    tr.append(element('td', observation?.metrics?.runtime_healthz?.observed_at ? formatTime(observation.metrics.runtime_healthz.observed_at) : '확인 시각 없음'));
     return tr;
   }));
   document.querySelector('#environment-detail').replaceChildren(...rows.map((row) => {
@@ -698,7 +705,7 @@ async function loadEnvironments() {
     const options = targets.filter((row) => !provider || row.provider === provider);
     select.replaceChildren(new Option('전체 환경', ''), ...options.map((row) => new Option(row.label || row.id, row.id)));
     if (options.some((row) => row.id === selected)) select.value = selected;
-    const rows = visibleTargets();
+    const rows = views.deploy.hidden ? visibleTargets() : targets;
     // Bound observer fan-out to four requests; targets are capped at 100 by the API.
     for (let index = 0; index < rows.length; index += 4) {
       await Promise.all(rows.slice(index, index + 4).map(async (row) => {
@@ -716,7 +723,7 @@ async function loadEnvironments() {
     renderEnvironments();
     document.querySelector('#environment-message').textContent = rows.length
       ? `마지막 조회 ${formatTime(new Date().toISOString())} · 30초마다 갱신 · 수집 실패는 0으로 표시하지 않습니다.`
-      : '선택한 조건에 등록된 환경이 없습니다. 다른 클라우드를 선택하거나 앱을 배포하세요.';
+      : '선택한 조건에 등록된 런타임이 없습니다.';
   } catch (cause) {
     if (environmentController !== controller) return;
     observations = new Map(targets.map((row) => [row.id, { failed: true }])); renderEnvironments();
@@ -724,7 +731,7 @@ async function loadEnvironments() {
   } finally {
     if (environmentController === controller) {
       environmentController = null;
-      if (!views.monitor.hidden) environmentTimer = setTimeout(loadEnvironments, 30000);
+      if (!views.monitor.hidden || !views.deploy.hidden) environmentTimer = setTimeout(loadEnvironments, 30000);
     }
   }
 }
@@ -797,7 +804,7 @@ async function initializeDashboard() {
       document.querySelector('#connection-message').textContent = cause.message;
     })]);
     if (history.length) { current = history[0]; renderRun(); refreshRun(); }
-    if (!views.monitor.hidden) loadEnvironments();
+    if (!views.monitor.hidden || !views.deploy.hidden) loadEnvironments();
   } catch (cause) {
     connectionError = cause.message; updateSelection();
     document.querySelector('#session-note').textContent = '세션을 불러오지 못했습니다. 새로고침하세요.';

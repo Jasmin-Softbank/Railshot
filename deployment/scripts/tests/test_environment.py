@@ -221,10 +221,51 @@ class RegistrationTest(unittest.TestCase):
             with self.subTest(provider=provider):
                 descriptor = json.loads((ROOT / f'examples/ansible/{provider}-node-descriptor.json').read_text())
                 descriptor.update(target_id=self.target, management_endpoint='https://10.99.0.1:16443')
+                descriptor['addresses']['metrics'] = '8.8.8.8'
                 self.write('descriptor.json', descriptor)
-                _, cd, _, _, _, _ = env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
+                _, cd, _, _, _, identity = env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
                 self.assertEqual(cd['targets'][self.target]['target']['cluster_server'],
                     'https://' + descriptor['addresses']['private'] + ':6443')
+                self.assertNotIn('metrics', identity['descriptor']['addresses'])
+
+    def test_gcp_public_management_route_binds_allocated_ip_and_preserves_tls_identity(self):
+        descriptor = json.loads((ROOT / 'examples/ansible/gcp-node-descriptor.json').read_text())
+        descriptor['target_id'] = self.target
+        descriptor['addresses']['public'] = '34.47.68.21'
+        self.write('descriptor.json', descriptor)
+        selected = self.registry['targets'][self.target]
+        for endpoint in (None, 'http://34.47.68.21:6443', 'https://34.47.68.22:6443',
+                'https://34.47.68.21:443', 'https://34.47.68.21:6443/api'):
+            selected['management_endpoint'] = endpoint
+            self.write('registry.json', self.registry)
+            with self.assertRaises(ValueError):
+                self.run_registration()
+            self.assertFalse(self.shared.exists())
+        for public in ('224.0.0.1', '239.1.2.3'):
+            descriptor['addresses']['public'] = public
+            self.write('descriptor.json', descriptor)
+            selected['management_endpoint'] = f'https://{public}:6443'
+            self.write('registry.json', self.registry)
+            with self.assertRaises(ValueError):
+                env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
+            self.assertFalse(self.shared.exists())
+        descriptor['addresses']['public'] = '34.47.68.21'
+        self.write('descriptor.json', descriptor)
+        selected['management_endpoint'] = 'https://34.47.68.21:6443'
+        self.write('registry.json', self.registry)
+        descriptor['addresses']['metrics'] = '8.8.8.8'
+        self.write('descriptor.json', descriptor)
+        *_, identity = env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
+        self.assertEqual(identity['descriptor']['addresses']['metrics'], '34.47.68.21')
+        result = self.run_registration()
+        self.assertEqual(result['status'], 'succeeded', result)
+        renewal = json.loads((self.home / 'renewal.json').read_text())
+        self.assertEqual(renewal['server'], selected['management_endpoint'])
+        self.assertEqual(renewal['tls_server_name'], descriptor['addresses']['private'])
+        secret = self.control.objects['argocd', 'secret', 'railshot-' + self.target]
+        tls = json.loads(base64.b64decode(secret['data']['config']))['tlsClientConfig']
+        self.assertEqual(tls['serverName'], descriptor['addresses']['private'])
+        self.assertIs(tls['insecure'], False)
 
     def test_gcp_public_management_route_binds_allocated_ip_and_preserves_tls_identity(self):
         descriptor = json.loads((ROOT / 'examples/ansible/gcp-node-descriptor.json').read_text())
@@ -456,7 +497,7 @@ class RegistrationTest(unittest.TestCase):
             self.assertEqual(request['node_ip'], self.descriptor['addresses']['private'])
             self.assertEqual(request['target_id'], self.target)
             self.assertEqual(request['registry_file'], str(self.root / 'registry.json'))
-            self.assertEqual(timeout, 300)
+            self.assertEqual(timeout, 900)
             env.save(Path(argv[argv.index('--out') + 1]), {'status': 'succeeded', 'target_id': self.target,
                 'app': 'new-app', 'registered': True, 'collection_state': 'pending'})
             return 0
@@ -616,7 +657,9 @@ class ObservationRegistryTest(unittest.TestCase):
                     registry = private('registry.json', {'version': 1, 'targets': {descriptor['target_id']: target}})
                     request, resource = self.observation.node_request(registry, descriptor['target_id'])
                     self.assertEqual(request['target']['provider'], provider)
-                    self.assertEqual(resource, descriptor)
+                    expected = copy.deepcopy(descriptor)
+                    expected['addresses'].pop('metrics', None)
+                    self.assertEqual(resource, expected)
                     row, _ = self.observation.registration_row(self.config,
                         {**self.request, 'target_id': descriptor['target_id'], 'node_ip': descriptor['addresses']['private']}, resource)
                     self.assertEqual(row['node_instance'], descriptor['addresses']['private'] + ':31490')
