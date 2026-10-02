@@ -41,15 +41,15 @@ and Argo connect to the relay but verify the original VM IP against its CA; TLS
 verification is not disabled. No WireGuard enrollment was introduced.
 
 The planned target uses namespace `tenant-openstack`, project
-`railshot-openstack`, app `fixture-npm-js`, NodePort `32000`, and health path
-`/health` returning `{"status":"ready"}`. The reserved public expectation is
-`https://openstack-demo.railshot.io/health`; it is not yet a verified live URL.
+`railshot-openstack`, app `openstack-smoke`, NodePort `32000`, and health path
+`/health` returning `{"status":"ready"}`. The existing ALB now has a dedicated target group and DNS route for
+`https://openstack-demo.railshot.io/health`; application health is not yet verified.
 
 ## Still to verify
 
 Scoped registration and credential renewal, provider selection through actual
 CI/CD, application health over HTTPS, and live metrics collection remain pending.
 The existing calculator's missing tests are a separate issue; this infrastructure
-acceptance uses the existing tested fixture app. Native Octavia/L7 readiness is
+acceptance copies the existing tested fixture into the separate `openstack-smoke` app. Native Octavia/L7 readiness is
 not established by this VM/bootstrap result. The active runtime is retained for
 the hackathon, so this is not a full resource-teardown claim.

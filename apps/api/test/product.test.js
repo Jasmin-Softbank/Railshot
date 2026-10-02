@@ -17,7 +17,7 @@ function diskState(directory) {
 const files = [{ path: 'app.js', content: Buffer.from('hello') }];
 const input = { app: 'demo-app', target_id: 'demo', source_type: 'folder', files };
 const publication = { run_id: 123, target_id: 'demo', app: 'demo-app', source_commit: 'a'.repeat(40), artifact_id: 456, producer_attempt: 1 };
-const deployed = { cd: { state: 'succeeded', deployed: true, revision: 'b'.repeat(40) }, public_http: { state: 'succeeded', verified_at: '2026-10-02T12:00:00Z', url: 'https://demo.example.test' } };
+const deployed = { cd: { state: 'deployed', deployed: true, revision: 'b'.repeat(40) }, public_http: { state: 'succeeded', verified_at: '2026-10-02T12:00:00Z', url: 'https://demo.example.test' } };
 async function fixture(t, overrides = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-product-'));
   let dispatches = 0, reads = 0, cdCalls = 0;
@@ -701,4 +701,87 @@ test('HTTP deployment accepts a dynamic app-bound plan alongside existing enviro
   assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
   const replay = await post(); assert.equal(replay.status, 200); assert.equal((await replay.json()).id, complete.id);
   assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+});
+
+test('CI diagnostics preserve blocked and unknown outcomes without replaying execution', async (t) => {
+  for (const outcome of ['BLOCKED', 'UNKNOWN']) {
+    const diagnostics = { state: 'ready', reason: 'NO_TESTS', code: outcome === 'UNKNOWN' ? 'SDK_OUTCOME_UNKNOWN' : 'GATE_CONFIG_INVALID',
+      outcome, phase: 'Q.discovery', message: '테스트를 찾지 못했습니다.', guidance: '수정 결과를 확인하세요.' };
+    const steps = [{ key: 'loop', status: 'completed', conclusion: 'failure', tasks: [{ number: 2, name: 'Baseline gates, then SDK repair only when eligible', conclusion: 'failure' }] }];
+    const f = await fixture(t, { service: { status: async () => ({ run_id: 123, state: 'failed', diagnostics, steps, message: 'CI 실패' }) } });
+    const accepted = await f.product.createDeployment(input, 'diagnostic');
+    const record = await settle(() => f.product.getDeployment(accepted.id));
+    assert.equal(record.status, outcome === 'UNKNOWN' ? 'unknown' : 'blocked');
+    assert.equal(record.error.outcome_unknown, outcome === 'UNKNOWN');
+    assert.equal(record.error.message, '테스트를 찾지 못했습니다. 수정 결과를 확인하세요.');
+    assert.deepEqual(record.ci.diagnostics, diagnostics); assert.deepEqual(record.ci.steps, steps);
+    assert.equal(f.dispatches(), 1); assert.equal(f.cdCalls(), 0);
+    await f.product.getDeployment(accepted.id);
+    assert.equal(f.dispatches(), 1);
+    if (outcome === 'UNKNOWN') await assert.rejects(f.product.createDeployment(input, 'another'), { code: 'EXECUTOR_BUSY' });
+  }
+});
+
+test('app logs enforce session ownership, deployed state and latest shared-app ownership', async (t) => {
+  let logReads = 0, run = 122;
+  const f = await fixture(t, { observeLogs: async (record) => { logReads++; return { deployment_id: record.id, target_id: record.target_id,
+    app: record.app, state: 'ready', checked_at: new Date().toISOString(), entries: [{ pod: 'demo-pod', container: 'app', text: 'GET /health 200' }] }; },
+    service: { deploy: async () => ({ run_id: ++run, source_commit: publication.source_commit }),
+      status: async (id) => ({ run_id: id, state: 'published', publication: { ...publication, run_id: id } }) } });
+  const owner = f.product.dashboard.session().id, stranger = f.product.dashboard.session().id;
+  const first = await f.product.createDeployment(input, 'first', undefined, owner);
+  assert.equal((await f.product.getDeploymentLogs(first.id, owner)).state, 'not_deployed');
+  await settle(() => f.product.getDeployment(first.id, owner));
+  assert.equal((await f.product.getDeploymentLogs(first.id, owner)).state, 'ready');
+  await assert.rejects(f.product.getDeploymentLogs(first.id, stranger), { status: 404 });
+  assert.equal(logReads, 1);
+  const second = await f.product.createDeployment(input, 'second', undefined, stranger);
+  await settle(() => f.product.getDeployment(second.id, stranger));
+  assert.equal((await f.product.getDeploymentLogs(first.id, owner)).state, 'superseded');
+  assert.equal(logReads, 1, 'superseded session never reads the new deployment logs');
+  assert.equal((await f.product.getDeploymentLogs(second.id, stranger)).state, 'ready');
+});
+
+test('deployment logs route rejects mutation and caller-provided query controls', async (t) => {
+  const { base } = await httpFixture(t);
+  const accepted = await fetch(`${base}/api/v1/deployments`, { method: 'POST', body: form(), headers: { 'Idempotency-Key': 'log-route' } });
+  const path = accepted.headers.get('location');
+  await settle(async () => (await fetch(base + path)).json());
+  const response = await fetch(base + path + '/logs');
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).state, 'not_configured');
+  assert.equal((await fetch(base + path + '/logs?pod=foreign')).status, 422);
+  assert.equal((await fetch(base + path + '/logs', { method: 'POST' })).status, 405);
+  assert.equal((await fetch(base + '/api/v1/deployments/foreign/logs')).status, 404);
+});
+
+test('app logs discard an in-flight read when another session admits CD for the same app', async (t) => {
+  let releaseLogs, releaseCd, beganLogs, beganCd, calls = 0, run = 122;
+  const waitingLogs = new Promise((resolve) => { releaseLogs = resolve; });
+  const waitingCd = new Promise((resolve) => { releaseCd = resolve; });
+  const enteredLogs = new Promise((resolve) => { beganLogs = resolve; });
+  const enteredCd = new Promise((resolve) => { beganCd = resolve; });
+  const f = await fixture(t, { observeLogs: async (record) => {
+    beganLogs(); await waitingLogs;
+    return { deployment_id: record.id, state: 'ready', entries: [{ pod: 'shared-pod', container: 'app', text: 'new session output' }] };
+  }, deployPublished: async () => {
+    if (++calls === 2) { beganCd(); await waitingCd; }
+    return deployed; // Reusing the same image/revision must still revoke the old session's log read.
+  }, service: { deploy: async () => ({ run_id: ++run, source_commit: publication.source_commit }),
+    status: async (id) => ({ run_id: id, state: 'published', publication: { ...publication, run_id: id } }) } });
+  const owner = f.product.dashboard.session().id, other = f.product.dashboard.session().id;
+  try {
+    const first = await f.product.createDeployment(input, 'first-race', undefined, owner);
+    await settle(() => f.product.getDeployment(first.id, owner));
+    const logs = f.product.getDeploymentLogs(first.id, owner);
+    await enteredLogs;
+    const second = await f.product.createDeployment(input, 'second-race', undefined, other);
+    await enteredCd;
+    releaseLogs();
+    const result = await logs;
+    assert.equal(result.state, 'superseded'); assert.deepEqual(result.entries, []);
+    assert.equal((await f.product.getDeploymentLogs(first.id, owner)).state, 'superseded');
+    releaseCd();
+    await settle(() => f.product.getDeployment(second.id, other));
+  } finally { releaseLogs(); releaseCd(); }
 });

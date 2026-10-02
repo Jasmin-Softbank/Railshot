@@ -982,7 +982,9 @@ class Bootstrap:
 
     def bootstrap_secrets(self):
         import yaml
-        docs = list(yaml.safe_load_all((self.root / 'deployment/manifests/product-access.yaml').read_text().replace('APPLICATION_REQUIRED', self.config['github']['application'])))
+        docs = list(yaml.safe_load_all((self.root / 'deployment/manifests/product-access.yaml').read_text()
+                    .replace('APPLICATION_REQUIRED', self.config['github']['application'])
+                    .replace('TARGET_REQUIRED', self.config['github']['target_id'])))
         namespaces = [{'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'labels': labels}}
                       for name, labels in [('railshot-system', {}), ('railshot-build', {'pod-security.kubernetes.io/enforce': 'privileged'})]]
         self.objects(namespaces + docs)

@@ -75,7 +75,7 @@ jobs:
         env:
           PROVIDER: ${{ vars.AGENT_PROVIDER || 'codex' }}
           QUALITY_NETWORK: ${{ vars.QUALITY_NETWORK }}
-          REPAIR_SCOPE: ${{ vars.REPAIR_SCOPE || 'packaging' }}
+          REPAIR_SCOPE: ${{ vars.REPAIR_SCOPE || 'source' }}
           RAILSHOT_AUTH_MODE: ${{ vars.AGENT_AUTH_MODE }}
           RAILSHOT_CODEX_HOME: ${{ vars.RAILSHOT_CODEX_HOME }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

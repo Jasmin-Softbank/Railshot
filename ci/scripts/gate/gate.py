@@ -32,7 +32,7 @@ PLATFORM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLATFORM))
 sys.path.insert(0, str(PLATFORM / "runner"))
 from observability import OperationError, event_record  # noqa: E402
-from run_agent import path_ok, writable_rules  # noqa: E402
+from run_agent import path_ok, writable_rules, source_change_allowed  # noqa: E402
 from quality import run_quality  # noqa: E402
 from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
@@ -94,7 +94,9 @@ def changed_files(ws):
 
 
 def added_lines(ws, changes):
-    diff = sh(["git", "diff", "HEAD", "-U0", "--no-color", "--no-renames", "--text", "--no-textconv", "--no-ext-diff", "--"],
+    if not changes:
+        return []
+    diff = sh(["git", "diff", "HEAD", "-U0", "--no-color", "--no-renames", "--text", "--no-textconv", "--no-ext-diff", "--", *[path for _, path in changes]],
               cwd=ws, check=True).stdout
     lines, in_hunk = [], False
     for line in diff.splitlines():
@@ -112,11 +114,15 @@ def added_lines(ws, changes):
     return lines
 
 
-def l0(ws, paths, *, repair_scope="packaging"):
+def l0(ws, paths, *, repair_scope="packaging", native_locks=None):
+    from repair import verified_lock
     changes = changed_files(ws)
     allow, protected = writable_rules("contract/paths.yaml", scope=repair_scope)
-    errors = []
+    errors, native = [], set()
     for kind, path in changes:
+        if repair_scope == "source" and kind != "D" and not (ws / path).is_symlink() and verified_lock(ws, path, native_locks or {}):
+            native.add(path)
+            continue
         if kind == "D":
             errors.append(f"deleted file: {path}")
         elif not path_ok(path, allow, protected):
@@ -125,10 +131,16 @@ def l0(ws, paths, *, repair_scope="packaging"):
             errors.append(f"symlink: {path}")
         elif b"\0" in (ws / path).read_bytes()[:8000]:
             errors.append(f"binary file: {path}")
+        elif repair_scope == "source":
+            original = sh(["git", "show", "HEAD:" + path], cwd=ws)
+            try:
+                source_change_allowed(path, (ws / path).read_text(), original.stdout if original.returncode == 0 else None)
+            except ValueError as exc:
+                errors.append(str(exc))
     lim = paths["limits"]
-    if len(changes) > lim["max_files_changed"]:
+    if len(changes) - len(native) > lim["max_files_changed"]:
         errors.append(f"too many files changed: {len(changes)} > {lim['max_files_changed']}")
-    lines = added_lines(ws, [c for c in changes if c[0] != "D"])
+    lines = added_lines(ws, [c for c in changes if c[0] != "D" and c[1] not in native])
     if sum(len(l) + 1 for l in lines) > lim["max_patch_bytes"]:
         errors.append(f"patch too large: > {lim['max_patch_bytes']} bytes")
     for pat in paths["forbidden_patterns"]:
@@ -694,7 +706,7 @@ def finish_verdict(verdict, run, run_id, attempt_id, *, persist=True):
     return verdict
 
 
-def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging"):
+def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None):
     observation_id = os.environ.get("RAILSHOT_RUN_ID") or str(uuid.uuid4())
     attempt_id = os.environ.get("RAILSHOT_ATTEMPT_ID")
     invalid = validate_layers(layers)
@@ -734,7 +746,7 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
         try:
             progress.start(layer)
             if layer == "L0":
-                errs, changed = l0(ws, paths, repair_scope=repair_scope)
+                errs, changed = l0(ws, paths, repair_scope=repair_scope, native_locks=native_locks)
                 result = {"layer": layer, "ok": not errs, "changed": changed, "errors": errs}
             elif layer == "L1":
                 errs, spec = l1(ws)
@@ -747,7 +759,7 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
                 result = {"layer": layer, "ok": not errs, "errors": errs}
             elif layer == "Q":
                 require_ci_network(quality_network)
-                result = {"layer": layer, **run_quality(ws, run, network=quality_network, selected_root=selected_root)}
+                result = {"layer": layer, **run_quality(ws, run, network=quality_network, selected_root=selected_root, repair_scope=repair_scope)}
                 errs = result.get("errors", [])
             else:
                 if not docker_ok():
@@ -840,12 +852,17 @@ def main():
     ap.add_argument("--quality-network", help="trusted CI network profile for Q/L2/L3; requires locally verified railshot-quality worker, never supplied by upload")
     ap.add_argument("--selected-root", help="trusted selected project path within the uploaded workspace")
     ap.add_argument("--repair-scope", choices=["packaging", "source"], default="packaging", help="trusted operator patch scope; uploaded specs cannot grant it")
+    ap.add_argument("--native-locks", type=Path, help="trusted native-resolution receipt outside the source workspace")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
-    v = run_gate(Path(a.workspace).resolve(), Path(a.run).resolve(), a.layers.split(","), quality_network=a.quality_network,
-                 repair_scope=a.repair_scope, selected_root=a.selected_root)
+    ws = Path(a.workspace).resolve()
+    if a.native_locks and a.native_locks.resolve().is_relative_to(ws):
+        ap.error("native lock receipt must be outside the source workspace")
+    v = run_gate(ws, Path(a.run).resolve(), a.layers.split(","), quality_network=a.quality_network,
+                 repair_scope=a.repair_scope, selected_root=a.selected_root,
+                 native_locks=json.loads(a.native_locks.read_text()) if a.native_locks else None)
     print(json.dumps({"ok": v["ok"], "failure": v["failure"] and {k: v["failure"][k] for k in ("layer", "class", "signature")},
                       "status": v["status"], "error": v["error"], "event": v["event"],
                       "layers": [(r["layer"], r["ok"], r.get("blocked")) for r in v["layers"]]}, ensure_ascii=False))

@@ -154,7 +154,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.RAILSHOT_TENANT || process.env.JASMIN_TENANT,
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
-  deployPublished, environmentAdapter, observeMetrics, product, pollInterval,
+  deployPublished, environmentAdapter, observeMetrics, observeLogs, product, pollInterval,
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
 } = {}) {
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
@@ -171,7 +171,9 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       configPath: process.env.RAILSHOT_OBSERVER_PRODUCT_FILE || process.env.RAILSHOT_OBSERVER_CONFIG,
     });
     const selections = providerTargets ?? (process.env.RAILSHOT_PROVIDER_TARGETS === undefined ? undefined : JSON.parse(process.env.RAILSHOT_PROVIDER_TARGETS));
-    return createProductService({ observeMetrics: observer, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
+    const { createAppLogsObserver } = await import('./logs.js');
+    const logs = observeLogs || createAppLogsObserver({ configPath: process.env.RAILSHOT_CD_CONFIG });
+    return createProductService({ observeMetrics: observer, observeLogs: logs, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
@@ -241,6 +243,13 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
+          }
+          const logRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/logs$/.exec(url.pathname);
+          if (logRoute) {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+            json(response, 200, await products.getDeploymentLogs(logRoute[1], sessionId)); return;
           }
           const routes = /^(?:\/api\/v1\/(targets|builds|deployments|profiles|plans|environments))(?:\/([A-Za-z0-9._-]+))?$/.exec(url.pathname);
           if (!routes) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);

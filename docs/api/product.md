@@ -73,3 +73,5 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 플랫폼 릴리스는 같은 이름의 선택 Actions 변수를 `--provider-targets`로 전달하고, 매핑과 기본 AWS를 포함한 CI 목록을 이미지 선언에 함께 보존한다. 기본값은 빈 매핑이다. 먼저 [런타임 등록](runtime-registration.md), CI 대상·앱 바인딩과 API의 CD 등록을 완료한 뒤 이 변수를 설정한다. OpenStack은 기존 서버·K3s의 등록과 재배포 경로이며, AWS/GCP의 Terraform 기반 신규 환경 생성 범위를 확장하지 않는다.
 
 `GET /api/v1/builds`, `/api/v1/deployments`, `/api/v1/environments`는 현재 세션의 실행 요약 목록을, `GET /api/v1/plans`는 현재 세션의 계획 목록을 반환한다. 배포 내역은 서버 목록으로 복원하며 localStorage의 기존 마지막 실행 ID를 사용하지 않는다. 세션·설정·OpenStack 연결 API는 [별도 명세](dashboard-sessions.md)에 정리했다.
+
+실패 CI의 세부 단계와 검증된 원인은 `steps[].tasks`, `ci.diagnostics`로 전달한다. 결과 불확실 상태는 `unknown`으로 유지한다. 앱 로그 조회는 `GET /api/v1/deployments/{id}/logs`이며 세션·현재 배포 버전·런타임 소유권 검증을 거친다. 상세 제한은 [제품 관측 계약](observations.md)을 따른다.

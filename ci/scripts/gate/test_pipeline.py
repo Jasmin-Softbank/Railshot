@@ -227,9 +227,12 @@ class PipelineTest(unittest.TestCase):
         allowed, denied = gate.writable_rules("contract/paths.yaml", scope="source")
         self.assertTrue(gate.path_ok("src/service.ts", allowed, denied))
         self.assertTrue(gate.path_ok("app.py", allowed, denied))
-        for path in ("tests/test_app.py", "src/app.test.ts", "eslint.config.js", "migrations/0001.py",
-                     "schemas/customer.ts", "generated/api.ts", "package.json", ".github/workflows/check.yml"):
+        for path in ("eslint.config.js", "migrations/0001.py",
+                     "schemas/customer.ts", "generated/api.ts", ".github/workflows/check.yml"):
             self.assertFalse(gate.path_ok(path, allowed, denied), path)
+        # These paths have additional content/original-byte checks at writer and L0.
+        for path in ("tests/test_app.py", "src/app.test.ts", "package.json"):
+            self.assertTrue(gate.path_ok(path, allowed, denied), path)
         default_allow, default_deny = gate.writable_rules("contract/paths.yaml")
         self.assertFalse(gate.path_ok("src/service.ts", default_allow, default_deny))
 
