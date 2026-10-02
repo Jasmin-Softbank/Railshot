@@ -39,7 +39,6 @@ Partial Network(일부 통신만 되는 환경)에서는 필요한 항목과 선
 | `registry_k8s` / `ghcr` | registry.k8s.io는 후속 요구사항에 따라 필수 경로로 검사합니다. GHCR은 해당 workload를 쓰면 필수 항목입니다. |
 | `workload_registry` | 다른 workload registry를 사용하는 경우 HTTPS 접속을 확인합니다. |
 | `cloudflare_tunnel` | 요청 시 edge의 TCP/TLS 7844 경로를 검사합니다. QUIC(UDP 기반 연결)·토큰·실제 connector 연결 성공을 의미하지 않습니다. |
-| `wireguard_udp_51820` | 현재 `null`입니다. 인증된 WireGuard(암호화된 노드 간 통신) peer/key 계약이 없으며 UDP 패킷 송신만으로 성공을 판단하지 않습니다. |
 
 Registry의 HTTP 401은 인증 challenge(자격정보 요청)를 받았다는 뜻으로, endpoint reachability(접속 가능성)를 인정합니다. **이미지별 다운로드 권한·tag 존재·레지스트리 CDN(파일 전달 서버) 접근까지 보장하지 않습니다.** 실제 다운로드/배포에서 추가 오류가 발생할 수 있습니다.
 
@@ -183,7 +182,7 @@ sudo python3 deployment/scripts/tests/test_airgap_vm.py \
 
 Online·bundle 재사용·registry 실패와 bundle 유무·인터넷 차단 후 최초 설치·손상/checksum/image 누락·반복 offline 배포·cleanup/redeploy·offline update·네트워크 복구·Cloudflare 불가·preflight timeout(대기 제한) 및 CPU 구조 불일치·동일 digest 재import 방지 등 16개 시나리오를 검사합니다. 원본 JSON·stderr·차단 규칙·차단 증거·PASS/FAIL/SKIP 수를 보존하며, 앞 단계 실패로 실행하지 않은 항목은 SKIP으로 기록합니다.
 
-실제 수행 결과와 아직 검증하지 않은 내용은 [검증 기록](../scripts/tests/results/AIRGAP-VALIDATION-2026-10-02.md)에 정리합니다. WireGuard 인증 통신, QUIC, Cloudflare token/domain/auth(접속 자격정보) 및 실제 CSP 환경은 별도 계약과 검증이 필요합니다.
+실제 수행 결과와 아직 검증하지 않은 내용은 [검증 기록](../scripts/tests/results/AIRGAP-VALIDATION-2026-10-02.md)에 정리합니다. WireGuard는 지원 경로에서 제거했습니다. QUIC, Cloudflare token/domain/auth(접속 자격정보) 및 실제 CSP 환경은 별도 계약과 검증이 필요합니다.
 
 ## Artifact storage와 GitHub Release
 

@@ -127,17 +127,59 @@ class EdgeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             edge.validate_plan(refresh, first)
 
-    def test_gcp_routes_use_same_identity_contract_and_only_exact_private_route_additions(self):
-        request = {**self.request, 'provider_kind': 'gcp', 'target_private_ip': '10.66.0.3'}
-        del request['target_security_group_id']
-        row = edge.prepare(self.path, request)
-        self.assertNotIn('target_security_group_id', row['route'])
-        plan = {'resource_changes': [{'address': 'aws_route.gcp["rtb-123:10.66.0.3"]', 'change': {
-            'actions': ['create'], 'after': {'destination_cidr_block': '10.66.0.3/32'}}}]}
-        self.assertEqual(len(edge.validate_plan(plan, row)), 1)
-        plan['resource_changes'][0]['change']['after']['destination_cidr_block'] = '10.66.0.0/24'
-        with self.assertRaises(ValueError):
-            edge.validate_plan(plan, row)
+    def test_retired_routes_and_state_handoffs_cannot_use_app_publication(self):
+        with patch('edge.native') as native:
+            request = {**self.request, 'provider_kind': 'gcp', 'target_private_ip': '10.66.0.3'}
+            del request['target_security_group_id']
+            with self.assertRaisesRegex(ValueError, 'AWS target required'):
+                edge.prepare(self.path, request)
+            self.assertFalse((self.root / 'state').exists())
+            row = self.prepared()
+            for address, action in [('aws_route.gcp["rtb-123:10.66.0.3"]', 'create'),
+                                    ('aws_security_group_rule.forward_from_alb["30080"]', 'create'),
+                                    ('aws_eip.wireguard', 'forget'), ('aws_eip.wireguard', 'delete')]:
+                with self.subTest(address=address, action=action), self.assertRaises(ValueError):
+                    edge.validate_plan({'resource_changes': [{'address': address, 'change': {'actions': [action]}}]}, row)
+            native.assert_not_called()
+
+    def test_legacy_base_is_observable_but_requires_migration_before_writes(self):
+        row = self.prepared(); reference = row['reference']
+        for legacy in ('gcp', 'wireguard'):
+            values = copy.deepcopy(self.values)
+            if legacy == 'gcp':
+                values['routes']['fixture-gcp']['provider_kind'] = 'gcp'
+            else:
+                values['wireguard_peer_cidrs'] = []
+            edge.durable_write(self.root / 'vars.json', edge.encoded(values))
+            config, stored = edge.load(reference)
+            self.assertEqual(edge.base_values(config), values)
+            with patch('edge.native') as native:
+                with self.assertRaisesRegex(ValueError, 'reviewed GCP/WireGuard migration'):
+                    self.prepared()
+                with self.assertRaisesRegex(ValueError, 'reviewed GCP/WireGuard migration'):
+                    edge.plan_route(reference)
+                stored.update(phase='planned', plan_sha256='f' * 64)
+                edge.save(config, stored)
+                with self.assertRaisesRegex(ValueError, 'reviewed GCP/WireGuard migration'):
+                    edge.apply_route(reference, 'f' * 64)
+                native.assert_not_called()
+
+    def test_legacy_applied_allocation_cannot_be_added_back_to_an_aws_plan(self):
+        old = self.prepared()
+        config, row = edge.load(old['reference'])
+        row['request']['provider_kind'] = row['route']['provider_kind'] = 'gcp'
+        for value in (row['request'], row['route']):
+            del value['target_security_group_id']
+        ledger = edge.read_private(Path(config['state_dir']) / 'allocations.json')
+        ledger[row['route_key']] = row
+        edge.durable_write(Path(config['state_dir']) / 'allocations.json', edge.encoded(ledger))
+        row['phase'] = 'applied'
+        edge.save(config, row)
+        next_row = edge.prepare(self.path, {**self.request, 'app': 'second-app'})
+        with patch('edge.native') as native:
+            with self.assertRaisesRegex(ValueError, 'legacy GCP allocation'):
+                edge.plan_route(next_row['reference'])
+            native.assert_not_called()
 
     def test_readback_requires_exact_target_dns_tls_health_and_site_before_url(self):
         row = self.prepared(); reference = row['reference']; route = row['route']

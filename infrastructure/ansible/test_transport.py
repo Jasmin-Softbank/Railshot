@@ -98,6 +98,38 @@ class TunnelCleanupTests(unittest.TestCase):
                             self.assertEqual(str(raised.exception), 'original caller failure')
                         terminate.assert_called_once()
 
+    def test_local_cleanup_failures_preserve_failed_jobs_and_never_hide_behind_successful_exit(self):
+        output = b'Starting session with SessionId: own-0123456789abcdef0\n'
+        for mode in ('sigterm', 'sigkill', 'wait-timeout'):
+            for original in (None, RuntimeError('original caller failure'), SystemExit(None), SystemExit(0), SystemExit(7)):
+                for remote_failure in (False, True):
+                    with self.subTest(mode=mode, original=repr(original), remote_failure=remote_failure):
+                        cleanup = lambda *a, **kw: subprocess.CompletedProcess([], 1 if remote_failure else 0,
+                            b'sensitive cleanup output' if remote_failure else b'{"SessionId":"own-0123456789abcdef0"}')
+                        with self.native_cli(output, cleanup=cleanup) as (process, stop, terminate):
+                            def signal_group(_pid, sig):
+                                if sig == (signal.SIGTERM if mode == 'sigterm' else signal.SIGKILL) and mode != 'wait-timeout':
+                                    raise PermissionError(1, 'sensitive local detail')
+                            stop.side_effect = signal_group
+                            if mode == 'wait-timeout':
+                                process.wait.side_effect = subprocess.TimeoutExpired('sensitive command', 5)
+                            preserve = isinstance(original, RuntimeError) or isinstance(original, SystemExit) and original.code == 7
+                            with self.assertRaises(type(original) if preserve else ValueError) as raised:
+                                with transport.forwarded_port('ssm:ap-northeast-2:i-0123456789abcdef0', time.monotonic() + 1):
+                                    if original is not None:
+                                        raise original
+                            if preserve:
+                                self.assertIs(raised.exception, original)
+                            rendered = str(raised.exception) + repr(getattr(raised.exception, '__notes__', []))
+                            self.assertIn('Local cloud tunnel process cleanup could not be verified', rendered)
+                            self.assertIn('TimeoutExpired' if mode == 'wait-timeout' else 'PermissionError', rendered)
+                            self.assertEqual('SSM session cleanup could not be verified' in rendered, remote_failure)
+                            self.assertNotIn('sensitive', rendered)
+                            self.assertEqual(stop.call_count, 2)
+                            self.assertTrue(process.wait.call_count)
+                            self.assertTrue(all(call.kwargs == {'timeout': 5} for call in process.wait.call_args_list))
+                            terminate.assert_called_once()
+
     def test_iap_and_direct_connections_never_call_aws_termination(self):
         with self.native_cli(b'Starting session with SessionId: unrelated-session\n') as (_, _, terminate):
             with transport.forwarded_port('iap:railshot-demo/asia-northeast3-a/railshot-gcp', time.monotonic() + 1):

@@ -19,7 +19,7 @@ function showView(name) {
   savePreferences({ view: name });
   if (sessionReady && name === 'history') loadHistory();
   if (sessionReady && name === 'monitor') loadEnvironments();
-  else { clearTimeout(environmentTimer); environmentController?.abort(); }
+  else stopEnvironmentPolling();
   if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
 }
 
@@ -433,7 +433,7 @@ async function refreshRun() {
 }
 document.querySelector('#stop-polling').addEventListener('click', () => { stopPolling(); renderMetrics(); document.querySelector('#run-message').textContent = '상태 조회를 중지했습니다. 서버의 실행은 계속됩니다.'; });
 document.querySelector('#refresh-run').addEventListener('click', refreshRun);
-window.addEventListener('pagehide', () => { stopPolling(); clearTimeout(environmentTimer); environmentController?.abort(); for (const controller of requests) controller.abort(); });
+window.addEventListener('pagehide', () => { stopPolling(); stopEnvironmentPolling(); for (const controller of requests) controller.abort(); });
 let consoleTab = 'work';
 const logLabels = { loading: '앱 로그를 조회하고 있습니다.', not_deployed: '앱 적용 전입니다. 작업 로그에서 CI 진행과 실패 원인을 확인하세요.',
   not_configured: '이 배포 대상의 로그 조회 설정이 없습니다.', unavailable: '앱 로그 조회에 실패했습니다. 다음 조회에서 다시 확인합니다.',
@@ -638,8 +638,12 @@ function renderEnvironments() {
   }));
   if (focused) [...document.querySelectorAll('#environment-detail details')].find((item) => item.dataset.target === focused)?.querySelector('summary').focus();
 }
+function stopEnvironmentPolling() {
+  clearTimeout(environmentTimer);
+  const controller = environmentController; environmentController = null; controller?.abort();
+}
 async function loadEnvironments() {
-  clearTimeout(environmentTimer); environmentController?.abort();
+  stopEnvironmentPolling();
   renderEnvironments();
   const controller = new AbortController(); environmentController = controller;
   document.querySelector('#environment-message').textContent = '실행 환경과 관측 지표를 조회하고 있습니다.';
@@ -664,20 +668,21 @@ async function loadEnvironments() {
           if (environmentController === controller) observations.set(row.id, { failed: true });
         }
       }));
-      if (environmentController !== controller || controller.signal.aborted) return;
+      if (environmentController !== controller) return;
+      if (controller.signal.aborted) throw new Error('지표 조회 시간이 초과되었습니다.');
     }
     renderEnvironments();
     document.querySelector('#environment-message').textContent = rows.length
       ? `마지막 조회 ${formatTime(new Date().toISOString())} · 30초마다 갱신 · 수집 실패는 0으로 표시하지 않습니다.`
       : '선택한 조건에 등록된 환경이 없습니다. 다른 클라우드를 선택하거나 앱을 배포하세요.';
   } catch (cause) {
-    if (environmentController !== controller || controller.signal.aborted) return;
+    if (environmentController !== controller) return;
     observations = new Map(targets.map((row) => [row.id, { failed: true }])); renderEnvironments();
-    document.querySelector('#environment-message').textContent = `환경 조회 실패: ${cause.message} 지표 새로고침을 눌러 다시 확인하세요.`;
+    document.querySelector('#environment-message').textContent = `환경 조회 실패: ${cause.name === 'AbortError' ? '조회 시간이 초과되었습니다.' : cause.message} 30초 후 다시 확인합니다.`;
   } finally {
     if (environmentController === controller) {
       environmentController = null;
-      if (!views.monitor.hidden && !controller.signal.aborted) environmentTimer = setTimeout(loadEnvironments, 30000);
+      if (!views.monitor.hidden) environmentTimer = setTimeout(loadEnvironments, 30000);
     }
   }
 }

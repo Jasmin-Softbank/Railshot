@@ -12,7 +12,7 @@ python3 -m unittest discover -s . -p 'test_*.py' -v
 운영 전용 `control.sh`도 같은 Cilium 설치기를 사용하며 Pod/Service CIDR은 `10.52/10.53`으로 유지한다.
 신규 설치·재실행·기존 Flannel 거부 조건과 백업/전환/복구는 [운영 Cilium runbook](../../docs/operations/control-cilium-migration.md)을 따른다.
 `test-control-cilium.sh --run`은 임시 namespace에서 실제 DNS/API/NetworkPolicy/NodePort를 검사한다.
-운영 CNI 전환 및 ALB/WireGuard 경로 검증은 별도 유지보수 작업이다.
+운영 CNI 전환, 공급자별 LB 및 관리 경로 검증은 별도 유지보수 작업이다.
 
 ---
 

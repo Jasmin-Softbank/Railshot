@@ -2,6 +2,8 @@
 
 2026-10-02 사용자 결정. 모든 앱 클러스터는 **VM에 직접 설치한 단일 노드 K3s + Cilium**이다. AWS EKS, GCP GKE, OpenStack Magnum을 전제로 하지 않는다. CI/CD·Ansible·Argo가 동작하는 AWS 운영 클러스터와 사용자 앱 클러스터는 분리한다.
 
+2026-10-03 후속 결정: 기존 AWS ALB를 유지한 채 GCP native L7와 OpenStack Octavia 경로를 병행 준비한다. WireGuard는 신규 등록·설치·공개 경로의 선택지에서 제거한다. 기존 실행 중인 터널의 중지는 GCP 앱뿐 아니라 Argo의 Kubernetes API 관리 경로까지 대체·검증한 후 수행한다. Cloudflare 앱 Tunnel은 이 관리 연결을 자동 대체하지 않는다.
+
 완료 범위는 선택한 공급자의 자원 준비 → K3s 설치 → 앱 적용 → 해당 공급자 공개 경로의 HTTPS 응답 확인이다. 공급자 사이의 앱 통신·DB 복제·장애 전환은 필수 조건이 아니다. 운영 서버의 SSH/Kubernetes API 관리 접근은 별도로 확보한다.
 
 ## HTTP ingress와 L4/L7의 의미
@@ -28,7 +30,7 @@ Octavia라는 이름 자체가 L4 또는 L7 중 하나를 뜻하지는 않는다
 | 공급자 | 공개 진입점 | K3s 연결 | 이 변경의 구현 범위 |
 | --- | --- | --- | --- |
 | AWS | Cloudflare → ALB | 사설 IP:NodePort | 기존 ALB 모듈 유지. Cloudflare DNS 연결·기존 Route53 이전은 별도 |
-| GCP | Cloudflare → external Application LB | instance group/named port → VM NodePort | 목표 설계. GKE Ingress controller나 자동 NEG를 가정하지 않음 |
+| GCP | Cloudflare → external Application LB | zonal NEG 또는 instance group → VM NodePort | 목표 설계. GKE Ingress controller나 자동 NEG를 가정하지 않음 |
 | OpenStack | Cloudflare → Octavia Amphora | pool member → VM 사설 IP:NodePort | [openstack-edge](../../infrastructure/terraform/openstack-edge/README.md)의 native Terraform 실행 경로 |
 
 서비스 하나는 선택한 공급자 한 곳으로 연결한다. Cloudflare가 여러 공급자 사이의 자동 장애 전환을 수행한다는 뜻은 아니다. `{service-name}-{stable-hash}.railshot.io` 이름은 기존 [서비스 이름 함수](../../gitops/service_name.py)의 입력·충돌 정책을 재사용한다.
@@ -53,7 +55,7 @@ Octavia라는 이름 자체가 L4 또는 L7 중 하나를 뜻하지는 않는다
 
 원본 서비스는 `https://...`를 사용한다. `tcp://...` 게시 경로는 일반 브라우저 HTTP 게시와 같은 방식이 아니다. `originServerName`은 인증서의 hostname을 검증하는 값이고, HTTP Host는 서비스 라우팅을 위해 보존한다. 사설 CA라면 CA bundle을 제공하고 `noTLSVerify=false`를 유지한다. 모든 서비스의 Host를 하나로 덮어쓰지 않는다.
 
-이 변경은 Tunnel 생성, 토큰 배포, 커넥터 설치, Cloudflare DNS 변경을 실행하지 않는다. [cloudflared 위치](../../deployment/cloudflared/README.md)는 아직 자동 설치 구현이 없다.
+이 변경은 Tunnel 생성, 토큰 배포, 커넥터 설치, Cloudflare DNS 변경을 실행하지 않는다. [cloudflared 생성기](../../deployment/cloudflared/README.md)는 기존 Secret과 내부 HTTPS VIP를 참조하는 connector manifest를 생성한다. 실제 설치와 외부 연결 검증은 운영 단계다.
 
 ## 실행 경계와 인수
 

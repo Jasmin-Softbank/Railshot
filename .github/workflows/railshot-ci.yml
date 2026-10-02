@@ -63,13 +63,21 @@ jobs:
         with:
           node-version: '22'
       - run: python -m pip install -r ci/requirements-test.txt
+      - name: Verify pinned cloudflared for native connector contract checks
+        run: |
+          curl --fail --silent --show-error --location --max-time 60 \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.9.3/cloudflared-linux-amd64 \
+            -o "$RUNNER_TEMP/cloudflared"
+          printf '%s  %s\n' 77e26d8d900e0b8469f416239d14b5f296525fdf79fee6f511ef55609e3fbac2 "$RUNNER_TEMP/cloudflared" | sha256sum --check --strict
+          chmod 0755 "$RUNNER_TEMP/cloudflared"
       - name: Render pinned Argo CD installation and CRD schemas
         run: kubectl kustomize gitops/argo > "$RUNNER_TEMP/railshot-argocd-schema.yaml"
       - name: CI, Ansible, runtime, GitOps and provider contracts
         env:
           RAILSHOT_ARGO_SCHEMA_MANIFEST: ${{ runner.temp }}/railshot-argocd-schema.yaml
+          CLOUDFLARED: ${{ runner.temp }}/cloudflared
         run: |
-          for suite in ci/scripts ci/scripts/gate ci/scripts/loop ci/scripts/runner ci/scripts/poc ci/scripts/infra infrastructure/ansible deployment/scripts/tests gitops infrastructure/providers/terraform_tools; do
+          for suite in ci/scripts ci/scripts/gate ci/scripts/loop ci/scripts/runner ci/scripts/poc ci/scripts/infra infrastructure/ansible deployment/scripts/tests deployment/cloudflared gitops infrastructure/providers/terraform_tools; do
             echo "::group::$suite"
             python -m unittest discover -s "$suite" -p 'test_*.py' -v
             echo "::endgroup::"
@@ -229,16 +237,17 @@ jobs:
           python-version: '3.13'
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
-          terraform_version: 1.5.7
+          terraform_version: 1.7.5
           terraform_wrapper: false
       - run: python -m pip install PyYAML==6.0.3
       - name: Validate without credentials, backend or apply
         run: |
           terraform fmt -check -recursive infrastructure/terraform
-          for module in aws aws-edge openstack-edge ci control gcp azure platform-verification; do
+          for module in aws aws-edge openstack-edge ci control gcp gcp-edge azure platform-verification; do
             terraform -chdir="infrastructure/terraform/$module" init -backend=false -input=false
             terraform -chdir="infrastructure/terraform/$module" validate
           done
+          terraform -chdir=infrastructure/terraform/gcp-edge test
           for suite in infrastructure/terraform/aws infrastructure/terraform/aws-edge infrastructure/terraform/openstack-edge infrastructure/terraform/ci infrastructure/terraform/gcp infrastructure/terraform/azure/tests; do
             python -m unittest discover -s "$suite" -p 'test_*.py' -v
           done
