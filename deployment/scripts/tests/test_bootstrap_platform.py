@@ -107,6 +107,53 @@ class BootstrapTests(unittest.TestCase):
             bootstrap.ensure_object(other, {bootstrap.object_key(other): 'registered'}, True)
         mutate.assert_not_called()
 
+    def test_observer_binding_uses_imported_registrar_state_and_rejects_ambiguous_or_unsafe_paths(self):
+        config = '/var/lib/railshot/config/app-db/'
+        documents = {'config/app-db/profiles.json': {'version': 1, 'profiles': [{'deployment_file': config + 'deployment.json'}]},
+                     'config/app-db/deployment.json': {'registration': {'observability_config_file': config + 'observer.json'}},
+                     'config/app-db/observer.json': {'state_dir': '/var/lib/railshot/state/observer'}}
+        def files():
+            return [{'path': path, 'kind': 'source', 'data': base64.b64encode(json.dumps(value).encode()).decode()}
+                    for path, value in documents.items()]
+        self.assertEqual(bootstrap.observer_product_file(files()), '/var/lib/railshot/state/observer/product.json')
+        for path in ('/private/observer', '/var/lib/railshot/config', '/var/lib/railshot/state/../config', '/var/lib/railshot/state//observer'):
+            documents['config/app-db/observer.json']['state_dir'] = path
+            with self.subTest(path=path), self.assertRaisesRegex(bootstrap.Blocked, 'OBSERVER_STATE_PATH_INVALID'):
+                bootstrap.observer_product_file(files())
+        documents['config/app-db/observer.json']['state_dir'] = '/var/lib/railshot/state/observer'
+        documents['config/app-db/profiles.json']['profiles'].append({'deployment_file': config + 'second.json'})
+        documents['config/app-db/second.json'] = {'registration': {'observability_config_file': config + 'other.json'}}
+        documents['config/app-db/other.json'] = {'state_dir': '/var/lib/railshot/state/other'}
+        with self.assertRaisesRegex(bootstrap.Blocked, 'MULTIPLE_OBSERVER_PRODUCT_FILES'):
+            bootstrap.observer_product_file(files())
+        del documents['config/app-db/other.json']
+        with self.assertRaisesRegex(bootstrap.Blocked, 'OBSERVER_CONFIG_NOT_IMPORTED'):
+            bootstrap.observer_product_file(files())
+        documents['config/app-db/profiles.json']['profiles'] = [{'deployment_file': config + 'deployment.json'}]
+        documents['config/app-db/deployment.json']['registration'] = {}
+        self.assertIsNone(bootstrap.observer_product_file(files()))
+
+    def test_observer_binding_migrates_once_without_replacing_existing_config(self):
+        wanted = {'kind': 'ConfigMap', 'metadata': {'name': 'railshot-environments', 'namespace': 'railshot-system'},
+                  'data': {'profiles_file': '/var/lib/railshot/config/app-db/profiles.json',
+                           'observer_file': '/var/lib/railshot/state/observer/product.json'}}
+        old = copy.deepcopy(wanted); old['metadata'].update(uid='same', resourceVersion='42')
+        del old['data']['observer_file']; old['data']['operator_key'] = 'preserved'
+        upgraded = copy.deepcopy(old); upgraded['data'].update(wanted['data'])
+        adopted = {bootstrap.object_key(wanted): 'same'}
+        with patch.object(bootstrap, 'kube_get', side_effect=[old, upgraded]), patch.object(bootstrap, 'kube') as mutate:
+            self.assertEqual(bootstrap.ensure_object(wanted, adopted, True), 'same')
+            self.assertEqual(mutate.call_args.args[:2], ('patch', 'configmap'))
+            self.assertEqual(json.loads(mutate.call_args.args[-1]),
+                             {'metadata': {'resourceVersion': '42'}, 'data': upgraded['data']})
+        with patch.object(bootstrap, 'kube_get', return_value=upgraded), patch.object(bootstrap, 'kube') as mutate:
+            self.assertEqual(bootstrap.ensure_object(wanted, adopted, True), 'same')
+            mutate.assert_not_called()
+            changed = copy.deepcopy(wanted); changed['data']['observer_file'] = '/var/lib/railshot/state/other/product.json'
+            with self.assertRaisesRegex(bootstrap.Blocked, 'ENVIRONMENT_BINDING_CHANGED'):
+                bootstrap.ensure_object(changed, adopted, True)
+            mutate.assert_not_called()
+
     def test_import_native_program_preserves_evolving_state_and_rejects_changed_lineage(self):
         destination = self.home / 'pvc'; destination.mkdir()
         source = self.home / 'budget.db'
@@ -238,17 +285,25 @@ class BootstrapTests(unittest.TestCase):
         destination = {'version': 1, 'destination_owner': 'pvc', 'application_uid': 'app', 'deployment_uid': 'deployment',
                        'pvc_uid': 'pvc', 'writers': {'api': 'stopped', 'argocd': 'frozen'}}
         bootstrap.write(self.home / 'source.json', source); bootstrap.write(self.home / 'destination.json', destination)
-        raw = b'{"version":1,"profiles":[]}'
+        documents = {'config/app-db/profiles.json': {'version': 1, 'profiles': [
+            {'deployment_file': '/var/lib/railshot/config/app-db/deployment.json'}]},
+            'config/app-db/deployment.json': {'registration': {
+                'observability_config_file': '/var/lib/railshot/config/app-db/observer.json'}},
+            'config/app-db/observer.json': {'state_dir': '/var/lib/railshot/state/observer'}}
+        files = []
         archive = self.home / 'package.tar'
         with tarfile.open(archive, 'w') as stream:
-            entry = tarfile.TarInfo('config/app-db/profiles.json'); entry.size = len(raw)
-            stream.addfile(entry, io.BytesIO(raw))
+            for path, document in documents.items():
+                raw = json.dumps(document).encode()
+                entry = tarfile.TarInfo(path); entry.size = len(raw)
+                stream.addfile(entry, io.BytesIO(raw))
+                files.append({'path': path, 'kind': 'source', 'sha256': bootstrap.digest(raw)})
         archive.chmod(0o600)
         package = {'version': 1, 'package_id': 'a' * 32, 'source_owner': 'local', 'destination_owner': 'pvc',
                    'freeze_receipt': str(self.home / 'source.json'), 'freeze_sha256': bootstrap.digest((self.home / 'source.json').read_bytes()),
                    'destination_freeze_receipt': str(self.home / 'destination.json'),
                    'destination_freeze_sha256': bootstrap.digest((self.home / 'destination.json').read_bytes()), 'archive': str(archive),
-                   'files': [{'path': 'config/app-db/profiles.json', 'kind': 'source', 'sha256': bootstrap.digest(raw)}]}
+                   'files': files}
         bootstrap.write(self.home / 'package.json', package)
         bootstrap.write(self.home / 'executors.json', {'cd.json': '{}', 'kubeconfig': 'fixed'})
         task = bootstrap.Bootstrap(self.home / 'checkout', {'state_dir': str(self.home / 'private'),
@@ -267,8 +322,13 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(objects.call_count, 2)
             document = objects.call_args.args[0][0]
             self.assertEqual(document['metadata']['name'], 'railshot-environments')
-            self.assertEqual(document['data'], {'profiles_file': '/var/lib/railshot/config/app-db/profiles.json'})
+            self.assertEqual(document['data'], {'profiles_file': '/var/lib/railshot/config/app-db/profiles.json',
+                                                'observer_file': '/var/lib/railshot/state/observer/product.json'})
             self.assertTrue(objects.call_args.kwargs['preserve_existing'])
+        with patch.object(task, 'remote', return_value={'verified': False}) as remote, patch.object(task, 'objects') as objects:
+            with self.assertRaisesRegex(bootstrap.Blocked, 'IMPORT_RECEIPT_DIFFERS'):
+                task.handoff('ghcr.io/example/api@sha256:' + 'b' * 64)
+            objects.assert_not_called()
 
     def test_terminal_import_pod_recovery_uses_uid_delete_and_never_deletes_running_pod(self):
         for phase in ('Succeeded', 'Running'):

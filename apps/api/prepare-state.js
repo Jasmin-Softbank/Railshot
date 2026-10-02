@@ -9,6 +9,8 @@ for (const directory of [config, '/var/lib/railshot/tmp', '/var/lib/railshot/pro
   chmodSync(directory, 0o700);
 }
 for (const name of readdirSync('/run/config').filter((value) => !value.startsWith('.'))) {
+  // After handoff the registrar owns the live target list; a legacy Secret must not restore it.
+  if (name === 'observer.json' && process.env.RAILSHOT_OBSERVER_PRODUCT_FILE) continue;
   const destination = `${config}/${name}`;
   if (existsSync(destination) && !lstatSync(destination).isFile()) throw new Error('Private config must be a regular file');
   writeFileSync(destination, readFileSync(`/run/config/${name}`), { mode: 0o600 });

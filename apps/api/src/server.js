@@ -167,7 +167,9 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     }
     const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments'), loadPublished: service?.publishedFiles }) : undefined);
     const { createMetricsObserver } = await import('./metrics.js');
-    const observer = observeMetrics || createMetricsObserver({ configPath: process.env.RAILSHOT_OBSERVER_CONFIG });
+    const observer = observeMetrics || createMetricsObserver({
+      configPath: process.env.RAILSHOT_OBSERVER_PRODUCT_FILE || process.env.RAILSHOT_OBSERVER_CONFIG,
+    });
     return createProductService({ observeMetrics: observer, service, target, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
