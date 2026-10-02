@@ -18,9 +18,10 @@ def evaluate(expression):
     return json.loads(json.loads(result.stdout))
 
 
-def render(operator_ssh_public_key=None):
+def render(operator_ssh_public_key=None, purpose="runtime"):
     args = {'device': '/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol01234567890123456',
-            'initialize_empty_data_disk': 'false'}
+            'initialize_empty_data_disk': 'false',
+            'data_mount_path': '/var/lib/postgresql' if purpose == 'database' else '/var/lib/rancher'}
     script = evaluate('templatefile(' + json.dumps(str(MODULE / 'bootstrap.sh.tftpl')) + ',' + json.dumps(args) + ')')
     config = {'name': 'offline', 'cloud_provider': 'aws', 'region': 'ap-northeast-2',
               'runtime_status': 'not_configured'}
@@ -45,6 +46,14 @@ class AWSBootstrapTest(unittest.TestCase):
             self.assertNotIn(retired, json.dumps(self.config))
         self.assertFalse(any('/systemd/system/k3s' in path for path in self.files))
         subprocess.run(['bash', '-n'], input=self.script, text=True, check=True)
+
+    def test_database_mount_is_distinct_and_keeps_readiness_unverified(self):
+        config = render(purpose="database")
+        script = next(row['content'] for row in config['write_files'] if row['path'].endswith('railshot-bootstrap'))
+        self.assertIn('mount_path=/var/lib/postgresql', script)
+        self.assertNotIn('/var/lib/rancher', script)
+        self.assertIn('runtime_ready":"not_configured', script)
+        subprocess.run(['bash', '-n'], input=script, text=True, check=True)
 
     def test_public_operator_key_bootstraps_only_a_locked_ssh_user(self):
         key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyTestNotARealKey offline'
@@ -79,7 +88,11 @@ class AWSBootstrapTest(unittest.TestCase):
                              ('operator_ssh_public_key', '-----BEGIN OPENSSH PRIVATE KEY-----'),
                              ('operator_ssh_public_key', 'ssh-ed25519 AAAA\nroot: injected'),
                              ('vpc_id', 'unknown'), ('subnet_id', 'unknown'),
-                             ('additional_security_group_ids', ['0.0.0.0/0'])):
+                             ('additional_security_group_ids', ['0.0.0.0/0']),
+                             ('purpose', 'arbitrary'), ('database_ingress', [{'port': 5432, 'cidr': '0.0.0.0/0'}]),
+                             ('database_egress', [{'port': 22, 'cidr': '10.1.0.0/16'}]),
+                             ('database_ingress', [{'port': 5432, 'cidr': '10.0.0.0/1'}]),
+                             ('database_ingress', [{'port': 5432, 'cidr': '192.168.999.1/32'}])):
                 with self.subTest(key=key):
                     inputs = root / 'inputs.tfvars.json'; inputs.write_text(json.dumps({**values, key: bad}))
                     result = subprocess.run(['terraform', 'console', '-no-color', '-var-file=' + str(inputs)], cwd=root,

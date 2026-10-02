@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 SIZE_FIELDS = {'aws': 'instance_type', 'gcp': 'machine_type', 'azure': 'vm_size'}
 
 
-def capabilities(provider):
-    if provider not in SIZE_FIELDS:
+def capabilities(provider, kind='app_cluster'):
+    if (provider not in SIZE_FIELDS or kind not in ('app_cluster', 'database_cluster')
+            or (kind == 'database_cluster' and provider not in ('aws', 'gcp'))):
         return {'provider_kind': provider, 'supported': False, 'actions': {}}
-    return {'provider_kind': provider, 'supported': True, 'kind': 'app_cluster',
+    return {'provider_kind': provider, 'supported': True, 'kind': kind,
             'verification': 'target_unverified', 'billing_reservation_supported': provider in {'aws', 'gcp', 'azure'},
             'actions': {'plan': True, 'apply_saved_plan': True, 'resize': 'maintenance_required',
                         'start': False, 'stop': False, 'delete': False, 'node_scale_out': False,
@@ -20,13 +21,17 @@ def validate_profile(target):
         raise ValueError('provider capability unsupported')
     profile = target.get('profile')
     if (not isinstance(profile, dict) or set(profile) != {'kind', 'allowed_sizes'}
-            or profile['kind'] != 'app_cluster' or not isinstance(profile['allowed_sizes'], list)
+            or profile['kind'] not in ('app_cluster', 'database_cluster') or not isinstance(profile['allowed_sizes'], list)
             or not profile['allowed_sizes'] or not all(isinstance(x, str) and x for x in profile['allowed_sizes'])):
-        raise ValueError('registered app_cluster size profile required')
+        raise ValueError('registered app_cluster or database_cluster size profile required')
+    supported = capabilities(provider, profile['kind'])
+    purpose = 'database' if profile['kind'] == 'database_cluster' else 'runtime'
+    if not supported['supported'] or target['variables'].get('purpose', 'runtime') != purpose:
+        raise ValueError('profile kind and supported node purpose must match')
     selected = target['variables'].get(SIZE_FIELDS[provider])
     if selected not in profile['allowed_sizes']:
         raise ValueError('explicit size must belong to the registered target profile')
-    return capabilities(provider)
+    return supported
 
 
 def timestamp(value):

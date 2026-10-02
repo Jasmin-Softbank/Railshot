@@ -10,6 +10,7 @@ output "subnet_id" { value = data.aws_subnet.selected.id }
 output "node_descriptor" {
   description = "Configured references only; no guest/readiness observation."
   value = {
+    purpose        = var.purpose
     schema_version = "v1", provider_kind = "aws", target_id = var.target_id,
     owner_ref      = var.owner_ref, execution_driver = "terraform", resource_id = aws_instance.node.arn,
     instance_id    = aws_instance.node.id, compute = { machine_type = var.instance_type, source = "configured" },
@@ -17,7 +18,7 @@ output "node_descriptor" {
     architecture   = "x86_64", image_ref = var.ami_id,
     addresses      = { private = aws_instance.node.private_ip, public = var.allocate_eip ? aws_eip.node[0].public_ip : aws_instance.node.public_ip },
     transport_ref  = "ssm:${var.region}:${aws_instance.node.id}",
-    data_disk      = { resource_id = aws_ebs_volume.data.id, size_gib = var.data_disk_gib, mount_path = "/var/lib/rancher", preservation = "retain" },
+    data_disk      = { resource_id = aws_ebs_volume.data.id, size_gib = var.data_disk_gib, mount_path = var.purpose == "database" ? "/var/lib/postgresql" : "/var/lib/rancher", preservation = "retain" },
     bootstrap      = { profile = "ubuntu2404-nitro-host-v1", revision = null, method = "host-preparation-only", status = "unverified" },
     gitops         = { repo = null, path = null, revision = null },
     runtime        = { configuration_status = "not_configured", readiness = "not_configured" }

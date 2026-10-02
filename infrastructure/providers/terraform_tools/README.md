@@ -94,3 +94,11 @@ python3 -m unittest discover -s infrastructure/providers/terraform_tools -p 'tes
 ```
 
 Terraform subprocesses in executor tests are mocked; these tests do not prove successful cloud provisioning.
+
+## Database nodes and host-key enrollment
+
+For AWS/GCP DB nodes, use `profile.kind: database_cluster` and `variables.purpose: database`. The same saved-plan, owner, budget and maintenance checks apply. Each target still creates one host. Runtime hosts retain the default `app_cluster` / `runtime` pair. DB hosts mount the retained disk at `/var/lib/postgresql`; Terraform never reports a configured database or runtime. Match the DB playbook data directory to that mount and verify it in the guest.
+
+Both modules accept `database_ingress` and `database_egress` lists of `{port, cidr}` objects. Only TCP 5432, 2379, 2380 and 8008 with RFC1918 IPv4 /16-/32 ranges are supported. Prefer exact peer /32 rules; these inputs neither create routes nor establish reachability. Ingress requires a database-purpose host; runtime hosts may use egress to their DB proxy. DB purpose suppresses public web ingress. Reuse one environment network: AWS uses its existing `vpc_id` / `subnet_id`; GCP uses the optional paired `existing_network_name` / `existing_subnetwork_name`. Existing network ownership stays outside each new DB target.
+
+`access.py --descriptor /private/node.json --output /private/new-known-hosts` enrolls a new VM's Ed25519 key through authenticated provider APIs. The descriptor and output directory must be private and owned by the executor; the output must not exist. AWS binds STS account, EC2 ID and private IP, waits for SSM, then reads the public host key after cloud-init. GCP binds its immutable instance ID and private IP before and after reading the bootstrap's public serial marker. Polling is bounded by `--timeout-seconds` (default 600). The file is created exclusively with mode 0600; no SSH keyscan or accept-new trust is used. Missing bootstrap markers, changed identities or provider failures block enrollment. This is a host-key observation, not runtime or database readiness.

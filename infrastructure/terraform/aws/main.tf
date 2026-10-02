@@ -54,13 +54,33 @@ resource "aws_security_group" "node" {
   vpc_id      = var.vpc_id == null ? data.aws_vpc.default[0].id : var.vpc_id
 
   dynamic "ingress" {
-    for_each = concat(var.http_enabled ? [80] : [], var.https_enabled ? [443] : [])
+    for_each = var.purpose == "database" ? [] : concat(var.http_enabled ? [80] : [], var.https_enabled ? [443] : [])
     content {
       description = "web ${ingress.value}"
       from_port   = ingress.value
       to_port     = ingress.value
       protocol    = "tcp"
       cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+  dynamic "ingress" {
+    for_each = var.database_ingress
+    content {
+      description = "database private ingress"
+      from_port   = ingress.value.port
+      to_port     = ingress.value.port
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value.cidr]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.database_egress
+    content {
+      description = "database private egress"
+      from_port   = egress.value.port
+      to_port     = egress.value.port
+      protocol    = "tcp"
+      cidr_blocks = [egress.value.cidr]
     }
   }
   dynamic "egress" {
@@ -121,6 +141,10 @@ resource "aws_instance" "node" {
   user_data_replace_on_change = false # guest changes require a separate approved configuration job
   tags                        = { Name = "${var.name}-node" }
   lifecycle {
+    precondition {
+      condition     = var.purpose == "database" || length(var.database_ingress) == 0
+      error_message = "Database ingress requires an approved database node."
+    }
     precondition {
       condition     = (var.vpc_id == null) == (var.subnet_id == null)
       error_message = "Specify both vpc_id and subnet_id, or neither for legacy default selection."
@@ -210,6 +234,7 @@ locals {
     bootstrap_script = templatefile("${path.module}/bootstrap.sh.tftpl", {
       device                     = "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(aws_ebs_volume.data.id, "-", "")}",
       initialize_empty_data_disk = var.initialize_empty_data_disk ? "true" : "false"
+      data_mount_path            = var.purpose == "database" ? "/var/lib/postgresql" : "/var/lib/rancher"
     })
   })
 }

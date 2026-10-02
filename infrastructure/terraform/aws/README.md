@@ -26,3 +26,5 @@ Offline template and validation checks:
 ```sh
 uv run --python 3.13 --with pyyaml python infrastructure/terraform/aws/test_bootstrap.py
 ```
+
+For a DB host, set `purpose: database` under an approved `database_cluster` target. The data disk mounts at `/var/lib/postgresql`, while the default runtime purpose retains `/var/lib/rancher`. Public HTTP/HTTPS ingress is suppressed for DB hosts. Explicit `database_ingress` / `database_egress` rules accept only TCP 5432/2379/2380/8008 with RFC1918 /16-/32 CIDRs. Register only actual application/proxy/cluster peers and use the same existing VPC/subnet. The common executor's `access.py` can bind a new SSH host key through STS/EC2/SSM without SSH trust-on-first-use. These additions configure a host and access rules; database installation and readiness remain Ansible responsibilities.
