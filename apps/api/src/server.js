@@ -140,7 +140,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.JASMIN_TENANT,
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
-  deployPublished, environmentAdapter, product, pollInterval,
+  deployPublished, environmentAdapter, observeMetrics, product, pollInterval,
 } = {}) {
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
@@ -152,7 +152,9 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       cd = await createCdAdapter({ configPath: process.env.RAILSHOT_CD_CONFIG, loadPublished: service.publishedFiles });
     }
     const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments') }) : undefined);
-    return createProductService({ service, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
+    const { createMetricsObserver } = await import('./metrics.js');
+    const observer = observeMetrics || createMetricsObserver({ configPath: process.env.RAILSHOT_OBSERVER_CONFIG });
+    return createProductService({ observeMetrics: observer, service, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
