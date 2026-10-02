@@ -134,6 +134,18 @@ class Apps:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_github_token_padding_is_normalized_and_invalid_headers_do_not_escape(self):
+        with patch.dict(workers.os.environ, {'GITHUB_TOKEN': '  gho_test_token\n'}), patch.object(workers, 'build_opener') as opener:
+            opener.return_value.open.return_value.__enter__.return_value.read.return_value = b'{}'
+            self.assertEqual(workers.github('repos/Jasmin-Softbank/railshot-apps/'), {})
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.get_header('Authorization'), 'Bearer gho_test_token')
+        for invalid in ('gho_test\ntoken', 'gho_test\rtoken', 'gho_test\ttoken', '  ', None):
+            with self.subTest(invalid=invalid), patch.dict(workers.os.environ, {'GITHUB_TOKEN': invalid or ''}), patch.object(workers, 'build_opener') as opener:
+                with self.assertRaisesRegex(workers.bootstrap.Blocked, '^GITHUB_TOKEN_INVALID$'):
+                    workers.github('repos/Jasmin-Softbank/railshot-apps/')
+                opener.assert_not_called()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

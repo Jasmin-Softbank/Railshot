@@ -46,11 +46,12 @@ def execute(trusted_ref):
         import release_admission
         import multicloud_release
         import edge_update
+        from platform_workers import github_token
         images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + values[key]
                   for name, key in (('dashboard', 'DashboardDigest'), ('api', 'ApiDigest'), ('ci-runner', 'RunnerDigest'))}
         secret = subprocess.run(['/usr/local/bin/k3s', 'kubectl', '--request-timeout=10s', '-n', 'railshot-system',
                                  'get', 'secret', 'railshot-github', '-o', 'json'], capture_output=True, timeout=20, check=True)
-        os.environ['GITHUB_TOKEN'] = base64.b64decode(json.loads(secret.stdout)['data']['token'], validate=True).decode()
+        os.environ['GITHUB_TOKEN'] = github_token(base64.b64decode(json.loads(secret.stdout)['data']['token'], validate=True).decode())
         try:
             release_admission.admit(values['SourceSha'], trusted_ref)
             publication = release_admission.publication(values['SourceSha'], trusted_ref,

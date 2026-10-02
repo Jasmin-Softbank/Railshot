@@ -185,19 +185,24 @@ class HostPublicationGateTests(unittest.TestCase):
                 if command[0] == 'git':
                     return SimpleNamespace(returncode=0, stdout=sha if command[1] == 'rev-parse' else '')
                 self.assertEqual(command[0], '/usr/local/bin/k3s')
-                return SimpleNamespace(stdout=json.dumps({'data': {'token': base64.b64encode(b'unit-test-token').decode()}}))
-            checked = SimpleNamespace(admit=mock.Mock(), publication=mock.Mock(side_effect=ValueError('PUBLICATION_IMAGE_PIN_MISMATCH')))
+                return SimpleNamespace(stdout=json.dumps({'data': {'token': base64.b64encode(b'gho_unit_test_token\n').decode()}}))
+            def admitted(*args):
+                self.assertEqual(os.environ['GITHUB_TOKEN'], 'gho_unit_test_token')
+            checked = SimpleNamespace(admit=mock.Mock(side_effect=admitted), publication=mock.Mock(side_effect=ValueError('PUBLICATION_IMAGE_PIN_MISMATCH')))
             release = SimpleNamespace(private=mock.Mock(), execute=mock.Mock())
+            tokens = SimpleNamespace(github_token=mock.Mock(wraps=load('platform_workers').github_token))
             with mock.patch.object(host, 'Path', side_effect=path), \
                     mock.patch.object(host.subprocess, 'run', side_effect=native), \
                     mock.patch.dict(os.environ, config, clear=True), \
                     mock.patch.object(sys, 'path', list(sys.path)), \
-                    mock.patch.dict(sys.modules, {'release_admission': checked, 'multicloud_release': release, 'edge_update': mock.Mock()}):
+                    mock.patch.dict(sys.modules, {'release_admission': checked, 'multicloud_release': release,
+                                                 'edge_update': mock.Mock(), 'platform_workers': tokens}):
                 with self.assertRaisesRegex(ValueError, 'PUBLICATION_IMAGE_PIN_MISMATCH'):
                     host.execute('refs/heads/main')
                 self.assertNotIn('GITHUB_TOKEN', os.environ)
             checked.admit.assert_called_once_with(sha, 'refs/heads/main')
             checked.publication.assert_called_once()
+            tokens.github_token.assert_called_once_with('gho_unit_test_token\n')
             release.private.assert_not_called(); release.execute.assert_not_called()
 
 

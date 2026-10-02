@@ -65,13 +65,21 @@ def kubectl(action, key, document=None):
     return bootstrap.kube(*args, document=document)
 
 
+def github_token(value):
+    """Normalize Secret-file padding and reject unsafe header bytes without echoing it."""
+    require(isinstance(value, str), 'GITHUB_TOKEN_INVALID')
+    token = value.strip()
+    require(re.fullmatch(r'[A-Za-z0-9_]+', token) is not None, 'GITHUB_TOKEN_INVALID')
+    return token
+
+
 def github(path, method='GET', body=None):
     class NoRedirect(HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
             return None
 
-    token = os.environ.get('GITHUB_TOKEN')
-    require(token and path.startswith('repos/Jasmin-Softbank/railshot-apps/'), 'APPS_GITHUB_BINDING_REQUIRED')
+    token = github_token(os.environ.get('GITHUB_TOKEN'))
+    require(path.startswith('repos/Jasmin-Softbank/railshot-apps/'), 'APPS_GITHUB_BINDING_REQUIRED')
     request = Request('https://api.github.com/' + path, method=method,
                       data=bootstrap.encoded(body) if body is not None else None,
                       headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
