@@ -6,6 +6,15 @@ Set the apps repository's `PLATFORM_REF` to the reviewed platform commit and
 update its workflow from `ci/workflows/railshot-deploy.yml`. A saved run is bound
 to its original harness and source; start a new request after changing these
 bindings instead of resuming an old failed run with different rules.
+
+Deployment requires the selected environment, exact app/image identity, a successful
+build and real runtime/public access. Q quality results remain visible but missing
+tests/checkers and completed lint/type/unit failures do not block release. Q
+isolation, source snapshot, evidence-write, unknown execution and cleanup failures
+still block. Publish the API validator update before emitting advisory artifacts.
+Initial adaptation uses packaging scope; source scope is granted only after an
+observed L2 build or L3 runtime failure. Do not generate tests, checker setup,
+features or unrelated refactors for deployment.
 The workflow also passes the registered `APP` as `--app-id`: the durable binding,
 agent task and L1 check use that exact identity. A spec mismatch fails before
 quality/build work and remains repairable as F5; publication checks it again.
@@ -31,10 +40,8 @@ repeat the completed model call. A corrected proposal still reruns every gate.
 | First failure | Authorized remediation | Required evidence afterward |
 | --- | --- | --- |
 | L0 prohibited patch | Revise proposal within unchanged platform limits | Full patch policy; no deleted files, escaped paths, secret files or bypasses |
-| L1 missing/invalid Dockerfile or service spec | Generate packaging and inspect downstream source/test needs in the same proposal | Schema, port, image and service contract |
-| Q missing/zero-collected unit tests or test script | Add behavior tests importing application code; add native Node/Jest/Vitest script, replace only empty/npm no-test placeholders | Positive executed tests, no skips; constant-only assertions rejected; a changed application must still fail those assertions |
-| Q missing checker/reporter setup | Add missing supported test/typecheck script or exact public dependencies; use existing platform checker overlay; existing unsupported custom test scripts remain a configuration block | Original lint/type policy plus supported native reporter |
-| Q lint, compile/type or unit error | Fix application source; original and previously generated tests stay immutable | Original quality commands and assertions pass |
+| L1 missing/invalid Dockerfile or service spec | Generate the smallest packaging proposal | Schema, port, image and service contract |
+| Q missing tests/checkers or completed lint/type/unit failure | Record the original result as advisory and continue; no model repair | Required build, scan and runtime checks still pass |
 | Missing JS dependency lock / additive dependencies | Native npm/pnpm/Yarn resolution in existing filtered-network Docker sandbox | External hash-bound native lock receipt, then frozen install and full gates |
 | L2 install/context/architecture error | Correct Dockerfile, build context, source or additive dependencies | Build succeeds under existing isolation and allowlisted base constraints |
 | L4 fixed vulnerability | Correct the permitted base/package packaging | Scanner passes unchanged policy |
@@ -44,7 +51,7 @@ repeat the completed model call. A corrected proposal still reruns every gate.
 The model retains read-only, network-disabled tools. It proposes at most eight
 files and 20 KB per patch. Existing tests, scripts (except the exact npm empty-test
 placeholder), dependency versions, checker configuration, migrations and schemas
-are immutable. Source scope accepts additive manifest test setup and exact
+are immutable. The underlying source validator accepts additive manifest test setup and exact
 public package versions; it never accepts model-authored locks. Native locks have
 a separate 4 MiB bound and must match both the recorded bytes and manifest.
 The resolver uses the same non-root, capability-free, read-only source mount,

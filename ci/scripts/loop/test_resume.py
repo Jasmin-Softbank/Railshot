@@ -180,7 +180,7 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual(ev['attempts'][1]['repair_scope'], 'packaging')
 
     def test_every_gate_prefix_failure_reruns_complete_order_after_source_proposal(self):
-        for layer, failure_class in (('L0', 'F5'), ('L1', 'F5'), ('Q', 'QUALITY'),
+        for layer, failure_class in (('L0', 'F5'), ('L1', 'F5'),
                                      ('L2', 'F3'), ('L4', 'F6'), ('L3', 'F7')):
             with self.subTest(layer=layer):
                 self.run = self.root / ('run-' + layer)
@@ -200,6 +200,9 @@ s.step('agent:1', lambda: os._exit(9))
                     self.assertEqual(self.cli(False, '--repair-scope', 'source'), 0)
                 self.assertEqual(observed, [(0, ','.join(loop.GATE_ORDER), 'source'),
                                             (1, ','.join(loop.GATE_ORDER), 'source')])
+                evidence = json.loads((self.run / 'evidence.json').read_text())
+                self.assertEqual(evidence['attempts'][1]['repair_scope'],
+                                 'source' if layer in {'L2', 'L3'} else 'packaging')
                 with patch.object(loop, 'gate', side_effect=AssertionError('gate replayed')), \
                         patch.object(loop, 'agent', side_effect=AssertionError('agent replayed')), redirect_stdout(io.StringIO()):
                     self.assertEqual(self.cli(True, '--repair-scope', 'source'), 0)
