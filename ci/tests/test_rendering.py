@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import base64
 import configparser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 import os
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import sys
+import threading
 
 import pytest
 import yaml
@@ -114,10 +117,58 @@ def test_etcd_topology_and_mutual_tls(tmp_path):
     }
     assert config["initial-cluster-token"] == "test-cluster-etcd"
     assert config["strict-reconfig-check"] is True
+    assert config["enable-grpc-gateway"] is True
     for key in ("client-transport-security", "peer-transport-security"):
         assert config[key]["client-cert-auth"] is True
         assert config[key]["trusted-ca-file"] == "/etc/etcd/tls/ca.crt"
         assert config[key]["key-file"] == "/etc/etcd/tls/server.key"
+
+
+@pytest.mark.parametrize('status,payload,ready', [
+    (404, '404 page not found\n', False),
+    (200, {'members': []}, False),
+    (200, {'members': [{'name': name} for name in ('etcd01', 'etcd02', 'etcd03')]}, True),
+])
+def test_etcd_gateway_rejects_missing_or_incomplete_json_api(tmp_path, status, payload, ready):
+    """Run the actual URI readiness task against a loopback-only response fixture."""
+    task = yaml.safe_load((ROLES / 'etcd/tasks/verify.yml').read_text())[-1]
+    uri = task['ansible.builtin.uri']
+    assert uri['url'] == 'https://{{ private_ip }}:2379/v3/cluster/member/list'
+    assert uri['validate_certs'] is True and uri['use_proxy'] is False
+    assert all(uri[key].startswith('/etc/etcd/tls/') for key in ('ca_path', 'client_cert', 'client_key'))
+    requests = []
+
+    class Fixture(BaseHTTPRequestHandler):
+        def do_POST(self):
+            requests.append((self.path, self.rfile.read(int(self.headers['Content-Length']))))
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json' if isinstance(payload, dict) else 'text/plain')
+            self.end_headers()
+            self.wfile.write((json.dumps(payload) if isinstance(payload, dict) else payload).encode())
+
+        def log_message(self, *_):
+            pass
+
+    server = HTTPServer(('127.0.0.1', 0), Fixture)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        uri['url'] = f'http://127.0.0.1:{server.server_port}/v3/cluster/member/list'
+        for key in ('ca_path', 'client_cert', 'client_key'):
+            del uri[key]  # Synthetic loopback transport; production task TLS is asserted above.
+        inventory = tmp_path / 'inventory.json'
+        inventory.write_text(json.dumps({'all': {'hosts': {'localhost': {}}, 'children': {
+            'etcd_nodes': {'hosts': {name: {} for name in ('etcd01', 'etcd02', 'etcd03')}}}}}))
+        playbook = tmp_path / 'verify.yml'
+        playbook.write_text(yaml.safe_dump([{'name': 'Check gateway fixture', 'hosts': 'localhost',
+            'gather_facts': False, 'vars': {'etcd_health_retries': 1, 'etcd_health_delay': 0}, 'tasks': [task]}]))
+        result = subprocess.run(['ansible-playbook', '-i', str(inventory), '-c', 'local', str(playbook),
+            '-e', 'ansible_python_interpreter=' + sys.executable], capture_output=True, text=True,
+            env={**os.environ, 'ANSIBLE_CONFIG': str(tmp_path / 'absent.cfg')}, timeout=20)
+        assert (result.returncode == 0) is ready, result.stdout + result.stderr
+        assert requests and requests[0] == ('/v3/cluster/member/list', b'{}')
+    finally:
+        server.shutdown(); server.server_close(); thread.join(2)
 
 
 def test_haproxy_check_channel_is_distinct_from_database_channel(tmp_path):

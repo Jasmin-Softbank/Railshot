@@ -23,6 +23,8 @@ from transport import forwarded_port, transport_parts
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
+sys.path.insert(0, str(ROOT / 'ci/scripts'))
+from storage import durable_write
 SCHEMA = ROOT / 'contracts/ansible-request.schema.json'
 PLAYBOOKS = {'guest': HERE / 'guest.yml', 'runtime': HERE / 'runtime.yml'}
 PRIVATE = tuple(ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
@@ -216,10 +218,13 @@ def execute(argv, timeout, env):
                                 stdout=log, stderr=log, start_new_session=True)
         try:
             return proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+        finally:
+            # Also reap children after interruption or a parent that exits early.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             proc.wait()
-            raise
 
 
 def read_receipt(path, request, stage, nonce):
@@ -304,18 +309,50 @@ def run(request, *, validate_only=False, runner=execute, state_dir=None):
     preview = _run(request, validate_only=True)
     if validate_only or preview['status'] != 'validated':
         return preview
-    result = base_result(request)
+    return run_locked(request, base_result(request), lock_keys(request),
+                      lambda: _run(request, runner=runner), state_dir=state_dir)
+
+
+def normalize_lock_keys(keys):
+    """Keep legacy locks and join AWS ARN/raw-ID aliases, including saved unknown jobs."""
+    if not isinstance(keys, (list, tuple, set)) or any(not isinstance(key, str) for key in keys):
+        raise ContractError('Invalid saved resource locks')
+    result = set(keys)
+    for key in keys:
+        arn = re.fullmatch(r'resource:arn:aws:ec2:([a-z]{2}(?:-[a-z]+)+-\d):[0-9]{12}:instance/(i-[a-f0-9]{8,17})', key)
+        if arn:
+            region, instance = arn.groups()
+            result.update(('resource:' + instance, f'transport:ssm:{region}:{instance}'))
+    return sorted(result)
+
+
+def lock_keys(request):
+    keys = []
+    for node in request.get('database_nodes', [request]):
+        physical = node['inventory']['control_plane'][0]
+        keys.extend(('target:' + node['target']['id'], 'resource:' + physical['resource_id']))
+        reference = physical['ssh'].get('transport_ref')
+        if reference:
+            kind, *parts = transport_parts(reference)
+            keys.append('transport:' + reference)
+            if kind == 'ssm':
+                # Preserve raw-ID locks used before canonical transport identities existed.
+                keys.append('resource:' + parts[1])
+    return normalize_lock_keys(keys)
+
+
+def run_locked(request, result, identities, operation, *, state_dir=None):
+    """Shared admission for one runtime or every physical member of a DB cluster."""
     directory = Path(state_dir) if state_dir is not None else STATE_DIR
     execution_started = False
     try:
+        identities = normalize_lock_keys(identities)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = directory.lstat()
         if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise ContractError('State directory must be private and owned by the executor')
-        node = request['inventory']['control_plane'][0]
-        identities = ['target:' + request['target']['id'], 'resource:' + node['resource_id']]
         with ExitStack() as stack:
-            for identity in sorted(identities):
+            for identity in sorted(set(identities) | {'request:' + request['request_id']}):
                 path = directory / (hashlib.sha256(identity.encode()).hexdigest() + '.lock')
                 fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
                 lock = stack.enter_context(os.fdopen(fd, 'r+'))
@@ -328,7 +365,8 @@ def run(request, *, validate_only=False, runner=execute, state_dir=None):
             if path.exists() or path.is_symlink():
                 private_file(path, identity=True)
                 prior = json.loads(path.read_text())
-                if not isinstance(prior, dict) or set(prior) != {'request_sha256', 'result'}:
+                if not isinstance(prior, dict) or set(prior) not in (
+                        {'request_sha256', 'result'}, {'request_sha256', 'result', 'lock_keys'}):
                     raise ContractError('Invalid saved request record')
                 if prior.get('request_sha256') != digest:
                     return fail(result, 'blocked', 'REQUEST_ID_CONFLICT', 'Request ID already names different inputs')
@@ -339,29 +377,36 @@ def run(request, *, validate_only=False, runner=execute, state_dir=None):
                         raise ContractError('Invalid saved request result')
                     return {**prior['result'], 'replayed': True}
                 return fail(result, 'blocked', 'PREVIOUS_OUTCOME_UNKNOWN', 'Previous executor did not record completion; inspect target before a new request', unknown=True)
-            with open(path, 'x', encoding='utf-8') as stream:
-                os.chmod(path, 0o600)
-                json.dump({'request_sha256': digest, 'result': None}, stream)
-                stream.flush(); os.fsync(stream.fileno())
+            for previous in directory.glob('*.json'):
+                private_file(previous, identity=True)
+                saved = json.loads(previous.read_text())
+                if not isinstance(saved, dict) or 'result' not in saved:
+                    raise ContractError('Invalid saved request record')
+                saved_result = saved['result']
+                error = (saved_result or {}).get('error') or {}
+                incomplete = saved_result is None or error.get('outcome_unknown') is True
+                if incomplete and (not saved.get('lock_keys') or set(identities) & set(normalize_lock_keys(saved['lock_keys']))):
+                    return fail(result, 'blocked', 'PREVIOUS_OUTCOME_UNKNOWN',
+                                'A previous request has unresolved effects on a selected resource', unknown=True)
+            durable_write(path, json.dumps({'request_sha256': digest, 'result': None,
+                                           'lock_keys': identities}).encode())
             execution_started = True
-            result = _run(request, runner=runner)
-            temporary = path.with_suffix('.tmp')
-            with open(temporary, 'x', encoding='utf-8') as stream:
-                os.chmod(temporary, 0o600)
-                json.dump({'request_sha256': digest, 'result': result}, stream)
-                stream.flush(); os.fsync(stream.fileno())
-            os.replace(temporary, path)
+            result = operation()
+            durable_write(path, json.dumps({'request_sha256': digest, 'result': result,
+                                           'lock_keys': identities}).encode())
             return result
     except (OSError, ValueError):
         return fail(result, 'failed' if execution_started else 'blocked', 'JOB_RECORD_UNAVAILABLE',
                     'Unable to read or persist the private job record',
-                    unknown=execution_started and request['operation'] == 'runtime.install')
+                    unknown=execution_started and request['operation'] != 'guest.check')
 
 
 def from_descriptor(descriptor, *, request_id, operation, ssh, timeout_seconds=1200):
-    """Select configured Terraform references; never treat them as readiness observations."""
+    """Bind registered Terraform/AWS CLI references; not a live readiness observation."""
     try:
-        if descriptor['schema_version'] != 'v1' or descriptor['execution_driver'] != 'terraform':
+        if descriptor['schema_version'] != 'v1' or not (
+                descriptor['execution_driver'] == 'terraform' or
+                (descriptor['execution_driver'] == 'aws-cli' and descriptor.get('provider_kind') == 'aws')):
             raise ContractError('Unsupported node descriptor version or execution driver')
         provider = descriptor['provider_kind']
         if provider not in ('aws', 'gcp') or descriptor['architecture'] != 'x86_64':

@@ -34,21 +34,23 @@ def runtime_plan(request):
 def database_plan(body, parameters, resolve):
     """Resolve approved VM references into an external DB inventory, not K8s objects.
 
-    Database/Patroni installation is the DB owner's boundary. This mapping can be
-    consumed and tested now without claiming that an unconnected playbook was run.
+    The executor separately binds an approved HA profile to the team's playbook.
+    This public preview contains no SSH, TLS or Vault references.
     """
-    groups = {'database': {'hosts': {}}, 'dcs': {'hosts': {}}}
+    groups = {role: {'hosts': {}} for role in ('database', 'dcs', 'proxy')}
     counts, node_ids, resources, addresses = Counter(), set(), set(), set()
     for selection in parameters['nodes']:
         target_id, roles = selection['target_id'], selection['roles']
         if target_id in node_ids or len(roles) != len(set(roles)):
             raise ansible.ContractError('Duplicate database node or role')
+        if 'database' in roles and 'proxy' in roles:
+            raise ansible.ContractError('The HA proxy must be separate from database hosts')
         request = resolve(target_id)
         node_id, host = host_summary(request)
-        identity = (host['railshot_provider'], host['railshot_resource_id'])
-        if identity in resources or host['ansible_host'] in addresses:
+        physical_keys = {key for key in ansible.lock_keys(request) if not key.startswith('target:')}
+        if resources & physical_keys or host['ansible_host'] in addresses:
             raise ansible.ContractError('Duplicate physical database node or management address')
-        resources.add(identity); addresses.add(host['ansible_host']); node_ids.add(target_id)
+        resources.update(physical_keys); addresses.add(host['ansible_host']); node_ids.add(target_id)
         for role in roles:
             groups[role]['hosts'][node_id] = host
             counts[(host['railshot_provider'], host['railshot_site'], role)] += 1
@@ -57,21 +59,25 @@ def database_plan(body, parameters, resolve):
     declared, sites = Counter(), set()
     for placement in parameters['placements']:
         site = (placement['provider'], placement['site'])
-        if site in sites or placement['database_nodes'] + placement['dcs_voters'] == 0:
+        if site in sites or placement['database_nodes'] + placement['dcs_voters'] + placement.get('proxy_nodes', 0) == 0:
             raise ansible.ContractError('Duplicate or empty database placement')
         sites.add(site)
         declared[(*site, 'database')] = placement['database_nodes']
         declared[(*site, 'dcs')] = placement['dcs_voters']
+        declared[(*site, 'proxy')] = placement.get('proxy_nodes', 0)
     if +declared != +counts:
         raise ansible.ContractError('Placement counts must match the resolved node roles')
     database_count, voters = len(groups['database']['hosts']), len(groups['dcs']['hosts'])
     if database_count == 0:
         raise ansible.ContractError('At least one database node is required')
     if parameters['mode'] == 'standalone':
-        if database_count != 1 or voters:
+        if database_count != 1 or voters or groups['proxy']['hosts']:
             raise ansible.ContractError('Standalone DB uses one external database VM and no DCS')
+    blocker = ('DATABASE_STANDALONE_UNSUPPORTED' if parameters['mode'] == 'standalone' else
+               'DATABASE_HA_TOPOLOGY_REQUIRED' if database_count < 2 or voters < 3 or voters % 2 == 0
+               or not groups['proxy']['hosts'] else 'DATABASE_PROFILE_REQUIRED')
     return {'valid': True, 'operation': body['operation'], 'target_id': body['target_id'],
-            'execution_supported': False, 'blockers': [{'code': 'DATABASE_PLAYBOOK_UNAVAILABLE'}],
+            'execution_supported': False, 'blockers': [{'code': blocker}],
             'inventory': {'all': {'children': groups}},
             'variables': {'railshot_database': {'mode': parameters['mode'], 'port': 5432,
                           'placements': parameters['placements']}}}
