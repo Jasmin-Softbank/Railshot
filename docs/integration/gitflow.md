@@ -43,6 +43,10 @@ Vercel Preview는 별도 웹 배포 연동이다. 런타임·Ansible·CI 검증�
 
 이미 반영된 CI·CSP·네트워크·Ansible·GitOps 구현을 다시 복사하지 않고 merge로 계보를 연결했다. README와 Ansible 문서는 통합 범위의 설명을 유지했다. 통합본에만 있는 팀 구현과 실제 앱 선언은 보존했다.
 
+## 정빈 observability 후속 통합
+
+검사 진행 중 새로 게시된 Railshot `feature/observability_JB@180482ad2f069eb09edf5056f2ad3d0621e70532`를 merge했다. 담당자의 `observability/` 구현과 이력을 그대로 유지한다. 기존 14개 unittest를 CI에 연결하며 Compose가 지정한 Prometheus/Blackbox 이미지에서 도구를 꺼내 native 검사 두 개도 생략하지 않는다. 컨테이너는 도구 추출 후 삭제하고 HTTP fixture·Blackbox 프로세스는 테스트의 finally에서 종료한다. 실제 운영 observer·exporter를 배포한 결과는 아니다.
+
 ## 승민 runtime 통합
 
 [원본 PR #1](https://github.com/Jasmin-Softbank/Railshot/pull/1)의 `c732b3bc83ad1b9cab416f1d763cfee9be26ea05`를 merge했다. `deployment/`는 원본과 byte 단위로 동일하게 유지한다. 새 Cilium 설치 코드가 online 경로에서도 읽는 `airgap/versions.json`을 Ansible 전달 목록에 추가했다. 버전 정책 누락을 잡는 기존 경계 검사를 보강했고, 수정 전 실패·수정 후 통과를 확인했다.
