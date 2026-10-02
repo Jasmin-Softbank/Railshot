@@ -153,6 +153,21 @@ jobs:
           esac
       - name: Set registry credential path
         run: echo "DOCKER_CONFIG=$RUNNER_TEMP/railshot-registry-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Match the CI containerd image store
+        run: |
+          set -euo pipefail
+          docker info --format 'Before: {{.ServerVersion}} {{.Driver}} {{json .DriverStatus}}'
+          sudo python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('/etc/docker/daemon.json')
+          config = json.loads(path.read_text()) if path.exists() else {}
+          config.setdefault('features', {})['containerd-snapshotter'] = True
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(config))
+          PY
+          sudo systemctl restart docker
+          docker info --format '{{json .DriverStatus}}' | grep -q 'io.containerd.snapshotter.v1'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {persist-credentials: false}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
