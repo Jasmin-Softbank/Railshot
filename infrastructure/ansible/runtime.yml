@@ -100,7 +100,7 @@
         K3S_VERSION: v1.34.11+k3s1
         CILIUM_VERSION: 1.20.2
         CILIUM_CLI_VERSION: v0.20.1
-        WAIT_TIMEOUT: 300s
+        WAIT_TIMEOUT: "{{ railshot_wait_timeout_seconds }}s"
         NODE_IP: "{{ railshot_node_ip }}"
         K3S_URL: ''
         K3S_TOKEN: ''

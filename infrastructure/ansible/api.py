@@ -18,6 +18,7 @@ import threading
 import time
 
 import run as ansible
+import inputs
 
 sys.path.insert(0, str(ansible.ROOT / 'ci/scripts'))
 from storage import durable_write
@@ -86,8 +87,13 @@ class Jobs:
         if not isinstance(self.targets, dict) or not self.targets:
             raise ValueError('registered target allowlist required')
         for target_id, target in self.targets.items():
-            if not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', target_id) or not isinstance(target, dict) or set(target) - {
-                    'descriptor_file', 'ssh', 'timeout_seconds'} or not {'descriptor_file', 'ssh'} <= set(target):
+            common = {'ssh', 'timeout_seconds', 'purpose'}
+            openstack = {'server_file', 'resource_id', 'project_id', 'management_network',
+                         'placement', 'architecture', 'initialization'}
+            required = openstack if isinstance(target, dict) and 'server_file' in target else {'descriptor_file'}
+            if (not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', target_id) or not isinstance(target, dict)
+                    or set(target) - (required | common) or not (required | {'ssh'}) <= set(target)
+                    or target.get('purpose', 'runtime') not in ('runtime', 'database')):
                 raise ValueError('invalid registered target')
         self.state_dir = private_directory(state_dir)
         self.directory = private_directory(self.state_dir / 'http-jobs')
@@ -130,22 +136,54 @@ class Jobs:
                                              'created_at', 'updated_at', 'result', 'error')}
 
     def prepare(self, body):
-        if not isinstance(body, dict) or set(body) != {'request_id', 'target_id', 'operation'}:
+        try:
+            parameters = inputs.validate_job(body)
+        except (ValueError, TypeError, KeyError):
             raise APIError('INVALID_JOB_REQUEST')
-        if (not isinstance(body['request_id'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', body['request_id'])
-                or not isinstance(body['target_id'], str) or body['operation'] not in ('guest.check', 'runtime.install')):
-            raise APIError('INVALID_JOB_REQUEST')
-        target = self.targets.get(body['target_id'])
+        if body['operation'] == 'database.configure':
+            self.preview(body)
+            raise APIError('DATABASE_PLAYBOOK_UNAVAILABLE', 501)
+        request = self.resolve(body['target_id'], body['request_id'], body['operation'],
+                               purpose='runtime' if body['operation'] == 'runtime.install' else None)
+        if parameters:
+            request['runtime'] = parameters
+        try:
+            return ansible.validate(request)
+        except ValueError:
+            raise APIError('INVALID_JOB_REQUEST') from None
+
+    def resolve(self, target_id, request_id, operation='guest.check', *, purpose=None):
+        target = self.targets.get(target_id)
         if target is None:
             raise APIError('TARGET_NOT_REGISTERED', 404)
+        if purpose is not None and target.get('purpose', 'runtime') != purpose:
+            raise APIError('TARGET_PURPOSE_MISMATCH', 400)
         try:
+            if 'server_file' in target:
+                return ansible.from_openstack(private_json(target['server_file']),
+                    request_id=request_id, operation=operation, target_id=target_id,
+                    **{key: target[key] for key in ('resource_id', 'project_id', 'management_network',
+                       'placement', 'architecture', 'initialization', 'ssh')},
+                    timeout_seconds=target.get('timeout_seconds', 1200))
             descriptor = private_json(target['descriptor_file'])
-            if descriptor.get('target_id') != body['target_id']:
+            if descriptor.get('target_id') != target_id:
                 raise ValueError('target binding mismatch')
-            return ansible.from_descriptor(descriptor, request_id=body['request_id'], operation=body['operation'],
+            return ansible.from_descriptor(descriptor, request_id=request_id, operation=operation,
                                            ssh=target['ssh'], timeout_seconds=target.get('timeout_seconds', 1200))
         except (ValueError, OSError, TypeError, AttributeError):
             raise APIError('TARGET_CONFIGURATION_INVALID', 503) from None
+
+    def preview(self, body):
+        try:
+            parameters = inputs.validate_job(body)
+            if body['operation'] == 'database.configure':
+                return inputs.database_plan(body, parameters, lambda target_id:
+                    self.resolve(target_id, body['request_id'], purpose='database'))
+            return inputs.runtime_plan(self.prepare(body))
+        except (ValueError, TypeError, KeyError) as exc:
+            if isinstance(exc, APIError):
+                raise
+            raise APIError('INVALID_JOB_REQUEST') from None
 
     def submit(self, body):
         request = self.prepare(body)
@@ -166,7 +204,8 @@ class Jobs:
             # ponytail: one admitted job, no unbounded queue; add workers only with isolated executors.
             if self.active is not None:
                 raise APIError('EXECUTOR_BUSY', 409)
-            record = {**body, 'request_sha256': digest, 'status': 'queued', 'created_at': time.time(),
+            record = {**{key: body[key] for key in ('request_id', 'target_id', 'operation')},
+                      'request_sha256': digest, 'status': 'queued', 'created_at': time.time(),
                       'updated_at': time.time(), 'result': None, 'error': None}
             self.save(record)  # Durable acceptance precedes any executor dispatch.
             self.active = body['request_id']
@@ -278,6 +317,7 @@ def create_server(*, targets_file, token_file, state_dir, port=4180, listen='127
             self.send_header('X-Content-Type-Options', 'nosniff')
             if status == 202:
                 self.send_header('Location', '/v1/ansible/jobs/' + value['request_id'])
+                self.send_header('Retry-After', '2')
             if status == 401:
                 self.send_header('WWW-Authenticate', 'Bearer')
             self.end_headers()
@@ -298,7 +338,7 @@ def create_server(*, targets_file, token_file, state_dir, port=4180, listen='127
         def handle_request(self):
             try:
                 self.authorize()
-                if self.command == 'POST' and self.path == '/v1/ansible/jobs':
+                if self.command == 'POST' and self.path in ('/v1/ansible/jobs', '/v1/ansible/validate'):
                     if self.headers.get_content_type() != 'application/json' or self.headers.get('Transfer-Encoding'):
                         raise APIError('JSON_BODY_REQUIRED', 415)
                     lengths = self.headers.get_all('Content-Length', [])
@@ -314,7 +354,8 @@ def create_server(*, targets_file, token_file, state_dir, port=4180, listen='127
                         value = parsed(body)
                     except (ValueError, UnicodeError):
                         raise APIError('INVALID_JSON') from None
-                    status, result = jobs.submit(value)
+                    status, result = ((200, jobs.preview(value)) if self.path.endswith('/validate')
+                                      else jobs.submit(value))
                     self.reply(status, result)
                     return
                 match = re.fullmatch(r'/v1/ansible/jobs/([A-Za-z0-9][A-Za-z0-9._-]{0,127})', self.path)

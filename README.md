@@ -18,8 +18,8 @@
 | 생산자 → 소비자 | 전달 | 현재 결과 의미 |
 |---|---|---|
 | UI/CLI/MCP → Node API → Actions | source commit, tenant/app, operator target ID | CI 요청 접수. target 자동 생성 아님 |
-| CI loop → release → API | tested bundle와 게시 ZIP, run/attempt/artifact ID | `published`. 고객 앱 배포 완료 아님 |
-| OpenStack Controller → 상위 실행기 | `resource_id`, `status`, `addresses` | 202 접수와 ACTIVE 구분. guest 정보·Ansible 자동 호출은 별도 연결 필요 |
+| CI loop → release → API | tested bundle와 게시 ZIP, run/attempt/artifact ID | `published`. 유저 앱 배포 완료 아님 |
+| OpenStack Controller → Ansible 연결부 | 생성: `resource_id`; 상세: `id`, `project_id`, `status`, `addresses` | 등록한 ACTIVE 자원을 inventory로 변환. 상위 API의 자동 등록·연속 호출은 별도 연결 필요 |
 | 운영 실행기 → Ansible CLI | target/provider/placement, private inventory, SSH 파일 참조 | 실제 guest/runtime receipt를 확인. 앱·URL 결과는 false |
 | 게시 artifact → CD 인계 CLI → 운영자 Git/Argo 실행 | 5개 게시 파일 + trusted target 설정 | 렌더 결과와 Git 반영·Argo sync·공개 HTTP 검증을 각각 기록. 제품 API 자동 연결은 별도 |
 
@@ -56,7 +56,7 @@ uv run --frozen --project infrastructure/providers/openstack pytest infrastructu
 
 ```sh
 python3 infrastructure/ansible/run.py --request examples/ansible/runtime-single-node.json --validate-only
-python3 -m unittest discover -s infrastructure/ansible -p test_run.py -v
+python3 -m unittest discover -s infrastructure/ansible -p 'test_*.py' -v
 ```
 
 `--validate-only` 통과는 입력 검사가 끝났다는 뜻입니다. Patroni 요청은 DB/DCS 배치를 구분해 받으며, 담당 playbook이 없으면 실행을 차단합니다. AWS SSM·GCP IAP 포트 전달과 strict SSH를 통한 runtime 설치를 검증했습니다. 상세 입력과 결과 형식은 [Ansible 인터페이스](docs/api/ansible.md)를 따릅니다.
