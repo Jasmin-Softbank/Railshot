@@ -1,43 +1,36 @@
-%%{init: {"theme":"base","fontFamily":"Arial,sans-serif","themeVariables":{"fontFamily":"Arial,sans-serif","fontSize":"16px","primaryTextColor":"#172033","lineColor":"#64748b","edgeLabelBackground":"#ffffff","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1"},"flowchart":{"curve":"linear","nodeSpacing":28,"rankSpacing":80,"htmlLabels":true,"subGraphTitleMargin":{"top":12,"bottom":30}}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, Apple SD Gothic Neo, sans-serif","fontSize":"18px","lineColor":"#64748b","primaryTextColor":"#172033","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"linear","nodeSpacing":28,"rankSpacing":18,"htmlLabels":true,"wrappingWidth":340,"padding":16}}}%%
 flowchart TB
-  subgraph OPS["운영 신뢰 영역 · 개념 배치"]
-    API["[구현] UI / API<br/>[설계] 운영 VM 또는 운영 K3s<br/>고객 앱과 다른 권한·Secret"]:::design
+ subgraph OPS["운영 K3s · EC2 2대"]
+  direction LR
+  subgraph PLATFORM["플랫폼 EC2"]
+   direction TB
+   C["Argo CD Pods<br/>sync / verify · 운영 인수 기록"]
+   D["Dashboard / Nginx Pod<br/>배치 선언 · 운영 적용은 별도 인수"]
+   A["제품 API Pod<br/>배치 선언 · 운영 적용은 별도 인수"]
+   C ~~~ D ~~~ A
   end
-  subgraph BUILD["CI 빌드 격리 영역"]
-    CI["[구현] CI / AI / gate 코드<br/>[설계] 전용 worker 등록·격리 인수"]:::design
+  subgraph BUILD["전용 빌드 EC2"]
+   R["일회성 runner Job<br/>build selector + 전용 taint<br/>호스트 Docker / BuildKit 사용"]
   end
-    subgraph CLOUD["AWS K3s · 단일 Linux 노드"]
-        CP["K3s server · 제어부<br/>API · scheduler · controller"]:::code
-        CS[("Kubernetes 상태<br/>기본 SQLite")]:::code
-        CW["K3s agent · 실행부<br/>kubelet · containerd"]:::code
-        CN["Cilium VXLAN · kube-proxy<br/>CoreDNS · 내부 통신"]:::code
-        subgraph CNS["고객 앱 namespace"]
-          CA["[설계] 고객 앱<br/>Deployment / Service"]:::design
-        end
-        CP -->|"상태 저장"| CS
-        CP -->|"Pod 조정"| CW
-        CW --> CA
-        CA <-->|"Pod / Service / DNS"| CN
-    end
-    subgraph ONPREM["OpenStack K3s · 단일 Linux 노드"]
-        OP["K3s server · 제어부<br/>API · scheduler · controller"]:::code
-        OS[("Kubernetes 상태<br/>기본 SQLite")]:::code
-        OW["K3s agent · 실행부<br/>kubelet · containerd"]:::code
-        ON["Cilium VXLAN · kube-proxy<br/>CoreDNS · 내부 통신"]:::code
-        subgraph ONS["고객 앱 namespace"]
-          OA["[설계] 고객 앱<br/>Deployment / Service"]:::design
-        end
-        OP -->|"상태 저장"| OS
-        OP -->|"Pod 조정"| OW
-        OW --> OA
-        OA <-->|"Pod / Service / DNS"| ON
-    end
-  DB[("[결정 대기] 별도 DB VM<br/>PostgreSQL / Patroni<br/>배치·수량·복구 계약 필요")]:::pending
-  API -->|"검사·게시 요청"| CI
-  CA -.->|"현재 stateless 인계에서는 미지원"| DB
-  OA -.->|"DB 연결은 후속 담당 계약"| DB
-
-classDef code fill:#e0f2fe,stroke:#0284c7,color:#172033,stroke-width:2px
-classDef design fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
-classDef pending fill:#ffe4e6,stroke:#e11d48,color:#172033,stroke-width:2px
-classDef actor fill:#172033,stroke:#172033,color:#ffffff,stroke-width:2px
+ end
+ subgraph CUSTOMERS["독립 고객 K3s / Cilium"]
+  direction LR
+  AWS["AWS K3s<br/>독립 클러스터 · 고객 앱<br/>Argo / 공개 HTTP 인수 기록"]
+  GCP["GCP K3s<br/>독립 클러스터 · 고객 앱<br/>Argo / 공개 HTTP 인수 기록"]
+  ONP["온프레미스 K3s<br/>설치 경로 있음<br/>공개 배포 인수 미확보"]
+  AWS ~~~ GCP ~~~ ONP
+ end
+ subgraph OUTSIDE["K3s 클러스터 밖"]
+  direction LR
+  M["클라이언트 측 MCP 컨테이너<br/>stdio · 자체 HTTP 포트 없음"]
+  DB[("단일 PostgreSQL / Patroni 클러스터<br/>별도 VM · etcd · HAProxy<br/>앱 자격 / egress 연결 미완료")]
+  M ~~~ DB
+ end
+ OPS ~~~ CUSTOMERS ~~~ OUTSIDE
+ class M code
+ class D,A,R,ONP,DB pending
+ class C,AWS,GCP evidence
+classDef code fill:#dbeafe,stroke:#2563eb,color:#172033,stroke-width:2px
+classDef evidence fill:#dcfce7,stroke:#16a34a,color:#172033,stroke-width:2px
+classDef pending fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
+classDef external fill:#f1f5f9,stroke:#64748b,color:#172033,stroke-width:2px

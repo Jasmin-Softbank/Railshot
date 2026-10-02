@@ -1,33 +1,28 @@
-%%{init: {"theme":"base","fontFamily":"Arial,sans-serif","themeVariables":{"fontFamily":"Arial,sans-serif","fontSize":"15px","primaryColor":"#e0f2fe","primaryBorderColor":"#0284c7","primaryTextColor":"#172033","signalColor":"#475569","noteBkgColor":"#fef3c7","noteTextColor":"#172033"},"sequence":{"actorMargin":30,"messageMargin":28,"noteMargin":12,"wrap":true,"width":135}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, Apple SD Gothic Neo, sans-serif","fontSize":"16px","primaryColor":"#dbeafe","primaryBorderColor":"#2563eb","primaryTextColor":"#172033","signalColor":"#475569","noteBkgColor":"#fef3c7","noteTextColor":"#172033"},"sequence":{"actorMargin":24,"messageMargin":24,"noteMargin":12,"wrap":true,"width":130}}}%%
 sequenceDiagram
-  autonumber
-  actor U as 사용자
-  participant API as 플랫폼 API
-  participant CI as CI · AI + gate
-  participant REG as GHCR
-  participant GIT as 배포 선언 Git
-  participant CD as Argo CD
-  participant K as 대상 K3s
-  Note over U,K: 목표 실행 순서 · 실제 통합 배포 미검증 · 대상 환경은 미리 준비
-  U->>API: 앱 입력 + 준비된 대상 선택
-  API->>CI: 고정 source commit + target_id로 CI 요청
-  CI->>CI: 기본 검사 · 필요한 범위만 AI 수정 · 재검사
-  alt gate 실패
-    CI-->>API: 실패 단계 + 검사 근거
-    API-->>U: 중단 · 수정 또는 재시도 안내
-  else gate 통과
-    CI->>REG: 검사한 이미지 그대로 게시
-    REG-->>CI: immutable image digest
-    CI-->>API: published artifact / images.json
-    Note over API,K: 이후 CD·상태 연결은 설계 단계 · image publish는 배포 완료가 아님
-    API->>GIT: CD 담당 연계로 digest 고정 manifest 기록
-    CD->>GIT: 대상 경로 / revision 조회 (outbound pull)
-    GIT-->>CD: manifest commit
-    CD->>K: 대상 Kubernetes API에 선언 적용
-    K->>REG: containerd가 지정 digest pull
-    K-->>CD: rollout / readiness 상태
-    CD-->>API: 적용 revision + 동기화 / health 상태
-    API->>K: 공개 endpoint를 통한 별도 HTTP 검사
-    K-->>API: 기대 앱 응답 또는 실패
-    API-->>U: target · revision · URL 검증 결과
-  end
+ autonumber
+ actor U as 사용자
+ participant A as 제품 API
+ participant CI as Actions CI / 게시 job
+ participant R as GHCR / artifact
+ actor O as 운영자 / CD CLI
+ participant G as config Git
+ participant C as Argo CD
+ participant K as 고객 K3s
+ Note over U,K: bc61a5a 기준 · 준비된 대상 / 게시 성공 이후의 주요 호출
+ U->>A: 소스 제출 / 승인 target
+ A->>CI: 앱 Git commit / workflow_dispatch
+ Note over CI: 기본 검사 → 필요한 AI 수정 → 같은 검사
+ CI->>R: 통과 bundle 그대로 게시 / receipt
+ A->>R: source / target / attempt / hash 대조
+ A-->>U: API 판정: published / URL null
+ Note over A,O: 제품 API에서 운영자 CD 절차로 자동 인계되지 않음
+ O->>R: 게시 artifact 읽기 / handoff.py 검증
+ O->>G: manifest 검토 / commit
+ O->>C: argo.py로 정확한 revision sync 요청
+ Note over G,K: Argo는 고정 config Git을 읽고 containerd는 지정 image digest를 pull
+ C->>K: Deployment / Service / NetworkPolicy 적용
+ O->>C: revision / Synced / Healthy 확인
+ O->>K: 공개 HTTPS로 기대 앱 응답 검사
+ K-->>O: 실제 공개 응답
+ Note over A,K: Argo 검증과 공개 응답의 제품 API 결과 소비는 별도 연결 필요
