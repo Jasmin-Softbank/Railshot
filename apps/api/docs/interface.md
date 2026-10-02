@@ -2,15 +2,15 @@
 
 ## POST /api/deploy
 
-multipart/form-data와 `x-jasmin-request: deploy` 헤더를 받는다. `app`과 ZIP `archive`, 폴더 `files`+`paths`, 또는 공개 GitHub `repository_url` 중 정확히 하나를 제공한다. 선택 `target_id`는 서버의 `RAILSHOT_TARGET_ID`와 같아야 한다. 생략하면 서버 설정을 쓴다. target은 준비·배포 성공을 뜻하지 않는 운영자 식별자다.
+multipart/form-data와 `x-jasmin-request: deploy` 헤더를 받는다. `app`과 ZIP `archive`, 폴더 `files`+`paths`, 공개 GitHub `repository_url`, 또는 `source_type=registered` 중 정확히 하나를 제공한다. `registered`는 같은 tenant의 apps 저장소에 이미 등록된 앱 이름으로 CI를 다시 실행하며 파일과 Git commit을 만들지 않는다. 없는 앱이면 404다. 선택 `target_id`는 서버의 `RAILSHOT_TARGET_ID`와 같아야 한다. 생략하면 서버 설정을 쓴다. target은 준비·배포 성공을 뜻하지 않는 운영자 식별자다.
 
 응답 202는 `{run_id, tenant, app, source_commit, target_id, state: "queued", changes, actions_url}`이며 공개 GitHub 입력이면 별도의 원본 `{source: {type, repository, sha}}`를 추가한다. 원본 repo SHA와 apps repo 등록 `source_commit`은 다르다. 단지 202를 받았다고 CI나 앱 배포가 성공한 것은 아니다.
 
-등록 commit을 만들고 ref를 갱신한 뒤 dispatch의 tenant/app/source_commit/target_id로 넘긴다. 소스가 같으면 새 commit 없이 현재 parent를 source_commit으로 사용한다. 다른 commit이 ref를 앞서 바꾸면 workflow checkout 일치 검사에서 차단된다. 원격 commit이나 dispatch의 불확실한 결과를 자동 재전송하지 않는다.
+등록 commit을 만들고 ref를 갱신한 뒤 dispatch의 tenant/app/source_commit/target_id로 넘긴다. 소스가 같거나 `registered`이면 새 commit 없이 현재 parent를 source_commit으로 사용한다. 다른 commit이 ref를 앞서 바꾸면 workflow checkout 일치 검사에서 차단된다. 원격 commit이나 dispatch의 불확실한 결과를 자동 재전송하지 않는다.
 
 ## GET /api/runs/:run_id
 
-등록된 `.github/workflows/<workflow>`만 허용한다. `steps`에 loop/release의 상태와 `observed_attempt`를 반환한다. `observed_attempt`는 job을 확인한 GitHub attempt의 번호다. 실패 job만 재실행하면 GitHub가 이전 성공 job을 새 ID와 attempt로 복제해 보여줄 수 있으므로 이 값으로 artifact의 생산 attempt를 판단하지 않는다. GitHub completed/success와 별도로 state를 반환한다.
+등록된 `.github/workflows/<workflow>`만 허용한다. `steps`에 loop/release의 상태와 `observed_attempt`, 각 job에서 GitHub가 제공한 `actions_steps`의 이름·상태·결론을 반환한다. `observed_attempt`는 job을 확인한 GitHub attempt의 번호다. 실패 job만 재실행하면 GitHub가 이전 성공 job을 새 ID와 attempt로 복제해 보여줄 수 있으므로 이 값으로 artifact의 생산 attempt를 판단하지 않는다. GitHub completed/success와 별도로 state를 반환한다.
 
 | state | 의미 |
 | --- | --- |

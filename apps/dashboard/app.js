@@ -54,16 +54,25 @@ function setSource(source) {
   selectedSource = source;
   selection.textContent = source ? source.label : '';
   selection.hidden = !source;
-  const name = source?.kind === 'repository' ? source.label.split('/').filter(Boolean).at(-1)?.replace(/\.git$/, '')
-    : source?.kind === 'archive' ? archive.files[0].name.replace(/\.zip$/i, '')
-    : source ? (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0] : '';
-  appName.value = (name || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '').slice(0, 30).replace(/-+$/g, '');
+  if (source?.kind !== 'registered') {
+    const name = source?.kind === 'repository' ? source.label.split('/').filter(Boolean).at(-1)?.replace(/\.git$/, '')
+      : source?.kind === 'archive' ? archive.files[0].name.replace(/\.zip$/i, '')
+      : source ? (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0] : '';
+    appName.value = (name || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '').slice(0, 30).replace(/-+$/g, '');
+  }
   invalidateReview();
 }
 
 document.querySelector('#choose-file').addEventListener('click', () => archive.click());
 document.querySelector('#choose-folder').addEventListener('click', () => folder.click());
+document.querySelector('#choose-registered').addEventListener('click', () => {
+  archive.value = '';
+  folder.value = '';
+  repositoryUrl.value = '';
+  setSource({ kind: 'registered', label: '등록된 앱' });
+  appName.focus();
+});
 archive.addEventListener('change', () => {
   const file = archive.files[0];
   if (!file) return;
@@ -158,6 +167,7 @@ document.querySelector('#deploy-form').addEventListener('submit', (event) => {
       ? '선택한 인프라를 등록 대상에 연결하는 기능은 아직 없습니다. 운영자 등록 대상을 선택하세요.'
       : !health?.configured ? 'API 또는 운영자 대상 설정을 확인한 뒤 페이지를 새로 여세요.'
       : activeRun() ? '진행 중인 CI 실행을 먼저 확인하세요.'
+      : draft.source.kind === 'registered' ? '기존 앱 소스 변경 없이 CI 검사와 이미지 게시를 다시 시작합니다. 실제 앱 배포는 별도입니다.'
       : '소스를 등록하고 CI 검사 및 이미지 게시를 요청합니다. 대상 자원 생성과 앱 배포·외부 URL 확인은 포함하지 않습니다.';
     document.querySelector('#review-panel').hidden = false;
     document.querySelector('#review-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -222,7 +232,8 @@ deployButton.addEventListener('click', async () => {
     const payload = new FormData();
     payload.set('app', reviewed.app);
     if (reviewed.targetId) payload.set('target_id', reviewed.targetId);
-    if (reviewed.source.kind === 'repository') payload.set('repository_url', reviewed.source.label);
+    if (reviewed.source.kind === 'registered') payload.set('source_type', 'registered');
+    else if (reviewed.source.kind === 'repository') payload.set('repository_url', reviewed.source.label);
     else if (reviewed.source.kind === 'archive') payload.set('archive', archive.files[0]);
     else {
       const paths = [];
@@ -270,6 +281,15 @@ function renderRun() {
   document.querySelector('#run-steps').replaceChildren(...(current.steps || []).map((step) => {
     const item = document.createElement('li');
     item.textContent = `${({ loop: '앱 검사 및 수정', release: '검증 이미지 게시' })[step.key] || step.key}: ${step.conclusion || step.status}`;
+    if (step.actions_steps?.length) {
+      const details = document.createElement('ul');
+      for (const action of step.actions_steps) {
+        const row = document.createElement('li');
+        row.textContent = `${action.name} · ${action.conclusion || action.status || '대기'}`;
+        details.append(row);
+      }
+      item.append(details);
+    }
     return item;
   }));
   const actions = document.querySelector('#actions-link');

@@ -20,7 +20,7 @@ Node 22 이상에서 `npm ci --ignore-scripts`, `npm start`를 실행한다. 이
 
 `npm run cli -- deploy <폴더 또는 ZIP 또는 공개 GitHub URL> --app my-app --target aws-demo`, `npm run cli -- status <run_id>`가 같은 HTTP API를 사용한다. target 생략 시 API의 운영자 설정을 사용한다. 임의 target은 거부한다. 이 제출 명령은 실제 설정이 있을 때 GitHub에 소스를 등록하고 CI를 실행하므로 로컬 검증 과정에서는 실행하지 않는다.
 
-MCP는 `npm run mcp`로 stdio transport를 사용한다. 기존 deploy/status 도구를 유지하며 CI의 published 상태를 앱 deployed로 바꾸지 않는다.
+MCP는 `npm run mcp`로 stdio transport를 사용한다. `redeploy_registered` 도구는 기존 앱 이름으로 소스 변경 없이 Actions를 다시 시작한다. 기존 deploy/status 도구를 유지하며 CI의 published 상태를 앱 deployed로 바꾸지 않는다.
 
 ## 컨테이너와 내부 접근
 
@@ -49,7 +49,7 @@ MCP 이미지는 `docker run --rm -i ... railshot-mcp` 또는 Compose의 `run --
 
 - 앱 이름은 CI와 같은 3–30자 규칙이다. 영문 소문자로 시작하고 영문 소문자나 숫자로 끝나며 중간에는 하이픈을 쓸 수 있다.
 - source 등록 commit SHA와 target ID를 workflow에 전달한다. CI checkout과 source SHA가 다르면 실행을 거부해 concurrent 등록 drift를 드러낸다.
-- 상태는 loop/release 두 job을 읽는다. 완료된 재실행에 job이 없으면 이전 attempt의 실제 producer를 찾는다. 최신 실패를 옛 성공으로 대체하지 않는다.
+- 상태는 loop/release 두 job과 GitHub Actions의 개별 step을 읽는다. 완료된 재실행에 job이 없으면 이전 attempt의 실제 producer를 찾는다. 최신 실패를 옛 성공으로 대체하지 않는다.
 - `published-<producer attempt>`의 유일하고 만료되지 않은 artifact를 고유 ID로 다운로드해 run/source/target과 evidence 파일 해시를 확인한다. 이를 통과해야 state가 `published`다.
 - `published`는 이미지 게시 및 CD 자료 생성이다. 앱 적용, Argo 상태 관측, 외부 HTTP와 URL은 이 API가 수행하지 않는다. `url`은 null이다.
 

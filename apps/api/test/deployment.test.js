@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { inspectArchive } from '../src/archive.js';
 import { createDeploymentService } from '../src/github.js';
 import { createAppServer } from '../src/server.js';
-import { archiveFromPath, deploySource, inferredAppName, insideRoot } from '../src/client.js';
+import { archiveFromPath, deploySource, inferredAppName, insideRoot, redeployRegistered } from '../src/client.js';
 import { fetchPublicGithubSource } from '../src/public-github.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -121,6 +121,34 @@ test('소스가 같아도 커밋 없이 Actions를 다시 실행한다', async (
   assert.deepEqual(calls.filter((call) => call.method !== 'GET').map((call) => call.path.split('/').at(-1)), ['dispatches']);
 });
 
+test('등록된 앱 재실행은 소스를 수정하지 않고 현재 commit으로 Actions만 시작한다', async () => {
+  const calls = [];
+  const fakeFetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    const method = options.method || 'GET';
+    calls.push({ path, method, body: options.body && JSON.parse(options.body) });
+    let data;
+    if (path.endsWith('/git/ref/heads/main')) data = { object: { sha: 'a'.repeat(40) } };
+    else if (path.endsWith('/git/commits/' + 'a'.repeat(40))) data = { tree: { sha: 'base' } };
+    else if (path.endsWith('/git/trees/base')) data = { tree: [{ path: 'apps', type: 'tree', sha: 'apps-tree' }] };
+    else if (path.endsWith('/git/trees/apps-tree')) data = { tree: [{ path: 'demo', type: 'tree', sha: 'tenant-tree' }] };
+    else if (path.endsWith('/git/trees/tenant-tree')) data = { tree: [{ path: 'my-app', type: 'tree', sha: 'app-tree' }] };
+    else if (path.endsWith('/git/trees/app-tree')) data = { tree: [{ path: 'app.js', type: 'blob', sha: 'blob' }] };
+    else if (path.endsWith('/dispatches')) data = { workflow_run_id: 321 };
+    else throw new Error(`Unexpected path: ${path}`);
+    return Response.json(data);
+  };
+  const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fakeFetch);
+  const result = await service.redeploy({ app: 'my-app' });
+  assert.equal(result.run_id, 321);
+  assert.equal(result.source_commit, 'a'.repeat(40));
+  assert.deepEqual(result.changes, { added: 0, updated: 0, deleted: 0, unchanged: 1 });
+  assert.deepEqual(calls.filter((call) => call.method !== 'GET').map((call) => call.path.split('/').at(-1)), ['dispatches']);
+  assert.deepEqual(calls.at(-1).body.inputs, { tenant: 'demo', app: 'my-app', source_commit: 'a'.repeat(40), target_id: 'aws-demo' });
+  await assert.rejects(service.redeploy({ app: 'my-app', target_id: 'other' }), /대상/);
+  await assert.rejects(service.redeploy({ app: 'bad!' }), /앱 이름/);
+});
+
 test('ZIP 경로 이동과 비밀키 파일을 거부한다', async () => {
   await assert.rejects(inspectArchive(await zipOf({ 'app/.env': 'secret' })), /비밀키/);
   const unsafe = await zipOf({ 'aaa/outside': 'bad' });
@@ -168,6 +196,7 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
     source: { type: 'github', repository: url, sha: 'b'.repeat(40) },
   }), service: {
     deploy: async (input) => { observed.push(input); return { run_id: 456, app: input.app, tenant: 'demo' }; },
+    redeploy: async (input) => { observed.push(input); return { run_id: 789, app: input.app, tenant: 'demo' }; },
     status: async (id) => ({ run_id: Number(id), status: 'queued', steps: [] }),
   } });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -217,6 +246,16 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
     const multiple = await fetch(`${base}/api/deploy`, { method: 'POST', headers: { 'x-jasmin-request': 'deploy' }, body: github });
     assert.equal(multiple.status, 400);
     assert.equal(observed.length, 5);
+    const rerun = await redeployRegistered({ app: 'my-app', baseUrl: base });
+    assert.equal(rerun.run_id, 789);
+    assert.deepEqual(observed[5], { app: 'my-app', target_id: undefined, registered: true });
+    const mixed = new FormData();
+    mixed.set('app', 'my-app');
+    mixed.set('source_type', 'registered');
+    mixed.set('repository_url', 'https://github.com/example/sample');
+    const mixedResponse = await fetch(`${base}/api/deploy`, { method: 'POST', headers: { 'x-jasmin-request': 'deploy' }, body: mixed });
+    assert.equal(mixedResponse.status, 400);
+    assert.equal(observed.length, 6);
     const status = await fetch(`${base}/api/runs/456`);
     assert.equal((await status.json()).status, 'queued');
     const blocked = await fetch(`${base}/api/deploy`, { method: 'POST', body: form });
@@ -286,6 +325,22 @@ test('실제 producer artifact ID와 해시를 확인한 경우에만 이미지 
   assert.deepEqual(result.steps.map((step) => step.key), ['loop', 'release']);
   assert.ok(calls.some((url) => url.endsWith('/artifacts/200/zip')));
   assert.ok(calls.every((url) => url.startsWith('https://api.github.com/')));
+});
+
+test('Actions job의 실제 세부 단계를 실행 상태에 함께 전달한다', async () => {
+  const { service } = await publicationService({ jobRows: [
+    { name: 'loop', status: 'completed', conclusion: 'success', steps: [
+      { name: 'Checkout source', status: 'completed', conclusion: 'success' },
+      { name: 'Inspect app', status: 'completed', conclusion: 'success' },
+    ] },
+    { name: 'release', status: 'completed', conclusion: 'success', steps: [
+      { name: 'Publish image', status: 'completed', conclusion: 'success' },
+    ] },
+  ] });
+  const result = await service.status('789');
+  assert.deepEqual(result.steps[0].actions_steps.map((step) => step.name), ['Checkout source', 'Inspect app']);
+  assert.equal(result.steps[1].actions_steps[0].conclusion, 'success');
+  assert.equal(result.state, 'published');
 });
 
 test('private registry 검증과 pull Secret 참조가 있는 v2 인계를 읽는다', async () => {

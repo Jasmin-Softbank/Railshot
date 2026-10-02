@@ -46,6 +46,7 @@ async function uploadedSource(request, sourceLoader) {
   if (target_id !== undefined && typeof target_id !== 'string') throw new ServiceError('대상 ID가 잘못되었습니다.', 400);
   const uploads = form.getAll('files');
   const supplied = [
+    form.get('source_type') === 'registered' && 'registered',
     form.has('repository_url') && 'github',
     uploads.length > 0 && 'folder',
     form.has('archive') && 'zip',
@@ -53,6 +54,7 @@ async function uploadedSource(request, sourceLoader) {
   if (supplied.length !== 1) throw new ServiceError('배포 소스 하나만 입력하세요.', 400);
   const sourceType = supplied[0];
   if (form.has('source_type') && form.get('source_type') !== sourceType) throw new ServiceError('소스 형식과 입력값이 일치하지 않습니다.', 400);
+  if (sourceType === 'registered') return { app, target_id, registered: true };
   if (sourceType === 'github') {
     const repositoryUrl = form.get('repository_url');
     if (typeof repositoryUrl !== 'string') throw new ServiceError('공개 GitHub 저장소 URL이 필요합니다.', 400);
@@ -105,7 +107,8 @@ export function createAppServer({ access = apiAccessConfig(), sourceLoader = fet
         if (request.method === 'POST' && url.pathname === '/api/deploy') {
           // A non-simple header forces a browser CORS preflight for cross-site requests.
           if (request.headers['x-jasmin-request'] !== 'deploy') throw new ServiceError('요청 헤더가 필요합니다.', 403);
-          json(response, 202, await service.deploy(await uploadedSource(request, sourceLoader)));
+          const input = await uploadedSource(request, sourceLoader);
+          json(response, 202, input.registered ? await service.redeploy(input) : await service.deploy(input));
           return;
         }
         const match = request.method === 'GET' && /^\/api\/runs\/(\d+)$/.exec(url.pathname);

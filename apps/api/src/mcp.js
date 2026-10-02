@@ -4,7 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import { APP_NAME, TARGET_ID } from './contract.js';
-import { deploySource, getRun, insideRoot } from './client.js';
+import { deploySource, getRun, insideRoot, redeployRegistered } from './client.js';
 
 const root = process.env.JASMIN_SOURCE_ROOT;
 
@@ -46,6 +46,19 @@ server.registerTool('status', {
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }, async ({ run_id }) => {
   try { return result(await getRun(run_id)); }
+  catch (error) { return failure(error); }
+});
+
+server.registerTool('redeploy_registered', {
+  title: '등록된 앱 다시 실행',
+  description: '이미 등록된 앱 이름으로 소스 변경 없이 CI 검사와 이미지 게시를 다시 시작합니다. 앱 배포 완료를 뜻하지 않습니다.',
+  inputSchema: z.object({
+    app: z.string().regex(APP_NAME).describe('기존 apps 저장소에 등록된 앱 이름'),
+    target_id: z.string().regex(TARGET_ID).optional().describe('API에 설정된 실행 대상 ID. 생략하면 API 설정을 사용'),
+  }),
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+}, async ({ app, target_id }) => {
+  try { return result(await redeployRegistered({ app, targetId: target_id })); }
   catch (error) { return failure(error); }
 });
 

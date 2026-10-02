@@ -52,6 +52,19 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
   }
 
+  async function dispatch(app, sourceCommit, changes, source) {
+    const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
+      method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id: targetId } }),
+    });
+    if (!dispatched.workflow_run_id) {
+      throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
+    }
+    return {
+      run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id: targetId, state: 'queued', changes, ...(source ? { source } : {}),
+      actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
+    };
+  }
+
   async function deploy({ app, files, source, target_id = targetId }) {
     if (typeof app !== 'string' || !APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
     if (target_id !== targetId) throw new ServiceError('이 API에 설정된 배포 대상과 일치하지 않습니다.', 400);
@@ -103,16 +116,19 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
       });
     }
-    const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
-      method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id: targetId } }),
-    });
-    if (!dispatched.workflow_run_id) {
-      throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
-    }
-    return {
-      run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id: targetId, state: 'queued', changes, ...(source ? { source } : {}),
-      actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
-    };
+    return dispatch(app, sourceCommit, changes, source);
+  }
+
+  async function redeploy({ app, target_id = targetId }) {
+    if (typeof app !== 'string' || !APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
+    if (target_id !== targetId) throw new ServiceError('이 API에 설정된 배포 대상과 일치하지 않습니다.', 400);
+    const branch = await request(`${repoPath}/git/ref/heads/${encodeURIComponent(ref)}`);
+    const sourceCommit = branch.object.sha;
+    if (!SOURCE_COMMIT.test(sourceCommit)) throw new ServiceError('소스 commit SHA를 확인하지 못했습니다.', 502);
+    const base = await request(`${repoPath}/git/commits/${sourceCommit}`);
+    const existing = await findAppTree(base.tree.sha, app);
+    if (!existing?.length) throw new ServiceError(`등록된 앱을 찾을 수 없습니다: ${app}`, 404);
+    return dispatch(app, sourceCommit, { added: 0, updated: 0, deleted: 0, unchanged: existing.length });
   }
 
   async function status(runId) {
@@ -136,7 +152,10 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       const job = observed.get(key);
       return { key, status: job?.status || (run.status === 'completed' ? 'completed' : 'queued'),
         conclusion: job?.conclusion || (run.status === 'completed' ? 'skipped' : null),
-        observed_attempt: job?.observed_attempt || null };
+        observed_attempt: job?.observed_attempt || null,
+        actions_steps: (Array.isArray(job?.steps) ? job.steps : []).map((step) => ({
+          name: step.name, status: step.status, conclusion: step.conclusion,
+        })) };
     });
     const completed = run.status === 'completed';
     const conclusion = completed && run.conclusion === 'success' && steps.some((step) => step.conclusion !== 'success')
@@ -174,5 +193,5 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return { ...receipt, artifact_id: artifact.id, artifact_name: name };
   }
 
-  return { deploy, status, targetId };
+  return { deploy, redeploy, status, targetId };
 }

@@ -91,6 +91,15 @@ export async function deployRepository({ app, repositoryUrl, targetId, baseUrl =
   return sendDeploy(form, baseUrl);
 }
 
+export async function redeployRegistered({ app, targetId, baseUrl = defaultUrl }) {
+  if (!APP_NAME.test(app)) throw new Error(APP_NAME_MESSAGE);
+  const form = new FormData();
+  form.set('app', app);
+  form.set('source_type', 'registered');
+  if (targetId) form.set('target_id', targetId);
+  return sendDeploy(form, baseUrl);
+}
+
 export async function deploySource({ source, app = inferredAppName(source), targetId, baseUrl = defaultUrl }) {
   if (/^https?:\/\//i.test(source)) return deployRepository({ app, repositoryUrl: source, targetId, baseUrl });
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(source)) throw new Error('공개 GitHub HTTPS URL 또는 로컬 경로만 사용할 수 있습니다.');
