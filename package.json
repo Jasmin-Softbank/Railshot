@@ -1,0 +1,13 @@
+{
+  "name": "railshot",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "npm run dev --workspace @railshot/dashboard",
+    "dev:api": "node --env-file=.env --watch apps/api/src/server.js",
+    "start:api": "npm run start --workspace @railshot/api",
+    "build": "npm run build --workspace @railshot/dashboard",
+    "preview": "npm run preview --workspace @railshot/dashboard",
+    "test": "npm run test --workspace @railshot/api"
+  }
+}
