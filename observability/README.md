@@ -61,6 +61,13 @@ Node Ready와 Pod 상태는 kube-state-metrics가 관측한 API 객체 상태이
 
 ## 설치
 
+노드만 등록할 때 `register.py` 요청에서 `app`, `namespace`, `probe_url` 세 필드를 모두
+생략합니다. node/cluster scrape와 실제 환경 ID는 유지하며 HTTP job은 앱 probe가 있는 행만
+수집합니다. 샘플 앱을 등록하지 않아도 노드 관측을 켤 수 있습니다.
+GCP의 검증된 public management endpoint가 등록되어 있으면 같은 IP의 metrics NodePort를
+사용합니다. NAT 뒤의 실제 송신 주소가 관측 VM 사설 IP와 다르면 등록 설정에
+`observer_source_cidr`를 실제 송신 IPv4 `/32`로 지정합니다. Prometheus 접속 주소는 바꾸지 않습니다.
+
 `bootstrap.py`와 `register.py`의 운영자 설정은 등록된 관측 VM의 SSH transport를 기본으로
 사용합니다. 실행기와 관측 스택을 기존 control VM에 함께 배치하고 그 사설 주소에 직접
 접속할 때만 `"observer_transport": "direct"`를 명시할 수 있습니다. 이 설정도 등록된
@@ -84,7 +91,7 @@ python3 observability/render.py observability/.local/target.json observability/.
 | `node_ip` | 관측 VM에서 도달 가능한 k3s 노드 IPv4. AWS에서는 사설 IP 권장 |
 | `observer_source_cidr` | 대상에서 보이는 관측 VM의 송신 IPv4 `/32`. NAT/VPN 변환 후 주소 확인 |
 | `node_metrics_port`, `cluster_metrics_port` | 충돌하지 않는 두 NodePort. 기본 30910/30081 |
-| `probe_urls` | 운영자가 승인한 정확한 HTTP(S) health URL 1~10개. 비밀 쿼리·인증정보 금지 |
+| `probe_urls` | 운영자가 승인한 정확한 HTTP(S) health URL 0~10개. 노드만 수집하면 빈 목록. 비밀 쿼리·인증정보 금지 |
 | `argocd_metrics` | 기본 null. 필요할 때 기존 Argo controller 메트릭의 사설/VPN IPv4:port |
 
 1. k3s 노드가 한 대인지, Cilium 등 NetworkPolicy 구현이 동작하는지 확인합니다.
@@ -100,8 +107,10 @@ python3 observability/render.py observability/.local/target.json observability/.
 kubectl --context YOUR_TARGET get nodes
 kubectl --context YOUR_TARGET create namespace railshot-observability --dry-run=client -o yaml | \
   kubectl --context YOUR_TARGET apply -f -
+# 실제 등록에는 아래 List 전체를 일괄 apply하지 않고 register.py의 정책 반영 gate를 사용합니다.
 kubectl --context YOUR_TARGET apply --dry-run=server -f observability/.local/aws-demo/cluster.json
-kubectl --context YOUR_TARGET apply -f observability/.local/aws-demo/cluster.json
+python3 observability/register.py --config /private/observer-registration.json \
+  --request /private/target-observation.json --out /private/observation-receipt.json
 kubectl --context YOUR_TARGET -n railshot-observability rollout status deployment/cluster-metrics --timeout=120s
 kubectl --context YOUR_TARGET -n railshot-observability rollout status daemonset/node-metrics --timeout=120s
 ```
@@ -136,12 +145,17 @@ cat observability/.local/aws-demo/secrets/grafana_password
   Docker 내부에서만 접근합니다. Blackbox는 대상 URL을 받아 요청할 수 있으므로 공개 금지입니다.
 - Exporter NodePort와 native TCP 9100은 SG/호스트 방화벽에서 관측 송신 주소로 제한합니다.
   `observer-only` NetworkPolicy는 cluster-metrics Pod를 보호하지만 hostNetwork node-metrics의
-  접근 제한을 대신하지 않습니다. 9100 접근 범위를 검증하기 전에 exporter를 적용하지 않습니다.
+  접근 제한을 대신하지 않습니다. 별도의 `railshot-observer-host-metrics` Cilium 정책이 모든
+  일반 Pod에서 host/remote-node의 TCP 9100과 노드 metrics NodePort로 나가는 트래픽을 거부합니다.
+  `register.py`는 이 정책의 UID·내용 hash가 Cilium에 반영된 revision을 확인하고
+  `cilium-dbg policy wait`가 성공한 뒤에만 exporter를 적용합니다. Cilium이 준비되지 않았거나
+  정책 반영이 실패하면 exporter와 제품 관측 binding을 갱신하지 않습니다. 이 정책은 다른
+  통신을 허용하지 않으며 hostNetwork 클라이언트나 외부 호스트의 방화벽을 대신하지 않습니다.
   CNI/NAT 처리에 따라 관측 주소가 달라질 수 있습니다. 수집 실패를 해결하기 위해 `/0`을 열지 않습니다.
 - kube-state-metrics는 nodes/pods/deployments의 list/watch만 가능합니다. Secret 읽기와 쓰기 권한은 없습니다.
 - node-exporter는 비특권/non-root이며 hostPID를 사용하지 않습니다. CPU/memory/filesystem/netdev를
   켜고, 노드 네트워크 네임스페이스의 실제 인터페이스를 읽도록 hostNetwork를 사용합니다.
-  9100 listener는 등록된 노드 사설 IP에만 바인딩합니다. Pod 네임스페이스의 트래픽을 노드 값으로
+  9100 listener는 Downward API `status.hostIP`가 제공한 실제 노드 IP에만 바인딩합니다. Pod 네임스페이스의 트래픽을 노드 값으로
   표시하지 않습니다. 호스트 `/proc`, `/sys`, `/`를 읽기 전용 마운트하므로 신뢰된 운영자용 설치입니다.
   Pod Security restricted 정책은 hostPath를 거부할 수 있습니다. 별도 검토 없이 정책을 낮추지 않습니다.
 - 출력 루트와 secrets 디렉터리는 Linux에서 0700입니다. secret 파일은 컨테이너의 비루트 UID가

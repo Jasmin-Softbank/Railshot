@@ -12,8 +12,8 @@ provider는 운영자 매핑이나 저장된 환경 profile에서 읽으며 ID �
 `network_receive_bytes_per_second`, `network_transmit_bytes_per_second`다.
 CPU·메모리는 노드 전체 사용률, 디스크는 루트 `/` 파일시스템의 사용률이다(여러 series면 최대 사용률).
 네트워크는 lo를 제외한 인터페이스의 2분 평균 bytes/s 합계다. 가상 인터페이스도 포함될 수 있어
-외부 회선 트래픽으로 해석하지 않는다. 기존 exporter 기본 설정에는 netdev가 없으므로 해당
-collector가 실제 활성화되어 샘플을 수집하기 전에는 `no_data/null`이다. 정상 0 또는 시계열을 합성하지 않는다.
+외부 회선 트래픽으로 해석하지 않는다. 새 renderer는 노드 네트워크의 netdev를 사용하지만
+정책 반영·exporter 갱신·실제 샘플 수집이 끝나기 전에는 `no_data/null`이다. 정상 0 또는 시계열을 합성하지 않는다.
 노드·Pod·HTTP 질의의 부분 실패는 다른 질의의 현재 값을 지우지 않는다.
 
 `GET /api/v1/deployments/{id}`는 영속 배포 기록과 `observation`을 함께 반환한다.
@@ -31,8 +31,13 @@ collector가 실제 활성화되어 샘플을 수집하기 전에는 `no_data/nu
 운영자가 [product.example.json](../../observability/product.example.json)의 형식으로
 소유자 전용 0600 파일을 만들고 API에 `RAILSHOT_OBSERVER_CONFIG` 절대 경로를 지정한다.
 파일은 요청마다 다시 읽으므로 새 target/app 등록은 원자적 파일 교체로 반영할 수 있다.
-각 행은 정확한 target/app, 앱 namespace, node/cluster scrape instance, Blackbox의
-정확한 probe URL을 묶는다. 미등록 앱의 요청은 외부 질의를 하지 않는다.
+앱 관측 행은 정확한 target/app, 앱 namespace, node/cluster scrape instance, Blackbox의
+정확한 probe URL을 묶는다. 노드만 관측하는 행에는 `target_id`, `prometheus_url`,
+`node_instance`만 필요하다. 이 행은 app/namespace/probe_url을 생략하며 cluster_instance는
+선택 사항이다. 샘플 앱을 만들거나 삭제한 앱의 probe를 되살릴 필요가 없다.
+정확한 앱 행이 있으면 우선 사용하고, 없으면 명시적으로 등록된 노드 행으로 노드만 조회한다.
+이때 Pod·HTTP는 unsupported/null이며 다른 앱의 행을 대신 사용하지 않는다.
+노드 행도 없는 미등록 앱의 요청은 외부 질의를 하지 않는다.
 
 Prometheus 접근은 관리망에서 API 노드에만 허용한다. 기본 Compose의 loopback 바인딩을
 그대로 사용하면 별도의 인증된 터널이 필요하다. 직접 사설 bind를 선택하면 SG/방화벽을

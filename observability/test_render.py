@@ -33,9 +33,14 @@ class ConfigurationTests(unittest.TestCase):
                 validate({**self.config, 'probe_urls': [url]})
 
     def test_probe_list_bounds(self):
-        for urls in [[], ['https://example.com'] * 2, ['https://example.com/' + str(i) for i in range(11)]]:
+        for urls in [['https://example.com'] * 2, ['https://example.com/' + str(i) for i in range(11)]]:
             with self.assertRaises(ValueError):
                 validate({**self.config, 'probe_urls': urls})
+
+    def test_node_only_has_no_http_probe_job(self):
+        config = {**self.config, 'probe_urls': []}
+        validate(config)
+        self.assertEqual([job['job_name'] for job in prometheus(config)['scrape_configs']], ['node', 'cluster'])
 
     def test_argo_optional_private_only(self):
         self.assertEqual(len(prometheus(self.config)['scrape_configs']), 3)
@@ -72,6 +77,17 @@ class ConfigurationTests(unittest.TestCase):
         self.assertIn('--metric-labels-allowlist=pods=[app.kubernetes.io/name,railshot.io/target]', args)
         self.assertIn('kube_pod_labels', next(a for a in args if a.startswith('--metric-allowlist=')))
 
+    def test_host_metrics_deny_precedes_exporter_without_allowing_other_traffic(self):
+        objects = cluster(self.config)['items']
+        policy = objects[0]
+        self.assertEqual(policy['kind'], 'CiliumClusterwideNetworkPolicy')
+        spec = policy['spec']
+        self.assertEqual(set(spec), {'endpointSelector', 'enableDefaultDeny', 'egressDeny', 'labels'})
+        self.assertEqual(spec['endpointSelector'], {})
+        self.assertEqual(spec['enableDefaultDeny'], {'ingress': False, 'egress': False})
+        self.assertEqual(spec['egressDeny'], [{'toEntities': ['host', 'remote-node'], 'toPorts': [{'ports': [
+            {'port': '9100', 'protocol': 'TCP'}, {'port': str(self.config['node_metrics_port']), 'protocol': 'TCP'}]}]}])
+
     def test_exporter_security(self):
         for obj in cluster(self.config)['items']:
             if obj['kind'] not in ('Deployment', 'DaemonSet'):
@@ -82,7 +98,8 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(pod['dnsPolicy'], 'ClusterFirstWithHostNet')
                 args = pod['containers'][0]['args']
                 self.assertIn('--collector.netdev', args)
-                self.assertIn(f"--web.listen-address={self.config['node_ip']}:9100", args)
+                self.assertIn('--web.listen-address=$(HOST_IP):9100', args)
+                self.assertEqual(pod['containers'][0]['env'][0]['valueFrom']['fieldRef']['fieldPath'], 'status.hostIP')
             self.assertFalse(pod.get('hostPID', False))
             for container in pod['containers']:
                 self.assertFalse(container['securityContext']['allowPrivilegeEscalation'])

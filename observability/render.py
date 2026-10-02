@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render one observer VM and one single-node cluster. No network or apply calls."""
 import argparse
+import hashlib
 import ipaddress
 import json
 from pathlib import Path
@@ -38,8 +39,8 @@ def validate(config):
     if any(type(p) is not int or not 30000 <= p <= 32767 for p in ports) or len(set(ports)) != 2:
         raise ValueError('Use two different NodePorts in 30000..32767')
     urls = config['probe_urls']
-    if not isinstance(urls, list) or not 1 <= len(urls) <= 10 or len(set(urls)) != len(urls):
-        raise ValueError('Provide 1..10 unique operator-approved HTTP probe URLs')
+    if not isinstance(urls, list) or not 0 <= len(urls) <= 10 or len(set(urls)) != len(urls):
+        raise ValueError('Provide 0..10 unique operator-approved HTTP probe URLs')
     for value in urls:
         parsed = urlsplit(value)
         if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username
@@ -69,6 +70,8 @@ def prometheus(config):
              {'source_labels': ['__param_target'], 'target_label': 'instance'},
              {'target_label': '__address__', 'replacement': 'blackbox:9115'}]},
     ]
+    if not config['probe_urls']:
+        jobs = [job for job in jobs if job['job_name'] != 'http']
     if config['argocd_metrics']:
         jobs.append({'job_name': 'argocd', 'static_configs': [{'targets': [config['argocd_metrics']]}],
                      'metric_relabel_configs': [{'source_labels': ['__name__'], 'regex': 'argocd_app_info', 'action': 'keep'}]})
@@ -85,6 +88,16 @@ def obj(kind, name, spec=None, api='v1', namespaced=True, **extra):
     return value
 
 
+def network_policy(config):
+    spec = {'endpointSelector': {}, 'enableDefaultDeny': {'ingress': False, 'egress': False},
+            'egressDeny': [{'toEntities': ['host', 'remote-node'], 'toPorts': [{'ports': [
+                {'port': str(port), 'protocol': 'TCP'} for port in (9100, config['node_metrics_port'])]}]}]}
+    binding = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+    spec['labels'] = [{'key': 'railshot.io/observer-policy-sha256', 'value': binding, 'source': 'unspec'}]
+    return obj('CiliumClusterwideNetworkPolicy', 'railshot-observer-host-metrics', spec,
+               api='cilium.io/v2', namespaced=False)
+
+
 def cluster(config):
     security = {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                 'runAsNonRoot': True, 'runAsUser': 65534,
@@ -96,16 +109,17 @@ def cluster(config):
            'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
            'readinessProbe': {'httpGet': {'path': '/readyz', 'port': 8081}, 'periodSeconds': 10}}
     node = {'name': 'metrics', 'image': 'quay.io/prometheus/node-exporter:v1.12.1',
-            'args': [f"--web.listen-address={config['node_ip']}:9100",
+            'args': ['--web.listen-address=$(HOST_IP):9100',
                      '--path.procfs=/host/proc', '--path.sysfs=/host/sys', '--path.rootfs=/host/root',
                      '--collector.disable-defaults', '--collector.cpu', '--collector.meminfo', '--collector.filesystem', '--collector.netdev',
                      '--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/(docker|containerd|kubelet|rancher))($|/)'],
+            'env': [{'name': 'HOST_IP', 'valueFrom': {'fieldRef': {'fieldPath': 'status.hostIP'}}}],
             'ports': [{'containerPort': 9100}], 'securityContext': security,
             'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
             'readinessProbe': {'httpGet': {'path': '/', 'port': 9100}, 'periodSeconds': 10},
             'volumeMounts': [{'name': n, 'mountPath': p, 'readOnly': True, 'mountPropagation': 'HostToContainer'}
                              for n, p in [('proc', '/host/proc'), ('sys', '/host/sys'), ('root', '/host/root')]]}
-    items = [obj('Namespace', NAMESPACE, namespaced=False),
+    items = [network_policy(config), obj('Namespace', NAMESPACE, namespaced=False),
              obj('ServiceAccount', 'cluster-metrics'),
              obj('ClusterRole', 'railshot-observer', api='rbac.authorization.k8s.io/v1', namespaced=False,
                  rules=[{'apiGroups': [''], 'resources': ['nodes', 'pods'], 'verbs': ['list', 'watch']},
