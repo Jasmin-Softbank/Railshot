@@ -40,14 +40,16 @@ def check_host(role, root=Path('/')):
 
 
 def check_cni(root=Path('/')):
-    # Matches install.sh's explicit confPath. /etc/cni/net.d may belong to Podman.
-    for path in (root / 'var/lib/rancher/k3s/agent/etc/cni/net.d').glob('*'):
-        if path.suffix not in ('.conf', '.conflist', '.json'):
-            continue
-        cni = json.loads(path.read_text())
-        plugins = cni.get('plugins', [cni])
-        if cni.get('name') != 'cilium' or not plugins or any(p.get('type') != 'cilium-cni' for p in plugins):
-            raise ValueError(f'existing non-Cilium CNI: {path.name}; use the migration runbook')
+    # With Flannel disabled, K3s uses containerd's /etc/cni/net.d default.
+    # Also reject remnants in the former Flannel directory before migration.
+    for directory in ('etc/cni/net.d', 'var/lib/rancher/k3s/agent/etc/cni/net.d'):
+        for path in (root / directory).glob('*'):
+            if path.suffix not in ('.conf', '.conflist', '.json'):
+                continue
+            cni = json.loads(path.read_text())
+            plugins = cni.get('plugins', [cni])
+            if cni.get('name') != 'cilium' or not plugins or any(p.get('type') != 'cilium-cni' for p in plugins):
+                raise ValueError(f'existing non-Cilium CNI: {path.name}; use the migration runbook')
     for interface in ('flannel.1', 'cni0'):
         if (root / 'sys/class/net' / interface).exists():
             raise ValueError(f'existing {interface}; use the migration runbook')

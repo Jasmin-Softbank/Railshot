@@ -9,6 +9,8 @@ on:
       - 'deployment/bootstrap/preflight.sh'
       - 'deployment/scripts/common.sh'
       - 'deployment/airgap/versions.json'
+      - 'ci/scripts/prepare-cni-smoke.sh'
+      - 'ci/scripts/test_prepare_cni_smoke.py'
   workflow_dispatch:
 
 permissions:
@@ -34,6 +36,8 @@ jobs:
           test ! -e /etc/rancher/k3s
           test ! -e /var/lib/rancher/k3s
           test ! -e /usr/local/bin/k3s
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" bash ci/scripts/prepare-cni-smoke.sh prepare
           sudo touch /run/railshot-control-ci
           sudo swapoff -a
       - name: Install control Cilium and Argo, then repeat
@@ -58,3 +62,8 @@ jobs:
           fi
           test ! -e /usr/local/bin/k3s
           test ! -e /var/lib/rancher/k3s
+      - name: Restore preserved hosted-runner Podman config after teardown
+        if: always()
+        run: |
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" bash ci/scripts/prepare-cni-smoke.sh restore

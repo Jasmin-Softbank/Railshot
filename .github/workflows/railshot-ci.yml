@@ -183,6 +183,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Preserve unused hosted-runner Podman CNI config
+        run: |
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" bash ci/scripts/prepare-cni-smoke.sh prepare
       - name: Install, deploy and verify on this disposable runner
         id: runtime
         run: |
@@ -199,6 +203,11 @@ jobs:
             GITHUB_JOB="$GITHUB_JOB" GITHUB_SHA="$GITHUB_SHA" \
             GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_TEMP="$RUNNER_TEMP" \
             python3 ci/scripts/integration_e2e.py cleanup --output-dir "$RUNNER_TEMP/railshot-runtime-e2e"
+      - name: Restore preserved hosted-runner Podman config after teardown
+        if: always()
+        run: |
+          sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_TEMP="$RUNNER_TEMP" bash ci/scripts/prepare-cni-smoke.sh restore
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

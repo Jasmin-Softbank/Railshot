@@ -30,12 +30,16 @@ class ControlCiliumTests(unittest.TestCase):
             podman = root / 'etc/cni/net.d/87-podman-bridge.conflist'
             podman.parent.mkdir(parents=True)
             podman.write_text('{"name":"podman", "plugins":[{"type":"bridge"}]}')
+            with self.assertRaisesRegex(ValueError, 'non-Cilium'):
+                guard.check_host('control', root)
+            podman.unlink()
             self.assertEqual(guard.check_host('control', root), ('10.52.0.0/16', '10.53.0.0/16'))
             with self.assertRaisesRegex(ValueError, 'role differs'):
                 guard.check_host('customer', root)
             for bad in (CONFIG.replace('flannel-backend: none\n', ''),
                         CONFIG.replace('10.52.', '10.42.'), CONFIG + 'cluster-cidr: 10.42.0.0/16\n',
-                        CONFIG + 'disable-kube-proxy: true\n'):
+                        CONFIG + 'disable-kube-proxy: true\n', CONFIG + '"cluster-cidr": 10.42.0.0/16\n',
+                        CONFIG + '<<: *alternate\n'):
                 self.host(root, bad)
                 with self.assertRaises(ValueError):
                     guard.check_host('control', root)
@@ -70,6 +74,9 @@ class ControlCiliumTests(unittest.TestCase):
         with patch.object(guard, 'kube', side_effect=[{'items': []}]):
             with self.assertRaisesRegex(ValueError, 'registration/PodCIDR'):
                 guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', wait_seconds=0)
+        with patch.object(guard, 'kube', side_effect=[{'items': nodes['items'] * 2}]):
+            with self.assertRaisesRegex(ValueError, 'exactly one'):
+                guard.check_cluster('10.52.0.0/16', '10.53.0.0/16')
         with patch.object(guard, 'kube', side_effect=[{'items': []}, {'items': [{'spec': {}}]}, nodes, service, None, None]), patch.object(guard.time, 'sleep') as sleep:
             guard.check_cluster('10.52.0.0/16', '10.53.0.0/16')
             self.assertEqual(sleep.call_count, 2)
@@ -79,6 +86,11 @@ class ControlCiliumTests(unittest.TestCase):
         config['data']['cluster-pool-ipv4-cidr'] = '10.42.0.0/16'
         with patch.object(guard, 'kube', side_effect=[nodes, service, config]):
             with self.assertRaisesRegex(ValueError, 'implicit migration'):
+                guard.check_cluster('10.52.0.0/16', '10.53.0.0/16')
+        config['data']['cluster-pool-ipv4-cidr'] = '10.52.0.0/16'
+        daemon['spec']['template']['spec']['containers'][0]['image'] = 'quay.io/cilium/cilium:other'
+        with patch.object(guard, 'kube', side_effect=[nodes, service, config, daemon]):
+            with self.assertRaisesRegex(ValueError, 'explicit upgrade'):
                 guard.check_cluster('10.52.0.0/16', '10.53.0.0/16')
         with patch.object(guard, 'kube', side_effect=subprocess.CalledProcessError(1, ['kubectl'])):
             with self.assertRaises(subprocess.CalledProcessError):

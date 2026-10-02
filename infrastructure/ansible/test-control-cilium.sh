@@ -15,6 +15,8 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/../../deployment/scripts/common.sh"
 for tool in python3 curl flock; do command -v "$tool" >/dev/null || die "Missing $tool"; done
 exec 9>/run/railshot-control.lock
 flock -n 9 || die 'Control installation or another regression is running'
+exec 8>/run/railshot-deployment.lock
+flock -n 8 || die 'Another runtime operation is running'
 [[ $(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}') == https://127.0.0.1:6443 ]] || die 'Expected local K3s API'
 
 # Check the observed cluster, not only the installation configuration.

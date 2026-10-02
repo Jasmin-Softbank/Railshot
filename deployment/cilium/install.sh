@@ -20,8 +20,6 @@ if [[ ! -x $CILIUM ]] || [[ $("$CILIUM" version --client | awk '/cilium-cli:/ {p
   install -m 755 "$TEMP_DIR/cilium" "$CILIUM"
 fi
 options=(--version "$CILIUM_VERSION" --namespace kube-system
-  --set cni.confPath=/var/lib/rancher/k3s/agent/etc/cni/net.d
-  --set cni.binPath=/var/lib/rancher/k3s/data/cni
   --set kubeProxyReplacement=false
   --set ipam.mode=cluster-pool
   --set "ipam.operator.clusterPoolIPv4PodCIDRList=$pod_cidr"
