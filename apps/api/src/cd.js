@@ -23,8 +23,7 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
   const configBytes = readFileSync(configPath);
   const configDigest = createHash('sha256').update(configBytes).digest('hex');
   const config = JSON.parse(configBytes.toString('utf8'));
-  if (config.version !== 1 || !config.targets || Array.isArray(config.targets) || typeof config.targets !== 'object' ||
-      !Object.keys(config.targets).length) {
+  if (config.version !== 1 || !config.targets || Array.isArray(config.targets) || typeof config.targets !== 'object') {
     throw new Error('CD configuration requires registered targets.');
   }
   const targets = Object.fromEntries(Object.entries(config.targets).map(([id, registered]) => {
