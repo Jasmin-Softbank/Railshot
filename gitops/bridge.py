@@ -209,10 +209,6 @@ def execute(config, request):
                                 workload_file.stat().st_size < 2_000_000, 'regular owned workload required')
                 prior = json.loads(workload_file.read_bytes())
                 argo.validate_workload(prior, registered['app'], target['namespace'], target['id'])
-                prior_jobs = [item['metadata']['name'] for item in prior['items'] if item['kind'] == 'Job']
-                next_jobs = [item['metadata']['name'] for item in rendered['workload']['items'] if item['kind'] == 'Job']
-                handoff.require(not prior_jobs or prior_jobs == next_jobs,
-                                'changed migration requires explicit owned-Job cleanup; automatic prune is disabled')
                 prior_deployment = next(item for item in prior['items'] if item['kind'] == 'Deployment')
                 handoff.require(prior_deployment['spec']['template']['metadata']['labels'].get('railshot.io/target') == target['id'],
                                 'existing Git workload target differs')

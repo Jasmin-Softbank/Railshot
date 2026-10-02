@@ -36,7 +36,11 @@ Public registry는 `anonymous_manifest_read`와 null Secret 참조, private regi
 
 배포 순서는 일반 Argo Sync wave의 NetworkPolicy `-2` → migration Job `-1` → Deployment `0`입니다. 사전 namespace 기본 차단 정책과 함께 사용하며 DB IP `/32`의 TCP 5432만 나갈 수 있습니다. 연결은 숫자 IP를 사용하므로 DNS 허용이 필요하지 않습니다. migration은 동일한 검증 이미지·보안 제한·CA를 사용하고, `backoffLimit: 0`, `restartPolicy: Never`, 300초 제한으로 실행합니다. Job이 실패하면 다음 wave로 진행하지 않습니다. Argo의 현재 revision 완료와 정확한 Job sync 결과가 있어야 `deployed: true`, `migration.state: succeeded`가 됩니다. 실제 SQL 응답·권한·TLS 연결 성공은 환경 E2E에서 별도로 확인합니다.
 
-Job 이름은 이미지·명령·DB 참조의 해시에 고정되며 완료된 Job을 보존합니다. 같은 배포 ID 재호출은 기존 bridge의 읽기 전용 관측만 수행하므로 migration을 다시 시작하지 않습니다. **다른 migration으로 갱신할 때는 이전 소유 Job과 Git 선언을 운영자가 정리해야 하며, bridge가 자동 prune 없이 진행을 차단합니다.** 일반 앱 갱신·롤백에서 DB migration을 임의 재실행하거나 DB를 삭제하지 않습니다. AppProject와 namespace Role에는 DB migration이 있는 경우에만 `batch/Job`을 추가합니다.
+Job 이름은 이미지·명령·DB 참조의 해시에 고정되며 완료된 Job을 보존합니다. 같은 배포 ID 재호출은 기존 bridge의 읽기 전용 관측만 수행하므로 migration을 다시 시작하지 않습니다. 이미지나 migration 명령이 바뀌면 새 이름의 Job을 먼저 실행하고 다음 wave에서 앱을 갱신합니다. 이전 Job은 삭제·재생성하지 않으며 `argocd.argoproj.io/compare-options: IgnoreExtraneous`로 전체 sync 상태에서만 제외합니다. [Argo compare option](https://argo-cd.readthedocs.io/en/stable/user-guide/compare-options/)은 health를 제외하지 않으므로 실패한 이전 Job은 성공 판정을 계속 차단합니다. 현재 revision의 정확한 Job 성공과 Deployment 이미지 digest를 별도로 확인하며, 다른 namespace·앱·종류이거나 Argo가 해당 Application 소유로 확인하지 않은 추가 리소스도 차단합니다.
+
+보존 Job은 운영자가 정리할 때까지 남습니다. 현재 API의 기본 100-operation 보관 한도가 전체 요청 수를 제한하며, 자동 prune·force·Job 삭제·DB 삭제는 수행하지 않습니다. 완료 Job이 남아 있는 동안 같은 이미지·명령·DB 참조로 롤백해도 그 migration은 재실행되지 않으므로 앱의 migration은 멱등적이고 롤백 호환성을 유지해야 합니다. AppProject와 namespace Role에는 DB migration이 있는 경우에만 `batch/Job`을 추가합니다.
+
+이전 Job의 완료는 해당 resource의 `health.status: Healthy`로 확인합니다. 현재 고정한 Argo CD 3.5.3 설치 선언은 `argocd-cmd-params-cm`의 `controller.resource.health.persist: "true"`를 설정합니다. [Argo 3.0 이후 기본값](https://argo-cd.readthedocs.io/en/stable/operator-manual/upgrading/2.14-3.0/#health-status-in-the-application-cr)은 resource health를 Application CR 밖에 저장하므로, 기존 Argo를 재사용할 때에도 owner가 같은 설정과 controller rollout·readback을 확인해야 합니다. 이전 Job의 health가 없거나 Progressing/Degraded이면 재배포 성공을 표시하지 않습니다. 전체 Application health 검사와 현재 revision의 정확한 Job·Deployment 검사도 유지합니다.
 
 ## Argo 연결과 실행
 

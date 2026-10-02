@@ -20,18 +20,18 @@ class ArgoTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.prepare()
 
-    def prepare(self, database=False):
+    def prepare(self, database=False, image_digest='c' * 64, migration_command=None):
         published = self.root / 'published'; published.mkdir(exist_ok=True)
         spec = {'apiVersion': 'jasmin/v0', 'app': 'demo', 'services': [
             {'name': 'web', 'build': {'dockerfile': 'Dockerfile'}, 'port': 8080, 'route': '/health', 'health': '/health'}]}
         if database:
             spec['resources'] = {'postgres': {'size': 'small'}}
-            spec['services'][0].update(migrate={'command': ['python', 'migrate.py']}, secrets=['DATABASE_URL'])
+            spec['services'][0].update(migrate={'command': migration_command or ['python', 'migrate.py']}, secrets=['DATABASE_URL'])
         verdict = {'release_eligible': True, 'ok': True, 'status': 'PASS', 'source_sha256': 'a' * 64,
                    'layers': [{'layer': layer, 'ok': True} for layer in GATE_ORDER],
                    'images': {'web': 'local/web:test'}, 'image_ids': {'web': 'sha256:' + 'b' * 64}}
         values = {'jasmin.yaml': spec, 'verdict.json': verdict,
-                  'images.json': {'web': 'ghcr.io/example/web@sha256:' + 'c' * 64}}
+                  'images.json': {'web': 'ghcr.io/example/web@sha256:' + image_digest}}
         data = {k: json.dumps(v).encode() for k, v in values.items()}
         manifest = {'version': 1, 'trust': handoff.TRUST, 'source_sha256': verdict['source_sha256'],
                     'images': {'web': {'id': verdict['image_ids']['web'], 'local_ref': 'local/web:test'}},
@@ -75,8 +75,10 @@ class ArgoTest(unittest.TestCase):
                                         'namespace': spec['destination']['namespace'], 'status': 'Synced',
                                         **({'health': {'status': 'Healthy'}} if item['kind'] in ('Deployment', 'Job') else {})}
                                        for item in review['workload']['items']],
-                         'summary': {'images': ['ghcr.io/example/web@sha256:' + 'c' * 64]}}
+                         'summary': {'images': [item['spec']['template']['spec']['containers'][0]['image']
+                                                for item in review['workload']['items'] if item['kind'] == 'Deployment']}}
         app['status']['operationState']['syncResult']['resources'] = copy.deepcopy(app['status']['resources'])
+        app['status']['operationState']['syncResult']['resources'][0]['images'] = app['status']['summary']['images'][:]
         return app
 
     def test_database_rollout_orders_policy_migration_and_runtime_without_credentials(self):
@@ -88,6 +90,7 @@ class ArgoTest(unittest.TestCase):
         self.assertEqual(items['NetworkPolicy']['spec']['egress'], [{'to': [{'ipBlock': {'cidr': '10.20.0.10/32'}}],
                                                                   'ports': [{'protocol': 'TCP', 'port': 5432}]}])
         self.assertEqual(items['Job']['metadata']['annotations']['argocd.argoproj.io/sync-wave'], '-1')
+        self.assertEqual(items['Job']['metadata']['annotations']['argocd.argoproj.io/compare-options'], 'IgnoreExtraneous')
         migration = items['Job']['spec']['template']['spec']['containers'][0]
         runtime = items['Deployment']['spec']['template']['spec']['containers'][0]
         self.assertEqual(migration['image'], runtime['image'])
@@ -112,15 +115,49 @@ class ArgoTest(unittest.TestCase):
             elif field == 'old_job': bad['status']['operationState']['syncResult']['resources'][-1]['name'] += '-old'
             else: bad['status']['operationState']['phase'] = 'Running'
             with self.subTest(field=field): self.assertFalse(argo.observe(review, bad)['deployed'])
-        for field in ('retry', 'image', 'secret', 'privileged'):
+        for field in ('retry', 'image', 'secret', 'privileged', 'missing_compare', 'hook', 'ignore_health'):
             bad = copy.deepcopy(review)
             job = bad['workload']['items'][-1]
             if field == 'retry': job['spec']['backoffLimit'] = 1
             elif field == 'image': job['spec']['template']['spec']['containers'][0]['image'] = 'unreviewed:latest'
             elif field == 'secret': job['spec']['template']['spec']['containers'][0]['env'][-1]['valueFrom']['secretKeyRef']['name'] = db['runtime_secret']
-            else: job['spec']['template']['spec']['containers'][0]['securityContext']['privileged'] = True
+            elif field == 'privileged': job['spec']['template']['spec']['containers'][0]['securityContext']['privileged'] = True
+            elif field == 'missing_compare': job['metadata']['annotations'].pop('argocd.argoproj.io/compare-options')
+            elif field == 'hook': job['metadata']['annotations']['argocd.argoproj.io/hook'] = 'PreSync'
+            else: job['metadata']['annotations']['argocd.argoproj.io/ignore-healthcheck'] = 'true'
             self.save_review(bad, self.directory)
             with self.subTest(field=field), self.assertRaises(ValueError): argo.load_review(self.directory)
+
+    def test_retained_migrations_require_owned_completed_jobs_and_current_deployment_images(self):
+        self.prepare(database=True)
+        live = self.healthy()
+        old = {'group': 'batch', 'kind': 'Job', 'namespace': 'tenant-demo', 'name': 'demo-migrate-0123456789ab',
+               'requiresPruning': True, 'status': 'OutOfSync', 'health': {'status': 'Healthy'}}
+        live['status']['resources'].append(old)
+        live['status']['summary']['images'].append('ghcr.io/example/old@sha256:' + 'a' * 64)
+        self.assertTrue(argo.observe(self.review, live)['deployed'])
+        for field in ('group', 'kind', 'namespace', 'name', 'ownership', 'hook', 'health_missing', 'health_running',
+                      'health_failed', 'duplicate', 'current_job', 'images_missing', 'images_old', 'deployment_missing',
+                      'deployment_duplicate', 'conflicting_deployment', 'conflicting_job', 'aggregate_health', 'aggregate_sync'):
+            bad = copy.deepcopy(live); retired = bad['status']['resources'][-1]
+            synced = bad['status']['operationState']['syncResult']['resources']
+            if field in ('group', 'kind', 'namespace', 'name'): retired[field] = 'foreign'
+            elif field == 'ownership': retired['requiresPruning'] = False
+            elif field == 'hook': retired['hook'] = True
+            elif field == 'health_missing': retired.pop('health')
+            elif field == 'health_running': retired['health']['status'] = 'Progressing'
+            elif field == 'health_failed': retired['health']['status'] = 'Degraded'
+            elif field == 'duplicate': bad['status']['resources'].append(copy.deepcopy(retired))
+            elif field == 'current_job': synced[-1]['name'] = retired['name']
+            elif field == 'images_missing': synced[0].pop('images')
+            elif field == 'images_old': synced[0]['images'] = [bad['status']['summary']['images'][-1]]
+            elif field == 'deployment_missing': synced.pop(0)
+            elif field == 'deployment_duplicate': synced.append(copy.deepcopy(synced[0]))
+            elif field == 'conflicting_deployment': synced.append({**synced[0], 'status': 'SyncFailed'})
+            elif field == 'conflicting_job': synced.append({**synced[-1], 'status': 'SyncFailed'})
+            elif field == 'aggregate_health': bad['status']['health']['status'] = 'Degraded'
+            else: bad['status']['sync']['status'] = 'OutOfSync'
+            with self.subTest(field=field): self.assertFalse(argo.observe(self.review, bad)['deployed'])
 
     def test_actual_rendered_review_hash_and_project_contract(self):
         loaded = argo.load_review(self.directory)

@@ -11,7 +11,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from handoff import database_binding, document_hash, http_path, require, secret_env
+from handoff import MIGRATION_ANNOTATIONS, database_binding, document_hash, http_path, require, secret_env
 
 KINDS = [{'group': 'apps', 'kind': 'Deployment'}, {'group': '', 'kind': 'Service'},
          {'group': 'networking.k8s.io', 'kind': 'NetworkPolicy'}]
@@ -42,7 +42,7 @@ def validate_workload(work, name, namespace, target_id):
         if item['kind'] == 'Job':
             item_name = item['metadata']['name']
             require(re.fullmatch(re.escape(name) + r'-migrate-[a-f0-9]{12}', item_name), 'bound migration identity required')
-            annotations = {'annotations': {'argocd.argoproj.io/sync-wave': '-1'}}
+            annotations = {'annotations': MIGRATION_ANNOTATIONS}
             spec = item['spec']; migration = spec['template']['spec']
             require(item['apiVersion'] == 'batch/v1' and set(spec) == {'backoffLimit', 'activeDeadlineSeconds', 'template'} and
                     spec['backoffLimit'] == 0 and spec['activeDeadlineSeconds'] == 300 and
@@ -224,27 +224,39 @@ def observe(review, live):
     expected_resources = {(item['apiVersion'].split('/')[0] if '/' in item['apiVersion'] else '', item['kind'],
                            item['metadata']['namespace'], item['metadata']['name']) for item in review['workload']['items']}
     resources = status.get('resources', [])
-    resource_keys = {(row.get('group', ''), row.get('kind'), row.get('namespace'), row.get('name')) for row in resources}
+    def resource_key(row):
+        return (row.get('group', ''), row.get('kind'), row.get('namespace'), row.get('name'))
+    current = [row for row in resources if resource_key(row) in expected_resources]
+    retained = [row for row in resources if resource_key(row) not in expected_resources]
+    # Argo sets requiresPruning only for live objects tracked by this Application.
+    # IgnoreExtraneous leaves these old Jobs OutOfSync individually, but preserves their health.
+    retained_ok = all(resource_key(row)[:3] == ('batch', 'Job', app['spec']['destination']['namespace']) and
+                      re.fullmatch(re.escape(receipt['app']) + r'-migrate-[a-f0-9]{12}', row.get('name', '')) and
+                      row.get('requiresPruning') is True and not row.get('hook') and
+                      row.get('status') == 'OutOfSync' and row.get('health', {}).get('status') == 'Healthy'
+                      for row in retained)
     # Argo 3 defaults to aggregate Application health; per-resource health may be absent.
-    resources_ok = (resource_keys == expected_resources and len(resources) == len(expected_resources) and all(
-        row.get('status') == 'Synced' and (not row.get('health') or row['health'].get('status') == 'Healthy')
-        for row in resources))
+    resources_ok = (retained_ok and {resource_key(row) for row in current} == expected_resources and
+                    len({resource_key(row) for row in resources}) == len(resources) and
+                    all(row.get('status') == 'Synced' and not row.get('requiresPruning') for row in current) and
+                    all(not row.get('health') or row['health'].get('status') == 'Healthy' for row in resources))
     deployment = next(item for item in review['workload']['items'] if item['kind'] == 'Deployment')
     images = {c['image'] for c in deployment['spec']['template']['spec']['containers']}
     sync_result = operation.get('syncResult', {})
     job = next((item for item in review['workload']['items'] if item['kind'] == 'Job'), None)
     # A successful ordered sync must contain this exact Job, not a previous migration.
-    migration_ok = not job or len([row for row in sync_result.get('resources', []) if
-        (row.get('group'), row.get('kind'), row.get('namespace'), row.get('name'), row.get('status')) ==
-        ('batch', 'Job', job['metadata']['namespace'], job['metadata']['name'], 'Synced')]) == 1
+    migration_results = [row for row in sync_result.get('resources', []) if job and
+        resource_key(row) == ('batch', 'Job', job['metadata']['namespace'], job['metadata']['name'])]
+    migration_ok = not job or len(migration_results) == 1 and migration_results[0].get('status') == 'Synced'
     summary = status.get('summary', {})
     observed_images = summary.get('images', [])
-    # Argo 3 may omit summary; bind its sync-result images to this exact Deployment.
-    if 'images' not in summary and sync_result.get('revision') == revision:
+    # A summary can include retained migration images. Bind the current Deployment instead.
+    # ResourceResult.images is part of Argo's syncResult API; absent evidence stays unverified.
+    if retained or 'images' not in summary:
+        observed_images = []
         matches = [row for row in sync_result.get('resources', [])
-                   if (row.get('group'), row.get('kind'), row.get('namespace'), row.get('name')) ==
-                   ('apps', 'Deployment', deployment['metadata']['namespace'], deployment['metadata']['name'])]
-        if len(matches) == 1:
+                   if resource_key(row) == ('apps', 'Deployment', deployment['metadata']['namespace'], deployment['metadata']['name'])]
+        if sync_result.get('revision') == revision and len(matches) == 1 and matches[0].get('status') == 'Synced':
             observed_images = matches[0].get('images', [])
     errors = any(c.get('type', '').endswith('Error') for c in status.get('conditions', []))
     complete = (not live.get('operation') and not errors and binding and resources_ok and migration_ok and

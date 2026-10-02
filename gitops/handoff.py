@@ -23,6 +23,8 @@ from jsonschema import ValidationError
 
 FILES = ('images.json', 'jasmin.yaml', 'verdict.json', 'manifest.json')
 CA_PATH = '/etc/railshot/db/ca.crt'
+MIGRATION_ANNOTATIONS = {'argocd.argoproj.io/sync-wave': '-1',
+                         'argocd.argoproj.io/compare-options': 'IgnoreExtraneous'}
 
 
 def database_binding(value):
@@ -178,7 +180,7 @@ def render(directory, target):
                                     'ports': [{'protocol': 'TCP', 'port': 5432}]}]
         if svc.get('migrate'):
             # A retained normal Job runs once for this immutable image/command/binding.
-            # ponytail: changed migrations need owned-Job cleanup before another rollout; no broad pruning.
+            # Retained older Jobs do not require pruning; their health still gates the Application.
             identity = document_hash({'image': images[svc['name']], 'command': svc['migrate']['command'], 'database': database})[:12]
             migration_name = name + '-migrate-' + identity
             pod = copy.deepcopy(workload['spec']['template'])
@@ -191,7 +193,7 @@ def render(directory, target):
                 secret_env(key, database['migration_secret'], 'MIGRATION_DATABASE_URL')
                 for key in ('DATABASE_URL', 'MIGRATION_DATABASE_URL')]
             items.append({'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': {
-                'name': migration_name, 'namespace': namespace, 'annotations': {'argocd.argoproj.io/sync-wave': '-1'}},
+                'name': migration_name, 'namespace': namespace, 'annotations': dict(MIGRATION_ANNOTATIONS)},
                 'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 300, 'template': pod}})
             migration = {'name': migration_name, 'image': images[svc['name']]}
     app_name = target['id'] + '-' + namespace + '-' + name
