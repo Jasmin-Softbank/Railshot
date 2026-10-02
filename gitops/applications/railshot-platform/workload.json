@@ -46,7 +46,7 @@
             "containers": [
               {
                 "name": "dashboard",
-                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:5d6cb04d0ddde0ef3795c6689167b3e1281ec6241c96381cedaf0145bee3fc99",
+                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:c74ad7431bc1e5ff1f0cc5dc547577fae567e9b9145ba46d4928d681fcd0e906",
                 "ports": [
                   {
                     "name": "http",
@@ -188,7 +188,7 @@
             "initContainers": [
               {
                 "name": "private-config",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:e479f8ec4159058f200b5281be49d9d255830e89041c32d14d436450f8c3a394",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:4b4f44ef947375401a0058eadc01b45fefb246052eaf97b031bfe61eb4643ed9",
                 "command": [
                   "node",
                   "/app/apps/api/prepare-state.js"
@@ -243,7 +243,7 @@
             "containers": [
               {
                 "name": "api",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:e479f8ec4159058f200b5281be49d9d255830e89041c32d14d436450f8c3a394",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:4b4f44ef947375401a0058eadc01b45fefb246052eaf97b031bfe61eb4643ed9",
                 "ports": [
                   {
                     "name": "http",
@@ -280,12 +280,30 @@
                     "value": "/var/lib/railshot/config/observer.json"
                   },
                   {
+                    "name": "RAILSHOT_PROFILES_FILE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "railshot-environments",
+                        "key": "profiles_file",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
                     "name": "KUBECONFIG",
                     "value": "/var/lib/railshot/config/kubeconfig"
                   },
                   {
                     "name": "HOME",
                     "value": "/var/lib/railshot"
+                  },
+                  {
+                    "name": "TMPDIR",
+                    "value": "/var/lib/railshot/tmp"
+                  },
+                  {
+                    "name": "TF_PLUGIN_CACHE_DIR",
+                    "value": "/var/lib/railshot/provider-cache"
                   },
                   {
                     "name": "GITHUB_TOKEN",
