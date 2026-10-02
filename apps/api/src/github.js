@@ -14,6 +14,11 @@ export function createDeploymentService(config, fetchImpl = fetch) {
   if (!token) throw new Error('GITHUB_TOKEN을 설정하세요.');
   if (typeof tenant !== 'string' || !TENANT_NAME.test(tenant)) throw new Error('JASMIN_TENANT가 잘못되었습니다.');
   if (typeof targetId !== 'string' || !TARGET_ID.test(targetId)) throw new Error('RAILSHOT_TARGET_ID에 운영자가 준비할 대상 ID를 설정하세요.');
+  if (config.targetIds !== undefined && !Array.isArray(config.targetIds)) throw new Error('등록된 CI target 목록이 잘못되었습니다.');
+  const targetIds = [...new Set(config.targetIds || [targetId])];
+  if (!targetIds.includes(targetId) || targetIds.length > 100 || targetIds.some((id) => typeof id !== 'string' || !TARGET_ID.test(id)))
+    throw new Error('등록된 CI target 목록이 잘못되었습니다.');
+  const permittedTarget = (id) => { if (!targetIds.includes(id)) throw new ServiceError('등록된 배포 대상과 일치하지 않습니다.', 400); };
   const repoPath = `/repos/${owner}/${repo}`;
 
   async function request(path, options = {}) {
@@ -53,7 +58,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
 
   async function deploy({ app, files, source, target_id = targetId }) {
     if (typeof app !== 'string' || !APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
-    if (target_id !== targetId) throw new ServiceError('이 API에 설정된 배포 대상과 일치하지 않습니다.', 400);
+    permittedTarget(target_id);
     const acceptedFiles = validateFiles(files);
     const prefix = `apps/${tenant}/${app}`;
     const branch = await request(`${repoPath}/git/ref/heads/${encodeURIComponent(ref)}`);
@@ -103,18 +108,19 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       });
     }
     const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
-      method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id: targetId } }),
+      method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id } }),
     });
     if (!dispatched.workflow_run_id) {
       throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
     }
     return {
-      run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id: targetId, state: 'queued', changes, ...(source ? { source } : {}),
+      run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id, state: 'queued', changes, ...(source ? { source } : {}),
       actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
     };
   }
 
-  async function status(runId) {
+  async function status(runId, expectedTargetId = targetId) {
+    permittedTarget(expectedTargetId);
     if (!/^\d+$/.test(String(runId))) throw new ServiceError('run_id가 잘못되었습니다.', 400);
     const run = await request(`${repoPath}/actions/runs/${runId}`);
     if (run.path !== `.github/workflows/${workflow}`) throw new ServiceError('해당 실행은 등록된 CI 워크플로가 아닙니다.', 404);
@@ -143,19 +149,20 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     let publication = null;
     let artifactError = null;
     if (completed && conclusion === 'success') {
-      try { publication = await published(runId, observed.get('release').observed_attempt, run.head_sha); }
+      try { publication = await published(runId, observed.get('release').observed_attempt, run.head_sha, false, expectedTargetId); }
       catch (error) { artifactError = error.message || '게시 산출물을 확인하지 못했습니다.'; }
     }
     const state = publication ? 'published' : artifactError ? 'publication_unverified'
       : completed ? 'failed' : run.status === 'in_progress' ? 'running' : 'queued';
     return { run_id: Number(runId), app: publication?.app || null, tenant,
-      source_commit: publication?.source_commit || run.head_sha || null, target_id: targetId,
+      source_commit: publication?.source_commit || run.head_sha || null, target_id: expectedTargetId,
       status: run.status, conclusion, state, actions_url: run.html_url, steps, url: null,
       publication, message: publication ? '검증한 이미지가 게시되었습니다. 대상 앱 적용과 외부 URL 확인은 아직 수행하지 않았습니다.'
         : artifactError || (state === 'failed' ? 'CI가 완료되지 않았습니다. GitHub Actions 로그를 확인하세요.' : null) };
   }
 
-  async function published(runId, attempt, headSha, includeFiles = false) {
+  async function published(runId, attempt, headSha, includeFiles = false, expectedTargetId = targetId) {
+    permittedTarget(expectedTargetId);
     const name = `published-${attempt}`;
     const list = await request(`${repoPath}/actions/runs/${runId}/artifacts?name=${name}&per_page=100`);
     const matches = list.artifacts?.filter((item) => item.name === name) || [];
@@ -169,17 +176,17 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     });
     if (!response.ok) throw new ServiceError('게시 artifact를 다운로드하지 못했습니다.', 502);
     const files = await inspectArchive(Buffer.from(await response.arrayBuffer()));
-    const receipt = readPublished(files, { runId, attempt, headSha, targetId, tenant });
+    const receipt = readPublished(files, { runId, attempt, headSha, targetId: expectedTargetId, tenant });
     const publication = { ...receipt, artifact_id: artifact.id, artifact_name: name };
     return includeFiles ? { publication, files } : publication;
   }
 
   async function publishedFiles(publication) {
     if (!publication || !Number.isSafeInteger(publication.run_id) || !Number.isSafeInteger(publication.producer_attempt) || !SOURCE_COMMIT.test(publication.source_commit || '')) throw new ServiceError('게시 참조가 잘못되었습니다.', 502);
-    const verified = await published(String(publication.run_id), publication.producer_attempt, publication.source_commit, true);
+    const verified = await published(String(publication.run_id), publication.producer_attempt, publication.source_commit, true, publication.target_id);
     if (JSON.stringify(verified.publication) !== JSON.stringify(publication)) throw new ServiceError('게시 참조가 변경되었습니다.', 502);
     return verified.files;
   }
 
-  return { deploy, status, publishedFiles, targetId };
+  return { deploy, status, publishedFiles, targetId, targetIds: Object.freeze(targetIds) };
 }

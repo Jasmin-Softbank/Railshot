@@ -42,7 +42,7 @@ test('ZIP 검사 후 앱을 Git 트리에 등록하고 Actions 실행 ID를 반�
     else throw new Error(`Unexpected path: ${path}`);
     return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
   };
-  const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fakeFetch);
+  const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo', targetIds: ['aws-demo', 'stack-aws-1002'] }, fakeFetch);
   const result = await service.deploy({ app: 'my-app', files: await inspectArchive(archive) });
   assert.equal(result.run_id, 123);
   assert.deepEqual(result.changes, { added: 2, updated: 0, deleted: 0, unchanged: 0 });
@@ -53,6 +53,9 @@ test('ZIP 검사 후 앱을 Git 트리에 등록하고 Actions 실행 ID를 반�
   assert.deepEqual(dispatch.inputs, { tenant: 'demo', app: 'my-app', source_commit: 'b'.repeat(40), target_id: 'aws-demo' });
   assert.equal(result.source_commit, 'b'.repeat(40));
   assert.equal(result.target_id, 'aws-demo');
+  const secondary = await service.deploy({ app: 'my-app', target_id: 'stack-aws-1002', files: await inspectArchive(archive) });
+  assert.equal(secondary.target_id, 'stack-aws-1002');
+  assert.equal(calls.at(-1).body.inputs.target_id, 'stack-aws-1002');
 });
 
 test('재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에서 제외한다', async () => {
@@ -517,4 +520,17 @@ with patch.object(publication, 'verify_registry', side_effect=verified_registry)
     await (await server.productReady)?.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+
+test('허용된 복수 target도 publication은 접수 target과 정확히 일치해야 한다', async () => {
+  const { fetchImpl } = await publicationService({ files: publishedFiles({ targetId: 'stack-aws-1002' }) });
+  const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo',
+    targetIds: ['aws-demo', 'stack-aws-1002'] }, fetchImpl);
+  const accepted = await service.status('789', 'stack-aws-1002');
+  assert.equal(accepted.state, 'published');
+  assert.equal(accepted.publication.target_id, 'stack-aws-1002');
+  assert.ok((await service.publishedFiles(accepted.publication)).length);
+  assert.equal((await service.status('789', 'aws-demo')).state, 'publication_unverified');
+  await assert.rejects(service.status('789', 'unregistered'), /대상/);
 });

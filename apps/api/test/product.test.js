@@ -272,3 +272,36 @@ test('build POST preserves string run IDs and plan/environment HTTP use 201 then
   assert.equal(complete.status, 'succeeded');
   assert.equal(complete.deployment_supported, false);
 });
+
+test('one deployment consumes its app-bound plan before CI, and replay never repeats the DB stack', async (t) => {
+  const sequence = [];
+  const environmentAdapter = {
+    plan: async (value, { id }) => ({ public: { ...value, id, executable: true }, private: { profile: { target: { target_id: input.target_id }, deployment: {} } } }),
+    verifyPlan: async () => sequence.push('verify'),
+    execute: async (plan, { onProgress }) => { sequence.push('environment'); await onProgress({ status: 'running', stage: 'database' }); return { status: 'succeeded', database: { status: 'succeeded' }, deployment_supported: true }; },
+    deployPublished: async () => { sequence.push('cd'); return deployed; },
+  };
+  const f = await fixture(t, { environmentAdapter, service: { deploy: async () => { sequence.push('ci'); return { run_id: 123, source_commit: publication.source_commit }; } } });
+  const plan = await f.product.createPlan({ name: input.app, runtime: {}, database: { mode: 'patroni' } });
+  await assert.rejects(f.product.createDeployment({ ...input, app: 'wrong-app', plan_id: plan.id }, 'wrong'), { code: 'INVALID_INPUT' });
+  const request = { ...input, plan_id: plan.id };
+  const created = await f.product.createDeployment(request, 'combined');
+  const result = await settle(() => f.product.getDeployment(created.id));
+  assert.equal(result.status, 'succeeded'); assert.equal(result.environment.database.status, 'succeeded');
+  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  await f.product.createDeployment(request, 'combined');
+  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  await assert.rejects(f.product.createDeployment(request, 'different'), { code: 'CONFLICT' });
+});
+
+test('failed database environment never dispatches CI or CD', async (t) => {
+  const f = await fixture(t, { environmentAdapter: {
+    plan: async (value, { id }) => ({ public: { ...value, id }, private: { profile: { target: { target_id: input.target_id }, deployment: {} } } }),
+    verifyPlan: async () => {}, deployPublished: async () => assert.fail('must not deploy'),
+    execute: async () => ({ status: 'unknown', database: { status: 'unknown' }, deployment_supported: false, error: { code: 'DATABASE_OUTCOME_UNKNOWN', outcome_unknown: true } }),
+  } });
+  const plan = await f.product.createPlan({ name: input.app });
+  const created = await f.product.createDeployment({ ...input, plan_id: plan.id }, 'db-failed');
+  const result = await settle(() => f.product.getDeployment(created.id));
+  assert.equal(result.status, 'unknown'); assert.equal(f.dispatches(), 0); assert.equal(f.cdCalls(), 0);
+});

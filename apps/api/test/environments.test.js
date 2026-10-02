@@ -50,7 +50,7 @@ async function fixture(t, { replaceRunner, modify } = {}) {
 
 test('registered profile → saved plan → descriptor snapshot → native validation → guest/runtime receipts', async (t) => {
   const { adapter, home, calls } = await fixture(t);
-  assert.deepEqual(Object.keys(adapter.profiles()[0]).sort(), ['blockers', 'id', 'label', 'provider', 'purposes', 'site', 'supported']);
+  assert.deepEqual(Object.keys(adapter.profiles()[0]).sort(), ['application_name', 'blockers', 'database', 'deployment_supported', 'id', 'label', 'provider', 'purposes', 'site', 'supported', 'target_id']);
   const plan = await adapter.plan(input, { id: 'plan1' });
   assert.equal(plan.public.executable, true);
   assert.equal(plan.public.plan_sha256, DIGEST);
@@ -78,7 +78,7 @@ test('unsupported database/multinode requests are saved as blocked plans without
   const { adapter, calls } = await fixture(t);
   const plan = await adapter.plan({ ...input, runtime: { ...input.runtime, node_count: 2 }, database: { mode: 'patroni' } }, { id: 'plan2' });
   assert.equal(plan.public.executable, false);
-  assert.deepEqual(plan.public.blockers, ['SINGLE_NODE_ONLY', 'DATABASE_EXECUTION_NOT_CONNECTED']);
+  assert.deepEqual(plan.public.blockers, ['SINGLE_NODE_ONLY', 'DATABASE_PLACEMENT_REQUIRED', 'DATABASE_TOPOLOGY_UNSUPPORTED']);
   assert.equal(calls.length, 0);
   await assert.rejects(adapter.verifyPlan(plan), { code: 'PLAN_NOT_EXECUTABLE' });
 });
@@ -149,4 +149,58 @@ test('runtime readiness requires the exact environment request and target identi
   assert.equal(result.runtime.status, 'unknown');
   assert.equal(result.status, 'unknown');
   assert.equal(result.error.code, 'READINESS_RESULT_INVALID');
+});
+
+test('Patroni request plans every new VM, installs only runtime on app VM, binds DB without exposing credentials', async (t) => {
+  const { home, config, profilesFile } = await fixture(t);
+  const profile = config.profiles[0];
+  profile.purposes.push('database'); profile.database = { nodes: [] };
+  profile.deployment_file = join(home, 'deployment.json');
+  await writeFile(profile.deployment_file, JSON.stringify({ version: 1, cd: { targets: { 'demo-runtime': { app: input.name, tenant: 'demo', target: { id: 'demo-runtime' } } } } }), { mode: 0o600 });
+  for (const [index, roles] of [['database', 'dcs'], ['database', 'dcs'], ['proxy', 'dcs']].entries()) {
+    const file = join(home, `db${index}.json`);
+    await writeFile(file, JSON.stringify({ schema_version: 'v1', target_id: `db-${index}`, provider_kind: 'aws',
+      profile: { kind: 'database_cluster' }, variables: { target_id: `db-${index}`, purpose: 'database' } }), { mode: 0o600 });
+    profile.database.nodes.push({ target_file: file, roles });
+  }
+  await writeFile(profilesFile, JSON.stringify(config));
+  const calls = [];
+  const runner = async (python, args) => {
+    calls.push(args);
+    if (['plan', 'apply'].includes(args[1])) {
+      const target = JSON.parse(await readFile(args[args.indexOf('--target') + 1], 'utf8'));
+      const sha = target.target_id === 'demo-runtime' ? DIGEST : target.target_id.slice(-1).repeat(64);
+      if (args[1] === 'plan') {
+        const dir = join(profile.state_root, target.target_id); await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, 'plan-manifest.json'), JSON.stringify({ plan_sha256: sha, apply_attempted: false }), { mode: 0o600 });
+        return { target_id: target.target_id, plan_sha256: sha, changes: [{ actions: ['create'] }] };
+      }
+      return { apply_status: 'completed', plan_sha256: sha, node_descriptor: { ...descriptor, target_id: target.target_id } };
+    }
+    if (args[0].endsWith('/cluster.py')) {
+      const spec = JSON.parse(await readFile(args[args.indexOf('--spec-file') + 1], 'utf8'));
+      assert.equal(spec.nodes.length, 3);
+      assert.deepEqual(spec.client_cidrs, ['10.0.1.10/32']);
+      const file = join(home, 'environments', 'combined', 'binding.json');
+      const raw = JSON.stringify({ password: 'never-in-status' });
+      await writeFile(file, raw, { mode: 0o600 });
+      const { createHash } = await import('node:crypto');
+      return { status: 'succeeded', database_ready: true, request_id: spec.request_id,
+        binding_file: file, binding_sha256: createHash('sha256').update(raw).digest('hex') };
+    }
+    if (args[0].endsWith('/environment.py')) return { status: 'succeeded', target_id: 'demo-runtime' };
+    if (args.includes('--validate-only')) return { status: 'validated', target_id: 'demo-runtime' };
+    const operation = args[args.indexOf('--operation') + 1];
+    return { status: 'succeeded', target_id: 'demo-runtime', request_id: args[args.indexOf('--request-id') + 1], operation, guest_ready: true, runtime_ready: true };
+  };
+  const adapter = await createEnvironmentAdapter({ profilesFile, stateDir: join(home, 'environments'), runner });
+  const plan = await adapter.plan({ ...input, database: { mode: 'patroni', placements: [{ profile_id: profile.id, database_nodes: 2, dcs_voters: 3, proxy_nodes: 1 }] } }, { id: 'all-nodes' });
+  assert.equal(plan.public.executable, true); assert.equal(calls.length, 4);
+  assert.ok(plan.public.steps.includes('database'));
+  const result = await adapter.execute(plan, { id: 'combined' });
+  assert.equal(result.status, 'succeeded'); assert.equal(result.database.status, 'succeeded');
+  assert.equal(result.deployment_supported, true);
+  assert.equal(calls.filter((args) => args.includes('runtime.install')).length, 1);
+  assert.ok(!JSON.stringify(result).includes('never-in-status'));
+  assert.ok(!JSON.stringify(result).includes(home));
 });

@@ -47,7 +47,7 @@ async function uploadedSource(request, strict = false) {
   try { form = await new Request('http://localhost/', { method: 'POST', headers: { 'content-type': contentType }, body }).formData(); }
   catch { throw new ServiceError('multipart 요청 형식이 잘못되었습니다.', 400); }
   const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
-  const allowed = new Set(['app', 'target_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
+  const allowed = new Set(['app', 'target_id', 'plan_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
   for (const key of form.keys()) {
     if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
     if (key !== 'files' && form.getAll(key).length !== 1) fail('단일 입력 필드를 중복해서 보낼 수 없습니다.');
@@ -57,6 +57,8 @@ async function uploadedSource(request, strict = false) {
   const target_id = form.has('target_id') ? form.get('target_id') : undefined;
   if (target_id !== undefined && (typeof target_id !== 'string' || !target_id)) fail('대상 ID가 잘못되었습니다.');
   if (strict && !target_id) fail('대상 ID가 필요합니다.');
+  const plan_id = form.has('plan_id') ? form.get('plan_id') : undefined;
+  if (plan_id !== undefined && (!strict || typeof plan_id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(plan_id))) fail('환경 계획 ID가 잘못되었습니다.');
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
   if (supplied.length !== 1) fail('배포 소스 하나만 입력하세요.');
@@ -67,7 +69,7 @@ async function uploadedSource(request, strict = false) {
     if (typeof form.get('repository_url') !== 'string') fail('공개 GitHub 저장소 URL이 필요합니다.');
     let repository_url;
     try { repository_url = normalizedRepository(form.get('repository_url')); } catch { fail('공개 GitHub 저장소 기본 URL이 필요합니다.'); }
-    return { app, target_id, source_type, repository_url };
+    return { app, target_id, ...(plan_id ? { plan_id } : {}), source_type, repository_url };
   }
   try {
     if (source_type === 'folder') {
@@ -77,11 +79,11 @@ async function uploadedSource(request, strict = false) {
         if (!file || typeof file.arrayBuffer !== 'function') fail('폴더 파일이 잘못되었습니다.');
         return { path: paths[index], content: Buffer.from(await file.arrayBuffer()) };
       }));
-      return { app, target_id, source_type, files: validateFiles(files) };
+      return { app, target_id, ...(plan_id ? { plan_id } : {}), source_type, files: validateFiles(files) };
     }
     const file = form.get('archive');
     if (!file || typeof file.arrayBuffer !== 'function' || !file.name?.toLowerCase().endsWith('.zip')) fail('ZIP 파일이 필요합니다.');
-    return { app, target_id, source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
+    return { app, target_id, ...(plan_id ? { plan_id } : {}), source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
   } catch { fail('소스 파일 목록·경로·크기를 확인하세요. 비밀 파일은 보낼 수 없습니다.'); }
 }
 async function jsonInput(request) {
@@ -138,7 +140,7 @@ function accepted(response, kind, record, requestId) {
 export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
   service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({ token: process.env.GITHUB_TOKEN,
     owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.JASMIN_TENANT,
-    workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID }) : null,
+    workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
   deployPublished, environmentAdapter, product, pollInterval,
 } = {}) {
@@ -151,7 +153,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       const { createCdAdapter } = await import('./cd.js');
       cd = await createCdAdapter({ configPath: process.env.RAILSHOT_CD_CONFIG, loadPublished: service.publishedFiles });
     }
-    const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments') }) : undefined);
+    const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments'), loadPublished: service?.publishedFiles }) : undefined);
     return createProductService({ service, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
