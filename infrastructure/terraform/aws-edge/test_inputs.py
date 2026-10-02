@@ -44,6 +44,16 @@ def evaluate(values, expression='local.private_routes'):
 
 
 class EdgeInputsTest(unittest.TestCase):
+    def test_idle_timeout_preserves_default_and_bounds_long_api_waits(self):
+        values = fixture()
+        self.assertEqual(evaluate(values, 'var.idle_timeout'), 60)
+        values['idle_timeout'] = 610
+        self.assertEqual(evaluate(values, 'var.idle_timeout'), 610)
+        for invalid in (0, 4001, 1.5):
+            values['idle_timeout'] = invalid
+            with self.subTest(idle_timeout=invalid), self.assertRaises(ValueError):
+                evaluate(values, 'var.idle_timeout')
+
     def test_apex_requires_explicit_certificate_and_preserves_child_routes(self):
         values = fixture()
         self.assertTrue(evaluate(values, 'local.route_hosts_valid'))
