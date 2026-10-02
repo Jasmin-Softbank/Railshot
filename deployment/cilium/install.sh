@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
 source "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/common.sh"
+# Callers hold /run/railshot-deployment.lock. No argument is the customer profile.
+[[ $# -le 1 ]] || die 'usage: install.sh [customer|control]'
+pod_cidr=$(python3 "$ROOT_DIR/cilium/preflight.py" "${1:-customer}")
 TEMP_DIR=$(mktemp -d)
 case $(uname -m) in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) die '지원하지 않는 CPU' ;; esac
 # 전역 cilium 바이너리를 덮어쓰지 않고 PoC 전용 경로에 checksum 검증 후 설치.
@@ -19,7 +22,7 @@ fi
 options=(--version "$CILIUM_VERSION" --namespace kube-system
   --set kubeProxyReplacement=false
   --set ipam.mode=cluster-pool
-  --set 'ipam.operator.clusterPoolIPv4PodCIDRList=10.42.0.0/16'
+  --set "ipam.operator.clusterPoolIPv4PodCIDRList=$pod_cidr"
   --set operator.replicas=1
   --set routingMode=tunnel --set tunnelProtocol=vxlan
   --set hubble.enabled=false)

@@ -189,7 +189,7 @@
         src: "{{ playbook_dir }}/../../deployment/{{ item }}"
         dest: "/var/lib/railshot/standalone-cilium/{{ item }}"
         mode: '0700'
-      loop: [scripts/common.sh, cilium/install.sh, airgap/versions.json]
+      loop: [scripts/common.sh, cilium/install.sh, cilium/preflight.py, airgap/versions.json]
 
     - name: Install Cilium before waiting for Node Ready or CoreDNS
       ansible.builtin.command:
