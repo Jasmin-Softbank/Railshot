@@ -75,6 +75,16 @@ class EdgeInputsTest(unittest.TestCase):
         self.assertTrue(evaluate(values, 'local.wireguard_routing_configured'))
         self.assertEqual(evaluate(values), {})
 
+    def test_zone_can_be_created_before_delegation_or_reused_by_id(self):
+        values = fixture()
+        self.assertEqual(evaluate(values, 'var.zone_id'), 'ZEXAMPLE')
+        del values['zone_id']
+        self.assertIsNone(evaluate(values, 'var.zone_id'))
+        for invalid in ('', 'example.com', '/hostedzone/ZEXAMPLE'):
+            values['zone_id'] = invalid
+            with self.subTest(zone_id=invalid), self.assertRaises(ValueError):
+                evaluate(values)
+
     def test_public_metadata_cgnat_ipv6_and_invalid_routes_fail_closed(self):
         changes = [('target_private_ip', ip) for ip in ('8.8.8.8', '169.254.169.254', '100.64.0.1', '::1', '10.999.0.1')]
         changes += [('node_port', 80), ('node_port', 32768), ('priority', 0), ('priority', 1.5),

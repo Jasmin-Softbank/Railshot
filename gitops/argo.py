@@ -172,12 +172,21 @@ def observe(review, live):
         for row in resources))
     deployment = next(item for item in review['workload']['items'] if item['kind'] == 'Deployment')
     images = {c['image'] for c in deployment['spec']['template']['spec']['containers']}
+    sync_result = operation.get('syncResult', {})
+    summary = status.get('summary', {})
+    observed_images = summary.get('images', [])
+    # Argo 3 may omit summary; bind its sync-result images to this exact Deployment.
+    if 'images' not in summary and sync_result.get('revision') == revision:
+        matches = [row for row in sync_result.get('resources', [])
+                   if (row.get('group'), row.get('kind'), row.get('namespace'), row.get('name')) ==
+                   ('apps', 'Deployment', deployment['metadata']['namespace'], deployment['metadata']['name'])]
+        if len(matches) == 1:
+            observed_images = matches[0].get('images', [])
     errors = any(c.get('type', '').endswith('Error') for c in status.get('conditions', []))
     complete = (not live.get('operation') and not errors and binding and resources_ok and
                 sync.get('revision') == revision and sync.get('status') == 'Synced' and
                 status.get('health', {}).get('status') == 'Healthy' and operation.get('phase') == 'Succeeded' and
-                operation.get('syncResult', {}).get('revision') == revision and
-                images == set(status.get('summary', {}).get('images', [])))
+                sync_result.get('revision') == revision and images == set(observed_images))
     failed = errors or (not live.get('operation') and operation.get('phase') in {'Failed', 'Error'} and
                         operation.get('syncResult', {}).get('revision') == revision)
     return {'status': 'deployed' if complete else 'failed' if failed else 'progressing', 'deployed': bool(complete),

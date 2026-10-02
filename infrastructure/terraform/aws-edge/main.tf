@@ -25,7 +25,19 @@ data "aws_subnet" "alb" {
   for_each = var.public_subnet_ids
   id       = each.value
 }
-data "aws_route53_zone" "public" { zone_id = var.zone_id }
+data "aws_route53_zone" "public" {
+  count   = var.zone_id == null ? 0 : 1
+  zone_id = var.zone_id
+}
+resource "aws_route53_zone" "app" {
+  count = var.zone_id == null ? 1 : 0
+  name  = var.base_domain
+  lifecycle { prevent_destroy = true }
+}
+locals {
+  zone_id      = var.zone_id == null ? aws_route53_zone.app[0].zone_id : data.aws_route53_zone.public[0].zone_id
+  name_servers = var.zone_id == null ? aws_route53_zone.app[0].name_servers : data.aws_route53_zone.public[0].name_servers
+}
 data "aws_network_interface" "wireguard" { id = var.wireguard_network_interface_id }
 data "aws_instance" "wireguard" {
   instance_id = one(data.aws_network_interface.wireguard.attachment).instance_id
@@ -82,8 +94,8 @@ resource "aws_lb" "app" {
       error_message = "ALB subnets must belong to the registered VPC and span at least two AZs."
     }
     precondition {
-      condition     = !data.aws_route53_zone.public.private_zone && trimsuffix(data.aws_route53_zone.public.name, ".") == var.base_domain
-      error_message = "Use the existing public Route53 zone for base_domain."
+      condition     = var.zone_id == null ? true : (!data.aws_route53_zone.public[0].private_zone && trimsuffix(data.aws_route53_zone.public[0].name, ".") == var.base_domain)
+      error_message = "The existing Route53 zone must be public and match base_domain."
     }
     precondition {
       condition = alltrue([for r in values(var.routes) :
@@ -124,7 +136,7 @@ resource "aws_acm_certificate" "app" {
 }
 resource "aws_route53_record" "certificate_validation" {
   count   = var.certificate_arn == null ? 1 : 0
-  zone_id = var.zone_id
+  zone_id = local.zone_id
   name    = one(aws_acm_certificate.app[0].domain_validation_options).resource_record_name
   type    = one(aws_acm_certificate.app[0].domain_validation_options).resource_record_type
   records = [one(aws_acm_certificate.app[0].domain_validation_options).resource_record_value]
@@ -177,7 +189,7 @@ resource "aws_lb_listener_rule" "app" {
 }
 resource "aws_route53_record" "app" {
   for_each = var.routes
-  zone_id  = var.zone_id
+  zone_id  = local.zone_id
   name     = each.value.host
   type     = "A"
   alias {
@@ -254,6 +266,8 @@ resource "aws_route" "gcp" {
 }
 
 output "app_urls" { value = { for key, r in var.routes : key => "https://${r.host}" } }
+output "zone_id" { value = local.zone_id }
+output "name_servers" { value = sort(local.name_servers) }
 output "target_group_arns" { value = { for key, group in aws_lb_target_group.app : key => group.arn } }
 output "alb_dns_name" { value = aws_lb.app.dns_name }
 output "alb_security_group_id" { value = aws_security_group.alb.id }

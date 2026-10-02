@@ -14,7 +14,7 @@ resource "aws_iam_role" "pull_sync" {
       Action    = "sts:AssumeRoleWithWebIdentity"
       Condition = { StringEquals = {
         "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-        "token.actions.githubusercontent.com:sub" = "repo:Jasmin-Softbank/railshot-apps:environment:railshot-release"
+        "token.actions.githubusercontent.com:sub" = "repo:Jasmin-Softbank@335003159/railshot-apps@1397698801:environment:railshot-release"
       } }
     }]
   })

@@ -7,6 +7,7 @@ Uses stdlib SQLite and Decimal; never converts currencies implicitly.
 import argparse
 import csv
 import hashlib
+import io
 import json
 import re
 import sqlite3
@@ -71,6 +72,10 @@ def verify_source_scope(provider, rows, source_scope):
         raise ValueError('source scope required')
     if provider == 'aws':
         if rows['account_id'] != source_scope:
+            raise ValueError('billing export source scope mismatch or missing')
+        return
+    if provider == 'gcp' and isinstance(rows, dict):
+        if rows['project_billing_info']['projectId'] != source_scope:
             raise ValueError('billing export source scope mismatch or missing')
         return
     for row in rows:
@@ -141,9 +146,108 @@ def normalize_aws(snapshot, period):
              'estimated': estimated, 'coverage_end': end.isoformat()}]
 
 
+def normalize_gcp_console(snapshot, period):
+    """Native Korean/KRW Console CSV, bound to the operator's browser observation.
+
+    Required envelope: format=gcp_console_report_v1, billing_account_id,
+    project_billing_info (the unedited gcloud billing projects describe response),
+    observed_at, csv (original text), browser_evidence (original observation text),
+    report={url,start,end,time_basis:'usage_date',group_by:'project',filters:{},currency:'KRW'}.
+    Dates cover the whole month, inclusive. The private original envelope remains
+    with the operator; hashes in the ledger bind this receipt to that evidence.
+    Browser metadata is operator-observed, not an independently verified API query.
+    Account-wide totals are conservative estimates, never project-attributed costs.
+    """
+    required = {'format', 'billing_account_id', 'project_billing_info', 'observed_at',
+                'csv', 'browser_evidence', 'report'}
+    if set(snapshot) != required or snapshot['format'] != 'gcp_console_report_v1':
+        raise ValueError('GCP Console snapshot requires the complete v1 envelope')
+    account, binding, metadata = (snapshot[k] for k in ('billing_account_id', 'project_billing_info', 'report'))
+    if not isinstance(account, str) or not re.fullmatch(r'[0-9A-F]{6}(?:-[0-9A-F]{6}){2}', account):
+        raise ValueError('invalid GCP billing account')
+    if (not isinstance(binding, dict) or set(binding) != {'billingAccountName', 'billingEnabled', 'name', 'projectId'}
+            or not isinstance(binding.get('projectId'), str)
+            or not re.fullmatch(r'[a-z][a-z0-9-]{4,28}[a-z0-9]', binding['projectId'])
+            or binding['billingEnabled'] is not True
+            or binding['billingAccountName'] != 'billingAccounts/' + account
+            or binding['name'] != 'projects/' + binding['projectId'] + '/billingInfo'):
+        raise ValueError('GCP project billing linkage missing or inconsistent')
+    expected_url = ('https://console.cloud.google.com/billing/' + account
+                    + '/reports;grouping=GROUP_BY_PROJECT?project=' + binding['projectId'])
+    if (not isinstance(metadata, dict)
+            or set(metadata) != {'url', 'start', 'end', 'time_basis', 'group_by', 'filters', 'currency'}
+            or metadata['url'] != expected_url or metadata['time_basis'] != 'usage_date'
+            or metadata['group_by'] != 'project' or metadata['filters'] != {}
+            or metadata['currency'] != 'KRW'):
+        raise ValueError('GCP Console report must be unfiltered, project-grouped, account-wide KRW usage')
+    if not isinstance(period, str) or not re.fullmatch(r'\d{4}-\d{2}', period):
+        raise ValueError('period must be YYYY-MM')
+    first = date.fromisoformat(period + '-01')
+    last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    if metadata['start'] != first.isoformat() or metadata['end'] != last.isoformat():
+        raise ValueError('GCP Console report must cover the complete usage month')
+    if not isinstance(snapshot['observed_at'], str) or not first <= timestamp(snapshot['observed_at']).date() <= last:
+        raise ValueError('GCP Console observation must fall within the report month')
+    for key in ('csv', 'browser_evidence'):
+        if not isinstance(snapshot[key], str) or not snapshot[key].strip():
+            raise ValueError('GCP Console original CSV and browser evidence required')
+    header = ['프로젝트 이름', '프로젝트 ID', '프로젝트 번호', '비용(₩)', '절감 프로그램(₩)',
+              '기타 절감(₩)', '반올림되지 않은 소계(₩)', '소계(₩)', '이전 기간 대비 소계 변동률']
+    try:
+        rows = list(csv.reader(io.StringIO(snapshot['csv'].lstrip('\ufeff')), strict=True))
+    except csv.Error as exc:
+        raise ValueError('malformed GCP Console CSV') from exc
+    if not rows or rows[0] != header:
+        raise ValueError('unsupported GCP Console CSV header or currency')
+
+    def money(value):
+        if not re.fullmatch(r'-?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,6})?', value):
+            raise ValueError('invalid GCP Console money')
+        return amount(value.replace(',', ''))
+
+    seen, footers, total, positive_total = set(), {}, Decimal(0), Decimal(0)
+    for row in rows[1:]:
+        if not row or not any(row):
+            continue
+        if len(row) in (8, 9) and not any(row[:5]):
+            if row[5] not in {'소계', '세금', '합계'} or row[5] in footers or (len(row) == 9 and row[8]):
+                raise ValueError('unknown or duplicate GCP Console footer')
+            footers[row[5]] = money(row[6])
+            money(row[7])
+        else:
+            if (footers or len(row) != 9 or not row[0] or not row[1]
+                    or not re.fullmatch(r'[0-9]+', row[2]) or row[1] in seen):
+                raise ValueError('malformed or duplicate GCP Console project row')
+            seen.add(row[1])
+            values = [money(value) for value in row[3:8]]
+            total += values[3]
+            positive_total += max(Decimal(0), values[3])
+    if not seen or set(footers) != {'소계', '세금', '합계'}:
+        raise ValueError('empty or incomplete GCP Console export is unknown, not zero spend')
+    selected = max(Decimal(0), positive_total, footers['소계'], footers['합계'])
+    # A negative project's credit cannot offset another project's known spend.
+    difference = total - footers['소계']
+    return [{'resource_id': 'gcp-billing-account:' + account, 'currency': 'KRW', 'cost': str(selected),
+             'estimated': True, 'basis': 'account_wide_reported_estimate',
+             'scope_binding': 'billing_account_link_verified', 'project_cost_attribution': 'not_project_attributed',
+             'billing_account_id': account, 'binding_project_id': binding['projectId'],
+             'report_metadata_basis': 'operator_browser_observation', 'report_url': expected_url,
+             'coverage_start': metadata['start'], 'coverage_end': metadata['end'],
+             'selection_policy': 'max_positive_project_rows_and_footer_totals',
+             'reported_project_rows_sum': str(total), 'reported_positive_project_rows_sum': str(positive_total),
+             'reported_subtotal': str(footers['소계']), 'reported_tax': str(footers['세금']),
+             'reported_total': str(footers['합계']), 'rows_subtotal_difference': str(difference),
+             'discrepancy': difference != 0 or footers['소계'] + footers['세금'] != footers['합계'],
+             'csv_sha256': hashlib.sha256(snapshot['csv'].encode()).hexdigest(),
+             'browser_evidence_sha256': hashlib.sha256(snapshot['browser_evidence'].encode()).hexdigest(),
+             'project_billing_info_sha256': hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()}]
+
+
 def normalize(provider, rows, period):
     if provider == 'aws':
         return normalize_aws(rows, period)
+    if provider == 'gcp' and isinstance(rows, dict):
+        return normalize_gcp_console(rows, period)
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError('export must be a complete JSON/CSV row list')
     if not re.fullmatch(r'\d{4}-\d{2}', period):
@@ -186,6 +290,12 @@ def import_snapshot(db, scope, provider, period, observed_at, rows, now=None, *,
     if observed > now:
         raise ValueError('future observation')
     normalized = normalize(provider, rows, period)
+    console = provider == 'gcp' and isinstance(rows, dict)
+    if console:
+        if source_scope is None:
+            raise ValueError('GCP Console source scope required')
+        if timestamp(rows['observed_at']) != observed:
+            raise ValueError('GCP Console observation timestamp mismatch')
     if provider == 'aws':
         if source_scope is None:
             raise ValueError('AWS source scope required')
@@ -197,16 +307,20 @@ def import_snapshot(db, scope, provider, period, observed_at, rows, now=None, *,
     digest = hashlib.sha256(payload.encode()).hexdigest()
     with db:
         db.execute('BEGIN IMMEDIATE')
-        previous = db.execute('SELECT provider,period,observed_at,checksum,source_scope FROM snapshots WHERE scope=?', (scope,)).fetchone()
+        previous = db.execute('SELECT provider,period,observed_at,checksum,source_scope,rows_json FROM snapshots WHERE scope=?', (scope,)).fetchone()
         if previous and (previous[0:2] != (provider, period) or timestamp(previous[2]) > observed):
             raise ValueError('scope is bound to one provider/month; older snapshots are rejected')
         if previous and previous[4] is not None and previous[4] != source_scope:
             raise ValueError('source scope binding cannot change')
+        if previous and console:
+            previous_accounts = {r['billing_account_id'] for r in json.loads(previous[5]) if r.get('billing_account_id')}
+            if previous_accounts and previous_accounts != {rows['billing_account_id']}:
+                raise ValueError('GCP billing account binding cannot change')
         if previous and timestamp(previous[2]) == observed and previous[3] != digest:
             raise ValueError('conflicting snapshot at the same observation time')
         db.execute('INSERT OR REPLACE INTO snapshots (scope,provider,period,observed_at,checksum,rows_json,source_scope) VALUES (?,?,?,?,?,?,?)',
                    (scope, provider, period, observed.isoformat(), digest, payload, source_scope))
-    basis = 'reported_estimate' if any(r.get('estimated') for r in normalized) else 'reported_actual'
+    basis = normalized[0].get('basis') or ('reported_estimate' if any(r.get('estimated') for r in normalized) else 'reported_actual')
     return {'scope': scope, 'basis': basis, 'checksum': digest,
             'observed_at': observed.isoformat(), 'resource_count': len(normalized), 'source_scope': source_scope}
 
@@ -224,11 +338,13 @@ def report(db, scope, *, now=None, max_age_hours=24):
     for currency, value in db.execute("SELECT currency,amount FROM reservations WHERE scope=? AND state='held'", (scope,)):
         held[currency] = held.get(currency, Decimal(0)) + amount(value)
     age = ((now or datetime.now(timezone.utc)) - timestamp(row[2])).total_seconds() / 3600
+    binding = ('query_verified' if row[0] == 'aws' else resources[0].get('scope_binding', 'row_verified')) if row[4] else 'operator_asserted'
+    basis = resources[0].get('basis') or ('reported_estimate' if any(r.get('estimated') for r in resources) else 'reported_actual')
     return {'scope': scope, 'provider': row[0], 'period': row[1], 'observed_at': row[2],
-            'source_scope': row[4], 'scope_binding': ('query_verified' if row[0] == 'aws' else 'row_verified') if row[4] else 'operator_asserted',
+            'source_scope': row[4], 'scope_binding': binding,
             'freshness': 'fresh' if 0 <= age <= max_age_hours else 'stale',
             'age_hours': age, 'max_age_hours': max_age_hours,
-            'status': 'reported', 'basis': 'reported_estimate' if any(r.get('estimated') for r in resources) else 'reported_actual',
+            'status': 'reported', 'basis': basis,
             'totals': {c: str(v) for c, v in totals.items()},
             'reserved_estimate': {c: str(v) for c, v in held.items()}, 'resources': resources}
 
@@ -255,7 +371,7 @@ def reserve(db, *, scope, operation_id, currency, incremental_cost, limit,
         current = report(db, scope, now=now, max_age_hours=max_age_hours)
         if current['status'] == 'unknown':
             raise ValueError('billing snapshot missing')
-        if current['scope_binding'] not in {'row_verified', 'query_verified'}:
+        if current['scope_binding'] not in {'row_verified', 'query_verified', 'billing_account_link_verified'}:
             raise ValueError('billing source scope unverified')
         if current['period'] != now.strftime('%Y-%m'):
             raise ValueError('billing snapshot is not the current usage month')

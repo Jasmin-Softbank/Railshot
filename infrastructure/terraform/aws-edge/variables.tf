@@ -52,7 +52,12 @@ variable "routes" {
 }
 variable "zone_id" {
   type        = string
-  description = "Existing public Route53 zone; registering the domain and delegating its NS are separate operations."
+  default     = null
+  description = "Existing public Route53 zone, or null to create one for base_domain. Domain registration and NS delegation remain separate. Keep null after creating a managed zone."
+  validation {
+    condition     = var.zone_id == null ? true : can(regex("^Z[A-Z0-9]+$", var.zone_id))
+    error_message = "Use an existing Route53 zone ID or null to create the public zone."
+  }
 }
 variable "base_domain" {
   type = string

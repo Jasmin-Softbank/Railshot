@@ -16,7 +16,7 @@ account_id = "123456789012"
 region     = "ap-northeast-2"
 vpc_id     = "vpc-0123456789abcdef0"
 public_subnet_ids = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
-zone_id        = "ZREPLACEWITHPUBLICZONE"
+zone_id        = null # 새 public zone 생성; 기존 zone이면 실제 Z... ID
 base_domain    = "railshot.io"
 certificate_arn = null # 기존 regional ACM ARN도 가능
 http_redirect   = true
@@ -50,7 +50,11 @@ wireguard_route_table_ids      = ["rtb-0123456789abcdef0"]
 
 ALB는 서로 다른 두 AZ의 지정 VPC subnet을 확인한다. 운영자는 각 subnet의 실제 IGW 경로와 유효 route table을 확인한다. HTTPS 기본 응답은 404이며 등록된 host만 전달한다. `http_redirect`가 true일 때만 80을 열어 HTTPS로 redirect한다. `web_client_cidrs` 기본값은 공개 웹 `0.0.0.0/0`이며 관리 API 공개 여부를 대신 승인하지 않는다.
 
-`zone_id`는 `base_domain`과 같은 기존 **public Route53 zone**이어야 한다. `certificate_arn`이 null이면 `*.base_domain` ACM 인증서, DNS 검증 record와 검증 대기를 만든다. Route host는 base domain 바로 아래 한 label만 허용한다. 기존 ARN을 쓰면 같은 region/account와 모든 host coverage를 운영자가 검증한다. 도메인의 실제 NS 위임이 끝나지 않으면 ACM DNS 검증이 완료되지 않는다. DNS 등록과 TLS 설정은 앱 준비 완료 증거가 아니다.
+`zone_id`가 null이거나 생략되면 `base_domain`의 **public Route53 zone**을 만든다. 기존 ID를 넣으면 새 zone을 만들지 않고 같은 이름의 public zone인지 확인해 재사용한다. 신규 생성 전 같은 도메인의 zone이 이미 있는지 관리자가 확인한다. 관리하는 zone에 `prevent_destroy`를 적용했으므로 생성 후에도 입력을 null로 유지한다. 출력 ID를 다시 입력에 넣으면 관리 대상 제거가 되므로 그렇게 전환하지 않는다.
+
+새 도메인은 private backend/입력을 준비한 후 먼저 `terraform plan -target=aws_route53_zone.app -out=<private-zone-plan>`으로 zone만 계획하고, 그 saved plan을 검토·적용한다. 출력 `zone_id`와 `name_servers`를 확인해 registrar에서 정확한 NS로 위임한다. 그 다음 **target 옵션 없이 전체 plan을 새로 만들고** 검토·적용해 ACM/ALB를 구성한다. 부분 apply는 NS 위임을 준비하는 단계이며 edge 전체 적용이나 앱 공개 완료가 아니다.
+
+`certificate_arn`이 null이면 `*.base_domain` ACM 인증서, DNS 검증 record와 검증 대기를 만든다. Route host는 base domain 바로 아래 한 label만 허용한다. 기존 ARN을 쓰면 같은 region/account와 모든 host coverage를 운영자가 검증한다. 도메인의 실제 NS 위임이 끝나지 않으면 ACM DNS 검증이 완료되지 않는다. DNS 등록과 TLS 설정은 앱 준비 완료 증거가 아니다.
 
 ## 보안 그룹과 WireGuard 소유권
 
@@ -101,6 +105,6 @@ terraform -chdir=infrastructure/terraform/aws-edge fmt -check
 
 오프라인 테스트는 임시 source-only Terraform console로 변수 제한과 여러 앱의 SG·route 중복 제거를 확인한다. 실제 provider 검증은 별도 임시 복사본에서 locked provider로 `init -backend=false -lockfile=readonly`, `validate`를 사용한다. 이 검사들은 클라우드 plan/apply, DNS 위임, 인증서 발급 또는 앱 실행을 증명하지 않는다.
 
-출력은 `app_urls`, `target_group_arns`, `alb_dns_name`, `alb_security_group_id`, `wireguard_endpoint`, `wireguard_public_ip`, `gcp_private_routes`, `certificate_arn`이다. `readiness`는 계속 `configured-references-only; runtime, tunnel and public HTTP unverified`다. 실제 인수는 WG handshake·양방향 route, 각 target health, DNS/TLS/host routing, NodePort health path와 외부 HTTPS를 각각 확인한다. ALB health check는 target IP와 포트를 Host로 사용하므로 지정 경로가 기본 virtual host에서도 응답해야 한다. 공유 ALB의 두 AZ가 각 단일 고객 노드의 HA를 보장하지는 않는다.
+출력은 `zone_id`, `name_servers`, `app_urls`, `target_group_arns`, `alb_dns_name`, `alb_security_group_id`, `wireguard_endpoint`, `wireguard_public_ip`, `gcp_private_routes`, `certificate_arn`이다. `readiness`는 계속 `configured-references-only; runtime, tunnel and public HTTP unverified`다. 실제 인수는 WG handshake·양방향 route, 각 target health, DNS/TLS/host routing, NodePort health path와 외부 HTTPS를 각각 확인한다. ALB health check는 target IP와 포트를 Host로 사용하므로 지정 경로가 기본 virtual host에서도 응답해야 한다. 공유 ALB의 두 AZ가 각 단일 고객 노드의 HA를 보장하지는 않는다.
 
 근거: [ALB IP target 제약](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html), [Terraform IP target attachment](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb_target_group_attachment), [Route53 Alias](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-to-elb-load-balancer.html), [WireGuard](https://www.wireguard.com/quickstart/).
