@@ -129,7 +129,7 @@ export async function createProductService({ service, directory, target, deployP
       for (;;) {
         if (abort.signal.aborted) return;
         const build = await readBuild(runId);
-        const ci = { run_id: runId, state: build.status, steps: build.steps || [], publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null, producer_attempt: build.publication?.producer_attempt || null };
+        const ci = { run_id: runId, state: build.status, steps: build.steps ?? [], publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null, producer_attempt: build.publication?.producer_attempt || null };
         await update(record.id, { ci });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }

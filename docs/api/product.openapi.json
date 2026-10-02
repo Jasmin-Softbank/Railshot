@@ -1132,7 +1132,9 @@
               },
               "steps": {
                 "type": "array",
-                "items": { "type": "object" },
+                "items": {
+                  "type": "object"
+                },
                 "description": "GitHub Actions loop/release jobs and their observed actions_steps."
               },
               "publication_artifact_id": {
