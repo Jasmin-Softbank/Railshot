@@ -16,6 +16,7 @@ API_NATIVE_FILES = {
     'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml', 'observability/runtime_health.py',
     'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
     'gitops/edge.py', 'gitops/service_name.py', 'gitops/logs.py',
+    'gitops/dns.py', 'gitops/gcp_routes.py',
     'ci/scripts/execution.py', 'ci/scripts/observability.py', 'ci/scripts/process.py',
     'ci/scripts/publication.py', 'ci/scripts/storage.py', 'ci/scripts/gate/bundle.py',
     'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/railshot.schema.json',
@@ -29,13 +30,15 @@ API_NATIVE_FILES = {
     'infrastructure/ansible/application_database.py', 'infrastructure/ansible/database.yml',
     'infrastructure/ansible/application-database.yml',
     'deployment/scripts/common.sh', 'deployment/scripts/environment.py', 'deployment/bootstrap/preflight.sh',
+    'deployment/scripts/applications.py', 'deployment/scripts/application_release.py', 'deployment/scripts/application_routes.py',
     'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
 }
 API_NATIVE_PREFIXES = ('infrastructure/ansible/roles/', 'infrastructure/ansible/playbooks/',
                        'infrastructure/providers/terraform_tools/',
-                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/', 'infrastructure/terraform/aws-edge/')
+                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/',
+                       'infrastructure/terraform/aws-edge/', 'infrastructure/terraform/gcp-edge/')
 
 
 def api_native_dependency(path):

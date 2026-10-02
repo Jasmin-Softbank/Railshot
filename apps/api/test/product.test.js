@@ -1,13 +1,14 @@
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, chmod, symlink, writeFile, readdir, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, stat, chmod, symlink, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
 import { createProductService } from '../src/product.js';
 import { createProductStore } from '../src/product-store.js';
 import { createAppServer } from '../src/server.js';
+import { createApplicationAdapter } from '../src/applications.js';
 
 function diskState(directory) {
   const db = new DatabaseSync(join(directory, 'dashboard.sqlite3'), { readOnly: true });
@@ -866,4 +867,192 @@ test('HTTP target observations authorize IDs before collecting and need no deplo
   assert.equal((await fetch(`${base}/api/v1/targets/demo/observations?app=another-app`)).status, 422);
   const method = await fetch(`${base}/api/v1/targets/demo/observations`, { method: 'POST' });
   assert.equal(method.status, 405); assert.equal(method.headers.get('allow'), 'GET'); assert.equal(calls.length, 3);
+});
+
+async function applicationFixture(t, { registrationStatus = 'succeeded', publicationChange = {} } = {}) {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'railshot-product-apps-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const configPath = join(home, 'environments.json');
+  await writeFile(configPath, JSON.stringify({ version: 1, state_dir: join(home, 'registrations'), environments: {
+    'runtime-aws': { provider: 'aws', tenant: 'team', source_repository: 'example/apps', ingress: { edge_config_file: '/private/aws-edge.json', dns_config_file: '/private/dns.json' } },
+    'runtime-gcp': { provider: 'gcp', tenant: 'team', source_repository: 'example/apps', ingress: { edge_config_file: '/private/gcp-edge.json', dns_config_file: '/private/dns.json' } },
+    'runtime-openstack': { provider: 'openstack', tenant: 'team', source_repository: 'example/apps' },
+  } }), { mode: 0o600 });
+  const registrations = [], submissions = [], deliveries = [], runs = new Map(), allowed = [];
+  const adapter = await createApplicationAdapter({ configPath, ciIdentity: { tenant: 'team', sourceRepository: 'example/apps' }, loadPublished: async () => assert.fail('CD stub consumes the bound publication'),
+    runner: async (_python, args) => {
+      assert.ok(args[0].endsWith('/applications.py'));
+      const request = JSON.parse(await readFile(args[args.indexOf('--request') + 1], 'utf8'));
+      registrations.push(request);
+      return { status: registrationStatus, application_id: request.application_id, target_id: request.application_id,
+        environment_id: request.environment_id, app: request.app, namespace: `app-${request.app}`,
+        node_port: 31000 + registrations.length, hostname: `${request.app}.example.test`,
+        ...(registrationStatus === 'unknown' ? { error: { code: 'APPLICATION_RECONCILE_REQUIRED' } } : {}) };
+    } });
+  adapter.deployPublished = async (application, args) => {
+    deliveries.push({ application, args });
+    assert.equal(application.app, args.app); assert.equal(application.target_id, args.targetId);
+    assert.equal(args.publication.app, args.app); assert.equal(args.publication.target_id, args.targetId);
+    assert.equal(args.publication.source_commit, args.sourceCommit);
+    return { ...deployed, public_http: { ...deployed.public_http, site_url: `https://${args.app}.example.test/` } };
+  };
+  const target = { id: 'runtime-aws', provider: 'aws' };
+  const providerTargets = { gcp: 'runtime-gcp', openstack: 'runtime-openstack' };
+  const legacy = Object.assign(async () => assert.fail('A new application must use its own CD binding'), { targets: {} });
+  const service = { targetId: 'runtime-aws', targetIds: [],
+    allowTarget: (id) => { if (!allowed.includes(id)) allowed.push(id); },
+    deploy: async (value) => {
+      assert.ok(allowed.includes(value.target_id), 'registration precedes CI admission');
+      submissions.push(value);
+      const runId = String(1000 + submissions.length);
+      const source = String(submissions.length % 10).repeat(40);
+      runs.set(runId, { ...publication, tenant: 'team', run_id: runId, app: value.app, target_id: value.target_id, source_commit: source, ...publicationChange });
+      return { run_id: runId, source_commit: source };
+    }, status: async (id, targetId) => {
+      assert.equal(submissions[Number(id) - 1001].target_id, targetId);
+      return { state: 'published', publication: runs.get(id) };
+    } };
+  const options = { service, target, providerTargets, applicationAdapter: adapter, deployPublished: legacy, pollInterval: 5 };
+  const f = await fixture(t, options);
+  return { ...f, options: { ...options, service: f.service, directory: f.directory }, adapter,
+    registrations, submissions, deliveries, allowed };
+}
+const applicationSource = (name, provider = 'aws') => ({ source_name: name, source_type: 'folder',
+  files: [{ path: 'app.js', content: Buffer.from(`user source for ${name}`) }],
+  deployment_selection: { environment: provider === 'openstack' ? 'onprem' : 'cloud', provider } });
+
+test('empty application registry accepts two user apps on one existing environment and reuses each binding after restart', async (t) => {
+  const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+  assert.deepEqual(f.product.applications(owner), []);
+  assert.ok(f.product.targets(owner).every((row) => row.deployment_scope === 'environment' && !row.application_name));
+  const completed = [];
+  for (const app of ['calculator', 'notes']) {
+    const accepted = await f.product.createDeployment(applicationSource(app), app, undefined, owner);
+    const result = await settle(() => f.product.getDeployment(accepted.id, owner));
+    assert.equal(result.status, 'succeeded'); assert.equal(result.app, app);
+    assert.equal(result.environment_target_id, 'runtime-aws'); assert.equal(result.target_id, result.application_id);
+    assert.equal(result.url, `https://${app}.example.test/`); completed.push(result);
+  }
+  assert.notEqual(completed[0].target_id, completed[1].target_id);
+  assert.equal(f.product.applications(owner).length, 2);
+  assert.deepEqual(f.submissions.map((row) => [row.app, row.target_id, row.files[0].content.toString()]),
+    completed.map((row) => [row.app, row.target_id, `user source for ${row.app}`]));
+  assert.deepEqual(f.deliveries.map(({ args }) => [args.app, args.targetId]), completed.map((row) => [row.app, row.target_id]));
+  await f.product.close(); f.allowed.length = 0;
+  const restarted = await createProductService(f.options);
+  try {
+    assert.deepEqual(new Set(f.allowed), new Set(completed.map((row) => row.target_id)));
+    assert.equal((await restarted.createDeployment(applicationSource('calculator'), 'calculator', undefined, owner)).id, completed[0].id);
+    assert.equal(f.submissions.length, 2);
+    const accepted = await restarted.createDeployment(applicationSource('calculator'), 'calculator-v2', undefined, owner);
+    const again = await settle(() => restarted.getDeployment(accepted.id, owner));
+    assert.equal(again.status, 'succeeded'); assert.equal(again.application_id, completed[0].application_id);
+    assert.equal(again.target_id, completed[0].target_id); assert.equal(restarted.applications(owner).length, 2);
+    assert.equal(new Set(f.registrations.map((row) => row.application_id)).size, 2);
+  } finally { await restarted.close(); }
+});
+
+test('application names are session-owned while separate providers receive separate app targets', async (t) => {
+  const f = await applicationFixture(t), owner = f.product.dashboard.session().id, other = f.product.dashboard.session().id;
+  const first = await f.product.createDeployment(applicationSource('calculator'), 'first', undefined, owner);
+  await settle(() => f.product.getDeployment(first.id, owner));
+  await assert.rejects(f.product.createDeployment(applicationSource('calculator'), 'foreign', undefined, other),
+    { status: 409, code: 'APPLICATION_OWNERSHIP_CONFLICT' });
+  assert.deepEqual(f.product.applications(other), []);
+  assert.throws(() => f.product.getApplication(first.application_id, other), { status: 404 });
+  assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1);
+  for (const provider of ['gcp']) {
+    const accepted = await f.product.createDeployment(applicationSource('calculator', provider), provider, undefined, owner);
+    assert.equal((await settle(() => f.product.getDeployment(accepted.id, owner))).status, 'succeeded');
+  }
+  await assert.rejects(f.product.createDeployment(applicationSource('calculator', 'openstack'), 'not-connected', undefined, owner),
+    { status: 409, code: 'CAPABILITY_UNAVAILABLE' });
+  assert.equal(new Set(f.submissions.map((row) => row.target_id)).size, 2);
+  assert.deepEqual(f.registrations.map((row) => row.environment_id), ['runtime-aws', 'runtime-gcp']);
+});
+
+test('unknown application registration survives restart without CI or CD dispatch', async (t) => {
+  const f = await applicationFixture(t, { registrationStatus: 'unknown' }), owner = f.product.dashboard.session().id;
+  const accepted = await f.product.createDeployment(applicationSource('calculator'), 'uncertain-app', undefined, owner);
+  const outcome = await settle(() => f.product.getDeployment(accepted.id, owner));
+  assert.equal(outcome.status, 'unknown'); assert.equal(outcome.error.code, 'APPLICATION_RECONCILE_REQUIRED');
+  assert.equal(f.product.getApplication(accepted.application_id, owner).status, 'unknown');
+  assert.equal(f.submissions.length, 0); assert.equal(f.deliveries.length, 0); assert.deepEqual(f.allowed, []);
+  await f.product.close();
+  const restarted = await createProductService(f.options);
+  try {
+    assert.equal((await restarted.createDeployment(applicationSource('calculator'), 'uncertain-app', undefined, owner)).id, accepted.id);
+    await assert.rejects(restarted.createDeployment(applicationSource('calculator'), 'retry', undefined, owner),
+      { status: 409, code: 'APPLICATION_RECONCILE_REQUIRED' });
+    assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 0); assert.deepEqual(f.allowed, []);
+  } finally { await restarted.close(); }
+});
+
+test('new app publication cannot substitute source app target or run before CD', async (t) => {
+  for (const field of ['source_commit', 'app', 'target_id', 'run_id']) {
+    await t.test(field, async (t) => {
+      const f = await applicationFixture(t, { publicationChange: { [field]: field === 'run_id' ? '999' : 'foreign' } });
+      const accepted = await f.product.createDeployment(applicationSource('calculator'), field);
+      const result = await settle(() => f.product.getDeployment(accepted.id));
+      assert.equal(result.status, 'unknown'); assert.equal(result.url, null);
+      assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 0);
+    });
+  }
+  const f = await applicationFixture(t);
+  await assert.rejects(f.product.createDeployment({ ...applicationSource('calculator'), app: 'replacement' }, 'forged'), { status: 422 });
+  await assert.rejects(f.product.createDeployment({ app: 'calculator', target_id: 'app-unregistered', source_type: 'folder', files }, 'target'), { status: 422 });
+  assert.equal(f.registrations.length, 0); assert.equal(f.submissions.length, 0);
+});
+
+test('HTTP applications are read-only, session-owned and paginated after automatic app registration', async (t) => {
+  const f = await applicationFixture(t);
+  const { base } = await httpFixture(t, { product: f.product });
+  const session = async () => {
+    const response = await fetch(`${base}/api/v1/sessions`, { method: 'POST' });
+    assert.equal(response.status, 201);
+    return { cookie: response.headers.get('set-cookie').split(';')[0] };
+  };
+  const owner = await session(), stranger = await session();
+  const list = (query = '', headers = owner) => fetch(`${base}/api/v1/applications${query}`, { headers });
+  const empty = await list();
+  assert.equal(empty.status, 200); assert.equal(empty.headers.get('cache-control'), 'no-store');
+  assert.ok(empty.headers.get('x-request-id'));
+  assert.deepEqual(await empty.json(), { items: [], next_marker: null });
+  const applicationIds = [];
+  for (const app of ['calculator', 'notes']) {
+    const source = form(); source.delete('app'); source.delete('target_id');
+    source.set('source_name', app); source.set('environment', 'cloud'); source.set('provider', 'aws');
+    const response = await fetch(`${base}/api/v1/deployments`, {
+      method: 'POST', headers: { ...owner, 'Idempotency-Key': `http-app-${app}` }, body: source,
+    });
+    assert.equal(response.status, 202);
+    const complete = await settle(async () => (await fetch(`${base}${response.headers.get('location')}`, { headers: owner })).json());
+    assert.equal(complete.status, 'succeeded'); assert.equal(complete.app, app);
+    applicationIds.push(complete.application_id);
+  }
+  const first = await (await list('?limit=1')).json();
+  assert.equal(first.items.length, 1); assert.equal(first.next_marker, first.items[0].id);
+  const second = await (await list(`?limit=1&marker=${first.next_marker}`)).json();
+  assert.equal(second.items.length, 1); assert.equal(second.next_marker, null);
+  assert.deepEqual(new Set([...first.items, ...second.items].map((row) => row.id)), new Set(applicationIds));
+  assert.deepEqual(await (await list(`?marker=${second.items[0].id}`)).json(), { items: [], next_marker: null });
+  const detail = await fetch(`${base}/api/v1/applications/${first.items[0].id}`, { headers: owner });
+  assert.equal(detail.status, 200); assert.equal(detail.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await detail.json(), first.items[0]);
+  assert.equal(first.items[0].status, 'ready'); assert.equal(first.items[0].environment_target_id, 'runtime-aws');
+  assert.equal(Object.hasOwn(first.items[0], 'session_id'), false);
+  assert.deepEqual(await (await list('', stranger)).json(), { items: [], next_marker: null });
+  for (const id of [first.items[0].id, 'app-missing', '__proto__']) {
+    const response = await fetch(`${base}/api/v1/applications/${id}`, { headers: stranger });
+    assert.equal(response.status, 404); assert.equal((await response.json()).error.code, 'NOT_FOUND');
+  }
+  assert.equal((await list(`?marker=${first.items[0].id}`, stranger)).status, 422);
+  for (const query of ['?limit=0', '?limit=101', '?limit=1&limit=2', '?marker=', '?marker=missing', '?unexpected=1'])
+    assert.equal((await list(query)).status, 422);
+  assert.equal((await fetch(`${base}/api/v1/applications/${first.items[0].id}?limit=1`, { headers: owner })).status, 422);
+  for (const path of ['', `/${first.items[0].id}`]) for (const method of ['POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS']) {
+    const response = await fetch(`${base}/api/v1/applications${path}`, { method, headers: owner });
+    assert.equal(response.status, 405); assert.equal(response.headers.get('allow'), 'GET');
+  }
+  assert.equal(f.registrations.length, 2); assert.equal(f.submissions.length, 2); assert.equal(f.deliveries.length, 2);
 });

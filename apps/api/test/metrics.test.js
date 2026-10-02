@@ -30,6 +30,9 @@ test('native healthz is independent of apps and distinguishes failed, missing an
   assert.equal(result.metrics.http.state, 'unavailable');
   assert.equal(result.metrics.node_up.state, 'unavailable');
   assert.deepEqual(result.metrics.runtime_healthz, { state: 'ready', value: 1, observed_at: new Date(now - 10000).toISOString(), scope: 'target_runtime' });
+  await save([node, { ...app, target_id: 'application-demo' }]);
+  assert.deepEqual((await observe({ target_id: 'application-demo', environment_target_id: 'demo', app: 'demo-app' })).metrics.runtime_healthz,
+    result.metrics.runtime_healthz, 'application-specific bindings use the registered physical runtime health');
   await save([node]);
   assert.deepEqual((await observe({ target_id: 'demo' })).metrics.runtime_healthz, result.metrics.runtime_healthz, 'removing the app cannot disconnect the runtime');
   value = 0; assert.equal((await observe({ target_id: 'demo' })).metrics.runtime_healthz.value, 0);
@@ -152,6 +155,19 @@ test('target node metrics preserve partial data, real zero, timestamps and node-
   failCluster = false;
   await writeFile(configPath, JSON.stringify({ version: 1, targets: [nodeOnly, binding] }));
   assert.equal((await observe(record)).metrics.pods.value, 1, 'exact app binding takes precedence over node-only fallback');
+  const application = { id: 'deployment-2', target_id: 'app-0123456789abcdef01234567', environment_target_id: 'demo', app: 'demo-app' };
+  const beforeApplication = calls;
+  result = await observe(application);
+  assert.equal(calls - beforeApplication, 1, 'an application binding falls back only to its registered environment node');
+  assert.equal(result.target_id, application.target_id); assert.equal(result.deployment_id, application.id);
+  assert.equal(result.app, application.app); assert.equal(result.metrics.node_up.state, 'ready');
+  assert.equal(result.metrics.pods.state, 'unsupported', 'another target app binding cannot supply this application probe or pods');
+  assert.equal(result.metrics.http.state, 'unsupported');
+  const beforeUnregisteredEnvironment = calls;
+  assert.equal((await observe({ ...application, environment_target_id: 'unregistered' })).metrics.node_up.state, 'unsupported');
+  assert.equal(calls, beforeUnregisteredEnvironment);
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [nodeOnly, { ...binding, target_id: application.target_id }] }));
+  assert.equal((await observe(application)).metrics.pods.value, 1, 'exact application observation still takes precedence');
   await writeFile(configPath, JSON.stringify({ version: 1, targets: [{ ...nodeOnly, probe_url: binding.probe_url }] }));
   const beforeInvalid = calls;
   assert.equal((await observe(record)).metrics.node_up.state, 'unavailable');

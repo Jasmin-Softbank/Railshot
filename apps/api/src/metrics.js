@@ -117,14 +117,15 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
     }
     const registered = config.targets.filter((item) => item.target_id === record.target_id);
     const exact = record.app ? registered.filter((item) => item.app === record.app) : registered;
-    const bindings = exact.length ? exact : registered.filter((item) => item.app == null);
+    const nodeId = record.environment_target_id ?? record.target_id;
+    const bindings = exact.length ? exact : config.targets.filter((item) => item.target_id === nodeId && item.app == null);
     // A node-only request cannot choose an arbitrary app or an ambiguous physical target.
     if (!record.app && new Set(bindings.map((item) => `${item.prometheus_url}|${item.node_instance}`)).size > 1) {
       for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable');
       return result;
     }
     const selected = bindings.find((item) => item.app == null) || bindings[0];
-    const healthBinding = registered.find((item) => item.healthz_url);
+    const healthBinding = config.targets.find((item) => item.target_id === nodeId && item.healthz_url);
     const target = selected && { ...selected, app: selected.app && record.app || null,
       healthz_url: selected.healthz_url || (healthBinding?.prometheus_url === selected.prometheus_url && healthBinding.node_instance === selected.node_instance ? healthBinding.healthz_url : null) };
     if (!target?.app) for (const name of ['pods', 'http']) result.metrics[name] = metric(name, 'unsupported');

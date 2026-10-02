@@ -19,7 +19,7 @@
 
 소스 접수는 multipart의 `app`, `target_id`와 공개 GitHub URL(`repository_url`), ZIP(`archive`), 폴더(`files`와 JSON 문자열 배열 `paths`) 중 하나를 받는다. `source_type`은 생략할 수 있으며 지정하면 실제 소스 형식과 일치해야 한다. `plan_id`는 `POST /api/v1/deployments`에서만 선택적으로 받는다. 빌드·legacy deploy에는 허용하지 않는다. 계획을 포함한 배포의 `app`·`target_id`는 계획의 이름·`runtime_target_id`와 일치해야 하고, 해당 profile에 배포 등록 설정이 있어야 한다. 계획이 없는 배포는 서버 CD 설정 또는 성공한 환경 등록 기록의 대상·앱을 사용한다. 성공한 환경의 재배포는 저장한 CD 설정을 재사용하며 VM·DB 생성은 반복하지 않는다. 대상·앱·계획·환경 ID가 일치한 성공 기록만 재시작 후 CI 허용 대상으로 복원한다.
 
-기존 환경을 선택하는 화면은 같은 배포 경로에 `app`·`target_id` 대신 `environment`·`provider`와 `source_name`을 보낼 수 있다. 폴더는 `source_name`이 필수이며 ZIP은 파일명, GitHub는 저장소명에서 이름을 얻을 수 있다. 화면·API·CLI/MCP는 `contracts/application.mjs`의 정규화 규칙을 공유하며 이름이 없거나 유효하지 않으면 거절한다. 서버는 등록된 provider와 CI/CD 연결에서 대상만 선택하고 앱 이름은 소스에서 정한다. 고정 대상에 등록된 앱 이름과 다르면 소스 취득·CI 전에 거절하며 샘플 앱 이름으로 바꾸지 않는다. 새 앱은 해당 앱의 등록 또는 기존 `create_per_request` 계획이 필요하다. 미연결 provider는 소스를 가져오거나 실행하기 전에 거부한다. 이 선택 방식에는 `app`, `target_id`, `plan_id`를 함께 보낼 수 없다. 새 앱·DB 환경을 만드는 화면은 profiles로 계획을 만든 뒤 그 계획의 `name`, `runtime_target_id`, `id`를 각각 `app`, `target_id`, `plan_id`로 제출한다.
+기존 환경을 선택하는 화면은 같은 배포 경로에 `app`·`target_id` 대신 `environment`·`provider`와 `source_name`을 보낼 수 있다. 폴더는 `source_name`이 필수이며 ZIP은 파일명, GitHub는 저장소명에서 이름을 얻을 수 있다. 화면·API·CLI/MCP는 `contracts/application.mjs`의 정규화 규칙을 공유하며 이름이 없거나 유효하지 않으면 거절한다. 서버는 등록된 provider와 CI/CD 연결에서 대상만 선택하고 앱 이름은 소스에서 정한다. `RAILSHOT_APPLICATIONS_FILE`에 등록된 환경은 업로드에서 앱 등록을 자동으로 생성한다. 기존 고정 앱 대상은 이름이 다르면 소스 취득·CI 전에 거절하며 샘플 앱 이름으로 바꾸지 않는다. 환경과 고정 앱 등록이 모두 없으면 미연결 provider로 거부한다. 이 선택 방식에는 `app`, `target_id`, `plan_id`를 함께 보낼 수 없다. 새 앱·DB 환경을 만드는 화면은 profiles로 계획을 만든 뒤 그 계획의 `name`, `runtime_target_id`, `id`를 각각 `app`, `target_id`, `plan_id`로 제출한다.
 
 profile의 `target_id`는 고정 runtime 대상 또는 새 대상 이름의 기준이다. `create_per_request=true`이면 사용자 앱 이름과 계획 ID의 SHA-256 앞 8자리로 runtime·DB 대상, namespace와 GitOps 경로를 한 번 파생한다. 이때 `application_name`은 null이며 최종 요청은 계획의 `runtime_target_id`를 사용한다. false이면 기존 고정 대상·앱을 유지한다. 운영자 설정 `registration_max_age_seconds`(1800–604800)는 계획 준비 시 비공개 등록 만료 시각을 한 번 정하며 재검증으로 연장하지 않는다. 이 만료는 VM 종료나 비용 상한을 보장하지 않는다. `deployment_supported`는 배포 설정 유무, `supported`는 provider·runtime 용도·운영자 실행 허용 여부를 나타낸다. 두 값 모두 생성·등록·준비 완료를 뜻하지 않는다. `database`는 null 또는 `{mode:"patroni", required, database_nodes, dcs_voters, proxy_nodes}`다. `required`는 등록된 앱 대상의 DB binding 필요 여부다. DB와 DCS 역할은 같은 VM에 둘 수 있으므로 역할 수를 더한 값이 VM 수는 아니다.
 
@@ -80,3 +80,17 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 앱 자동 배포의 시작점은 `POST /api/v1/deployments`다. API가 소스 commit을 만들고 `railshot-deploy.yml`을 dispatch하면, CI gate·이미지 게시 성공 뒤 제품 worker가 CD를 호출해 고정 Git revision을 Argo에 적용하고 공개 HTTP를 확인한다. `POST /api/v1/builds`는 게시에서 끝난다. 현재 앱 workflow에는 push/PR 자동 배포 trigger가 없으므로 저장소 수정·병합만으로 이 제품 배포 경로가 시작되지는 않는다.
 
 실패 CI의 세부 단계와 검증된 원인은 `steps[].tasks`, `ci.diagnostics`로 전달한다. 결과 불확실 상태는 `unknown`으로 유지한다. 앱 로그 조회는 `GET /api/v1/deployments/{id}/logs`이며 세션·현재 배포 버전·런타임 소유권 검증을 거친다. 상세 제한은 [제품 관측 계약](observations.md)을 따른다.
+
+### 기존 환경과 앱 등록 분리
+
+`RAILSHOT_APPLICATIONS_FILE`은 기존 Ansible registry의 환경 ID와 CD 기반 설정을 연결하는 비공개 운영자 JSON이다. API는 업로드에서 실제 앱 이름을 얻고 `(environment_id, tenant, app)`으로 앱 binding ID를 결정한다. 환경에는 앱 이름을 넣지 않는다. `GET /api/v1/targets`는 `deployment_scope=environment`, `GET /api/v1/applications[/{id}]`는 현재 세션의 앱 등록을 반환한다. 처음에는 앱 목록이 비어 있다.
+
+같은 앱 재배포는 namespace·NodePort·Argo project·GitOps 경로를 재사용한다. 다른 앱은 별도 등록을 만든다. `deployment.target_id`는 앱 binding이고 `environment_target_id`는 기존 노드다. CI 게시물·CD·로그는 앱 binding을 사용하며 노드 관측만 환경 ID를 사용한다. 다른 세션의 같은 이름은 409이며 다른 세션의 등록 상세는 404다.
+
+최초 `stage=registration`에서 실제 노드의 Service와 영속 예약을 읽어 NodePort를 할당하고 namespace·pull Secret·Argo 권한·CI binding을 연결한다. VM 생성이나 runtime 재설치는 하지 않는다. 등록 `ready`는 배포 완료가 아니다. `running/unknown` 등록은 재실행하지 않고 운영자 조정이 필요하다. CI의 정확한 source commit·앱·target·image digest를 검증한 뒤 실제 spec의 포트·health·route로 CD와 공개 경로를 준비한다. 앱 URL은 해당 revision/digest가 실행되고 실제 health와 서비스 경로가 HTTPS 200을 반환할 때만 제공한다.
+
+환경의 `ingress`는 `base_domain`, `edge_config_file`, `dns_config_file`을 참조한다. AWS는 기존 ALB에 앱 전용 target group·host rule과 해당 NodePort 권한을 추가하고 Cloudflare CNAME을 만든다. GCP는 기존 전역 IP·proxy·certificate map에 앱별 backend·인증서와 host rule을 추가하고 인증용 CNAME과 앱 A 레코드를 만든다. DNS writer는 `railshot:<application_id>` 소유 표식과 레코드 재조회를 확인하며 외부 소유 레코드를 덮어쓰지 않는다. DNS API 성공은 `https_verified=false`인 경로 준비 결과이고 배포 성공이 아니다.
+
+운영 참조 파일과 Terraform state는 단일 API PVC에 둔다. `railshot-cloudflare` Secret의 `cloudflare-token`·`cloudflare.json`은 init container가 0600으로 복사한다. GCP WIF 설정은 `railshot-environments.google_credentials_file`로 참조하며 정적 서비스 계정 키를 이미지에 넣지 않는다. 기존 Terraform state의 lineage·resource ID를 유지하고 이전 writer를 중지한 뒤 이관한다. 원본 state 복사본으로 별도 apply하지 않는다.
+
+현재 한계: AWS/GCP 자동 공개 경로만 연결돼 있다. OpenStack은 기존 환경의 앱 등록 코드를 공유하지만 공개 경로 writer가 연결되기 전에는 자동 배포 옵션을 차단한다. 같은 앱의 소스·이미지 재배포는 기존 등록을 사용하고, NodePort·health path 등 라우팅 계약 변경은 자동 수정하지 않는다. 기존 경로 변경에는 별도 검토가 필요하다. 실제 실행 상태와 미검증 항목은 [앱 자동 등록 검증 기록](../poc/application-registration-20261003.md)을 따른다.

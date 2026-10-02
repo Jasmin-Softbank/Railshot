@@ -2061,6 +2061,162 @@
           }
         }
       }
+    },
+    "/api/v1/applications": {
+      "get": {
+        "operationId": "listApplications",
+        "summary": "List application registrations owned by this session",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted application registrations, without credentials or cluster endpoints.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "An empty workspace returns no apps. Source submission allocates a binding on the selected existing environment. It does not create a VM. Pagination accepts limit and marker."
+      }
+    },
+    "/api/v1/applications/{id}": {
+      "get": {
+        "operationId": "getApplication",
+        "summary": "Read an application registration",
+        "description": "Same-environment redeployment retains this binding. A different app gets a separate namespace, Argo project and target ID. Foreign session bindings are 404. No query parameters.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Persisted application registration.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Application"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2153,7 +2309,10 @@
             "type": "string"
           },
           "deployment_scope": {
-            "const": "registered_application"
+            "enum": [
+              "environment",
+              "registered_application"
+            ]
           },
           "capabilities": {
             "type": "object",
@@ -2458,6 +2617,7 @@
           "stage": {
             "type": "string",
             "enum": [
+              "registration",
               "environment",
               "ci",
               "cd",
@@ -2744,6 +2904,14 @@
           },
           "observation": {
             "$ref": "#/components/schemas/Observation"
+          },
+          "application_id": {
+            "type": "string",
+            "description": "Application binding ID."
+          },
+          "environment_target_id": {
+            "type": "string",
+            "description": "Existing runtime environment ID; node observations use this ID."
           }
         },
         "required": [
@@ -5004,6 +5172,85 @@
           "target_id",
           "status",
           "truncated",
+          "items",
+          "next_marker"
+        ],
+        "additionalProperties": false
+      },
+      "Application": {
+        "type": "object",
+        "description": "Session-owned application slot on an existing runtime. ready means namespace, permissions and CI binding registered; it does not mean deployed or publicly reachable.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "app": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "environment_target_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "hostname": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "registered_at": {
+            "type": "string"
+          },
+          "node_port": {
+            "type": "integer",
+            "minimum": 30000,
+            "maximum": 32767
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "registering",
+              "ready",
+              "blocked",
+              "unknown"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "app",
+          "target_id",
+          "environment_target_id",
+          "provider",
+          "status",
+          "created_at"
+        ],
+        "additionalProperties": false
+      },
+      "ApplicationList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Application"
+            }
+          },
+          "next_marker": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
           "items",
           "next_marker"
         ],

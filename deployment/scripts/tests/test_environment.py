@@ -108,6 +108,41 @@ class RegistrationTest(unittest.TestCase):
     def run_registration(self):
         return env.register(self.root / 'registry.json', self.target, self.root / 'config.json', self.home)
 
+    def fill_renewal_policy(self, count):
+        cm = self.control.objects['argocd', 'configmap', 'railshot-credentials']
+        original = json.loads(cm['data']['policy.json'])['targets'][0]
+        targets = [copy.deepcopy(original)]
+        for index in range(1, count):
+            targets.append({**copy.deepcopy(original), 'target_id': f'reserved-{index}', 'secret': f'railshot-reserved-{index}'})
+        cm['data']['policy.json'] = json.dumps({'version': 1, 'targets': targets})
+        return targets
+
+    def test_legacy_registration_checks_renewal_capacity_before_external_writes(self):
+        self.fill_renewal_policy(20)
+        with self.assertRaisesRegex(ValueError, 'renewal target capacity exhausted'):
+            self.run_registration()
+        self.assertEqual((self.runtime.applications, self.control.applications), (0, 0))
+        self.assertIsNone(self.variable)
+
+    def test_install_renewal_rejects_full_or_invalid_candidate_before_role_write(self):
+        targets = self.fill_renewal_policy(20)
+        before = copy.deepcopy(self.control.objects)
+        candidate = {**targets[0], 'target_id': 'new-target', 'secret': 'railshot-new-target'}
+        with self.assertRaisesRegex(ValueError, 'registered targets required'):
+            env.install_renewal(self.config['cd'], candidate)
+        self.assertEqual(self.control.applications, 0)
+        self.assertEqual(self.control.objects, before)
+        # Reinstalling an identical existing binding consumes no extra capacity.
+        env.install_renewal(self.config['cd'], targets[0])
+        self.assertEqual(self.control.applications, 0)
+        self.fill_renewal_policy(1)
+        candidate.pop('audiences')
+        before = copy.deepcopy(self.control.objects)
+        with self.assertRaisesRegex(ValueError, 'invalid registration binding'):
+            env.install_renewal(self.config['cd'], candidate)
+        self.assertEqual(self.control.applications, 0)
+        self.assertEqual(self.control.objects, before)
+
     def use_openstack(self):
         self.server = {'id': 'server-1', 'project_id': 'project-1', 'status': 'ACTIVE',
             'addresses': [{'network': 'management', 'address': '10.26.1.5', 'version': 4}]}
