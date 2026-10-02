@@ -193,3 +193,15 @@ variable "database_egress" {
     error_message = "Supply at most 64 private IPv4 /16-/32 rules on TCP 5432, 2379, 2380 or 8008."
   }
 }
+
+variable "max_run_duration_seconds" {
+  type        = number
+  default     = null
+  description = "Optional per-start guest poweroff timer. EC2 stop retains disks; cloud-init installs it only on new instances."
+  validation {
+    condition = var.max_run_duration_seconds == null ? true : (
+      var.max_run_duration_seconds >= 1800 && var.max_run_duration_seconds <= 604800 && floor(var.max_run_duration_seconds) == var.max_run_duration_seconds
+    )
+    error_message = "max_run_duration_seconds must be null or an integer from 1800 to 604800."
+  }
+}

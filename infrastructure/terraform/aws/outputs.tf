@@ -10,6 +10,10 @@ output "subnet_id" { value = data.aws_subnet.selected.id }
 output "node_descriptor" {
   description = "Configured references only; no guest/readiness observation."
   value = {
+    runtime_limit = var.max_run_duration_seconds == null ? null : {
+      seconds        = var.max_run_duration_seconds, instance_termination_action = "STOP",
+      implementation = "guest_systemd_timer", readiness = "unverified"
+    }
     purpose        = var.purpose
     schema_version = "v1", provider_kind = "aws", target_id = var.target_id,
     owner_ref      = var.owner_ref, execution_driver = "terraform", resource_id = aws_instance.node.arn,

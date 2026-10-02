@@ -13,6 +13,26 @@ users:
 package_update: true
 packages: [e2fsprogs, util-linux]
 write_files:
+%{ if max_run_duration_seconds != null ~}
+  - path: /etc/systemd/system/railshot-runtime-limit.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Stop the disposable Railshot instance at its runtime limit
+      [Service]
+      Type=oneshot
+      ExecStart=/sbin/poweroff
+  - path: /etc/systemd/system/railshot-runtime-limit.timer
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Bound each start of the disposable Railshot instance
+      [Timer]
+      OnActiveSec=${max_run_duration_seconds}s
+      AccuracySec=1s
+      [Install]
+      WantedBy=timers.target
+%{ endif ~}
   - path: /etc/railshot/host.yml
     permissions: "0600"
     content: |
@@ -25,4 +45,8 @@ write_files:
     permissions: "0600"
     content: ${jsonencode(bootstrap_manifest)}
 runcmd:
+%{ if max_run_duration_seconds != null ~}
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, --now, railshot-runtime-limit.timer]
+%{ endif ~}
   - [bash, /usr/local/sbin/railshot-bootstrap]

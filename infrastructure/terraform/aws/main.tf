@@ -225,7 +225,8 @@ resource "aws_volume_attachment" "data" {
 }
 locals {
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    operator_ssh_public_key = var.operator_ssh_public_key
+    operator_ssh_public_key  = var.operator_ssh_public_key
+    max_run_duration_seconds = var.max_run_duration_seconds
     host_config = yamlencode({
       name           = var.name, node_name = coalesce(var.node_name, var.name), cloud_provider = "aws", region = var.region,
       runtime_status = "not_configured"

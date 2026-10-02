@@ -18,7 +18,7 @@ def evaluate(expression):
     return json.loads(json.loads(result.stdout))
 
 
-def render(operator_ssh_public_key=None, purpose="runtime"):
+def render(operator_ssh_public_key=None, purpose="runtime", max_run_duration_seconds=None):
     args = {'device': '/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol01234567890123456',
             'initialize_empty_data_disk': 'false',
             'data_mount_path': '/var/lib/postgresql' if purpose == 'database' else '/var/lib/rancher'}
@@ -26,7 +26,7 @@ def render(operator_ssh_public_key=None, purpose="runtime"):
     config = {'name': 'offline', 'cloud_provider': 'aws', 'region': 'ap-northeast-2',
               'runtime_status': 'not_configured'}
     data = {'host_config': yaml.safe_dump(config), 'bootstrap_script': script,
-            'operator_ssh_public_key': operator_ssh_public_key,
+            'operator_ssh_public_key': operator_ssh_public_key, 'max_run_duration_seconds': max_run_duration_seconds,
             'bootstrap_manifest': json.dumps({'method': 'host-preparation-only', 'runtime_status': 'not_configured'})}
     return yaml.safe_load(evaluate('templatefile(' + json.dumps(str(MODULE / 'cloud-init.yaml.tftpl')) + ',' + json.dumps(data) + ')'))
 
@@ -54,6 +54,16 @@ class AWSBootstrapTest(unittest.TestCase):
         self.assertNotIn('/var/lib/rancher', script)
         self.assertIn('runtime_ready":"not_configured', script)
         subprocess.run(['bash', '-n'], input=script, text=True, check=True)
+
+    def test_optional_runtime_timer_stops_without_removing_retained_data(self):
+        self.assertFalse(any('runtime-limit' in path for path in self.files))
+        configured = render(max_run_duration_seconds=7200)
+        files = {row['path']: row['content'] for row in configured['write_files']}
+        self.assertIn('OnActiveSec=7200s', files['/etc/systemd/system/railshot-runtime-limit.timer'])
+        self.assertIn('ExecStart=/sbin/poweroff', files['/etc/systemd/system/railshot-runtime-limit.service'])
+        self.assertEqual(configured['runcmd'], [['systemctl', 'daemon-reload'],
+                         ['systemctl', 'enable', '--now', 'railshot-runtime-limit.timer'],
+                         ['bash', '/usr/local/sbin/railshot-bootstrap']])
 
     def test_public_operator_key_bootstraps_only_a_locked_ssh_user(self):
         key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyTestNotARealKey offline'
@@ -89,7 +99,8 @@ class AWSBootstrapTest(unittest.TestCase):
                              ('operator_ssh_public_key', 'ssh-ed25519 AAAA\nroot: injected'),
                              ('vpc_id', 'unknown'), ('subnet_id', 'unknown'),
                              ('additional_security_group_ids', ['0.0.0.0/0']),
-                             ('purpose', 'arbitrary'), ('database_ingress', [{'port': 5432, 'cidr': '0.0.0.0/0'}]),
+                             ('purpose', 'arbitrary'), ('max_run_duration_seconds', 1799),
+                             ('max_run_duration_seconds', 604801), ('max_run_duration_seconds', 7200.5), ('database_ingress', [{'port': 5432, 'cidr': '0.0.0.0/0'}]),
                              ('database_egress', [{'port': 22, 'cidr': '10.1.0.0/16'}]),
                              ('database_ingress', [{'port': 5432, 'cidr': '10.0.0.0/1'}]),
                              ('database_ingress', [{'port': 5432, 'cidr': '192.168.999.1/32'}])):
