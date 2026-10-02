@@ -51,6 +51,18 @@ variable "archive_sha256" {
     error_message = "Hash the exact codeload archive for the pinned commit."
   }
 }
+variable "existing_user_data_base64" {
+  description = "Exact existing EC2 gzip user-data bytes, verified against AWS and state; null renders a new bootstrap."
+  type        = string
+  default     = null
+  validation {
+    condition = var.existing_user_data_base64 == null ? true : (
+      length(var.existing_user_data_base64) <= 21848 && length(var.existing_user_data_base64) % 4 == 0 &&
+      can(regex("^H4sI[A-Za-z0-9+/]*={0,2}$", var.existing_user_data_base64))
+    )
+    error_message = "Use the verified existing gzip/base64 EC2 user-data, or null for a new bootstrap."
+  }
+}
 variable "admin_ssh_public_key" {
   type = string
   validation {
@@ -202,7 +214,7 @@ resource "aws_instance" "ci" {
     encrypted             = true
     delete_on_termination = false
   }
-  user_data_base64 = base64gzip(templatefile("${path.module}/cloud-init.yaml.tftpl", {
+  user_data_base64 = var.existing_user_data_base64 != null ? var.existing_user_data_base64 : base64gzip(templatefile("${path.module}/cloud-init.yaml.tftpl", {
     platform_ref = var.platform_ref, archive_sha256 = var.archive_sha256,
     public_key   = var.admin_ssh_public_key, stop_at = var.stop_at
   }))

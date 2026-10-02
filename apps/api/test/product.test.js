@@ -506,13 +506,17 @@ test('incomplete or mismatched environment registration never admits the dynamic
 });
 
 test('original UI environment selection is resolved server-side and never falls back to a different provider', async (t) => {
+  const contract = JSON.parse(await readFile(new URL('../../../docs/api/product.openapi.json', import.meta.url)));
+  for (const route of Object.keys(contract.paths)) {
+    assert.match(route, /^\/api\/v1(?:\/(?:[a-z]+|\{[a-z]+\}))+$/, `Nonconforming product route: ${route}`);
+  }
   const submitted = [];
   const deployPublished = async () => deployed;
   deployPublished.targets = { demo: { applicationName: 'demo-app' } };
   const { base } = await httpFixture(t, { target: { provider: 'aws' }, deployPublished,
     service: { targetId: 'demo', deploy: async (value) => { submitted.push(value); return { run_id: '123', source_commit: publication.source_commit }; },
       status: async () => ({ run_id: 123, state: 'published', publication }) } });
-  const options = await (await fetch(`${base}/api/v1/deployment-options`)).json();
+  const options = await (await fetch(`${base}/api/v1/options`)).json();
   assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['openstack', false], ['proxmox', false]]);
   const selection = () => { const value = form(); value.delete('app'); value.delete('target_id'); value.set('environment', 'cloud'); value.set('provider', 'aws'); value.set('source_name', 'different-source'); return value; };
   for (const [mutate, status] of [
@@ -560,7 +564,7 @@ test('HTTP deployment accepts a dynamic app-bound plan alongside existing enviro
       deploy: async (value) => { assert.equal(value.app, app); assert.equal(value.target_id, targetId);
         assert.ok(targetIds.includes(targetId)); sequence.push('ci'); return { run_id: 123, source_commit: publication.source_commit }; },
       status: async () => ({ state: 'published', publication: { ...publication, app, target_id: targetId } }) } });
-  const options = await (await fetch(`${base}/api/v1/deployment-options`)).json();
+  const options = await (await fetch(`${base}/api/v1/options`)).json();
   assert.equal(options.items.find(({ provider }) => provider === 'aws').available, true);
   const planned = await fetch(`${base}/api/v1/plans`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: app }) });
   assert.equal(planned.status, 201);

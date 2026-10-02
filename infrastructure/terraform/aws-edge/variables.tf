@@ -75,6 +75,15 @@ variable "certificate_arn" {
     error_message = "Use a regional ACM certificate ARN or null."
   }
 }
+variable "idle_timeout" {
+  type        = number
+  default     = 60
+  description = "Shared ALB connection idle timeout in seconds; set above the longest supported API response wait."
+  validation {
+    condition     = var.idle_timeout >= 1 && var.idle_timeout <= 4000 && floor(var.idle_timeout) == var.idle_timeout
+    error_message = "Use an integer ALB idle timeout from 1 through 4000 seconds."
+  }
+}
 variable "http_redirect" {
   type    = bool
   default = false

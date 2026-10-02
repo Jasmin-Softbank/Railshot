@@ -2,8 +2,12 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { execFileSync } from 'node:child_process';
 
 const config = '/var/lib/railshot/config';
-mkdirSync(config, { recursive: true, mode: 0o700 });
-chmodSync(config, 0o700);
+// The single API worker shares providers; downloads must not fill the 128Mi /tmp volume.
+for (const directory of [config, '/var/lib/railshot/tmp', '/var/lib/railshot/provider-cache']) {
+  if (existsSync(directory) && !lstatSync(directory).isDirectory()) throw new Error('Private state must be a directory');
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+}
 for (const name of readdirSync('/run/config').filter((value) => !value.startsWith('.'))) {
   const destination = `${config}/${name}`;
   if (existsSync(destination) && !lstatSync(destination).isFile()) throw new Error('Private config must be a regular file');

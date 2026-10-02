@@ -7,6 +7,7 @@ QUALITY_PASS and full_gate_status are deliberately different evidence fields.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -22,7 +23,7 @@ PLATFORM = HERE.parent
 STACKS = ("npm-js", "npm-ts", "nextjs", "fastapi", "maven-spring", "gradle-spring")
 ALIASES = ("pnpm-js", "yarn-js")
 EXTRA_STACKS = ("requirements-fastapi", "node-test-js")
-CASES = ("good", "lint", "type", "unit", "missing-env", "missing-tool", "missing-lock", "no-tests", "zero-tests", "skip")
+CASES = ("good", "private-source", "lint", "type", "unit", "missing-env", "missing-tool", "missing-lock", "no-tests", "zero-tests", "skip")
 SOURCE = {"npm-js": "src/app.js", "npm-ts": "src/app.ts", "nextjs": "lib/message.ts", "fastapi": "app.py",
           "maven-spring": "src/main/java/dev/railshot/HealthController.java",
           "gradle-spring": "src/main/java/dev/railshot/HealthController.java"}
@@ -33,6 +34,14 @@ SOURCE.update({"requirements-fastapi": "app.py", "node-test-js": "src/app.js"})
 def variant(root, stack, case):
     """Mutate trusted fixtures BEFORE intake; zero/skip cases explicitly alter test fixtures."""
     if case == "good":
+        return "PASS"
+    if case == "private-source":
+        # Reproduce the ephemeral runner's 077 checkout/intake without changing
+        # application bytes. Only Q's separate snapshot may become readable.
+        for path in (root, *root.rglob("*")):
+            if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                raise ValueError("private source fixture requires regular files/directories")
+            path.chmod(0o700 if path.is_dir() or path.stat().st_mode & 0o111 else 0o600)
         return "PASS"
     if case in {"zero-tests", "skip"}:
         if stack != "node-test-js":
@@ -153,7 +162,8 @@ def execute(fixtures, output, stack, case, mode, network, timeout):
     case_dir.mkdir()  # Never overwrite earlier evidence.
     result = {"stack": stack, "case": case, "mode": mode, "quality_status": "NOT_RUN",
               "full_gate_status": "NOT_RUN", "release_eligible": False, "assertion": "BLOCKED",
-              "commands": [], "started": int(time.time())}
+               "commands": [], "started": int(time.time())}
+    previous_umask = os.umask(0o077) if case == "private-source" else None
     try:
         receipt = generation_evidence(fixtures, stack)
         result["generation_evidence"] = receipt
@@ -221,7 +231,11 @@ def execute(fixtures, output, stack, case, mode, network, timeout):
             if not result["upload_unchanged"]:
                 result.update(assertion="MISMATCH", error="UPLOADED_SOURCE_CHANGED")
         result["finished"] = int(time.time())
-        (case_dir / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        try:
+            (case_dir / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+        finally:
+            if previous_umask is not None:
+                os.umask(previous_umask)
     return result
 
 

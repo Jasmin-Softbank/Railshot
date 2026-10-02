@@ -822,7 +822,7 @@
         }
       }
     },
-    "/api/v1/deployment-options": {
+    "/api/v1/options": {
       "get": {
         "operationId": "listDeploymentOptions",
         "summary": "Resolve original cloud and on-premise UI choices against operator configuration",
@@ -1403,6 +1403,95 @@
                   "string",
                   "null"
                 ]
+              },
+              "site_url": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://",
+                "description": "App path verified with HTTPS 200 after the health contract, exact ALB route, DNS alias and target health checks."
+              },
+              "receipt": {
+                "type": "object",
+                "description": "Present only after verification of an allocated edge route. Does not contain endpoint IPs or credentials.",
+                "properties": {
+                  "deployment_id": {
+                    "type": "string"
+                  },
+                  "target_id": {
+                    "type": "string"
+                  },
+                  "tenant": {
+                    "type": "string"
+                  },
+                  "app": {
+                    "type": "string"
+                  },
+                  "environment_id": {
+                    "type": "string"
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "source_commit": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "images_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "route_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "expires_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "plan_sha256": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "route_key": {
+                    "type": "string",
+                    "pattern": "^app-[a-f0-9]{24}$"
+                  },
+                  "target_health": {
+                    "const": "healthy"
+                  },
+                  "dns_alias": {
+                    "const": "verified"
+                  },
+                  "tls_http": {
+                    "const": "verified"
+                  }
+                },
+                "required": [
+                  "deployment_id",
+                  "target_id",
+                  "tenant",
+                  "app",
+                  "environment_id",
+                  "namespace",
+                  "source_commit",
+                  "revision",
+                  "images_sha256",
+                  "route_sha256",
+                  "expires_at",
+                  "plan_sha256",
+                  "route_key",
+                  "target_health",
+                  "dns_alias",
+                  "tls_http"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

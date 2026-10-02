@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import edge
+from jsonschema import Draft202012Validator, ValidationError
 
 
 class EdgeTest(unittest.TestCase):
@@ -162,6 +163,13 @@ class EdgeTest(unittest.TestCase):
             result = edge.observe(reference, request, 'b' * 40, public, lambda _: True)
             self.assertEqual(result['receipt']['deployment_id'], 'dep-1')
             self.assertEqual(result['site_url'], 'https://' + route['host'] + '/')
+            schema = json.loads((Path(__file__).resolve().parents[1] / 'docs/api/product.openapi.json').read_text())
+            public_schema = schema['components']['schemas']['Deployment']['properties']['public_http']
+            validator = Draft202012Validator(public_schema)
+            validator.validate(result)
+            validator.validate({'state': 'unverified', 'verified_at': None, 'url': None})
+            with self.assertRaises(ValidationError):
+                validator.validate({**result, 'receipt': {**result['receipt'], 'private_ip': '10.0.0.3'}})
             self.assertEqual(edge.load(reference)[1]['phase'], 'applied')
             self.assertIsNone(edge.observe(reference, request, 'b' * 40, public, lambda _: False)['url'])
             health['TargetHealthDescriptions'][0]['TargetHealth']['State'] = 'initial'

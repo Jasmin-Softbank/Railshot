@@ -75,7 +75,7 @@ def container_components(paths):
                       'deployment/manifests/platform.yaml',
                       'gitops/applications/railshot-platform.yaml'}:
             components.update(('dashboard', 'api', 'mcp'))
-        elif (path.startswith(('ci/', 'deployment/', 'infrastructure/ansible/',
+        elif (path.startswith(('apps/agent/', 'ci/', 'deployment/', 'infrastructure/ansible/',
                                'infrastructure/providers/openstack/',
                                'infrastructure/providers/terraform_tools/',
                                'infrastructure/terraform/', 'gitops/', 'observability/',
@@ -107,6 +107,11 @@ def select(paths):
             continue  # Container job below checks all affected image contexts.
         elif path.startswith(('apps/api/', 'apps/dashboard/', 'ci/browser/')):
             selected.add('api-browser')
+        elif path.startswith(('apps/agent/', 'deployment/bootstrap/client_setup/',
+                              'deployment/bootstrap/templates/')) or path in {
+                'deployment/bootstrap/install.sh', 'deployment/bootstrap/uninstall.sh',
+                'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/requirements.lock'}:
+            selected.add('openstack')
         elif path.startswith('infrastructure/providers/openstack/'):
             selected.update(('openstack', 'contracts'))
         elif path.startswith('infrastructure/providers/terraform_tools/'):

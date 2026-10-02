@@ -98,6 +98,14 @@ selects a nonexistent npm checker command or removes a Java wrapper.
 Maven); `no-tests` removes test files to verify rejection. These deliberate test
 inputs are not a permission for the product fixer to change policy or tests.
 
+Use `--stacks npm-js --cases private-source --mode quality` to reproduce the
+ephemeral runner's `umask 077`: the upload/intake retain directories `0700` and
+files `0600` (executables `0700`). Q copies validated application input, excluding
+`.git`, into a temporary snapshot under the private runner temp directory. Only
+that snapshot is readable by the existing UID `65532` Docker checker and mounted
+read-only; original source, credentials and run records stay private. The case
+must pass native Q and preserve the original source digest, including its modes.
+
 JavaScript's `type` case and Python's `missing-tool` case are explicitly
 `NOT_APPLICABLE`; the latter needs a separately native-generated Python lock
 without the required checker. They are never reported as executed passes.
