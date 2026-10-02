@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 HERE = Path(__file__).resolve().parent
 NAMESPACE = 'railshot-observability'
 KSM_METRICS = [
-    'kube_node_status_condition', 'kube_deployment_spec_replicas',
+    'kube_node_status_condition', 'kube_pod_status_phase', 'kube_deployment_spec_replicas',
     'kube_deployment_status_replicas_available',
     'kube_pod_container_status_restarts_total',
     'kube_pod_container_status_waiting_reason',

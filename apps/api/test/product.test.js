@@ -44,6 +44,9 @@ test('snapshot and intent are durable before one dispatch; replay returns the sa
   assert.equal(complete.status, 'succeeded');
   assert.equal(complete.url, deployed.public_http.url);
   assert.equal(complete.ci.run_id, '123');
+  assert.match(complete.source_digest, /^[a-f0-9]{64}$/);
+  assert.equal(complete.observation.deployment_id, complete.id);
+  assert.equal(complete.observation.metrics.pods.state, 'not_configured');
   assert.equal(complete.ci.publication_artifact_id, '456');
   assert.equal(f.cdCalls(), 1);
   assert.equal((await f.product.createDeployment(input, 'same')).id, created.id);
@@ -292,7 +295,7 @@ test('running intent becomes unknown after restart without dispatch or CD replay
   await f.product.close();
   const restarted = await createProductService({ service: f.service, directory: f.directory, deployPublished: async () => assert.fail('No replay') });
   try {
-    assert.equal(restarted.getDeployment(first.id).status, 'unknown');
+    assert.equal((await restarted.getDeployment(first.id)).status, 'unknown');
     assert.equal((await restarted.createDeployment(input, 'interrupted')).id, first.id);
     assert.equal(f.dispatches(), 1);
     assert.equal(f.cdCalls(), 0);

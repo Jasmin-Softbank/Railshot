@@ -109,6 +109,8 @@
             <p id="run-meta"></p>
             <p id="run-state" role="status"></p>
             <p class="review-note" id="run-message"></p>
+            <p class="field-note" id="run-freshness" role="status"></p>
+            <pre class="execution-binding" id="run-binding"></pre>
             <ul id="run-steps"></ul>
             <a id="application-link" target="_blank" rel="noopener noreferrer" hidden>배포한 앱 열기</a>
             <a id="actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 로그</a>
@@ -127,18 +129,18 @@
           <div class="monitor-grid">
             <div class="monitor-left">
               <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2 id="monitor-state">연결된 배포 없음</h2><p>이미지 게시, 앱 적용, 공개 URL 확인 결과를 구분해 표시합니다.</p></div></div>
-              <div class="panel stages-panel"><h2>배포 단계</h2><ol><li>소스 접수</li><li>앱 검사 및 수정</li><li>이미지 빌드</li><li>GitOps 반영</li><li>URL 및 앱 상태 확인</li></ol></div>
+              <div class="panel stages-panel"><h2>배포 단계</h2><ol id="monitor-steps"><li>배포가 연결되면 단계가 표시됩니다.</li></ol><pre class="execution-binding" id="monitor-binding"></pre><a id="monitor-application-link" target="_blank" rel="noopener noreferrer" hidden>배포한 앱 열기</a></div>
             </div>
             <div class="console panel">
-              <div class="console-heading"><h2>배포 환경 콘솔</h2><span><i class="status-dot muted"></i> 연결 대기 · 읽기 전용</span></div>
+              <div class="console-heading"><h2>배포 관측</h2><span id="observation-status" role="status">연결 대기 · 읽기 전용</span></div>
               <div class="console-tabs" role="tablist" aria-label="콘솔 보기">
-                <button type="button" role="tab" aria-selected="true" data-console="work">작업 로그</button>
+                <button type="button" role="tab" aria-selected="true" data-console="work">작업 단계</button>
                 <button type="button" role="tab" aria-selected="false" data-console="environment">환경 상태</button>
-                <button type="button" role="tab" aria-selected="false" data-console="app">앱 로그</button>
+                <button type="button" role="tab" aria-selected="false" data-console="app">HTTP 검증 기록</button>
               </div>
-              <div class="console-metrics"><span>Pod <strong>—</strong></span><span>CPU <strong>—</strong></span><span>Memory <strong>—</strong></span><span>HTTP <strong>—</strong></span></div>
-              <div class="console-output" style="white-space:pre-wrap;overflow-wrap:anywhere" id="console-output" role="tabpanel"><p>배포가 연결되면 작업 로그가 여기에 표시됩니다.</p></div>
-              <div class="console-footer">서버가 확인한 실행 상태 · 읽기 전용</div>
+              <div class="console-metrics" aria-live="polite"><span>앱 Pod (Running) <strong id="metric-pods">연결 전</strong><small id="metric-pods-time"></small></span><span>노드 CPU <strong id="metric-cpu_percent">연결 전</strong><small id="metric-cpu_percent-time"></small></span><span>노드 Memory <strong id="metric-memory_percent">연결 전</strong><small id="metric-memory_percent-time"></small></span><span>현재 HTTP probe <strong id="metric-http">연결 전</strong><small id="metric-http-time"></small></span></div>
+              <div class="console-output" style="white-space:pre-wrap;overflow-wrap:anywhere" id="console-output" role="tabpanel"><p>배포가 연결되면 확인된 작업 단계가 여기에 표시됩니다.</p></div>
+              <div class="console-footer">15초마다 조회 · CPU/Memory는 대상 노드 전체 · HTTP probe는 관측 위치의 응답이며 배포 버전 검증과 별개입니다.</div>
             </div>
           </div>
         </section>
