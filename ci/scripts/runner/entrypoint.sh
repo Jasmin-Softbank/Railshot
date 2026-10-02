@@ -11,6 +11,9 @@ fi
 : "${RAILSHOT_RUNNER_URL:?Set the private apps repository URL}"
 : "${RAILSHOT_RUNNER_NAME:?Set a unique runner name for this invocation}"
 : "${RAILSHOT_RUNNER_LABELS:?Set the labels selected by RAILSHOT_CI_RUNNER_LABELS}"
+# One job owns the same-path workspace and Docker builder on each worker.
+exec 9>/var/lib/railshot-runner/work/.runner.lock
+flock -n 9 || { echo 'This build worker already has an active runner.' >&2; exit 2; }
 python3 /opt/railshot/ci/scripts/runner/container_preflight.py
 # This creates local Buildx connection metadata only. The existing Ansible
 # bootstrap owns the BuildKit container, resource bounds and network policy.

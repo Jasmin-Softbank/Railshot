@@ -10,7 +10,7 @@ spec:
     metadata: {labels: {app: railshot-dashboard}}
     spec:
       automountServiceAccountToken: false
-      nodeSelector: {kubernetes.io/arch: amd64}
+      nodeSelector: {kubernetes.io/arch: amd64, railshot.io/node-role: platform}
       imagePullSecrets: [{name: ghcr-pull}]
       securityContext:
         runAsNonRoot: true
@@ -52,7 +52,7 @@ spec:
     metadata: {labels: {app: railshot-api}}
     spec:
       automountServiceAccountToken: false
-      nodeSelector: {kubernetes.io/arch: amd64}
+      nodeSelector: {kubernetes.io/arch: amd64, railshot.io/node-role: platform}
       imagePullSecrets: [{name: ghcr-pull}]
       securityContext:
         runAsNonRoot: true

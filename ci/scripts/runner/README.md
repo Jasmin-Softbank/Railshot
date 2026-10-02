@@ -1,12 +1,59 @@
-# 전용 CI VM의 GitHub Actions runner 컨테이너
+# 전용 빌드 노드의 GitHub Actions runner 컨테이너
 
-`ci/runner-compose.yml`은 **전용 Ubuntu 24.04 amd64 CI VM**에서 앱 저장소의 `railshot-deploy.yml` loop job을 한 번 실행하는 runner입니다. 운영 K3s와 고객 runtime에는 설치하지 않습니다. GitHub 공식 `actions/actions-runner:2.337.0` 이미지를 digest로 고정하고 Python·호스트 방화벽 확인 도구만 추가합니다. 공식 이미지에 Git, Docker CLI, Buildx, Actions용 Node가 포함됩니다. workflow의 `setup-python`이 Python 3.13을 설치하고 SDK 버전은 기존 workflow에서 고정합니다. 사용자 Python·Node·Java 빌드/테스트는 기존 Q/L2의 격리 컨테이너에서 수행하므로 runner에 Java나 앱용 Node 도구를 추가하지 않습니다. 이미지 게시 release job은 GitHub-hosted runner를 계속 사용하며 이 runner에는 AWS CLI·운영 kubeconfig·cloud 자격을 설치하거나 마운트하지 않습니다.
+runner는 **Ubuntu 24.04 amd64 전용 빌드 노드**에서 앱 저장소의 `railshot-deploy.yml` job을 한 번 실행합니다. 목표 배치는 운영 K3s의 build agent 위 [일회성 Job](../../../deployment/manifests/build-runner.yaml)이며, 기존 독립 VM은 `ci/runner-compose.yml`을 유지합니다. 일반 운영 노드나 고객 runtime에는 설치하지 않습니다. GitHub 공식 `actions/actions-runner:2.337.0` 이미지를 digest로 고정하고 Python·호스트 방화벽 확인 도구만 추가합니다. workflow의 `setup-python`이 Python 3.13을 설치하며 사용자 코드의 테스트는 기존 제한 컨테이너에서 실행합니다. 이미지 게시 job은 GitHub-hosted runner에 남깁니다. 아래 설정은 실제 노드 가입·고객 job 검증을 대신하지 않습니다.
 
 이 컨테이너는 신뢰된 CI 실행기를 포장합니다. **전용 VM이 기존 root 신뢰 경계**입니다. 같은 VM의 Docker socket과 host network, Docker 기본 capability에 추가한 `NET_ADMIN`이 필요합니다. socket은 CI VM의 root 권한에 해당하며 운영 호스트 socket과 공유할 수 없습니다. `NET_ADMIN`은 기존 root-owned helper의 실제 iptables 정책 검증에, host network는 격리된 L3 컨테이너 IP의 HTTP 검사에 필요합니다. runner에는 `privileged: true`나 host PID, `SYS_ADMIN`, seccomp 해제를 추가하지 않습니다. 사용자 코드에는 socket·runner 인증·운영 자격을 전달하지 않고 기존의 비root/읽기전용/자원제한 Q 컨테이너와 제한된 BuildKit/L3 네트워크를 유지합니다.
 
 BuildKit은 새로 만들지 않습니다. 먼저 `infrastructure/ansible/ci.yml`을 실행한 기존 bootstrap이 `railshot-buildkit` 컨테이너와 `railshot-quality` bridge/firewall을 준비하고 실제 네트워크 검증 receipt를 남겨야 합니다. runner는 자신만의 Docker config에 remote Buildx 연결 정보만 만들고 같은 gate 코드로 기존 BuildKit의 이미지·network·자원제한·실행 flags를 확인합니다. bootstrap의 기존 BuildKit 권한 설정은 이 패키징에서 변경하지 않습니다.
 
-## 준비와 실행
+## 운영 K3s의 build agent 준비
+
+기존 `railshot-build-worker-aws-01`을 전용 agent로 사용합니다. 운영 서버와 고객 K3s를 재설치하지 않습니다. 먼저 운영자가 기존 STOP 기한과 사설 통신 경로를 확인해야 합니다. 현재 CI Terraform의 보안 그룹은 Kubernetes 연결을 허용하지 않으므로 **그대로 시작하는 것만으로 가입되지 않습니다.** 운영 서버의 실제 K3s/CNI 버전에 맞춰 SG와 호스트 방화벽을 검토합니다. 현재 `control.sh` 기준은 K3s `v1.34.11+k3s1`, 기본 Flannel, Pod CIDR `10.52.0.0/16`, Service CIDR `10.53.0.0/16`입니다. CI Docker `172.30.0.0/24`와 겹치지 않게 합니다.
+
+| 경로 | 필요한 사설 통신 |
+|---|---|
+| build agent → 운영 server | K3s API/supervisor TCP 6443 |
+| 운영 cluster 노드 사이 | 해당 CNI의 데이터 경로. 현재 Flannel VXLAN은 UDP 8472; 인터넷 공개 금지 |
+| 운영 cluster 노드 사이 | 필요한 kubelet TCP 10250; 승인된 노드/관리 경로로 한정 |
+| 고객 코드 컨테이너 | 기존 CI bridge 정책 유지. 운영 API·메타데이터·사설 DB 접근 차단 |
+
+운영 서버와 같은 검토된 K3s binary/installer를 사용합니다. build 노드의 root 소유 `0600` `/etc/rancher/k3s/config.yaml`은 다음 입력으로 준비합니다. `server`와 별도 `token-file`은 실제 운영 cluster 값이며 join token을 문서·Git·Pod에 넣지 않습니다. 다른 config drop-in은 허용하지 않습니다.
+
+```yaml
+server: https://REPLACE_WITH_OPS_PRIVATE_ADDRESS:6443
+token-file: /etc/rancher/k3s/agent-token
+node-name: railshot-build-worker-aws-01
+node-label:
+  - railshot.io/node-role=build
+node-taint:
+  - railshot.io/dedicated=build:NoSchedule
+```
+
+`k3s agent`로 가입하며 기본 containerd를 유지합니다. `--docker`로 K3s와 CI Docker를 합치지 않습니다. 운영자 context에서 해당 Node의 Ready·hostname·build label·taint와 기존 서비스/DNS가 정상인지 확인한 후, **build 노드에서만** 실행합니다.
+
+```sh
+sudo ansible-playbook -i localhost, -c local infrastructure/ansible/ci.yml \
+  -e '{"railshot_ci_k3s_build_worker":true}'
+sudo bash ci/scripts/runner/prepare-host.sh --k3s-build-worker
+```
+
+bootstrap은 일반 Kubernetes/control-plane을 계속 거부합니다. 위 명시적 프로필도 agent 서비스·root 소유 config의 전용 label/taint·server 부재를 확인합니다. 기존 Docker/방화벽 설정과 native probe는 유지하므로 Docker 재시작 및 CNI 변경 후에도 운영 통신과 고객 코드 격리를 함께 재검증합니다. CI hook 앞에 CNI 규칙이 생기면 receipt는 보수적으로 거부됩니다. 실제 공존 시험 전에는 이 경로를 운영 검증 완료로 취급하지 않습니다.
+
+운영자 context에서 `railshot-build` namespace와 이미지 pull Secret `ghcr-pull`, 새 runner 등록 토큰 Secret `railshot-build-runner-registration`의 `token` 키를 준비합니다. namespace는 이 검토된 hostNetwork/hostPath Job에 맞는 Pod Security 정책이 필요합니다. 일반 팀 workload를 이 namespace에 생성하도록 권한을 주지 않습니다. 검토된 이미지 digest JSON으로 다음을 렌더하고 별도로 적용합니다. 기본 platform Argo Application에는 이 Job/RBAC를 넣지 않습니다.
+
+```sh
+python3 deployment/scripts/render-platform.py /private/images.json \
+  --build-runner-name railshot-build-attempt01 \
+  --runner-url https://github.com/Jasmin-Softbank/railshot-apps \
+  --build-node railshot-build-worker-aws-01 > /private/build-runner.json
+kubectl --context "$OPS_CONTEXT" apply -f /private/build-runner.json
+```
+
+Job은 정확한 build 노드에만 배치되며 다른 노드로 fallback하지 않습니다. 전용 ServiceAccount는 build namespace의 Pod 조회와 지정된 Node 한 개 조회만 허용합니다. Secret 조회·배포 변경 권한은 없습니다. runner는 인증된 API 응답으로 자기 Pod의 UID·권한·마운트와 Node의 역할·taint를 확인합니다. K3s 자격 디렉터리와 관리자 kubeconfig는 마운트하지 않습니다. 이 metadata token도 고객 코드 컨테이너에는 전달하지 않습니다.
+
+Job의 제한은 runner에 적용됩니다. 호스트 Docker가 실행하는 BuildKit/Q/L3는 기존 Docker 제한을 사용하므로 Kubernetes quota에 자동 합산되지 않습니다. 한 워커에서 runner 하나만 실행하도록 호스트 lock을 잡습니다. 이 설계는 운영 Pod와 빌드의 노드를 나누지만, privileged BuildKit과 운영 cluster의 control plane 공유에 따른 위험까지 제거하지는 않습니다. 다음 job에는 새로운 등록 token·Job 이름을 사용합니다. 자동 재등록 controller는 추가하지 않았습니다.
+
+## 기존 독립 VM의 Compose 실행
 
 다음은 bootstrap을 마친 전용 CI VM의 저장소 루트에서 수행합니다. 호스트 준비 명령은 root가 필요하며 Kubernetes 설치 흔적을 발견하면 중단합니다. Docker Compose v2는 호스트에 별도로 설치되어 있어야 합니다.
 

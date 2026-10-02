@@ -36,9 +36,12 @@ def container_components(paths):
             components.update(('api', 'mcp'))
         elif path.startswith('ci/scripts/') or path == 'ci/runner-compose.yml':
             components.add('ci-runner')  # The runner image COPYs all CI scripts.
+        elif path == 'deployment/manifests/build-runner.yaml' or path == 'infrastructure/ansible/ci.yml':
+            components.add('ci-runner')
+        elif path in {'deployment/scripts/render-platform.py', 'deployment/scripts/tests/test_platform.py'}:
+            components.update(COMPONENTS)
         elif path in {'deployment/compose.yaml', 'deployment/.env.example',
-                      'deployment/manifests/platform.yaml', 'deployment/scripts/render-platform.py',
-                      'deployment/scripts/tests/test_platform.py',
+                      'deployment/manifests/platform.yaml',
                       'gitops/applications/railshot-platform.yaml'}:
             components.update(('dashboard', 'api', 'mcp'))
         elif (path.startswith(('ci/', 'deployment/', 'infrastructure/ansible/',
@@ -82,7 +85,7 @@ def select(paths):
             if path == 'infrastructure/ansible/ci.yml':
                 selected.add('terraform')  # CI VM bootstrap consumes this playbook.
         elif path in {'deployment/compose.yaml', 'deployment/.env.example',
-                      'deployment/manifests/platform.yaml', 'deployment/scripts/render-platform.py',
+                      'deployment/manifests/platform.yaml', 'deployment/manifests/build-runner.yaml', 'deployment/scripts/render-platform.py',
                       'deployment/scripts/tests/test_platform.py'}:
             selected.add('contracts')  # Platform workloads do not install the customer runtime.
         elif path.startswith('deployment/'):

@@ -13,6 +13,27 @@ spec.loader.exec_module(module)
 
 
 class PlatformTests(unittest.TestCase):
+    def test_build_job_uses_dedicated_agent_and_scoped_read_only_identity(self):
+        images = {"ci-runner": "ghcr.io/jasmin-softbank/railshot-ci-runner@sha256:" + "a" * 64}
+        result = module.render_build_runner(images, "build-test-1", "https://github.com/Jasmin-Softbank/railshot-apps", "railshot-build-worker-aws-01")
+        resources = {item["kind"]: item for item in result["items"]}
+        self.assertEqual(resources['Role']['rules'], [{'apiGroups':[''], 'resources':['pods'], 'verbs':['get']}])
+        self.assertEqual(resources['ClusterRole']['rules'], [{'apiGroups':[''], 'resources':['nodes'], 'resourceNames':['railshot-build-worker-aws-01'], 'verbs':['get']}])
+        job = resources['Job']
+        self.assertEqual(job['spec']['backoffLimit'], 0)
+        pod = job['spec']['template']['spec']
+        self.assertEqual(pod['nodeSelector']['railshot.io/node-role'], 'build')
+        self.assertEqual(pod['nodeSelector']['kubernetes.io/hostname'], 'railshot-build-worker-aws-01')
+        self.assertEqual(pod['containers'][0]['image'], images['ci-runner'])
+        self.assertFalse(any('/rancher' in v.get('hostPath', {}).get('path', '') for v in pod['volumes']))
+        for name, url, node in [('bad/name', 'https://github.com/Jasmin-Softbank/apps', 'worker'),
+                                ('runner', 'https://github.com/unreviewed/apps', 'worker'),
+                                ('runner', 'https://github.com/Jasmin-Softbank/apps', '../node')]:
+            with self.assertRaises(ValueError):
+                module.render_build_runner(images, name, url, node)
+        with self.assertRaises(ValueError):
+            module.render_build_runner({'ci-runner':'ghcr.io/jasmin-softbank/railshot-ci-runner:latest'}, 'runner', 'https://github.com/Jasmin-Softbank/apps', 'worker')
+
     def test_gitops_manifests_keep_platform_permissions_and_sync_explicit(self):
         install = yaml.safe_load((ROOT / "gitops/argo/kustomization.yaml").read_text())
         self.assertEqual(install["kind"], "Kustomization")
@@ -67,6 +88,9 @@ class PlatformTests(unittest.TestCase):
         output = module.render(images, "k3s-aws")
         api = next(item for item in output["items"] if item["kind"] == "Deployment" and item["metadata"]["name"] == "railshot-api")
         container = api["spec"]["template"]["spec"]["containers"][0]
+        for item in output['items']:
+            if item['kind'] == 'Deployment':
+                self.assertEqual(item['spec']['template']['spec']['nodeSelector']['railshot.io/node-role'], 'platform')
         self.assertEqual(container["image"], images["api"])
         self.assertIn("configured", container["readinessProbe"]["exec"]["command"][-1])
         self.assertTrue(all(item["spec"]["type"] == "ClusterIP" for item in output["items"] if item["kind"] == "Service"))
