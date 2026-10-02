@@ -228,9 +228,15 @@ def execute(config, request):
             remote = argo.https_url(git(config, 'remote', 'get-url', 'origin'))
             handoff.require(remote.rstrip('/').removesuffix('.git') == target['repo_url'].rstrip('/').removesuffix('.git'),
                             'registered Git remote mismatch')
-            git(config, 'fetch', '--no-tags', 'origin', config['branch'])
+            git(config, 'fetch', '--no-tags', 'origin', 'refs/heads/' + config['branch'])
             base = git(config, 'rev-parse', 'HEAD')
-            handoff.require(base == git(config, 'rev-parse', 'FETCH_HEAD'), 'config checkout must match remote branch')
+            remote_revision = git(config, 'rev-parse', 'FETCH_HEAD')
+            if base != remote_revision:
+                handoff.require(git(config, 'merge-base', base, remote_revision) == base,
+                                'config checkout must match or fast-forward to remote branch')
+                git(config, 'merge', '--ff-only', remote_revision)
+                base = git(config, 'rev-parse', 'HEAD')
+            handoff.require(base == remote_revision, 'config checkout must match remote branch')
             target['revision'] = base
             rendered = handoff.render(published, target)
             # Validate the public contract before any remote mutation.
