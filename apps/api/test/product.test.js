@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat, chmod, symlink, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +8,11 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { createProductService } from '../src/product.js';
 import { createProductStore } from '../src/product-store.js';
 import { createAppServer } from '../src/server.js';
+
+function diskState(directory) {
+  const db = new DatabaseSync(join(directory, 'dashboard.sqlite3'), { readOnly: true });
+  try { return { operations: Object.fromEntries(db.prepare('SELECT id, record FROM operations').all().map((row) => [row.id, JSON.parse(row.record)])) }; } finally { db.close(); }
+}
 
 const files = [{ path: 'app.js', content: Buffer.from('hello') }];
 const input = { app: 'demo-app', target_id: 'demo', source_type: 'folder', files };
@@ -35,7 +41,7 @@ async function settle(get, predicate = (record) => !['queued', 'running'].includ
 test('snapshot and intent are durable before one dispatch; replay returns the same completed deployment', async (t) => {
   let f;
   f = await fixture(t, { service: { deploy: async () => {
-    const state = JSON.parse(await readFile(join(f.directory, 'state.json'))), operation = Object.values(state.operations)[0];
+    const state = diskState(f.directory), operation = Object.values(state.operations)[0];
     assert.equal(operation.status, 'running');
     const saved = JSON.parse(await readFile(join(f.directory, `${operation.id}.source.json`)));
     assert.equal(Buffer.from(saved[0].content, 'base64').toString(), 'hello');
@@ -93,7 +99,7 @@ test('CD progress persists revision and HTTP stage before completion while obser
     assert.equal(progressing.status, 'running'); assert.equal(progressing.cd.revision, deployed.cd.revision);
     assert.deepEqual(progressing.ci.images, images); assert.equal(progressing.url, null);
     assert.equal(progressing.observation.metrics.pods.state, 'unavailable');
-    const disk = JSON.parse(await readFile(join(f.directory, 'state.json')));
+    const disk = diskState(f.directory);
     assert.equal(disk.operations[first.id].stage, 'http');
   } finally { finish(); }
   assert.equal((await settle(() => f.product.getDeployment(first.id))).status, 'succeeded');
@@ -298,10 +304,14 @@ test('v1 HTTP contract has accepted/error headers, strict fields, preserved lega
   assert.equal((await fetch(`${base}/api/v1/deployments`, { method: 'POST', body: form() })).status, 422);
 });
 
-test('unconfigured server lists empty capabilities without creating state', async (t) => {
+test('unconfigured server persists dashboard state while listing empty execution capabilities', async (t) => {
   const { base, server } = await httpFixture(t, { service: null, deployPublished: undefined });
   for (const path of ['targets', 'profiles']) assert.deepEqual(await (await fetch(`${base}/api/v1/${path}`)).json(), { items: [], next_marker: null });
-  assert.equal(await server.productReady, null);
+  assert.ok((await server.productReady).dashboard);
+  assert.equal((await (await fetch(`${base}/healthz`)).json()).configured, false, 'dashboard storage alone does not configure an executor');
+  const response = await fetch(`${base}/api/v1/sessions`, { method: 'POST' });
+  assert.equal(response.status, 201);
+  assert.match(response.headers.get('set-cookie'), /railshot_session=/);
 });
 
 test('health stays live but not ready when private product state fails initialization', async (t) => {
@@ -325,8 +335,9 @@ test('health stays live but not ready when private product state fails initializ
 
 test('intent write failure prevents external effects and fails subsequent writes closed', async (t) => {
   const f = await fixture(t);
-  await rm(join(f.directory, 'state.json'));
-  await mkdir(join(f.directory, 'state.json'));
+  const db = new DatabaseSync(join(f.directory, 'dashboard.sqlite3'));
+  db.exec("CREATE TRIGGER simulate_disk_failure BEFORE INSERT ON operations BEGIN SELECT RAISE(ABORT, 'write failed'); END");
+  db.close();
   await assert.rejects(f.product.createDeployment(input, 'write-failure'));
   await assert.rejects(f.product.createDeployment(input, 'write-failure-2'));
   assert.equal(f.dispatches(), 0);
@@ -456,14 +467,19 @@ for (const origin of ['environments', 'deployments']) {
       };
     }
     const f = await fixture(t, { deployPublished: undefined, environmentAdapter, service: ciService() });
+    const owner = f.product.dashboard.session(null).id, stranger = f.product.dashboard.session(null).id;
     assert.equal(f.product.targets().some(({ id }) => id === request.target_id), false);
     await assert.rejects(f.product.createDeployment(request, 'unregistered'), { code: 'INVALID_INPUT' });
-    const plan = await f.product.createPlan({ name: request.app });
+    const plan = await f.product.createPlan({ name: request.app }, owner);
     const first = origin === 'environments'
-      ? await f.product.createEnvironment({ plan_id: plan.id }, 'environment')
-      : await f.product.createDeployment({ ...request, plan_id: plan.id }, 'initial');
+      ? await f.product.createEnvironment({ plan_id: plan.id }, 'environment', owner)
+      : await f.product.createDeployment({ ...request, plan_id: plan.id }, 'initial', undefined, owner);
     const ready = await settle(() => origin === 'environments' ? f.product.getEnvironment(first.id) : f.product.getDeployment(first.id));
     assert.equal(ready.status, 'succeeded');
+    assert.ok(f.product.targets(owner).some(({ id }) => id === request.target_id));
+    assert.ok(!f.product.targets(stranger).some(({ id }) => id === request.target_id));
+    await assert.rejects(f.product.createDeployment(request, 'foreign', undefined, stranger), { code: 'INVALID_INPUT' });
+    await assert.rejects(f.product.createBuild(request, undefined, stranger), { code: 'INVALID_INPUT' });
     const environmentId = origin === 'environments' ? first.id : first.environment_id;
     const registered = f.product.targets().find(({ id }) => id === request.target_id);
     assert.equal(registered.application_name, request.app);
@@ -484,6 +500,9 @@ for (const origin of ['environments', 'deployments']) {
     const restarted = await createProductService({ service: restartedService, directory: f.directory, environmentAdapter, pollInterval: 5 });
     try {
       assert.deepEqual(restartedService.targetIds, ['demo', request.target_id]);
+      assert.ok(restarted.targets(owner).some(({ id }) => id === request.target_id));
+      assert.ok(!restarted.targets(stranger).some(({ id }) => id === request.target_id));
+      await assert.rejects(restarted.createDeployment(request, 'foreign-restart', undefined, stranger), { code: 'INVALID_INPUT' });
       assert.equal(restarted.targets().find(({ id }) => id === request.target_id).capabilities.database_configuration, true);
       assert.equal((await restarted.getBuild(reusedComplete.ci.run_id)).status, 'published');
       assert.equal((await restarted.legacyStatus(reusedComplete.ci.run_id)).state, 'published');
