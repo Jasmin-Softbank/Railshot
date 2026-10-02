@@ -58,40 +58,15 @@
                 <span class="section-number">02</span>
                 <h2 id="target-title">배포 환경</h2>
               </div>
-              <fieldset class="target-options">
-                <legend class="sr-only">배포 환경 선택</legend>
-                <label class="target-option">
-                  <input type="radio" name="environment" value="cloud" checked />
-                  <span class="target-icon" aria-hidden="true">☁</span>
-                  <span class="target-copy"><strong>클라우드</strong><small>RailShot AWS</small></span>
-                  <span class="radio-mark" aria-hidden="true"></span>
-                </label>
-                <label class="target-option">
-                  <input type="radio" name="environment" value="onprem" />
-                  <span class="target-icon" aria-hidden="true">▣</span>
-                  <span class="target-copy"><strong>온프레미스</strong><small>내 인프라에 배포</small></span>
-                  <span class="radio-mark" aria-hidden="true"></span>
-                </label>
-                <label class="target-option">
-                  <input type="radio" name="environment" value="registered" />
-                  <span class="target-icon" aria-hidden="true">↗</span>
-                  <span class="target-copy"><strong>운영자 등록 대상</strong><small id="registered-target">연결 확인 중</small></span>
-                  <span class="radio-mark" aria-hidden="true"></span>
-                </label>
-              </fieldset>
+              <label class="field-label" for="target">실행 대상</label>
+              <select id="target"><option value="">대상을 불러오는 중입니다</option></select>
+              <label class="field-label" for="operation">실행할 작업</label>
+              <select id="operation">
+                <option value="deployments">빌드 후 앱 배포</option>
+                <option value="builds">검사 및 이미지 게시</option>
+              </select>
               <p class="field-note" id="connection-status" role="status">API 연결을 확인하고 있습니다.</p>
-              <p class="field-note">클라우드·온프레미스 자동 연결은 준비 중입니다. 현재는 API에 등록된 대상으로 CI 검사와 이미지 게시를 요청할 수 있습니다.</p>
-              <label class="field-label" for="api-token">API 접근 토큰 (운영자가 요구한 경우)</label>
-              <input id="api-token" type="password" maxlength="4096" autocomplete="off" spellcheck="false" />
-              <div class="provider-field" id="provider-field" hidden>
-                <label class="field-label" for="provider">인프라 종류</label>
-                <select id="provider" name="provider">
-                  <option value="" selected>선택하세요</option>
-                  <option value="openstack">OpenStack</option>
-                  <option value="proxmox">Proxmox</option>
-                </select>
-                <p class="field-note">인프라 연결 정보는 배포 연동 단계에서 받습니다.</p>
-              </div>
+              <p class="field-note" id="target-note"></p>
             </section>
 
             <div class="form-bottom">
@@ -99,6 +74,20 @@
               <button class="primary-button" type="submit">선택 내용 확인 <span aria-hidden="true">→</span></button>
             </div>
           </form>
+
+          <details class="panel review-panel" id="environment-panel">
+            <summary>새 실행 환경 준비</summary>
+            <form id="environment-form" class="form-section">
+              <label class="field-label" for="profile">환경 사양</label>
+              <select id="profile"><option value="">환경 사양을 불러오는 중입니다</option></select>
+              <label class="field-label" for="environment-name">환경 이름</label>
+              <input id="environment-name" type="text" maxlength="63" placeholder="demo-environment" required />
+              <button class="secondary-button" id="plan-button" type="submit" disabled>환경 계획 확인</button>
+            </form>
+            <p id="environment-message" class="review-note" role="status"></p>
+            <button class="primary-button" id="environment-button" type="button" hidden disabled>이 계획으로 환경 준비</button>
+            <button class="text-button" id="environment-refresh" type="button" hidden>환경 상태 다시 조회</button>
+          </details>
 
           <section class="panel review-panel" id="review-panel" aria-labelledby="review-title" hidden>
             <div class="review-heading">
@@ -112,15 +101,16 @@
             </dl>
             <p class="review-note" id="review-note">선택 내용을 확인하세요.</p>
             <p class="form-error" id="request-error" role="alert" hidden></p>
-            <button class="primary-button" id="deploy-button" type="button" disabled>검사 및 이미지 게시</button>
+            <button class="primary-button" id="deploy-button" type="button" disabled>빌드 후 앱 배포</button>
           </section>
 
           <section class="panel review-panel" id="run-panel" aria-labelledby="run-title" hidden>
-            <h2 id="run-title">CI 실행</h2>
+            <h2 id="run-title">실행 상태</h2>
             <p id="run-meta"></p>
             <p id="run-state" role="status"></p>
             <p class="review-note" id="run-message"></p>
             <ul id="run-steps"></ul>
+            <a id="application-link" target="_blank" rel="noopener noreferrer" hidden>배포한 앱 열기</a>
             <a id="actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 로그</a>
             <button class="text-button" id="stop-polling" type="button" hidden>상태 조회 중지</button>
             <button class="text-button" id="refresh-run" type="button" hidden>상태 다시 조회</button>
@@ -129,14 +119,14 @@
 
         <section class="view" id="history-view" aria-labelledby="history-title" hidden>
           <header class="page-header"><span class="eyebrow">DEPLOYMENTS</span><h1 id="history-title">배포 내역</h1></header>
-          <div class="panel empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2 id="history-summary">아직 배포 내역이 없습니다</h2><p id="history-detail">이 페이지에서 요청한 마지막 CI 실행이 표시됩니다.</p></div>
+          <div class="panel empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2 id="history-summary">아직 배포 내역이 없습니다</h2><p id="history-detail">이 브라우저에서 마지막으로 요청한 실행을 다시 조회합니다.</p></div>
         </section>
 
         <section class="view" id="monitor-view" aria-labelledby="monitor-title" hidden>
           <header class="page-header"><span class="eyebrow">ENVIRONMENT</span><h1 id="monitor-title">환경 모니터링</h1></header>
           <div class="monitor-grid">
             <div class="monitor-left">
-              <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2 id="monitor-state">연결된 배포 없음</h2><p>CI 이미지 게시는 앱 배포 완료를 의미하지 않습니다. 실제 환경·앱 상태는 아직 연결되지 않았습니다.</p></div></div>
+              <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2 id="monitor-state">연결된 배포 없음</h2><p>이미지 게시, 앱 적용, 공개 URL 확인 결과를 구분해 표시합니다.</p></div></div>
               <div class="panel stages-panel"><h2>배포 단계</h2><ol><li>소스 접수</li><li>앱 검사 및 수정</li><li>이미지 빌드</li><li>GitOps 반영</li><li>URL 및 앱 상태 확인</li></ol></div>
             </div>
             <div class="console panel">
@@ -147,8 +137,8 @@
                 <button type="button" role="tab" aria-selected="false" data-console="app">앱 로그</button>
               </div>
               <div class="console-metrics"><span>Pod <strong>—</strong></span><span>CPU <strong>—</strong></span><span>Memory <strong>—</strong></span><span>HTTP <strong>—</strong></span></div>
-              <div class="console-output" id="console-output" role="tabpanel"><p>배포가 연결되면 작업 로그가 여기에 표시됩니다.</p></div>
-              <div class="console-footer">로그 연결 전</div>
+              <div class="console-output" style="white-space:pre-wrap;overflow-wrap:anywhere" id="console-output" role="tabpanel"><p>배포가 연결되면 작업 로그가 여기에 표시됩니다.</p></div>
+              <div class="console-footer">서버가 확인한 실행 상태 · 읽기 전용</div>
             </div>
           </div>
         </section>
