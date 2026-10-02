@@ -84,11 +84,17 @@ def registered_node(selected, target_id, request_id, *, timeout_seconds=None):
                          'management endpoint must match the registered private connection host')
             resource['management_endpoint'] = endpoint
     else:
-        argo.require('management_endpoint' not in selected, 'management endpoint override requires OpenStack')
         resource = read_private(selected['descriptor_file'])
         argo.require(resource['target_id'] == target_id, 'descriptor identity mismatch')
         request = ansible.from_descriptor(resource, request_id=request_id, operation='guest.check',
             ssh=selected['ssh'], timeout_seconds=timeout)
+        resource.pop('management_endpoint', None)  # Descriptor metadata cannot select a management route.
+        if 'management_endpoint' in selected:
+            argo.require(request['target']['provider'] == 'gcp', 'management endpoint override requires GCP or OpenStack')
+            public = ipaddress.IPv4Address(resource['addresses'].get('public', ''))
+            argo.require(public.is_global and selected['management_endpoint'] == f'https://{public}:6443',
+                         'GCP management endpoint must match the provisioned public IPv4 API')
+            resource['management_endpoint'] = selected['management_endpoint']
     for key in ('identity_file', 'known_hosts_file'):
         ansible.private_file(selected['ssh'][key], identity=key == 'identity_file')
     return request, resource
@@ -126,7 +132,7 @@ def load(registry_file, target_id, config_file, binding_file=None):
                  and target['namespace'] not in {'default', 'argocd', 'kube-system', 'kube-public', 'kube-node-lease'},
                  'dedicated application namespace required')
     expected_server = 'https://' + descriptor['addresses']['private'] + ':6443'
-    if request['target']['provider'] == 'openstack':
+    if request['target']['provider'] in ('openstack', 'gcp'):
         expected_server = descriptor.get('management_endpoint', expected_server)
     argo.require(target.get('cluster_server', expected_server) == expected_server
                  and target['architecture'] == request['target']['architecture'] == 'amd64',
@@ -460,7 +466,8 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                 complete('namespace')
                 checkpoint('argo')
                 tls_options = {}
-                if request['target']['provider'] == 'openstack' and request['inventory']['control_plane'][0]['ssh'].get('connect_host'):
+                if (request['target']['provider'] == 'openstack' and request['inventory']['control_plane'][0]['ssh'].get('connect_host')
+                        or request['target']['provider'] == 'gcp' and identity['descriptor'].get('management_endpoint')):
                     tls_options['tls_server_name'] = identity['descriptor']['addresses']['private']
                 renewal, expiration = register_argo(kube, cd, registered, target_id, owner, binding, **tls_options)
                 save(home / 'renewal.json', renewal); complete('argo')
