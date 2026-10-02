@@ -161,6 +161,24 @@ class RegistrationTest(unittest.TestCase):
         self.assertFalse(self.shared.exists())
         self.assertEqual(self.runtime.applications, 0)
 
+    def test_observability_hook_receives_verified_identity_without_claiming_collection(self):
+        self.config['registration']['observability_config_file'] = '/private/observer.json'
+        self.write('config.json', self.config)
+        def execute(argv, timeout, child_env):
+            request = env.read_private(argv[argv.index('--request') + 1])
+            self.assertEqual(request['node_ip'], self.descriptor['addresses']['private'])
+            self.assertEqual(request['target_id'], self.target)
+            self.assertEqual(request['registry_file'], str(self.root / 'registry.json'))
+            self.assertEqual(timeout, 300)
+            env.save(Path(argv[argv.index('--out') + 1]), {'status': 'succeeded', 'target_id': self.target,
+                'app': 'new-app', 'registered': True, 'collection_state': 'pending'})
+            return 0
+        with patch.object(env.ansible, 'execute', side_effect=execute):
+            result = self.run_registration()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(result['observability'], {'registered': True, 'collection_state': 'pending'})
+        self.assertLess(result['steps'].index('observability'), result['steps'].index('ci'))
+
     def test_db_address_derived_only_from_private_binding(self):
         target = self.config['cd']['targets'][self.target]['target']
         target['database'] = {'runtime_secret': 'runtime-db', 'migration_secret': 'migration-db', 'ca_secret': 'database-ca'}

@@ -68,6 +68,8 @@ The existing `argocd/railshot-credentials` CronJob must already be installed and
 
 On complete registration, `cd.json` is atomically written in the existing bridge v1 format. The environment owner reads it for the next deployment without restarting the API. The registry row binds one application to one runtime; it does not introduce a general cluster registry or multi-node topology.
 
+Optional `registration.observability_config_file` invokes the observability owner's `observability/register.py` after credential registration and before CI admission. The private request binds target/environment/app/namespace, descriptor-derived node IP, the allocated probe URL, the existing SSH registry and control context. The helper receives its exporter ports and shared observer from operator configuration and uses the same strict cloud transport. Its successful receipt must match the target/app and `registered: true`; the registrar still records `collection_state: pending` until real metrics/probes are observed. The source helper, API packaging and provider firewall prerequisites must be installed before enabling this option. No observer VM is created per app.
+
 `RAILSHOT_TARGET_BINDINGS` is an additive Actions variable map:
 
 ```json

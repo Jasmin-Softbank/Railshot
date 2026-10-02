@@ -67,7 +67,7 @@ def load(registry_file, target_id, config_file, binding_file=None):
     argo.require(set(cd) == {'version', 'state_dir', 'repository', 'branch', 'context', 'targets'} and cd['version'] == 1
                  and isinstance(cd['targets'], dict) and target_id in cd['targets'], 'existing CD base config required')
     argo.require(set(settings) >= {'state_dir', 'source_repository', 'pull_secret_file'}
-                 and not set(settings) - {'state_dir', 'source_repository', 'pull_secret_file', 'edge_config_file', 'target_security_group_id', 'expires_at'},
+                 and not set(settings) - {'state_dir', 'source_repository', 'pull_secret_file', 'edge_config_file', 'target_security_group_id', 'expires_at', 'observability_config_file'},
                  'registration settings differ')
     argo.require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', settings['source_repository']), 'source repository required')
     if settings.get('edge_config_file'):
@@ -377,6 +377,23 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
             checkpoint('credentials')
             install_renewal(cd, renewal)
             record['credentials'] = {'renewal': 'configured', 'expires_at': expiration}; complete('credentials')
+            if settings.get('observability_config_file'):
+                checkpoint('observability')
+                observation = {'version': 1, 'target_id': target_id, 'environment_id': home.name,
+                    'app': registered['app'], 'namespace': target['namespace'],
+                    'node_ip': identity['descriptor']['addresses']['private'],
+                    'probe_url': registered['public_http']['url'], 'registry_file': str(registry_file), 'context': cd['context']}
+                save(home / 'observability-request.json', observation)
+                rc = ansible.execute([sys.executable, str(ROOT / 'observability/register.py'),
+                    '--config', settings['observability_config_file'], '--request', str(home / 'observability-request.json'),
+                    '--out', str(home / 'observability.json')], 300, dict(os.environ))
+                argo.require(rc == 0, 'observability registration did not complete')
+                observed = read_private(home / 'observability.json')
+                argo.require(observed.get('status') == 'succeeded' and observed.get('target_id') == target_id
+                             and observed.get('app') == registered['app'] and observed.get('registered') is True,
+                             'observability registration binding differs')
+                record['observability'] = {'registered': True, 'collection_state': 'pending'}
+                complete('observability')
             checkpoint('ci')
             bind_ci(settings, registered, target_id); complete('ci')
             save(home / 'cd.json', cd)
