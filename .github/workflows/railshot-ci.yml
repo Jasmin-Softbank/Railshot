@@ -110,7 +110,7 @@ jobs:
           python-version: '3.13'
           cache: pip
           cache-dependency-path: ci/requirements-test.txt
-      - run: python -m pip install PyYAML==6.0.3
+      - run: python -m pip install PyYAML==6.0.3 jsonschema==4.23.0
       - name: Observability config and real loopback probes
         run: |
           python - <<'PY'
