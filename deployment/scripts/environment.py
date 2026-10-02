@@ -89,6 +89,7 @@ def registered_node(selected, target_id, request_id, *, timeout_seconds=None):
         request = ansible.from_descriptor(resource, request_id=request_id, operation='guest.check',
             ssh=selected['ssh'], timeout_seconds=timeout)
         resource.pop('management_endpoint', None)  # Descriptor metadata cannot select a management route.
+        resource['addresses'].pop('metrics', None)
         if 'management_endpoint' in selected:
             argo.require(request['target']['provider'] == 'gcp', 'management endpoint override requires GCP or OpenStack')
             public = ipaddress.IPv4Address(resource['addresses'].get('public', ''))
@@ -96,6 +97,7 @@ def registered_node(selected, target_id, request_id, *, timeout_seconds=None):
                          and selected['management_endpoint'] == f'https://{public}:6443',
                          'GCP management endpoint must match the provisioned public IPv4 API')
             resource['management_endpoint'] = selected['management_endpoint']
+            resource['addresses']['metrics'] = str(public)
     for key in ('identity_file', 'known_hosts_file'):
         ansible.private_file(selected['ssh'][key], identity=key == 'identity_file')
     return request, resource
@@ -103,6 +105,11 @@ def registered_node(selected, target_id, request_id, *, timeout_seconds=None):
 
 def load(registry_file, target_id, config_file, binding_file=None):
     registry, config = read_private(registry_file), read_private(config_file)
+    return load_configuration(registry, target_id, config, binding_file)
+
+
+def load_configuration(registry, target_id, config, binding_file=None):
+    """Validate already-read operator files without writing a temporary configuration."""
     argo.require(registry.get('version') == 1 and isinstance(registry.get('targets'), dict), 'registry v1 required')
     selected = registry['targets'][target_id]
     argo.require(selected['purpose'] == 'runtime', 'registered runtime required')

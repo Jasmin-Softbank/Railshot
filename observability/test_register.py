@@ -1,4 +1,5 @@
 import base64
+import copy
 import io
 import json
 from pathlib import Path
@@ -63,18 +64,6 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
 
 
-    def test_gcp_uses_verified_public_route_and_actual_observer_source(self):
-        config = {**self.config, 'observer_source_cidr': '198.51.100.20/32'}
-        settings(config)
-        descriptor = {**self.descriptor, 'provider_kind': 'gcp', 'management_endpoint': 'https://198.51.100.10:6443'}
-        row, rendering = registration_row(config, self.request, descriptor)
-        self.assertEqual(row['node_instance'], '198.51.100.10:30910')
-        self.assertEqual(row['node_ip'], self.request['node_ip'])
-        self.assertEqual(rendering['observer_source_cidr'], '198.51.100.20/32')
-        for source in ['0.0.0.0/0', '198.51.100.0/24', '127.0.0.1/32']:
-            with self.assertRaises(ValueError):
-                settings({**config, 'observer_source_cidr': source})
-
     def test_direct_observer_ssh_keeps_identity_and_default_transport(self):
         request = {'inventory': {'control_plane': [{'private_ipv4': self.config['observer_ip'],
             'ssh': {'transport_ref': 'ssm:ap-northeast-2:i-12345678'}}]}}
@@ -108,6 +97,35 @@ class RegistrationTests(unittest.TestCase):
                 self.fail('unregistered observer address accepted')
         with self.assertRaises(ValueError):
             settings({**direct, 'observer_transport': 'arbitrary'})
+
+    def test_public_gcp_metrics_use_only_provisioned_address_and_explicit_nat_source(self):
+        descriptor = {**self.descriptor, 'provider_kind': 'gcp', 'management_endpoint': 'https://34.47.68.21:6443',
+            'addresses': {**self.descriptor['addresses'], 'public': '34.47.68.21', 'metrics': '34.47.68.21'}}
+        config = {**self.config, 'observer_source_cidr': '52.78.97.236/32'}
+        settings(config)
+        row, rendered = registration_row(config, self.request, descriptor)
+        self.assertEqual(row['node_instance'], '34.47.68.21:30910')
+        self.assertEqual(row['cluster_instance'], '34.47.68.21:30911')
+        self.assertEqual(row['node_ip'], self.request['node_ip'])
+        self.assertEqual(rendered['observer_source_cidr'], '52.78.97.236/32')
+        self.assertEqual(row['prometheus_url'], self.config['prometheus_url'])
+        for changed in ({'metrics': '8.8.8.8'}, {'public': '8.8.8.8'}, {'public': '224.0.0.1', 'metrics': '224.0.0.1'}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                registration_row(config, self.request, {**descriptor, 'addresses': {**descriptor['addresses'], **changed}})
+        with self.assertRaises(ValueError):
+            registration_row(config, self.request, {**descriptor, 'management_endpoint': 'https://34.47.68.21:443'})
+        private = copy.deepcopy(descriptor); del private['addresses']['metrics']; private.pop('management_endpoint')
+        default, rendering = registration_row(self.config, self.request, private)
+        self.assertEqual(default['node_instance'], self.request['node_ip'] + ':30910')
+        self.assertEqual(rendering['observer_source_cidr'], self.config['observer_ip'] + '/32')
+
+    def test_observer_source_override_is_one_rfc1918_or_global_nonmulticast_ipv4(self):
+        for value in ('52.78.97.236/32', '172.31.0.172/32', '10.1.2.3/32', '192.168.1.2/32'):
+            self.assertEqual(settings({**self.config, 'observer_source_cidr': value})['observer_source_cidr'], value)
+        for value in ('0.0.0.0/0', '52.78.97.0/24', '224.0.0.1/32', '239.1.2.3/32', '127.0.0.1/32',
+                      '169.254.169.254/32', '192.0.2.20/32', '::1/128', '52.78.97.236'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                settings({**self.config, 'observer_source_cidr': value})
 
     def test_bootstrap_is_empty_and_idempotent_without_rotating_password_or_promoting_acceptance(self):
         with tempfile.TemporaryDirectory() as root:
@@ -193,6 +211,18 @@ class RegistrationTests(unittest.TestCase):
             registration_row(self.config, {**request, 'probe_url': self.request['probe_url']}, self.descriptor)
 
 
+    def test_gcp_uses_verified_public_route_and_actual_observer_source(self):
+        config = {**self.config, 'observer_source_cidr': '8.8.8.8/32'}
+        settings(config)
+        descriptor = {**self.descriptor, 'provider_kind': 'gcp', 'management_endpoint': 'https://8.8.4.4:6443',
+            'addresses': {**self.descriptor['addresses'], 'public': '8.8.4.4', 'metrics': '8.8.4.4'}}
+        row, rendering = registration_row(config, self.request, descriptor)
+        self.assertEqual(row['node_instance'], '8.8.4.4:30910')
+        self.assertEqual(row['node_ip'], self.request['node_ip'])
+        self.assertEqual(rendering['observer_source_cidr'], '8.8.8.8/32')
+        for source in ['0.0.0.0/0', '198.51.100.0/24', '127.0.0.1/32']:
+            with self.assertRaises(ValueError):
+                settings({**config, 'observer_source_cidr': source})
     def test_node_health_upgrade_survives_failed_sync_without_publishing_trust(self):
         request = {k: v for k, v in self.request.items() if k not in {'app', 'namespace', 'probe_url'}}
         row, _ = registration_row(self.config, request, self.descriptor)
@@ -209,7 +239,7 @@ class RegistrationTests(unittest.TestCase):
             state = Path(root).resolve()
             config = {**self.config, 'state_dir': str(state)}
             product = state / 'product.json'
-            product.write_text(json.dumps({'version': 1, 'targets': [row]}))
+            product.write_text(json.dumps({'version': 1, 'collector': registration.collector(config), 'targets': [row]}))
             before = product.read_bytes()
             environment = SimpleNamespace(read_private=lambda p: json.loads(Path(p).read_text()), runtime_kubectl=runtime)
             with patch.dict(sys.modules, {'environment': environment, 'argo': SimpleNamespace(native=None),
