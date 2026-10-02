@@ -2,7 +2,7 @@
 
 runner는 **Ubuntu 24.04 amd64 전용 빌드 노드**에서 앱 저장소의 `railshot-deploy.yml` job을 한 번 실행합니다. 목표 배치는 운영 K3s의 build agent 위 [일회성 Job](../../../deployment/manifests/build-runner.yaml)이며, 기존 독립 VM은 `ci/runner-compose.yml`을 유지합니다. 일반 운영 노드나 고객 runtime에는 설치하지 않습니다. GitHub 공식 `actions/actions-runner:2.337.0` 이미지를 digest로 고정하고 Python·호스트 방화벽 확인 도구만 추가합니다. workflow의 `setup-python`이 Python 3.13을 설치하며 사용자 코드의 테스트는 기존 제한 컨테이너에서 실행합니다. 이미지 게시 job은 GitHub-hosted runner에 남깁니다. 아래 설정은 실제 노드 가입·고객 job 검증을 대신하지 않습니다.
 
-이 컨테이너는 신뢰된 CI 실행기를 포장합니다. **전용 VM이 기존 root 신뢰 경계**입니다. 같은 VM의 Docker socket과 host network, Docker 기본 capability에 추가한 `NET_ADMIN`이 필요합니다. socket은 CI VM의 root 권한에 해당하며 운영 호스트 socket과 공유할 수 없습니다. `NET_ADMIN`은 기존 root-owned helper의 실제 iptables 정책 검증에, host network는 격리된 L3 컨테이너 IP의 HTTP 검사에 필요합니다. runner에는 `privileged: true`나 host PID, `SYS_ADMIN`, seccomp 해제를 추가하지 않습니다. 사용자 코드에는 socket·runner 인증·운영 자격을 전달하지 않고 기존의 비root/읽기전용/자원제한 Q 컨테이너와 제한된 BuildKit/L3 네트워크를 유지합니다.
+이 컨테이너는 신뢰된 CI 실행기를 포장합니다. **전용 VM이 기존 root 신뢰 경계**입니다. 같은 VM의 Docker socket과 host network, Docker 기본 capability에 추가한 `NET_ADMIN`이 필요합니다. socket은 CI VM의 root 권한에 해당하며 운영 호스트 socket과 공유할 수 없습니다. `NET_ADMIN`은 기존 root-owned helper의 실제 nftables 정책 검증에, host network는 격리된 L3 컨테이너 IP의 HTTP 검사에 필요합니다. runner에는 `privileged: true`나 host PID, `SYS_ADMIN`, seccomp 해제를 추가하지 않습니다. 사용자 코드에는 socket·runner 인증·운영 자격을 전달하지 않고 기존의 비root/읽기전용/자원제한 Q 컨테이너와 제한된 BuildKit/L3 네트워크를 유지합니다.
 
 BuildKit은 새로 만들지 않습니다. 먼저 `infrastructure/ansible/ci.yml`을 실행한 기존 bootstrap이 `railshot-buildkit` 컨테이너와 `railshot-quality` bridge/firewall을 준비하고 실제 네트워크 검증 receipt를 남겨야 합니다. runner는 자신만의 Docker config에 remote Buildx 연결 정보만 만들고 같은 gate 코드로 기존 BuildKit의 이미지·network·자원제한·실행 flags를 확인합니다. bootstrap의 기존 BuildKit 권한 설정은 이 패키징에서 변경하지 않습니다.
 
