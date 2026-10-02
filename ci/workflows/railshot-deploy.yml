@@ -62,6 +62,7 @@ jobs:
         env:
           CONFIGURED_TARGET: ${{ vars.RAILSHOT_TARGET_ID }}
           CONFIGURED_TARGETS: ${{ vars.RAILSHOT_TARGET_IDS }}
+          CONFIGURED_BINDINGS: ${{ vars.RAILSHOT_TARGET_BINDINGS }}
         run: |
           set -euo pipefail
           [[ "$TENANT" =~ ^[a-z0-9]{1,20}$ && "$APP" =~ ^[a-z][a-z0-9-]{1,28}[a-z0-9]$ ]] || exit 1
@@ -138,6 +139,9 @@ jobs:
       GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
       PULL_SECRET_NAMESPACE: ${{ vars.RAILSHOT_PULL_NAMESPACE }}
       PULL_SECRET_NAME: ${{ vars.RAILSHOT_PULL_SECRET }}
+      CONFIGURED_BINDINGS: ${{ vars.RAILSHOT_TARGET_BINDINGS }}
+      CONFIGURED_TARGETS: ${{ vars.RAILSHOT_TARGET_IDS }}
+      CONFIGURED_TARGET: ${{ vars.RAILSHOT_TARGET_ID }}
     outputs:
       published_id: ${{ steps.published.outputs.artifact-id }}
       bundle_id: ${{ needs.loop.outputs.bundle_id }}
@@ -154,7 +158,7 @@ jobs:
           case "${REGISTRY_VISIBILITY:-private}" in
             public) ;;
             private)
-              [[ -n "$GHCR_PULL_USERNAME" && -n "$GHCR_PULL_TOKEN" && -n "$PULL_SECRET_NAMESPACE" && -n "$PULL_SECRET_NAME" ]] || {
+              [[ -n "$GHCR_PULL_USERNAME" && -n "$GHCR_PULL_TOKEN" && ( -n "${CONFIGURED_BINDINGS:-}" || ( -n "$PULL_SECRET_NAMESPACE" && -n "$PULL_SECRET_NAME" ) ) ]] || {
                 echo "BLOCKED: private release requires dedicated pull credentials and a target Secret reference" >&2; exit 1;
               } ;;
             *) echo "BLOCKED: REGISTRY_VISIBILITY must be private or explicitly public" >&2; exit 1 ;;
@@ -186,6 +190,7 @@ jobs:
         env:
           CONFIGURED_TARGET: ${{ vars.RAILSHOT_TARGET_ID }}
           CONFIGURED_TARGETS: ${{ vars.RAILSHOT_TARGET_IDS }}
+          CONFIGURED_BINDINGS: ${{ vars.RAILSHOT_TARGET_BINDINGS }}
         run: |
           set -euo pipefail
           [[ "$TENANT" =~ ^[a-z0-9]{1,20}$ && "$APP" =~ ^[a-z][a-z0-9-]{1,28}[a-z0-9]$ ]] || exit 1
