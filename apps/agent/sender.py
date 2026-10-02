@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Server-side fixed-action SSH transport bound to the expected tunnel route."""
+"""Server-side fixed-action SSH transport bound to the explicit management route."""
 import argparse
 import ipaddress
 import json
@@ -89,7 +89,7 @@ def _run_ssh_bounded(command, payload, timeout=45):
             process.stdout.close()
 
 
-def send_job(request,host,user,key_path,known_hosts,interface='jasmin0',runner=subprocess.run):
+def send_job(request,host,user,key_path,known_hosts,interface,runner=subprocess.run):
     request=decode_request(json.dumps(request).encode())
     host=str(ipaddress.ip_address(host))
     if not re.fullmatch(r'[a-z_][a-z0-9_-]{0,31}',user):
@@ -138,7 +138,7 @@ def main():
     parser.add_argument('--user',default='root')
     parser.add_argument('--key',type=Path,required=True)
     parser.add_argument('--known-hosts',type=Path,required=True)
-    parser.add_argument('--interface',default='jasmin0')
+    parser.add_argument('--interface',required=True,help='Verified management route interface')
     parser.add_argument('--job-id',required=True)
     args=parser.parse_args()
     request={'version':1,'job_id':args.job_id,'action':'instance.list','params':{}}

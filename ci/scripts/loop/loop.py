@@ -24,6 +24,7 @@ from process import OutputLimitError, run_bounded
 from observability import event_record
 from execution import GATE_ORDER, quality_advisory
 from runner.runtime_boundary import effective_auth_route
+from checks_progress import OUTCOMES as PROGRESS_OUTCOMES, from_environment as progress_from_environment
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gate'))
 from bundle import SOURCE_SPECS
 
@@ -34,7 +35,7 @@ STOP = {"F7": "application code defect", "F8": "transient infrastructure failure
         "QUALITY": "quality failure requires reviewed application changes; automatic source editing is disabled"}
 
 
-def agent_observer(run, role, provider):
+def agent_observer(run, role, provider, progress_sink=None):
     """Project the private SDK snapshot, never child stdout, to live Actions logs."""
     from runner.run_agent import validated_progress
     run_id, attempt_id = os.environ.get('RAILSHOT_RUN_ID'), os.environ.get('RAILSHOT_ATTEMPT_ID')
@@ -83,6 +84,8 @@ def agent_observer(run, role, provider):
             print(json.dumps(event, sort_keys=True), file=sys.stderr, flush=True)
         except OSError:
             pass  # Public log transport does not supersede required private receipts.
+        if progress_sink is not None:
+            progress_sink.emit(event)
     return observe
 
 
@@ -138,14 +141,14 @@ def task_text(role, attempt, n, run, request, repair_scope="packaging", app_id=N
         "Write summary and user_action in Korean.\n")
 
 
-def agent(role, provider, ws, run, attempt, n, request, repair_scope="packaging", app_id=None):
+def agent(role, provider, ws, run, attempt, n, request, repair_scope="packaging", app_id=None, progress_sink=None):
     if any((run / (role + suffix)).exists() for suffix in ('.json', '-events.jsonl', '-session.json')):
         raise StateError('STATE_EVIDENCE_MISMATCH', component='loop', phase='agent.prepare', retry_policy='after_reconcile')
     t = run / f"task-{attempt}.md"
     t.write_text(task_text(role, attempt, n, run, request, repair_scope, app_id))
     rc, out, err = run_json(PY + [str(PLATFORM / "runner/run_agent.py"), role, "--provider", provider,
                                   "--workspace", str(ws), "--run", str(run), "--task", str(t), "--repair-scope", repair_scope],
-                                  phase='agent', observer=agent_observer(run, role, provider))
+                                  phase='agent', observer=agent_observer(run, role, provider, progress_sink))
     rec_path = run / f"{role}.json"
     try:
         rec = json.loads(rec_path.read_text())
@@ -266,7 +269,7 @@ def binding(a):
             'harness_sha256': hashlib.sha256(json.dumps({str(p.relative_to(PLATFORM)): digest(p) for p in sorted(files)}, sort_keys=True).encode()).hexdigest()}
 
 
-def execute(a, run, state):
+def execute(a, run, state, progress_sink=None):
     ws = run / 'work'
     if 'final' in state.data:
         return finish(run, json.loads((run / state.data['final']).read_text()), state.data['started'], finalized=True)
@@ -303,7 +306,8 @@ def execute(a, run, state):
             attempt_scope = a.repair_scope if current_failure.get('layer') in {'L2', 'L3'} else 'packaging'
 
             def agent_step():
-                rc, record = agent(role, a.provider, ws, run, attempt, a.max_attempts, a.request, attempt_scope, app_id)
+                arguments = (role, a.provider, ws, run, attempt, a.max_attempts, a.request, attempt_scope, app_id)
+                rc, record = agent(*arguments, progress_sink) if progress_sink is not None else agent(*arguments)
                 if record.get('error'):
                     try:
                         upstream = StateError.from_dict(record['error'])
@@ -412,6 +416,8 @@ def execute(a, run, state):
 
 
 def main():
+    # Remove the publisher credential before any subprocess, binding, or run file.
+    progress_token = os.environ.pop('RAILSHOT_PROGRESS_TOKEN', None)
     ap = argparse.ArgumentParser()
     ap.add_argument("upload", nargs="?")
     ap.add_argument("run", nargs="?")
@@ -429,6 +435,9 @@ def main():
     if a.self_test:
         return self_test()
 
+    progress_sink = progress_from_environment(progress_token, a.app_id)
+    progress_token = None
+    native_run_id = None
     try:
         if not a.upload or not a.run:
             raise StateError('STATE_USAGE_INVALID', component='loop', phase='config', retry_policy='after_configuration')
@@ -438,7 +447,23 @@ def main():
         if run == upload or run in upload.parents or upload in run.parents or Path(a.run).is_symlink():
             raise StateError('STATE_USAGE_INVALID', component='loop', phase='config', retry_policy='after_configuration')
         with RunState(run, binding(a), a.resume) as state:
-            return execute(a, run, state)
+            native_run_id = state.data['run_id']
+            if progress_sink is not None:
+                progress_sink.emit(event_record('loop.started', component='loop', phase='loop', outcome='RUNNING',
+                    run_id=native_run_id, attributes={'sdk_invocations': None}))
+            result = execute(a, run, state, progress_sink)
+            if progress_sink is not None:
+                # A successful execute has durably finalized this evidence; it is not provider output.
+                try:
+                    evidence = json.loads((run / 'evidence.json').read_text())
+                    if not isinstance(evidence, dict) or evidence.get('status') not in PROGRESS_OUTCOMES:
+                        raise ValueError('invalid final observation')
+                except (OSError, ValueError, TypeError):
+                    evidence = {'status': 'UNKNOWN'}
+                progress_sink.emit(event_record('loop.completed', component='loop', phase='loop',
+                    outcome=evidence['status'], run_id=native_run_id,
+                    attributes={'sdk_invocations': evidence.get('sdk_invocations')}), final=True)
+            return result
     except StateError as exc:
         error = exc
     except OSError as exc:
@@ -448,6 +473,9 @@ def main():
         error = StateError('INTERNAL_ERROR', component='loop', phase='execution', outcome='UNKNOWN',
                            retry_policy='after_reconcile', side_effect='unknown', cause=exc)
     detail = error.as_dict()
+    if progress_sink is not None and native_run_id is not None:
+        progress_sink.emit(event_record('loop.completed', component='loop', phase='loop', outcome=error.outcome,
+            run_id=native_run_id, attributes={'sdk_invocations': None}), final=True)
     print(json.dumps({'result': detail['summary'], 'passed': False, 'status': error.outcome, 'error': detail}))
     return 1
 

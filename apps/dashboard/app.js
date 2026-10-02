@@ -1,3 +1,5 @@
+import { sourceAppName } from '../../contracts/application.mjs';
+
 const views = {
   deploy: document.querySelector('#deploy-view'),
   history: document.querySelector('#history-view'),
@@ -19,6 +21,7 @@ function showView(name) {
   if (sessionReady && name === 'monitor') loadEnvironments();
   else stopEnvironmentPolling();
   if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
+  if (sessionReady && name === 'monitor' && consoleTab === 'work') refreshEvents();
 }
 
 document.querySelectorAll('[data-view]').forEach((button) => {
@@ -68,6 +71,7 @@ let pollController;
 let lastReadAt = null;
 let observationError = false;
 let logSnapshot = null, logController;
+let eventSnapshot = null, eventController;
 const requests = new Set();
 
 function invalidateReview() {
@@ -222,15 +226,10 @@ async function createPlan(name, profile, mode) {
   return data;
 }
 
-async function sourceApplication(profile, source) {
-  if (!profile.create_per_request && profile.application_name) return profile.application_name;
-  const name = source.kind === 'repository' ? source.label.split('/').filter(Boolean).at(-1).replace(/\.git$/, '')
+function sourceApplication(source) {
+  const name = source.kind === 'repository' ? source.label.split('/').filter(Boolean).at(-1).replace(/\.git$/i, '')
     : source.kind === 'archive' ? archive.files[0].name : (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0];
-  const app = name.normalize('NFKD').toLowerCase().replace(/\.zip$/i, '').replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '').replace(/^[^a-z]+/, '').slice(0, 30).replace(/-+$/g, '');
-  if (/^[a-z][a-z0-9-]{1,28}[a-z0-9]$/.test(app)) return app;
-  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(name))));
-  return `app-${[...hash].map((value) => value.toString(16).padStart(2, '0')).join('').slice(0, 10)}`;
+  return sourceAppName(name);
 }
 
 document.querySelector('#deploy-form').addEventListener('submit', async (event) => {
@@ -248,14 +247,16 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else {
     invalidateReview();
     const generation = reviewGeneration, source = selectedSource;
-    let plan;
+    let plan, app;
     reviewing = true;
     const reviewButton = document.querySelector('#deploy-form button[type="submit"]');
     reviewButton.disabled = true;
     try {
+      app = sourceApplication(source);
       if (profile) {
-        const app = await sourceApplication(profile, source);
-        if (generation !== reviewGeneration) return;
+        if (!profile.create_per_request && profile.application_name && profile.application_name !== app) {
+          throw new Error(`선택한 환경은 ${profile.application_name} 앱 전용입니다. ${app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
+        }
         plan = await createPlan(app, profile, deploymentDatabase.value);
         if (generation !== reviewGeneration) return;
         if (!plan.executable) throw new Error(`현재 실행할 수 없는 계획입니다: ${(plan.blockers || []).join(', ')}${planCost(plan)}`);
@@ -268,9 +269,10 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
     reviewed = { ...selected, source, kind: 'deployments', key: crypto.randomUUID(), plan,
       targetId: plan?.runtime_target_id || profile?.target_id };
     document.querySelector('#review-source').textContent = source.label;
+    document.querySelector('#review-app').textContent = app;
     document.querySelector('#review-target').textContent = profile ? `클라우드 · ${profile.label || profile.id} · ${databaseSummary(profile, plan.database.mode)}` : option.label;
     document.querySelector('#review-note').textContent = plan
-      ? `앱 ${plan.name}: 새 자원을 생성하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.${planCost(plan)}`
+      ? `앱 ${plan.name}: 환경을 준비하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.${planCost(plan)}`
       : option.message;
     deployButton.disabled = false;
     requestError.hidden = true;
@@ -421,6 +423,7 @@ async function refreshRun() {
     if (data.id !== current.id || (current.target_id && data.target_id !== current.target_id)) throw new Error('실행 또는 대상이 요청과 일치하지 않습니다.');
     current = { ...current, ...data }; lastReadAt = Date.now(); observationError = false; remember(); renderRun();
     if (consoleTab === 'app' && !views.monitor.hidden) refreshLogs();
+    if (consoleTab === 'work' && !views.monitor.hidden) refreshEvents();
     if (!terminal.has(current.status) || current.kind === 'deployments') timer = setTimeout(refreshRun, 15000);
     else stopPolling();
   } catch (cause) {
@@ -454,6 +457,44 @@ async function refreshLogs() {
     logSnapshot = { deployment_id: id, state: 'unavailable' };
   } finally { if (logController === controller) { logController = null; renderConsole(); } }
 }
+function eventsMatch(events) {
+  return events && current?.kind === 'deployments' && events.deployment_id === current.id
+    && events.app === current.app && events.target_id === current.target_id
+    && (events.source_commit ?? null) === (current.source_commit ?? null)
+    && String(events.run_id ?? '') === String(current.ci?.run_id ?? '');
+}
+async function refreshEvents() {
+  if (eventController && eventsMatch(eventSnapshot)) return;
+  eventController?.abort();
+  if (!current || current.kind !== 'deployments') return;
+  const id = current.id, controller = new AbortController(); eventController = controller;
+  if (!eventsMatch(eventSnapshot)) eventSnapshot = { deployment_id: id, app: current.app, target_id: current.target_id,
+    source_commit: current.source_commit ?? null, run_id: current.ci?.run_id ?? null, state: 'loading', items: [] };
+  renderConsole();
+  try {
+    const { data } = await request(`/api/v1/deployments/${encodeURIComponent(id)}/events`, {}, controller);
+    if (eventController !== controller || current?.id !== id) return;
+    if (!eventsMatch(data) || !Array.isArray(data.items)) throw new Error('이벤트 대상 불일치');
+    eventSnapshot = data;
+  } catch {
+    if (eventController !== controller || current?.id !== id) return;
+    if (eventsMatch(eventSnapshot)) eventSnapshot = { ...eventSnapshot, read_error: true };
+  } finally { if (eventController === controller) { eventController = null; renderConsole(); } }
+}
+function agentEvents() {
+  const events = eventsMatch(eventSnapshot) ? eventSnapshot : null;
+  const age = events?.updated_at ? Date.now() - Date.parse(events.updated_at) : NaN;
+  const stale = events?.stale || events?.state === 'live' && (!Number.isFinite(age) || age > 90000);
+  const messages = { loading: '에이전트 이벤트를 조회하고 있습니다.', live: '에이전트 실행 관측 중',
+    complete: '에이전트 관측이 종료되었습니다. CI와 앱 배포 결과는 위 상태에서 확인하세요.',
+    not_started: '아직 에이전트 이벤트가 기록되지 않았습니다.', no_data: '이 실행에 기록된 에이전트 이벤트가 없습니다.',
+    unavailable: '에이전트 이벤트를 확인할 수 없습니다. 다음 조회에서 다시 확인합니다.' };
+  return { message: events?.read_error ? '이벤트 조회 실패 · 마지막으로 확인한 기록입니다.'
+    : stale ? '이벤트 갱신이 지연되고 있습니다. 마지막 기록만으로 실행 정지를 판단할 수 없습니다.'
+    : messages[events?.state] || '작업 로그 탭에서 현재 실행의 에이전트 이벤트를 조회합니다.',
+    ...(events || { items: [] }),
+    ...(events?.truncated ? { history_note: '최근 이벤트만 표시합니다. 전체 기록은 CI 실행 로그에서 확인하세요.' } : {}) };
+}
 function renderConsole() {
   const logs = logSnapshot?.deployment_id === current?.id ? logSnapshot : null;
   const data = !current ? '실행을 시작하면 확인된 상태가 여기에 표시됩니다.'
@@ -462,7 +503,7 @@ function renderConsole() {
       : logLabels[logs?.state] || '앱 로그 탭을 선택하면 현재 배포의 로그를 조회합니다.')
     : consoleTab === 'environment' ? { target_id: current.target_id, environment: current.environment || null, cd: current.cd || null, public_http: current.public_http || null, observation: current.observation || null }
     : { status: current.status, stage: current.stage || 'ci', diagnostics: current.ci?.diagnostics || current.diagnostics || null,
-      steps: current.steps || current.ci?.steps || [], error: current.error || null };
+      steps: current.steps || current.ci?.steps || [], error: current.error || null, agent_events: agentEvents() };
   document.querySelector('#console-output').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
 const metricLabels = { not_configured: '연결 전', unsupported: '대상 미지원', unavailable: '수집 연결 실패', collection_failed: '수집 실패', no_data: '데이터 없음', stale: '오래된 값' };
@@ -489,13 +530,14 @@ function renderMetrics() {
     : '수집기 수명 정보 미제공';
 }
 // Even after polling is stopped, expire old samples on screen.
-const freshnessTimer = setInterval(() => { renderMetrics(); renderEnvironments(); }, 15000);
+const freshnessTimer = setInterval(() => { renderMetrics(); renderConsole(); renderEnvironments(); }, 15000);
 window.addEventListener('pagehide', () => clearInterval(freshnessTimer));
 document.querySelectorAll('[data-console]').forEach((button) => button.addEventListener('click', () => {
   consoleTab = button.dataset.console;
   document.querySelectorAll('[data-console]').forEach((tab) => tab.setAttribute('aria-selected', String(tab === button)));
   renderConsole();
   if (consoleTab === 'app') refreshLogs();
+  if (consoleTab === 'work') refreshEvents();
 }));
 function savePreferences(patch) {
   if (!sessionReady) return;
@@ -514,7 +556,7 @@ function element(tag, text, className) {
 }
 function showHistoryError(cause) { historyError = cause.message; document.querySelector('#history-detail').textContent = `내역 조회 실패: ${cause.message} 최신 내역을 눌러 다시 확인하세요.`; }
 function openExecution(row, tab = 'work') {
-  stopPolling(); logController?.abort(); logSnapshot = null;
+  stopPolling(); logController?.abort(); logSnapshot = null; eventController?.abort(); eventSnapshot = null;
   current = row; lastReadAt = null; observationError = false; consoleTab = tab;
   document.querySelectorAll('[data-console]').forEach((button) => button.setAttribute('aria-selected', String(button.dataset.console === tab)));
   showView('monitor'); renderRun(); refreshRun();

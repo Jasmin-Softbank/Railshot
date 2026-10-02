@@ -93,8 +93,9 @@ test('original dashboard cards submit three source types through backend selecti
   assert.equal(await page.locator('#provider-field').isVisible(), false);
   const review = () => page.locator('#deploy-form button[type="submit"]').click();
   const run = () => page.locator('#deploy-button').click();
-  await page.locator('#repository-url').fill('https://github.com/example/browser-demo');
+  await page.locator('#repository-url').fill('https://github.com/example/browser-demo.git/');
   await review();
+  assert.equal(await page.locator('#review-app').innerText(), 'browser-demo');
   await page.getByRole('radio', { name: /온프레미스/ }).check();
   assert.equal(await page.locator('#review-panel').isVisible(), false, 'changing environment invalidates the reviewed request');
   await page.locator('#provider').selectOption('proxmox');
@@ -114,6 +115,7 @@ test('original dashboard cards submit three source types through backend selecti
   await review(); await run();
   await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
   assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].app, 'browser-demo');
   assert.equal(await page.locator('#application-link').getAttribute('href'), 'https://demo.railshot.io/');
   assert.equal(await page.locator('#actions-link').getAttribute('href'), 'https://github.com/example/apps/actions/runs/1');
   await page.reload();
@@ -124,12 +126,16 @@ test('original dashboard cards submit three source types through backend selecti
   await writeFile(join(files, 'index.js'), 'source from zip');
   const zip = await archiveFromPath(files);
   await page.locator('#archive').setInputFiles({ name: 'archive-app.zip', mimeType: 'application/zip', buffer: zip.bytes });
-  await review(); await run();
+  await review();
+  assert.equal(await page.locator('#review-app').innerText(), 'archive-app');
+  await run();
   await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('archive-app') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
   assert.equal(submitted[1].files[0].content.toString(), 'source from zip');
   await writeFile(join(files, 'index.js'), 'source from folder');
   await page.locator('#folder').setInputFiles(files);
-  await review(); await run();
+  await review();
+  assert.equal(await page.locator('#review-app').innerText(), 'fixture');
+  await run();
   await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('fixture') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
   assert.equal(await page.locator('#run-state').innerText(), '앱 배포 완료');
   assert.equal(submitted.length, 3);
@@ -225,6 +231,13 @@ test('each provider selection keeps the assigned CI and CD target through reload
     assert.equal(await page.locator(provider === 'openstack' ? '#provider' : '#cloud-provider').inputValue(), provider);
     await page.locator('#repository-url').fill('https://github.com/example/provider-fixture');
     await page.locator('#deploy-form button[type="submit"]').click();
+    assert.equal(await page.locator('#review-app').innerText(), 'provider-fixture');
+    await page.locator('#deploy-button').click();
+    await page.waitForFunction(() => document.querySelector('#request-error').textContent.includes('전용입니다'));
+    assert.equal(submissions.length, 0); assert.equal(deliveries.length, 0);
+    await page.locator('#repository-url').fill(`https://github.com/example/${app}`);
+    await page.locator('#deploy-form button[type="submit"]').click();
+    assert.equal(await page.locator('#review-app').innerText(), app);
     await page.locator('#deploy-button').click();
     await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
     assert.equal(submissions.length, 1); assert.equal(deliveries.length, 1);
@@ -302,6 +315,44 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   assert.equal(await page.locator('#monitor-actions-link').isVisible(), true);
   if (output) await page.screenshot({ path: join(output, 'monitor-failed.png'), fullPage: true });
   assert.equal(requests.some((request) => request.method === 'POST' && request.path !== '/api/v1/sessions'), false, 'resume and observation never redeploy');
+  assert.deepEqual(errors, []);
+});
+
+test('work log reads bound agent events over HTTP and marks stale or failed observations without redeploying', { timeout: 45000 }, async (t) => {
+  const record = { id: 'events-demo', app: 'demo-app', target_id: 'demo-aws', status: 'running',
+    source_commit: 'a'.repeat(40), ci: { run_id: '123', state: 'running', steps: [] } };
+  let mode = 'live', attempt = 1;
+  const { page, origin, errors, requests } = await start(t, { product: {
+    dashboard: { session: () => ({ id: 'events-test', expires_at: '2099-01-01T00:00:00Z' }), preferences: () => ({ view: 'monitor', environment: 'cloud', provider: '' }), connections: () => [] },
+    list: () => ({ items: [record], next_marker: null, total: 1 }), targets: () => [], profiles: () => [], getDeployment: () => record,
+    getDeploymentEvents: () => {
+      if (mode === 'error') throw new Error('private event transport details');
+      return { deployment_id: record.id, app: record.app, target_id: record.target_id, source_commit: record.source_commit,
+        run_id: record.ci.run_id, run_attempt: attempt, state: mode === 'empty' ? 'not_started' : 'live',
+        checked_at: new Date().toISOString(), updated_at: new Date(Date.now() - (mode === 'stale' ? 120000 : 0)).toISOString(),
+        truncated: true, items: mode === 'empty' ? [] : [{ sequence: 1, event_name: 'agent.heartbeat', role: 'fixer',
+          progress: { sdk_event_count: 7, elapsed_ms: 1200, last_sdk_event_at_ms: Date.now(), item_counts: { commandExecution: 1 } } }], next_marker: null };
+    },
+  } });
+  const output = page.locator('#console-output');
+  const refresh = async () => { await page.locator('[data-console="work"]').click(); };
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('agent.heartbeat'));
+  assert.match(await output.innerText(), /관측 중/);
+  assert.match(await output.innerText(), /최근 이벤트만/);
+  assert.match(await output.innerText(), /sdk_event_count/);
+  mode = 'stale'; await refresh();
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('갱신이 지연'));
+  mode = 'error'; await refresh();
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('이벤트 조회 실패'));
+  assert.match(await output.innerText(), /agent.heartbeat/);
+  assert.doesNotMatch(await output.innerText(), /private event/);
+  mode = 'empty'; attempt = 2; await refresh();
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('아직 에이전트 이벤트'));
+  assert.doesNotMatch(await output.innerText(), /agent.heartbeat/, 'an earlier attempt is never reused for a new attempt');
+  assert.ok(requests.some((request) => request.path === '/api/v1/deployments/events-demo/events'));
+  assert.equal(requests.some((request) => request.authorization), false);
+  assert.equal(requests.some((request) => request.method === 'POST' && request.path !== '/api/v1/sessions'), false);
   assert.deepEqual(errors, []);
 });
 

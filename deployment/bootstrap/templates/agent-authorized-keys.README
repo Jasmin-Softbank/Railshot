@@ -8,5 +8,6 @@ anywhere without the restrictive options. The runner permits only jasmin-job-v1.
 The Python interpreter, repository, parent directories and config directory must be
 root-owned and not writable by other users. The server's known_hosts must be verified
 out of band and stored with mode 0600. Never disable host key checking.
-The source IP must be the server WireGuard tunnel address, not its public address.
+The source IP and interface must match an operator-managed, verified management route.
+The Cloudflare application Tunnel does not supply this SSH management path.
 This helper does not create users, change sshd_config or restart SSH.

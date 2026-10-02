@@ -79,7 +79,7 @@ CI는 먼저 기본 검사를 실행합니다. 수정 가능한 실패가 나오
 
 플랫폼 운영 API, 고객 소스의 CI 실행 환경, 고객 앱의 실행 클러스터를 분리합니다. AWS와 OpenStack도 각각 독립된 K3s 클러스터를 사용합니다. Cilium VXLAN은 각 클러스터 내부 통신을 담당합니다.
 
-환경 준비는 CSP Terraform 또는 OpenStack Provider가 VM을 준비하고, Ansible이 guest 검사 후 공통 K3s/Cilium 설치기를 한 번 호출하는 구조입니다. 앱 배포는 이 환경을 재사용합니다. CD는 회의 합의에 따라 Argo CD로 우선 진행하며 정빈의 대안 조사를 병행합니다. AWS 앱 공개 경로와 EIP·WireGuard 관리 경로는 역할이 다릅니다. 온프레미스의 공개 입구는 별도로 결정합니다.
+환경 준비는 CSP Terraform 또는 OpenStack Provider가 VM을 준비하고, Ansible이 guest 검사 후 공통 K3s/Cilium 설치기를 한 번 호출하는 구조입니다. 앱 배포는 이 환경을 재사용합니다. CD는 회의 합의에 따라 Argo CD로 우선 진행하며 정빈의 대안 조사를 병행합니다. 앱 공개는 AWS ALB·GCP native L7·OpenStack Octavia로 나누고, 사설 Octavia는 Cloudflare Named Tunnel로 연결하는 목표입니다. WireGuard는 지원 경로에서 제거하며 SSH·Kubernetes API 관리 접근은 별도로 확보합니다.
 
 구현 연결에는 [Ansible 명세](api/ansible.md)와 [CI 게시 명세](api/ci-publication.md)를 사용합니다. 다음 그림은 [공통 아키텍처](architecture/README.md)에서 확인할 수 있습니다. 사용자 흐름은 이 기획서의 3절에도 직접 표시합니다.
 

@@ -10,7 +10,7 @@ Node 22 이상에서 `npm ci --ignore-scripts`, `npm start`를 실행한다. 이
 
 | 변수 | 의미 |
 | --- | --- |
-| `GITHUB_TOKEN` | 업로드용 apps repository의 Git tree/commit/ref 및 Actions 호출 권한. 응답에 포함하지 않음 |
+| `GITHUB_TOKEN` | 기존 업로드용 apps repository의 Contents·Actions 권한과 SDK 진행 조회용 Checks 읽기 권한을 사용한다. 새 토큰은 필요하지 않으며 응답에 포함하지 않음 |
 | `GITHUB_OWNER`, `GITHUB_REPO` | 기본 `Jasmin-Softbank`, `railshot-apps`; 통합 platform source repo와 별도 |
 | `GITHUB_REF`, `GITHUB_WORKFLOW` | 기본 `main`, `railshot-deploy.yml` |
 | `RAILSHOT_TENANT` | 소문자·숫자 1–20자. 기본 `demo` |
