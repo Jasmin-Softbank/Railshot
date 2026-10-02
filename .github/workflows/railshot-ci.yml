@@ -63,7 +63,11 @@ jobs:
         with:
           node-version: '22'
       - run: python -m pip install -r ci/requirements-test.txt
+      - name: Render pinned Argo CD installation and CRD schemas
+        run: kubectl kustomize gitops/argo > "$RUNNER_TEMP/railshot-argocd-schema.yaml"
       - name: CI, Ansible, runtime, GitOps and provider contracts
+        env:
+          RAILSHOT_ARGO_SCHEMA_MANIFEST: ${{ runner.temp }}/railshot-argocd-schema.yaml
         run: |
           for suite in ci/scripts ci/scripts/gate ci/scripts/loop ci/scripts/runner ci/scripts/poc ci/scripts/infra infrastructure/ansible deployment/scripts/tests gitops infrastructure/providers/terraform_tools; do
             echo "::group::$suite"

@@ -1,6 +1,11 @@
 import importlib.util
+import os
 from pathlib import Path
 import unittest
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[3]
 
 spec = importlib.util.spec_from_file_location("platform_render", Path(__file__).parents[1] / "render-platform.py")
 module = importlib.util.module_from_spec(spec)
@@ -8,6 +13,55 @@ spec.loader.exec_module(module)
 
 
 class PlatformTests(unittest.TestCase):
+    def test_gitops_manifests_keep_platform_permissions_and_sync_explicit(self):
+        install = yaml.safe_load((ROOT / "gitops/argo/kustomization.yaml").read_text())
+        self.assertEqual(install["kind"], "Kustomization")
+        self.assertEqual(install["namespace"], "argocd")
+        self.assertEqual(len(install["resources"]), 1)
+        self.assertRegex(install["resources"][0],
+                         r"^https://raw\.githubusercontent\.com/argoproj/argo-cd/[a-f0-9]{40}/manifests/install\.yaml$")
+        documents = list(yaml.safe_load_all((ROOT / "gitops/applications/railshot-platform.yaml").read_text()))
+        self.assertEqual(len(documents), 2)
+        resources = {item["kind"]: item for item in documents}
+        self.assertEqual(set(resources), {"AppProject", "Application"})
+        project, application = resources["AppProject"], resources["Application"]
+        for item in documents:
+            self.assertEqual(item["apiVersion"], "argoproj.io/v1alpha1")
+            self.assertEqual(item["metadata"]["namespace"], "argocd")
+            self.assertNotIn("finalizers", item["metadata"])  # No cascading workload removal.
+        self.assertEqual(application["spec"]["project"], project["metadata"]["name"])
+        self.assertEqual(project["spec"]["sourceRepos"], ["https://github.com/Jasmin-Softbank/Railshot.git"])
+        self.assertEqual(project["spec"]["clusterResourceWhitelist"], [])
+        self.assertEqual({(item["group"], item["kind"]) for item in project["spec"]["namespaceResourceWhitelist"]},
+                         {("apps", "Deployment"), ("", "Service"), ("networking.k8s.io", "NetworkPolicy")})
+        destination = {"server": "https://kubernetes.default.svc", "namespace": "railshot-system"}
+        self.assertEqual(project["spec"]["destinations"], [destination])
+        self.assertEqual(application["spec"]["destination"], destination)
+        source = application["spec"]["source"]
+        self.assertEqual(source["repoURL"], project["spec"]["sourceRepos"][0])
+        self.assertEqual(source["path"], "gitops/applications/railshot-platform")
+        self.assertEqual(source["directory"], {"include": "workload.json"})
+        self.assertRegex(source["targetRevision"], r"^(REPLACE_WITH_REVIEWED_CONFIG_COMMIT|[a-f0-9]{40})$")
+        self.assertNotIn("automated", application["spec"].get("syncPolicy", {}))
+
+    @unittest.skipUnless(os.environ.get("RAILSHOT_ARGO_SCHEMA_MANIFEST"),
+                         "Set RAILSHOT_ARGO_SCHEMA_MANIFEST to the kubectl kustomize output for native Argo schema validation")
+    def test_platform_declarations_match_rendered_upstream_argo_crds(self):
+        from jsonschema import Draft7Validator
+        rendered = Path(os.environ["RAILSHOT_ARGO_SCHEMA_MANIFEST"])
+        schemas = {}
+        for item in yaml.safe_load_all(rendered.read_text()):
+            if item["kind"] != "CustomResourceDefinition" or item["spec"]["group"] != "argoproj.io":
+                continue
+            for version in item["spec"]["versions"]:
+                if version["name"] == "v1alpha1" and version["served"]:
+                    schemas[item["spec"]["names"]["kind"]] = version["schema"]["openAPIV3Schema"]
+        self.assertTrue({"Application", "AppProject"} <= set(schemas), "Rendered Argo CRDs are missing")
+        for item in yaml.safe_load_all((ROOT / "gitops/applications/railshot-platform.yaml").read_text()):
+            with self.subTest(kind=item["kind"]):
+                errors = sorted(Draft7Validator(schemas[item["kind"]]).iter_errors(item), key=lambda error: str(error.path))
+                self.assertFalse(errors, "\n".join(f"{list(error.path)}: {error.message}" for error in errors))
+
     def test_pinned_images_private_api_and_configured_readiness(self):
         images = {name: f"ghcr.io/jasmin-softbank/railshot-{name}@sha256:" + "a" * 64 for name in ("dashboard", "api")}
         output = module.render(images, "k3s-aws")

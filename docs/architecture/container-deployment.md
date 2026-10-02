@@ -5,8 +5,7 @@
 이 문서는 컨테이너·CI 설정을 설명한다. 이미지 게시, 운영 설치, UI의 전체 배포 기능 완료를 뜻하지 않는다.
 
 ```mermaid
-flowchart LR
-  B["브라우저"]
+flowchart TB
   M["MCP 컨테이너<br/>클라이언트가 stdio로 실행"]
   subgraph OPS["운영 K3s"]
     D["Dashboard 컨테이너<br/>Nginx · Vite dist"]
@@ -17,16 +16,17 @@ flowchart LR
     R["Actions runner 컨테이너"]
     K["기존 BuildKit 컨테이너"]
   end
+  P["별도 GitHub-hosted 게시 job<br/>검사 이미지 그대로 게시"]
   G["GHCR<br/>검사한 이미지 digest"]
-  subgraph TARGET["독립된 고객 K3s · AWS / GCP / 온프레미스"]
-    U["고객 앱 컨테이너"]
+  subgraph TARGET["각 고객 K3s · 독립 클러스터"]
+    U["고객 앱 컨테이너<br/>AWS / GCP / 온프레미스"]
   end
-  B -->|"화면 조회"| D
   D -. "후속 UI 연결" .-> A
   M -->|"내부 HTTP · Bearer"| A
   A -->|"GitHub Actions dispatch"| R
   R -->|"격리된 빌드"| K
-  R -->|"검사한 이미지 게시"| G
+  R -->|"검사 bundle 인계"| P
+  P -->|"게시"| G
   C -->|"GitOps 선언 적용"| U
   G -->|"digest로 pull"| U
   G -->|"플랫폼 이미지 pull"| D
@@ -35,11 +35,11 @@ flowchart LR
   classDef control fill:#f1f5f9,stroke:#64748b,color:#334155
   classDef runtime fill:#dcfce7,stroke:#16a34a,color:#14532d
   class D,A,M app
-  class B,C,R,K,G control
+  class C,R,K,P,G control
   class U runtime
 ```
 
-Argo는 별도 config Git 경로의 검토된 선언을 읽는다. 위 그림은 배치와 주요 통신만 나타내며 CI 게시가 자동으로 Argo sync를 시작한다는 뜻이 아니다. 고객 클러스터는 서로 독립돼 있다. MCP의 내부 API 접속은 허가된 관리 경로/port-forward를 사용하며 API를 인터넷에 공개하지 않는다.
+Argo는 별도 config Git 경로의 검토된 선언을 읽는다. 위 그림은 배치와 주요 통신만 나타내며 CI 게시가 자동으로 Argo sync를 시작한다는 뜻이 아니다. 고객 클러스터는 서로 독립돼 있다. 고객 소스의 검사는 전용 CI VM에서, 게시와 플랫폼 이미지 build/smoke는 GitHub-hosted runner에서 수행한다. MCP의 내부 API 접속은 허가된 관리 경로/port-forward를 사용하며 API를 인터넷에 공개하지 않는다.
 
 ## 파일과 실행 책임
 
