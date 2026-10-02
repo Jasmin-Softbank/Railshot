@@ -1,7 +1,7 @@
 # 배포용 최소 관측 구성
 
 대상별 노드/클러스터 기본 상태와 배포된 HTTP 주소를 확인합니다. 서비스 전체의 관측성,
-CI 실행 엔진, 배포 성공 판정기를 만드는 구성이 아닙니다. 기존 API/CI/CD 코드는 변경하지 않습니다.
+CI 실행 엔진이나 배포 성공 판정기를 만드는 구성이 아닙니다. 제품 API/UI 연결은 [제품 관측 계약](../docs/api/observations.md)을 따릅니다.
 
 ## 배치와 범위
 
@@ -182,7 +182,7 @@ PROMTOOL=/path/to/promtool BLACKBOX=/path/to/blackbox_exporter \
 2026-10-02 [AWS 실자원 인수 검증](../docs/integration/observability-acceptance-20261002.md)에서
 설치·수집·정상/실패 HTTP·수집 중단·앱 이미지 장애·NodePort/Cilium 접근 제한과 자원 정리를 확인했습니다.
 Grafana는 API 및 패널 질의 결과를 확인했으며 브라우저 화면 렌더는 검증하지 않았습니다.
-온프레미스/VPN 도달성과 제품 API/CD 연결도 별도 검증 대상입니다.
+온프레미스/VPN 도달성과 실제 제품 API/CD 연결은 별도 검증 대상입니다. 제품 관측 helper/UI의 모의 검사는 클라우드 연결 증거가 아닙니다.
 
 중지 시 `docker compose -f .../compose.yaml down`은 named volume을 보존합니다. `down -v`는 데이터를
 삭제하므로 기본 절차로 사용하지 않습니다. Exporter 제거는 해당 `cluster.json`의 리소스만 검토 후
