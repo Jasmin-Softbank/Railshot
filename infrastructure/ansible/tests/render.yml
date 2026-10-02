@@ -29,7 +29,10 @@
         that:
           - config['write-kubeconfig-mode'] == '0600'
           - config['tls-san'] == ['demo.example.test', '192.0.2.10']
-          - config['disable'] == ['traefik', 'servicelb', 'metrics-server']
+          - config['disable'] == ['traefik', 'servicelb', 'metrics-server', 'local-storage']
+          - config['flannel-backend'] == 'none'
+          - config['disable-network-policy'] == true
+          - not config.get('disable-kube-proxy', false)
           - config['cluster-cidr'] == '10.42.0.0/16'
           - smoke | length == 3
           - smoke[0].kind == 'Namespace'
@@ -44,6 +47,19 @@
           - kubeconfig.clusters[0].cluster['certificate-authority-data'] == 'test-ca'
           - kubeconfig.users[0].user['client-key-data'] == 'test-key'
           - kubeconfig['current-context'] == 'default'
+
+    - name: Check that legacy ownership cannot be accepted as Cilium ownership
+      vars:
+        identity: "{{ (lookup('ansible.builtin.file', '../site.yml') | from_yaml)[0].vars.k3s_identity }}"
+        legacy: "{{ identity | dict2items | rejectattr('key', 'in', ['cni', 'cilium_version', 'cilium_cli_version']) | items2dict }}"
+      ansible.builtin.assert:
+        that:
+          - identity.cni == 'cilium'
+          - identity.cilium_version is defined
+          - identity.cilium_cli_version is defined
+          - cilium_version == '1.20.2'
+          - cilium_cli_version == 'v0.20.1'
+          - legacy != identity
 
     - name: Override sample port and confirm rendering uses it
       ansible.builtin.set_fact:
