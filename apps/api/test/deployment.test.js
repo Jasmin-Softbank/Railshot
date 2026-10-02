@@ -428,6 +428,95 @@ test('최신 release가 실패하거나 건너뛰면 옛 성공 artifact를 사�
   }
 });
 
+async function diagnosticService({ artifact = {}, evidence = {}, files, duplicate = false, body, attempt = 1 } = {}) {
+  const data = { passed: false, result: 'blocked: NO_TESTS', status: 'BLOCKED', agent_attempts: 1, repair_scope: 'packaging',
+    error: { code: 'GATE_CONFIG_INVALID', phase: 'Q.discovery', outcome: 'BLOCKED', summary: 'private-secret-value' },
+    attempts: [{ attempt: 0, agent_invoked: false, written: null },
+      { attempt: 1, agent_invoked: true, written: ['Dockerfile', '.dockerignore', '.railshot/railshot.yaml', '.env', '../private-secret-value'] }],
+    ...evidence };
+  const zip = await zipOf(files || { 'evidence.json': JSON.stringify(data) }), calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    const value = new URL(url), path = value.pathname;
+    if (path.endsWith('/actions/runs/789')) return Response.json({ run_attempt: attempt, head_sha: 'a'.repeat(40),
+      status: 'completed', conclusion: 'failure', path: '.github/workflows/railshot-deploy.yml',
+      html_url: 'https://github.com/org/apps/actions/runs/789' });
+    if (path.endsWith(`/attempts/${attempt}/jobs`)) return Response.json({ total_count: 2, jobs: [
+      { name: 'loop', status: 'completed', conclusion: 'failure', steps: [
+        { number: 1, name: 'Validate inputs', status: 'completed', conclusion: 'success' },
+        { number: 2, name: 'Baseline gates, then SDK repair only when eligible', status: 'completed', conclusion: 'failure' },
+        { number: 3, name: 'private-secret-value', status: 'private-secret-value', conclusion: 'private-secret-value' }, null,
+      ] }, { name: 'release', status: 'completed', conclusion: 'skipped' },
+    ] });
+    if (path.endsWith('/runs/789/artifacts')) {
+      assert.equal(value.searchParams.get('name'), `loop-${attempt}`);
+      const row = { id: 201, name: `loop-${attempt}`, expired: false, size_in_bytes: zip.length,
+        workflow_run: { id: 789, head_sha: 'a'.repeat(40) }, archive_download_url: 'https://untrusted.invalid/private-secret-value', ...artifact };
+      return Response.json({ total_count: duplicate ? 2 : 1, artifacts: duplicate ? [row, { ...row, id: 202 }] : [row] });
+    }
+    if (path.endsWith('/actions/artifacts/201/zip')) return new Response(body || zip);
+    throw new Error('private-secret-value');
+  };
+  return { service: createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fetchImpl), calls };
+}
+
+test('failed CI exposes current-attempt NO_TESTS diagnostics and safe job tasks without raw artifact text', async () => {
+  const { service, calls } = await diagnosticService();
+  const result = await service.status('789');
+  assert.equal(result.state, 'failed'); assert.equal(result.publication, null);
+  assert.deepEqual(result.diagnostics, { state: 'ready', run_attempt: 1, artifact_id: 201, reason: 'NO_TESTS',
+    code: 'GATE_CONFIG_INVALID', phase: 'Q.discovery', outcome: 'BLOCKED', agent_attempts: 1,
+    changed_files: ['Dockerfile', '.dockerignore', '.railshot/railshot.yaml'], changed_file_count: 3, repair_scope: 'packaging',
+    message: '실행할 테스트를 찾지 못해 품질 검사가 중단되었습니다.',
+    guidance: '원본 프로젝트에 실행 가능한 테스트와 테스트 명령을 추가한 뒤 다시 배포하세요. 자동 패키징 수정은 테스트를 만들거나 품질 검사를 생략하지 않습니다.' });
+  assert.deepEqual(result.steps[0].tasks, [
+    { number: 1, name: 'Validate inputs', status: 'completed', conclusion: 'success' },
+    { number: 2, name: 'Baseline gates, then SDK repair only when eligible', status: 'completed', conclusion: 'failure' },
+    { number: 3, name: '단계 3', status: 'unknown', conclusion: null },
+  ]);
+  assert.ok(!JSON.stringify(result).includes('private-secret-value'));
+  assert.ok(calls.every((url) => url.startsWith('https://api.github.com/')));
+  const source = await diagnosticService({ evidence: { repair_scope: 'source', attempts: [
+    { attempt: 0, agent_invoked: false, written: null },
+    { attempt: 1, agent_invoked: true, written: ['Dockerfile', 'tests/private-secret-value.test.js', 'src/private-secret-value.js',
+      'tests/private-secret-value.test.js', '../private-secret-value', '.env', '/private-secret-value'] },
+  ] } });
+  const repaired = (await source.service.status('789')).diagnostics;
+  assert.equal(repaired.repair_scope, 'source'); assert.equal(repaired.changed_file_count, 3);
+  assert.deepEqual(repaired.changed_files, ['Dockerfile']);
+  assert.match(repaired.guidance, /소스·테스트 자동 수정을 시도/);
+  assert.ok(!JSON.stringify(repaired).includes('private-secret-value'));
+  assert.ok(!repaired.guidance.includes('테스트를 만들거나'));
+});
+
+test('stale, mismatched, oversized and malicious CI diagnostics fail closed without hiding the failed run', async () => {
+  for (const options of [
+    { attempt: 2, artifact: { name: 'loop-1' } },
+    { artifact: { expired: true } }, { duplicate: true },
+    { artifact: { workflow_run: { id: 788, head_sha: 'a'.repeat(40) } } },
+    { artifact: { workflow_run: { id: 789, head_sha: 'b'.repeat(40) } } },
+    { artifact: { size_in_bytes: 3 * 1024 * 1024 } }, { body: Buffer.alloc(2 * 1024 * 1024 + 1) },
+    { files: { 'evidence.json': '{private-secret-value' } },
+    { files: { 'other/evidence.json': '{}' } }, { evidence: { passed: true } },
+    { evidence: { agent_attempts: 9 } }, { evidence: { status: 'FAIL' } },
+  ]) {
+    const { service, calls } = await diagnosticService(options);
+    const result = await service.status('789');
+    assert.equal(result.state, 'failed'); assert.equal(result.publication, null);
+    assert.equal(result.diagnostics.state, 'unavailable', JSON.stringify(options));
+    assert.ok(!JSON.stringify(result).includes('private-secret-value'));
+    if (options.attempt === 2) assert.ok(calls.every((url) => !url.includes('loop-1') && !url.includes('/artifacts/201/zip')));
+  }
+  const { service } = await diagnosticService({ evidence: { result: 'private-secret-value', repair_scope: 'private-secret-value',
+    error: { code: 'private-secret-value', phase: '/private-secret-value', outcome: 'BLOCKED' } } });
+  const result = await service.status('789');
+  assert.equal(result.diagnostics.state, 'ready');
+  assert.equal(result.diagnostics.reason, 'CI_FAILED'); assert.equal(result.diagnostics.code, 'CI_FAILED');
+  assert.equal(result.diagnostics.phase, null);
+  assert.equal(result.diagnostics.repair_scope, null);
+  assert.ok(!JSON.stringify(result).includes('private-secret-value'));
+});
+
 test('artifact 만료·중복·누락과 source/target/attempt/파일 변조는 게시 확인을 차단한다', async () => {
   const tampered = publishedFiles(); tampered['images.json'] = '{}';
   for (const options of [
@@ -435,12 +524,16 @@ test('artifact 만료·중복·누락과 source/target/attempt/파일 변조는 
     { files: publishedFiles({ sourceCommit: 'b'.repeat(40) }) },
     { files: publishedFiles({ targetId: 'onprem-demo' }) },
     { files: publishedFiles({ attempt: 2 }) },
+    { files: { ...publishedFiles(), 'handoff.json': '{"private-secret-value": INVALID}' } },
+    { files: { ...publishedFiles(), 'private-secret-value.pem': 'private-secret-value' } },
   ]) {
     const { service } = await publicationService(options);
     const result = await service.status('789');
     assert.equal(result.state, 'publication_unverified', JSON.stringify(options));
     assert.equal(result.publication, null);
     assert.equal(result.url, null);
+    assert.ok(!JSON.stringify(result).includes('private-secret-value'));
+    assert.equal(result.message, '게시 산출물의 식별자·무결성·계약을 확인하지 못했습니다. GitHub Actions 기록을 확인하세요.');
   }
 });
 

@@ -17,7 +17,7 @@ function diskState(directory) {
 const files = [{ path: 'app.js', content: Buffer.from('hello') }];
 const input = { app: 'demo-app', target_id: 'demo', source_type: 'folder', files };
 const publication = { run_id: 123, target_id: 'demo', app: 'demo-app', source_commit: 'a'.repeat(40), artifact_id: 456, producer_attempt: 1 };
-const deployed = { cd: { state: 'succeeded', deployed: true, revision: 'b'.repeat(40) }, public_http: { state: 'succeeded', verified_at: '2026-10-02T12:00:00Z', url: 'https://demo.example.test' } };
+const deployed = { cd: { state: 'deployed', deployed: true, revision: 'b'.repeat(40) }, public_http: { state: 'succeeded', verified_at: '2026-10-02T12:00:00Z', url: 'https://demo.example.test' } };
 async function fixture(t, overrides = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-product-'));
   let dispatches = 0, reads = 0, cdCalls = 0;
@@ -568,12 +568,13 @@ test('original UI environment selection is resolved server-side and never falls 
     service: { targetId: 'demo', deploy: async (value) => { submitted.push(value); return { run_id: '123', source_commit: publication.source_commit }; },
       status: async () => ({ run_id: 123, state: 'published', publication }) } });
   const options = await (await fetch(`${base}/api/v1/options`)).json();
-  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['openstack', false], ['proxmox', false]]);
+  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['gcp', false], ['openstack', false], ['proxmox', false]]);
   const selection = () => { const value = form(); value.delete('app'); value.delete('target_id'); value.set('environment', 'cloud'); value.set('provider', 'aws'); value.set('source_name', 'different-source'); return value; };
   for (const [mutate, status] of [
     [(value) => { value.set('environment', 'onprem'); value.set('provider', 'openstack'); }, 409],
     [(value) => { value.set('environment', 'onprem'); value.set('provider', 'proxmox'); }, 409],
-    [(value) => value.set('provider', 'gcp'), 422],
+    [(value) => value.set('provider', 'gcp'), 409],
+    [(value) => { value.set('environment', 'onprem'); value.set('provider', 'gcp'); }, 422],
     [(value) => value.set('target_id', 'foreign'), 422],
     [(value) => value.set('app', 'foreign-app'), 422],
     [(value) => value.set('plan_id', 'foreign-plan'), 422],
@@ -595,6 +596,76 @@ test('original UI environment selection is resolved server-side and never falls 
   assert.ok(unregistered.product.deploymentOptions().every((option) => !option.available), 'unknown provider never becomes AWS');
   const onprem = await fixture(t, { target: { provider: 'openstack' } });
   assert.deepEqual(onprem.product.deploymentOptions().filter((option) => option.available).map((option) => option.provider), ['openstack']);
+});
+
+test('HTTP provider selection binds AWS, GCP and OpenStack to separate CI, app and CD targets', async (t) => {
+  const previous = process.env.RAILSHOT_PROVIDER_TARGETS;
+  process.env.RAILSHOT_PROVIDER_TARGETS = JSON.stringify({ gcp: 'stack-gcp', openstack: 'stack-openstack' });
+  t.after(() => { if (previous === undefined) delete process.env.RAILSHOT_PROVIDER_TARGETS; else process.env.RAILSHOT_PROVIDER_TARGETS = previous; });
+  const submissions = [], deliveries = [], runs = new Map();
+  const deployPublished = async ({ app, targetId }) => {
+    deliveries.push({ app, targetId });
+    return { ...deployed, public_http: { ...deployed.public_http, url: `https://${targetId}.example.test` } };
+  };
+  deployPublished.targets = { demo: { applicationName: 'demo-app' }, 'stack-gcp': { applicationName: 'gcp-app' }, 'stack-openstack': { applicationName: 'openstack-app' } };
+  const { base } = await httpFixture(t, { target: { provider: 'aws' }, deployPublished,
+    service: { targetId: 'demo', targetIds: ['demo', 'stack-gcp', 'stack-openstack'],
+      deploy: async (value) => {
+        submissions.push({ app: value.app, targetId: value.target_id });
+        const runId = String(123 + runs.size);
+        runs.set(runId, { ...publication, run_id: runId, app: value.app, target_id: value.target_id });
+        return { run_id: runId, source_commit: publication.source_commit };
+      },
+      status: async (runId, targetId) => {
+        assert.equal(runs.get(runId).target_id, targetId);
+        return { state: 'published', publication: runs.get(runId) };
+      } } });
+  const options = await (await fetch(`${base}/api/v1/options`)).json();
+  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['gcp', true], ['openstack', true], ['proxmox', false]]);
+  const targets = await (await fetch(`${base}/api/v1/targets`)).json();
+  assert.deepEqual(targets.items.map(({ id, provider }) => [id, provider]), [['demo', 'aws'], ['stack-gcp', 'gcp'], ['stack-openstack', 'openstack']]);
+  for (const [provider, environment, id, app] of [['aws', 'cloud', 'demo', 'demo-app'], ['gcp', 'cloud', 'stack-gcp', 'gcp-app'], ['openstack', 'onprem', 'stack-openstack', 'openstack-app']]) {
+    const post = () => {
+      const body = form(); body.delete('app'); body.delete('target_id');
+      body.set('provider', provider); body.set('environment', environment); body.set('source_name', 'different-source');
+      return fetch(`${base}/api/v1/deployments`, { method: 'POST', body, headers: { 'Idempotency-Key': `multi-${provider}` } });
+    };
+    const accepted = await post(); assert.equal(accepted.status, 202, await accepted.text());
+    const completed = await settle(async () => (await fetch(`${base}${accepted.headers.get('location')}`)).json());
+    assert.equal(completed.status, 'succeeded'); assert.equal(completed.target_id, id); assert.equal(completed.app, app);
+    assert.equal(completed.url, `https://${id}.example.test`);
+    const replay = await post(); assert.equal(replay.status, 200); assert.equal((await replay.json()).id, completed.id);
+  }
+  assert.deepEqual(submissions, [{ app: 'demo-app', targetId: 'demo' }, { app: 'gcp-app', targetId: 'stack-gcp' }, { app: 'openstack-app', targetId: 'stack-openstack' }]);
+  assert.deepEqual(deliveries, submissions);
+});
+
+test('provider metadata never admits an additional target without both CI permission and a CD registration', async (t) => {
+  for (const [name, permitted, registered] of [['missing-ci', false, true], ['missing-cd', true, false], ['legacy-adapter', true, null]]) {
+    await t.test(name, async (t) => {
+      const deployPublished = async () => assert.fail('Unavailable selection must not invoke CD');
+      if (registered !== null) deployPublished.targets = { demo: { applicationName: 'demo-app' },
+        ...(registered ? { 'stack-openstack': { applicationName: 'openstack-app' } } : {}) };
+      const f = await fixture(t, { target: { provider: 'aws' }, providerTargets: { openstack: 'stack-openstack' }, deployPublished,
+        service: { targetIds: permitted ? ['demo', 'stack-openstack'] : ['demo'] } });
+      assert.equal(f.product.deploymentOptions().find(({ provider }) => provider === 'aws').available, true);
+      assert.equal(f.product.deploymentOptions().find(({ provider }) => provider === 'openstack').available, false);
+      await assert.rejects(f.product.createDeployment({ source_type: 'folder', files,
+        deployment_selection: { environment: 'onprem', provider: 'openstack' } }, 'unavailable'), { code: 'CAPABILITY_UNAVAILABLE' });
+      assert.equal(f.dispatches(), 0);
+    });
+  }
+  const deployPublished = async () => deployed;
+  deployPublished.targets = { demo: { applicationName: 'demo-app' } };
+  const f = await fixture(t, { target: { provider: 'aws' }, deployPublished, service: { targetIds: [] } });
+  assert.ok(f.product.deploymentOptions().every(({ available }) => !available), 'the legacy default also requires CI admission');
+});
+
+test('provider target configuration rejects ambiguous identities and cannot replace the existing default', async () => {
+  for (const providerTargets of [null, [], 'openstack', { openstack: '../foreign' }, { unknown: 'stack-openstack' },
+    { aws: 'replacement' }, { openstack: 'demo' }, { openstack: 'stack-openstack', proxmox: 'stack-openstack' }]) {
+    await assert.rejects(createProductService({ service: { targetId: 'demo' }, target: { provider: 'aws' }, providerTargets }), { code: 'INVALID_INPUT' });
+  }
 });
 
 test('HTTP deployment accepts a dynamic app-bound plan alongside existing environment options and replays once', async (t) => {
@@ -631,4 +702,87 @@ test('HTTP deployment accepts a dynamic app-bound plan alongside existing enviro
   assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
   const replay = await post(); assert.equal(replay.status, 200); assert.equal((await replay.json()).id, complete.id);
   assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+});
+
+test('CI diagnostics preserve blocked and unknown outcomes without replaying execution', async (t) => {
+  for (const outcome of ['BLOCKED', 'UNKNOWN']) {
+    const diagnostics = { state: 'ready', reason: 'NO_TESTS', code: outcome === 'UNKNOWN' ? 'SDK_OUTCOME_UNKNOWN' : 'GATE_CONFIG_INVALID',
+      outcome, phase: 'Q.discovery', message: '테스트를 찾지 못했습니다.', guidance: '수정 결과를 확인하세요.' };
+    const steps = [{ key: 'loop', status: 'completed', conclusion: 'failure', tasks: [{ number: 2, name: 'Baseline gates, then SDK repair only when eligible', conclusion: 'failure' }] }];
+    const f = await fixture(t, { service: { status: async () => ({ run_id: 123, state: 'failed', diagnostics, steps, message: 'CI 실패' }) } });
+    const accepted = await f.product.createDeployment(input, 'diagnostic');
+    const record = await settle(() => f.product.getDeployment(accepted.id));
+    assert.equal(record.status, outcome === 'UNKNOWN' ? 'unknown' : 'blocked');
+    assert.equal(record.error.outcome_unknown, outcome === 'UNKNOWN');
+    assert.equal(record.error.message, '테스트를 찾지 못했습니다. 수정 결과를 확인하세요.');
+    assert.deepEqual(record.ci.diagnostics, diagnostics); assert.deepEqual(record.ci.steps, steps);
+    assert.equal(f.dispatches(), 1); assert.equal(f.cdCalls(), 0);
+    await f.product.getDeployment(accepted.id);
+    assert.equal(f.dispatches(), 1);
+    if (outcome === 'UNKNOWN') await assert.rejects(f.product.createDeployment(input, 'another'), { code: 'EXECUTOR_BUSY' });
+  }
+});
+
+test('app logs enforce session ownership, deployed state and latest shared-app ownership', async (t) => {
+  let logReads = 0, run = 122;
+  const f = await fixture(t, { observeLogs: async (record) => { logReads++; return { deployment_id: record.id, target_id: record.target_id,
+    app: record.app, state: 'ready', checked_at: new Date().toISOString(), entries: [{ pod: 'demo-pod', container: 'app', text: 'GET /health 200' }] }; },
+    service: { deploy: async () => ({ run_id: ++run, source_commit: publication.source_commit }),
+      status: async (id) => ({ run_id: id, state: 'published', publication: { ...publication, run_id: id } }) } });
+  const owner = f.product.dashboard.session().id, stranger = f.product.dashboard.session().id;
+  const first = await f.product.createDeployment(input, 'first', undefined, owner);
+  assert.equal((await f.product.getDeploymentLogs(first.id, owner)).state, 'not_deployed');
+  await settle(() => f.product.getDeployment(first.id, owner));
+  assert.equal((await f.product.getDeploymentLogs(first.id, owner)).state, 'ready');
+  await assert.rejects(f.product.getDeploymentLogs(first.id, stranger), { status: 404 });
+  assert.equal(logReads, 1);
+  const second = await f.product.createDeployment(input, 'second', undefined, stranger);
+  await settle(() => f.product.getDeployment(second.id, stranger));
+  assert.equal((await f.product.getDeploymentLogs(first.id, owner)).state, 'superseded');
+  assert.equal(logReads, 1, 'superseded session never reads the new deployment logs');
+  assert.equal((await f.product.getDeploymentLogs(second.id, stranger)).state, 'ready');
+});
+
+test('deployment logs route rejects mutation and caller-provided query controls', async (t) => {
+  const { base } = await httpFixture(t);
+  const accepted = await fetch(`${base}/api/v1/deployments`, { method: 'POST', body: form(), headers: { 'Idempotency-Key': 'log-route' } });
+  const path = accepted.headers.get('location');
+  await settle(async () => (await fetch(base + path)).json());
+  const response = await fetch(base + path + '/logs');
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).state, 'not_configured');
+  assert.equal((await fetch(base + path + '/logs?pod=foreign')).status, 422);
+  assert.equal((await fetch(base + path + '/logs', { method: 'POST' })).status, 405);
+  assert.equal((await fetch(base + '/api/v1/deployments/foreign/logs')).status, 404);
+});
+
+test('app logs discard an in-flight read when another session admits CD for the same app', async (t) => {
+  let releaseLogs, releaseCd, beganLogs, beganCd, calls = 0, run = 122;
+  const waitingLogs = new Promise((resolve) => { releaseLogs = resolve; });
+  const waitingCd = new Promise((resolve) => { releaseCd = resolve; });
+  const enteredLogs = new Promise((resolve) => { beganLogs = resolve; });
+  const enteredCd = new Promise((resolve) => { beganCd = resolve; });
+  const f = await fixture(t, { observeLogs: async (record) => {
+    beganLogs(); await waitingLogs;
+    return { deployment_id: record.id, state: 'ready', entries: [{ pod: 'shared-pod', container: 'app', text: 'new session output' }] };
+  }, deployPublished: async () => {
+    if (++calls === 2) { beganCd(); await waitingCd; }
+    return deployed; // Reusing the same image/revision must still revoke the old session's log read.
+  }, service: { deploy: async () => ({ run_id: ++run, source_commit: publication.source_commit }),
+    status: async (id) => ({ run_id: id, state: 'published', publication: { ...publication, run_id: id } }) } });
+  const owner = f.product.dashboard.session().id, other = f.product.dashboard.session().id;
+  try {
+    const first = await f.product.createDeployment(input, 'first-race', undefined, owner);
+    await settle(() => f.product.getDeployment(first.id, owner));
+    const logs = f.product.getDeploymentLogs(first.id, owner);
+    await enteredLogs;
+    const second = await f.product.createDeployment(input, 'second-race', undefined, other);
+    await enteredCd;
+    releaseLogs();
+    const result = await logs;
+    assert.equal(result.state, 'superseded'); assert.deepEqual(result.entries, []);
+    assert.equal((await f.product.getDeploymentLogs(first.id, owner)).state, 'superseded');
+    releaseCd();
+    await settle(() => f.product.getDeployment(second.id, other));
+  } finally { releaseLogs(); releaseCd(); }
 });

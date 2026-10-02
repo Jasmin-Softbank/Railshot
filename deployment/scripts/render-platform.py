@@ -16,11 +16,22 @@ def image_ref(images, name):
     return value
 
 
-def render(images, target_id, dashboard_node_port=None):
+def render(images, target_id, dashboard_node_port=None, provider_targets=None):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", target_id):
         raise ValueError("operator-approved target_id is required")
     if dashboard_node_port is not None and not 30000 <= dashboard_node_port <= 32767:
         raise ValueError("dashboard NodePort must be in 30000..32767")
+    if provider_targets is None:
+        provider_targets = {}
+    if not isinstance(provider_targets, dict) or set(provider_targets) - {'aws', 'gcp', 'openstack', 'proxmox'}:
+        raise ValueError("provider targets must map supported providers to registered target IDs")
+    selections = {'aws': target_id}
+    for provider, selected in provider_targets.items():
+        if not isinstance(selected, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', selected):
+            raise ValueError("provider target ID is invalid")
+        if provider == 'aws' and selected != target_id or any(other != provider and value == selected for other, value in selections.items()):
+            raise ValueError("provider targets must preserve the default and use distinct target IDs")
+        selections[provider] = selected
     for name in ("dashboard", "api"):
         image_ref(images, name)
     source = Path(__file__).resolve().parents[1] / "manifests/platform.yaml"
@@ -39,6 +50,11 @@ def render(images, target_id, dashboard_node_port=None):
         for item in container.get("env", []):
             if item["name"] == "RAILSHOT_TARGET_ID":
                 item["value"] = target_id
+        if container['name'] == 'api' and provider_targets:
+            container['env'].extend([
+                {'name': 'RAILSHOT_PROVIDER_TARGETS', 'value': json.dumps(provider_targets, sort_keys=True, separators=(',', ':'))},
+                {'name': 'RAILSHOT_TARGET_IDS', 'value': ','.join([target_id, *sorted(set(selections.values()) - {target_id})])},
+            ])
     return {"apiVersion": "v1", "kind": "List", "items": documents}
 
 
@@ -95,18 +111,22 @@ if __name__ == "__main__":
     parser.add_argument("--runner-url")
     parser.add_argument("--build-node", help="exact approved build worker hostname label")
     parser.add_argument("--dashboard-node-port", type=int, help="optional allocated ALB backend port; API stays private")
+    parser.add_argument("--provider-targets", default="{}", help="optional JSON provider-to-target map; enable only after CI and CD registration")
     args = parser.parse_args()
     try:
         images = json.loads(args.images.read_text())
+        provider_targets = json.loads(args.provider_targets)
+        if not isinstance(provider_targets, dict):
+            raise ValueError("provider targets must be a JSON object")
         if args.build_runner_name or args.build_controller:
-            if args.dashboard_node_port:
-                raise ValueError("build runner cannot expose a dashboard port")
+            if args.dashboard_node_port or provider_targets:
+                raise ValueError("build runner cannot configure dashboard ports or provider targets")
             output = (render_build_controller(images, args.runner_url, args.build_node) if args.build_controller
                       else render_build_runner(images, args.build_runner_name, args.runner_url, args.build_node))
         else:
             if args.runner_url or args.build_node:
                 raise ValueError("runner options require --build-runner-name or --build-controller")
-            output = render(images, args.target_id, args.dashboard_node_port)
+            output = render(images, args.target_id, args.dashboard_node_port, provider_targets)
         print(json.dumps(output, indent=2))
     except (ValueError, TypeError, KeyError) as error:
         parser.exit(2, f"BLOCKED: {error}\n")

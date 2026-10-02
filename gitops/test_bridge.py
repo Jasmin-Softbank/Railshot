@@ -82,6 +82,46 @@ class BridgeTest(unittest.TestCase):
         # The fixture's origin is a temporary local bare repository; no network writes.
         return self.native(args, **kwargs)
 
+    def test_cloud_publications_keep_cluster_path_namespace_and_pull_secret_isolated(self):
+        config = copy.deepcopy(self.config)
+        template = config['targets'].pop('k3s-aws')
+        requests = {}
+        for index, provider in enumerate(('aws', 'gcp', 'openstack'), 1):
+            target_id = 'k3s-' + provider
+            registered = copy.deepcopy(template)
+            registered['target'].update(id=target_id, namespace='app-' + provider, project='railshot-' + provider,
+                cluster_server=f'https://10.{index}.0.2:6443', path=f'gitops/applications/demo/{target_id}', revision='e' * 40,
+                image_pull_secret={'namespace': 'app-' + provider, 'name': 'pull-' + provider})
+            config['targets'][target_id] = registered
+            request = copy.deepcopy(self.request)
+            request['target_id'] = target_id
+            receipt = json.loads(base64.b64decode(request['files']['handoff.json']))
+            receipt['target_id'] = target_id
+            receipt['registry'].update(visibility='private', verification='authenticated_manifest_read',
+                image_pull_secret=registered['target']['image_pull_secret'])
+            request['publication'].update(receipt)
+            request['files']['handoff.json'] = base64.b64encode(json.dumps(receipt).encode()).decode()
+            requests[target_id] = request
+        with patch('argo.native') as native:
+            for target_id, request in requests.items():
+                registered, files, _ = bridge.validate_request(config, request)
+                published = self.root / target_id; published.mkdir()
+                for name, content in files.items(): (published / name).write_bytes(content)
+                rendered = bridge.handoff.render(published, registered['target'])
+                application, workload = rendered['application']['spec'], rendered['workload']['items'][0]
+                self.assertEqual(application['destination'], {'server': registered['target']['cluster_server'], 'namespace': registered['target']['namespace']})
+                self.assertEqual(application['source']['path'], registered['target']['path'])
+                self.assertEqual(application['project'], registered['target']['project'])
+                self.assertEqual(workload['spec']['template']['spec']['imagePullSecrets'], [{'name': registered['target']['image_pull_secret']['name']}])
+                for other in requests:
+                    if other == target_id: continue
+                    forged = {**request, 'target_id': other}
+                    with self.assertRaisesRegex(ValueError, 'publication target mismatch'):
+                        bridge.validate_request(config, forged)
+                    with self.assertRaisesRegex(ValueError, 'artifact target mismatch'):
+                        bridge.handoff.render(published, config['targets'][other]['target'])
+            native.assert_not_called()
+
     def kubectl(self, context, namespace, *args, document=None):
         self.calls.append(['kubectl', *args])
         if args[0:2] == ('get', 'appproject'):

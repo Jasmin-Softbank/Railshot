@@ -145,6 +145,11 @@
                     "maxLength": 256,
                     "pattern": "^(?:ssm:[a-z]{2}(?:-[a-z]+)+-\\d:i-[a-f0-9]{8,17}|iap:[a-z][a-z0-9-]{4,61}[a-z0-9]/[a-z]+-[a-z]+[1-9][0-9]*-[a-z]/[a-z][a-z0-9-]{0,61}[a-z0-9])$",
                     "description": "Optional operator-selected native SSH tunnel; validated against provider, placement and resource_id. No ProxyCommand."
+                  },
+                  "connect_host": {
+                    "type": "string",
+                    "format": "ipv4",
+                    "description": "Optional operator-registered RFC1918 SSH relay for OpenStack only; excludes transport_ref and retains the actual private_ipv4 as HostKeyAlias."
                   }
                 }
               }
@@ -213,6 +218,11 @@
                     "maxLength": 256,
                     "pattern": "^(?:ssm:[a-z]{2}(?:-[a-z]+)+-\\d:i-[a-f0-9]{8,17}|iap:[a-z][a-z0-9-]{4,61}[a-z0-9]/[a-z]+-[a-z]+[1-9][0-9]*-[a-z]/[a-z][a-z0-9-]{0,61}[a-z0-9])$",
                     "description": "Optional operator-selected native SSH tunnel; validated against provider, placement and resource_id. No ProxyCommand."
+                  },
+                  "connect_host": {
+                    "type": "string",
+                    "format": "ipv4",
+                    "description": "Optional operator-registered RFC1918 SSH relay for OpenStack only; excludes transport_ref and retains the actual private_ipv4 as HostKeyAlias."
                   }
                 }
               }

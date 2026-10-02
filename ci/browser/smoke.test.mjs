@@ -196,15 +196,57 @@ test('anonymous browser sessions persist settings and write-only OpenStack conne
   assert.deepEqual(errors, []);
 });
 
+test('each provider selection keeps the assigned CI and CD target through reload', { timeout: 90000 }, async (t) => {
+  for (const provider of ['aws', 'gcp', 'openstack']) await t.test(provider, async (t) => {
+    const targetId = `assigned-${provider}`, app = `${provider}-app`, commit = 'a'.repeat(40);
+    const submissions = [], deliveries = [];
+    const publication = { run_id: 1, target_id: targetId, app, tenant: 'demo', source_commit: commit, artifact_id: 2, producer_attempt: 1 };
+    const service = { targetId,
+      deploy: async (input) => { submissions.push(input); return { run_id: 1, source_commit: commit }; },
+      status: async () => ({ state: 'published', status: 'completed', conclusion: 'success', source_commit: commit, publication }),
+    };
+    const deployPublished = Object.assign(async (input) => {
+      deliveries.push(input);
+      return { cd: { state: 'deployed', deployed: true, revision: 'b'.repeat(40) },
+        public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: `https://${provider}.example.test/health` } };
+    }, { targets: { [targetId]: { applicationName: app, tenant: 'demo' } } });
+    const { page, origin, errors } = await start(t, { service, target: { provider }, deployPublished,
+      sourceLoader: async () => ({ files: [{ path: 'index.js', content: Buffer.from('provider fixture') }] }),
+    });
+    await page.goto(origin);
+    await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+    const saved = page.waitForResponse((res) => res.url().endsWith('/api/v1/preferences') && res.request().method() === 'PUT');
+    if (provider === 'openstack') {
+      await page.getByRole('radio', { name: /온프레미스/ }).check();
+      await page.locator('#provider').selectOption(provider);
+    } else await page.locator('#cloud-provider').selectOption(provider);
+    await saved; await page.reload();
+    await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+    assert.equal(await page.locator(provider === 'openstack' ? '#provider' : '#cloud-provider').inputValue(), provider);
+    await page.locator('#repository-url').fill('https://github.com/example/provider-fixture');
+    await page.locator('#deploy-form button[type="submit"]').click();
+    await page.locator('#deploy-button').click();
+    await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+    assert.equal(submissions.length, 1); assert.equal(deliveries.length, 1);
+    assert.equal(submissions[0].target_id, targetId); assert.equal(submissions[0].app, app);
+    assert.equal(deliveries[0].targetId, targetId); assert.equal(deliveries[0].publication.target_id, targetId);
+    assert.equal(await page.locator('#application-link').getAttribute('href'), `https://${provider}.example.test/health`);
+    assert.deepEqual(errors, []);
+  });
+});
+
 test('deployment monitor binds metrics, restores progress, and distinguishes stale, collection and HTTP failure', { timeout: 45000 }, async (t) => {
   let state = 'ready', age = 0, http = 1, broken = false;
   const record = { id: 'monitor-demo', app: 'demo-app', target_id: 'demo-aws', status: 'running', stage: 'cd',
+    actions_url: 'https://github.com/example/apps/actions/runs/123',
     source_commit: 'a'.repeat(40), source_digest: 'b'.repeat(64), ci: { run_id: '123', state: 'published', images: { app: `ghcr.io/example/app@sha256:${'c'.repeat(64)}` }, steps: [{ key: 'release', status: 'completed', conclusion: 'success' }] },
     cd: { state: 'progressing', revision: 'd'.repeat(40), deployed: false }, public_http: { state: 'not_run', verified_at: null, url: null } };
   const { page, origin, errors, requests } = await start(t, { product: {
     dashboard: { session: () => ({ id: 'monitor-test', expires_at: '2099-01-01T00:00:00Z' }), preferences: () => ({ view: 'deploy', environment: 'cloud', provider: '' }), connections: () => [] },
     list: () => [record],
     targets: () => [], profiles: () => [],
+    getDeploymentLogs: () => ({ deployment_id: record.id, app: record.app, target_id: record.target_id, state: 'ready',
+      checked_at: new Date().toISOString(), entries: [{ pod: 'demo-app-123', container: 'app', text: 'GET /health 200\n<img src=x onerror=alert(1)>' }] }),
     getDeployment: () => {
       if (broken) throw new Error('private backend details');
       return { ...record, observation: { deployment_id: record.id, app: record.app, target_id: record.target_id, checked_at: new Date().toISOString(), stale_after_seconds: 90,
@@ -232,6 +274,12 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   record.public_http = { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://app.example.test/health', site_url: 'https://app.example.test/' };
   await page.reload(); await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 }); await monitor();
   assert.equal(await page.locator('#monitor-application-link').getAttribute('href'), 'https://app.example.test/');
+  assert.equal(await page.locator('#monitor-actions-link').getAttribute('href'), 'https://github.com/example/apps/actions/runs/123');
+  await page.locator('[data-console="app"]').click();
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('GET /health 200'));
+  assert.equal(await page.locator('#console-output img').count(), 0, 'app logs are text, never HTML');
+  assert.ok(requests.some((request) => request.path === '/api/v1/deployments/monitor-demo/logs'));
+  await page.locator('[data-console="work"]').click();
   if (output) await page.screenshot({ path: join(output, 'monitor-success.png'), fullPage: true });
   age = 100000; await refresh(); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '오래된 값');
   age = 0; state = 'collection_failed'; await refresh(); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '수집 실패');
@@ -245,10 +293,28 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   assert.match(await page.locator('#observation-status').textContent(), /조회 중지/);
   await monitor();
   if (output) await page.screenshot({ path: join(output, 'monitor-unavailable.png'), fullPage: true });
-  broken = false; record.status = 'failed'; record.stage = 'cd'; record.error = { message: '앱 적용 실패' }; record.public_http.state = 'not_run';
+  broken = false; record.status = 'failed'; record.stage = 'ci'; record.error = { message: '테스트를 찾지 못했습니다. 실행 가능한 테스트를 추가하세요.' }; record.public_http.state = 'not_run';
+  record.ci.diagnostics = { state: 'ready', reason: 'NO_TESTS', phase: 'Q.discovery', agent_attempts: 1, changed_file_count: 3 };
   await page.reload(); await page.waitForFunction(() => document.querySelector('#run-state').textContent === '실행 실패'); await monitor();
   assert.equal(await page.locator('#monitor-application-link').isVisible(), false);
+  assert.match(await page.locator('#monitor-message').innerText(), /테스트를 찾지 못했습니다/);
+  assert.match(await page.locator('#console-output').innerText(), /NO_TESTS/);
+  assert.equal(await page.locator('#monitor-actions-link').isVisible(), true);
   if (output) await page.screenshot({ path: join(output, 'monitor-failed.png'), fullPage: true });
   assert.equal(requests.some((request) => request.method === 'POST' && request.path !== '/api/v1/sessions'), false, 'resume and observation never redeploy');
+  assert.deepEqual(errors, []);
+});
+
+test('saved connection failure stays local to its panel and does not disable deployment choices', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors } = await start(t, { service: null });
+  await page.route('**/api/v1/connections*', (route) => route.fulfill({ status: 503, contentType: 'application/json',
+    body: JSON.stringify({ error: { message: '연결 목록을 일시적으로 조회할 수 없습니다.' } }) }));
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#connection-message').textContent.includes('일시적으로'));
+  assert.match(await page.locator('#session-note').textContent(), /까지 유지/);
+  assert.doesNotMatch(await page.locator('#connection-status').textContent(), /일시적으로/);
+  const saved = page.waitForResponse((response) => response.url().endsWith('/api/v1/preferences') && response.request().method() === 'PUT');
+  await page.getByRole('radio', { name: /온프레미스/ }).check();
+  assert.equal((await saved).status(), 200);
   assert.deepEqual(errors, []);
 });

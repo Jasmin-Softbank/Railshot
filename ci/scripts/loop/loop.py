@@ -27,7 +27,7 @@ from bundle import SOURCE_SPECS
 
 PLATFORM = Path(__file__).resolve().parents[1]
 PY = [sys.executable]
-FIXABLE = {"F1", "F2", "F4", "F5", "F6", "F9"}
+FIXABLE = {"F1", "F2", "F3", "F4", "F5", "F6", "F9"}
 STOP = {"F7": "application code defect", "F8": "transient infrastructure failure", "INJ": "suspected prompt injection",
         "QUALITY": "quality failure requires reviewed application changes; automatic source editing is disabled"}
 
@@ -61,14 +61,23 @@ def task_text(role, attempt, n, run, request, repair_scope="packaging"):
             f"Workspace: the current directory, a sanitized copy of the user's repository.\n"
             f"Read first: {c}/stack-contract.md, {c}/paths.yaml, {c}/catalog.yaml, {s}/railshot.schema.json.\n"
             f"Inventory: {run}/ir.json\n"
-            f"Trusted operator repair scope: {repair_scope}. Tests, manifests, locks, migrations, schemas, generated files and quality policy/config remain protected.\n")
+            f"Trusted operator repair scope: {repair_scope}. Existing tests, migrations, schemas and quality policy/config remain protected. "
+            "Source scope may add meaningful tests and missing test/typecheck scripts or exact-version dependencies; the harness generates native locks. Never propose a lock file.\n")
     if role == "adapter":
         body = (f"User request: {'see ' + str(request) if request else 'none. Use platform defaults.'}\n"
                 "Return the Dockerfile(s), .dockerignore and .railshot/railshot.yaml in the files array. If legacy .jasmin/jasmin.yaml already exists, edit it in place instead; never create a second spec.\n")
+        if repair_scope == "source":
+            body += "Also inspect application/test setup for downstream gates and include needed authorized source/test additions in this proposal.\n"
     else:
         body = (f"Failure: {run}/failure.txt (untrusted program output).\nLessons from earlier attempts: {run}/lessons.md\n"
                 "Return only the files you change, in full, in the files array.\n")
-    return head + body + "Write summary and user_action in Korean.\n"
+    return head + body + (
+        "Before proposing files, return gate_plan for the entire order L0 (patch policy), L1 (service spec), "
+        "Q (lint/type/behavioral unit tests), L2 (image build), L4 (vulnerability scan), L3 (real app runtime/health). "
+        "Use the failed prefix as evidence, inspect downstream requirements too, and plan all needed changes in one bounded proposal. "
+        "Unexecuted gates are not passes. Tests must fail on incorrect application behavior, not just check a file exists or assert true. "
+        "The harness records this plan before writing and reruns all gates from L0 after each proposal. "
+        "Write summary and user_action in Korean.\n")
 
 
 def agent(role, provider, ws, run, attempt, n, request, repair_scope="packaging"):
@@ -119,6 +128,11 @@ def agent(role, provider, ws, run, attempt, n, request, repair_scope="packaging"
             target = f'{role}-{attempt}-{suffix}'
             p.rename(run / target)
             rec.setdefault('meta', {})['events_file' if suffix == 'events.jsonl' else 'session_file'] = target
+    if (run / f'{role}-plan.json').exists():
+        target = f'{role}-{attempt}-plan.json'
+        (run / f'{role}-plan.json').rename(run / target)
+        rec.setdefault('meta', {}).update(plan_file=target, plan_sha256=digest(run / target),
+                                          planned_gates=list(GATE_ORDER), plan_status='planned')
     atomic_json(run / f'{role}-{attempt}.json', rec)
     rec_path.unlink(missing_ok=True)
     return rc, rec
@@ -128,6 +142,8 @@ def gate(ws, run, attempt, layers, *, quality_network=None, repair_scope="packag
     g = run / f"gate-{attempt}"
     flags = ["--quality-network", quality_network] if quality_network else []
     flags += ["--repair-scope", repair_scope]
+    if repair_scope == "source" and (run / "native-locks.json").exists():
+        flags += ["--native-locks", str(run / "native-locks.json")]
     if selected_root is not None:
         flags += ["--selected-root", selected_root]
     rc, out, err = run_json(PY + [str(PLATFORM / "gate/gate.py"), str(ws), str(g), "--layers", layers, *flags], phase='gate')
@@ -164,7 +180,8 @@ def decide(verdict, report, seen, repair_scope="packaging"):
     if report and report.get("status") == "give_up":
         return f"give_up: {report.get('give_up', {}).get('class')}"
     f = verdict.get("failure") or {}
-    if f.get("class") == "QUALITY" and repair_scope == "source" and f.get("layer") == "Q" and f.get("source_repair_eligible") is True:
+    if repair_scope == "source" and (f.get("class") == "F7" or
+            f.get("class") == "QUALITY" and f.get("layer") == "Q" and f.get("source_repair_eligible") is True):
         return "stop: same failure twice" if f.get("signature") in seen else None
     if f.get("class") in STOP:
         return f"stop: {STOP[f['class']]}"
@@ -222,9 +239,7 @@ def execute(a, run, state):
         os.environ['RAILSHOT_ATTEMPT_ID'] = f"{state.data['run_id']}:{attempt}"
         rec, report, attempt_scope = {}, None, 'packaging'
         if attempt:
-            attempt_scope = 'source' if (role == 'fixer' and a.repair_scope == 'source'
-                             and current_failure.get('layer') == 'Q'
-                             and current_failure.get('source_repair_eligible') is True) else 'packaging'
+            attempt_scope = a.repair_scope
 
             def agent_step():
                 rc, record = agent(role, a.provider, ws, run, attempt, a.max_attempts, a.request, attempt_scope)
@@ -243,24 +258,59 @@ def execute(a, run, state):
                                      retry_policy='after_reconcile', side_effect='unknown')
                 # The runner keeps its report; checkpoint only the control fields, never raw model text.
                 output = record.get('output') or {}
-                return {**{k: record.get(k) for k in ('meta', 'written', 'rejected', 'instructions_sha256', 'error')},
+                return {**{k: record.get(k) for k in ('meta', 'written', 'rejected', 'instructions_sha256', 'error', 'proposal_rejection')},
                         'role': role, 'repair_scope': attempt_scope,
                         'exit_code': rc, 'output': {k: output.get(k) for k in ('status', 'give_up')}}
 
             sidecars = (f'{role}-{attempt}-events.jsonl', f'{role}-{attempt}-session.json')
             rec = state.step(f'agent:{attempt}', agent_step,
                              artifacts=lambda result: (f'{role}-{attempt}.json',) + (sidecars if not result['exit_code'] else ()),
-                             optional_artifacts=sidecars)
+                             optional_artifacts=sidecars + (f'{role}-{attempt}-plan.json',))
             if rec['role'] != role or rec['repair_scope'] != attempt_scope:
                 raise StateError('STATE_EVIDENCE_MISMATCH', component='loop', phase='agent.checkpoint', retry_policy='after_reconcile')
             report = rec.get('output')
             if rec.get('exit_code'):
+                rejection, error, meta = rec.get('proposal_rejection') or {}, rec.get('error') or {}, rec.get('meta') or {}
                 ev['attempts'].append({'attempt': attempt, 'attempt_id': os.environ['RAILSHOT_ATTEMPT_ID'],
-                                       'role': role, 'agent_invoked': True, 'agent_meta': rec.get('meta')})
+                                       'role': role, 'agent_invoked': True, 'agent_meta': meta,
+                                       'written': rec.get('written'), 'error': error, 'proposal_rejection': rejection})
+                safe = (error.get('code') in {'SDK_OUTPUT_INVALID', 'SDK_PATCH_REJECTED'} and error.get('outcome') == 'FAIL'
+                        and error.get('side_effect') == 'none' and rec.get('written') == []
+                        and meta.get('sdk_status') == 'completed' and meta.get('status') == 'failed'
+                        and rejection.get('safe_to_replan') is True)
+                rejection_signature = 'PROPOSAL:' + error.get('code', '') + ':' + rejection.get('reason', '')
+                if safe and attempt < a.max_attempts and rejection_signature not in seen:
+                    def replan_step():
+                        guidance = rejection['guidance']
+                        detail = {'attempt': attempt, 'signature': rejection_signature, 'source_changed': False, **rejection}
+                        atomic_json(run / f'rejection-{attempt}.json', detail)
+                        with (run / 'failure.txt').open('a') as stream:
+                            stream.write(f"\nProposal validation failed before any source write: {rejection_signature}\n{guidance}\n")
+                            stream.flush(); os.fsync(stream.fileno())
+                        with (run / 'lessons.md').open('a') as stream:
+                            stream.write(f"- attempt {attempt}: no source files changed; {rejection_signature}. {guidance}\n")
+                            stream.flush(); os.fsync(stream.fileno())
+                        return detail
+                    state.step(f'replan:{attempt}', replan_step, artifacts=(f'rejection-{attempt}.json',))
+                    seen.add(rejection_signature)
+                    role = 'fixer'
+                    continue
                 ev['result'] = 'stop: agent proposal rejected'
                 ev['error'] = rec.get('error')
                 ev['status'] = (rec.get('error') or {}).get('outcome', 'FAIL')
                 return finish(run, ev, state.data['started'], state)
+        if a.repair_scope == 'source':
+            from repair import prepare_locks
+            def preparation_step():
+                try:
+                    receipt = prepare_locks(ws, run, network=a.quality_network, selected_root=a.selected_root)
+                    atomic_json(run / f'native-locks-{attempt}.json', receipt)
+                    return receipt
+                except Exception as exc:
+                    raise StateError('GATE_ENVIRONMENT_UNAVAILABLE', component='loop', phase='dependency-preparation',
+                                     retry_policy='after_configuration', side_effect='possible', cause=exc) from exc
+            receipts = state.step(f'prepare:{attempt}', preparation_step, artifacts=(f'native-locks-{attempt}.json',))
+            atomic_json(run / 'native-locks.json', receipts)
         verdict = state.step(f'gate:{attempt}', lambda: gate(ws, run, attempt, a.layers, **options),
                              artifacts=(f'gate-{attempt}/verdict.json',),
                              optional_artifacts=(f'gate-{attempt}/failure.txt', f'gate-{attempt}/progress.jsonl'))

@@ -252,6 +252,11 @@ def python_plan(root):
         "print('RAILSHOT_PYTHON_ARTIFACTS=' + payload)",
     ])
     report = "import xml.etree.ElementTree as E; r=E.parse('/tmp/unit.xml').getroot(); s=[r] if r.tag=='testsuite' else list(r.iter('testsuite')); n=sum(int(x.get('tests',0)) for x in s); skipped=sum(int(x.get('skipped',0)) for x in s); assert n>0 and skipped==0, 'NO_TESTS or skipped tests'; print('RAILSHOT_TESTS='+str(n))"
+    zero_report = ("import pathlib,xml.etree.ElementTree as E; b=pathlib.Path('/tmp/unit.xml').read_bytes(); "
+                   "assert len(b)<=4194304 and b'<!DOCTYPE' not in b; r=E.fromstring(b); "
+                   "s=list(r.iter('testsuite')); assert r.tag in ('testsuite','testsuites') and s; "
+                   "assert all(x.get('tests')=='0' for x in s) and not list(r.iter('testcase')); "
+                   "assert not any(x.tag in ('failure','error','skipped') or any(int(x.get(k,'0')) for k in ('failures','errors','skipped','disabled')) for x in r.iter()); print('NO_TESTS')")
     commands = [f"pip install --disable-pip-version-check --no-cache-dir --target /tmp/tools uv=={UV}",
                 'export PATH="/tmp/tools/bin:$PATH" PYTHONPATH=/tmp/tools UV_PYTHON_DOWNLOADS=never UV_PYTHON=python',
                 f"mkdir -p {artifact}",
@@ -269,7 +274,9 @@ def python_plan(root):
     commands += [f"uv pip freeze --exclude-editable --python {environment}/bin/python > {artifact}/app-requirements.txt",
                  f"{environment}/bin/python -c " + shlex.quote(prepare),
                  run + "python -c " + shlex.quote(verify),
-                 run + "ruff check .", run + "mypy .", run + "pytest --junitxml=/tmp/unit.xml",
+                 run + "ruff check .", run + "mypy .", run + "pytest --junitxml=/tmp/unit.xml" +
+                 ' || { railshot_pytest_rc=$?; if [ "$railshot_pytest_rc" -eq 5 ] && python -c ' + shlex.quote(zero_report) +
+                 '; then exit 1; fi; exit "$railshot_pytest_rc"; }',
                  "python -c " + shlex.quote(report)]
     return {"stack": "fastapi" if "fastapi" in tools else "python", "image": f"python:{python}-slim-bookworm",
             "commands": commands, "checks": ["lint", "type", "unit"],
@@ -489,17 +496,25 @@ def java_failure_kind(text):
     return next(iter(kinds)) if len(kinds) == 1 else None
 
 
-def quality_failure(text, returncode, project_path=".", *, stack=None):
+def quality_failure(text, returncode, project_path=".", *, stack=None, repair_scope="packaging"):
     """Only observed checker failures can request an already-approved source repair."""
     text = re.sub(r"(?m)^RAILSHOT_PYTHON_[A-Z_]+=.*\n?", "", text)
     stage = next((name for name, code in STAGE_CODES.items() if code == returncode), None)
     if returncode != 0 and stage is None:
         return blocked("QUALITY_EXECUTION_BLOCKED: no trusted stage exit status")
-    if returncode == 0 or stage == "report" or re.search(r"NO_TESTS|no tests (found|ran|collected)|collected 0 items", text, re.I):
+    no_tests = re.search(r"NO_TESTS|no tests (found|ran|collected)|collected 0 items", text, re.I)
+    if repair_scope == "source" and stage == "unit" and no_tests:
+        return {"ok": False, "status": "FAIL", "source_repair_eligible": True, "check": "unit",
+                "failure_signature": "Q:QUALITY:unit:" + diagnostic_fingerprint("NO_TESTS", "unit", project_path),
+                "errors": ["NO_TESTS: add behavioral tests collected by the existing runner; preserve existing tests and scripts"]}
+    if returncode == 0 or stage == "report" or no_tests:
         return blocked("NO_TESTS_OR_REPORT: positive executed test evidence required")
     if stage == "prepare":
         return blocked("QUALITY_PREPARATION_BLOCKED: dependency/toolchain/runtime failure")
-    if re.search(r"ENOTFOUND|ECONNRESET|ETIMEDOUT|TLS handshake|(?:HTTP\S*|status(?: code)?|E)\s*[:=]?\s*429\b|429 Too Many Requests|Could not resolve|Could not transfer artifact|Could not find artifact|not found in.*repositor|Failed to download|Failed to validate Maven distribution SHA|Dependency verification failed|Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND|ModuleNotFoundError|No module named|command not found|: not found|not installed|requires.*Python|UnsupportedClassVersion|secret.*(missing|required)|API[_ -]?KEY.*(missing|required|not set)", text, re.I):
+    source_dependency = (repair_scope == "source" and stage in {"lint", "type", "unit"} and
+                         re.search(r"Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND|ModuleNotFoundError|No module named", text))
+    environment = re.search(r"ENOTFOUND|ECONNRESET|ETIMEDOUT|TLS handshake|(?:HTTP\S*|status(?: code)?|E)\s*[:=]?\s*429\b|429 Too Many Requests|Could not resolve|Could not transfer artifact|Could not find artifact|not found in.*repositor|Failed to download|Failed to validate Maven distribution SHA|Dependency verification failed|command not found|: not found|not installed|requires.*Python|UnsupportedClassVersion|secret.*(missing|required)|API[_ -]?KEY.*(missing|required|not set)", text, re.I)
+    if environment or (not source_dependency and re.search(r"Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND|ModuleNotFoundError|No module named", text)):
         return blocked("QUALITY_DEPENDENCY_OR_ENV_BLOCKED: restore required tool, dependency, network or secret")
     if stack in {"maven", "gradle"} and stage == "unit":
         stage = java_failure_kind(text)
@@ -578,6 +593,26 @@ def test_count(text, stack, report_format=None):
     return int(values[-1]) if values else 0
 
 
+def zero_node_report(text):
+    """Valid native zero collection differs from absent, failed or corrupt evidence."""
+    chunks = re.findall(r"^RAILSHOT_JUNIT_BEGIN\n(.*?)\nRAILSHOT_JUNIT_END$", text, re.S | re.M)
+    if len(chunks) != 1 or "<!DOCTYPE" in chunks[0] or len(chunks[0].encode()) > 4 * 1024 * 1024:
+        return False
+    try:
+        root = ET.fromstring(chunks[0])
+        if root.tag not in {"testsuite", "testsuites"} or any(
+                item.tag in {"failure", "error", "skipped"} or any(int(item.get(key, "0")) != 0 for key in
+                ("failures", "errors", "skipped", "disabled")) for item in root.iter()):
+            return False
+        cases = list(root.iter("testcase"))
+        if cases:
+            return all(re.search(r"\.[cm]?js$", case.get("name", "")) for case in cases)
+        suites = [item for item in root.iter() if item.tag in {"testsuite", "testsuites"} and "tests" in item.attrib]
+        return bool(suites) and all(item.get("tests") == "0" for item in suites)
+    except (ET.ParseError, ValueError):
+        return False
+
+
 def save_python_artifacts(text, run, index, *, required):
     rows = re.findall(r"^RAILSHOT_PYTHON_ARTIFACTS=(.*)$", text, re.M)
     if not rows and not required:
@@ -605,7 +640,7 @@ def save_python_artifacts(text, run, index, *, required):
     return {"directory": str(directory), "sha256": hashes}
 
 
-def run_quality(ws, run, *, network=None, timeout=900, selected_root=None):
+def run_quality(ws, run, *, network=None, timeout=900, selected_root=None, repair_scope="packaging"):
     plans = discover(ws, selected_root=selected_root)
     try:
         run.mkdir(parents=True, exist_ok=True)
@@ -616,6 +651,20 @@ def run_quality(ws, run, *, network=None, timeout=900, selected_root=None):
             retry_policy="after_reconcile", side_effect="possible", cause=exc))
     if any(p.get("blocked") for p in plans):
         first = next(p for p in plans if p.get("blocked"))
+        repairable = {"NO_TESTS", "MISSING_CHECKER", "UNSUPPORTED_TEST_REPORTER"}
+        candidates = all(p.get("blocked") in repairable for p in plans if p.get("blocked"))
+        for plan in plans:
+            if plan.get("blocked") == "UNSUPPORTED_TEST_REPORTER":
+                manifest = ws / plan["path"] / "package.json"
+                script = json.loads(manifest.read_text()).get("scripts", {}).get("test") if manifest.is_file() else None
+                candidates &= script in {None, '', 'echo "Error: no test specified" && exit 1', "echo 'Error: no test specified' && exit 1"}
+        if repair_scope == "source" and candidates:
+            reasons = [p["path"] + ": " + p["blocked"] for p in plans if p.get("blocked")]
+            detail = "; ".join(reasons)
+            return {"ok": False, "status": "FAIL", "source_repair_eligible": True, "check": "discovery",
+                    "failure_signature": "Q:QUALITY:discovery:" + diagnostic_fingerprint(detail, "discovery", "."),
+                    "errors": [detail], "projects": plans,
+                    "error": OperationError("GATE_CHECK_FAILED", component="gate", phase="Q.discovery", outcome="FAIL").as_dict()}
         return blocked("; ".join(p["blocked"] for p in plans if p.get("blocked")), error=first.get("error"), projects=plans)
     if not network or network in {"host", "bridge", "none"} or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", network):
         return blocked("DEPENDENCY_NETWORK_UNCONFIGURED: register a credential-free egress-filtered Docker network", projects=plans)
@@ -656,7 +705,10 @@ def run_quality(ws, run, *, network=None, timeout=900, selected_root=None):
             else:
                 status = "PASS" if proc.returncode == 0 and count > 0 else "FAIL"
                 reason = None if status == "PASS" else "NO_TESTS" if proc.returncode == 0 else "QUALITY_COMMAND_FAILED"
-                failure = quality_failure(text, proc.returncode, plan["path"], stack=plan["stack"]) if status != "PASS" else None
+                failure = quality_failure(text, proc.returncode, plan["path"], stack=plan["stack"], repair_scope=repair_scope) if status != "PASS" else None
+                if (status != "PASS" and proc.returncode == 0 and repair_scope == "source" and
+                        plan.get("report_format") == "junit" and zero_node_report(text)):
+                    failure = quality_failure("NO_TESTS", 204, plan["path"], repair_scope="source")
                 sig = failure.get("failure_signature", "").rsplit(":", 1)[-1] if failure else ""
                 sig = sig or hashlib.sha256((plan["path"] + ":" + (reason or "PASS")).encode()).hexdigest()
                 results.append({"path": plan["path"], "status": failure.get("status", status) if failure else status,

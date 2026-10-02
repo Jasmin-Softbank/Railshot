@@ -325,7 +325,9 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(record['output'], {})
             self.assertEqual(record['error']['code'], 'SDK_OUTPUT_INVALID')
             self.assertEqual(record['error']['outcome'], 'FAIL')
-            self.assertEqual(record['error']['side_effect'], 'completed')
+            self.assertEqual(record['error']['side_effect'], 'none')
+            self.assertEqual(record['meta']['sdk_status'], 'completed')
+            self.assertTrue(record['proposal_rejection']['safe_to_replan'])
             self.assertEqual(record['error']['causes'][0]['type'], 'jsonschema.exceptions.ValidationError')
 
     def test_lifecycle_rejects_unapproved_native_attributes(self):
@@ -370,7 +372,7 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual(run_agent.main(), 1)
             error = json.loads((run/'fixer.json').read_text())['error']
             self.assertEqual((error['code'], error['phase'], error['outcome'], error['side_effect']),
-                             ('SDK_PATCH_REJECTED', 'patch', 'FAIL', 'completed'))
+                             ('SDK_PATCH_REJECTED', 'patch', 'FAIL', 'none'))
             self.assertEqual(error['causes'][0]['type'], 'builtins.ValueError')
             self.assertNotIn('sentinel-private', (run/'fixer-events.jsonl').read_text())
 
@@ -552,7 +554,9 @@ class RunnerTest(unittest.TestCase):
     def test_partial_atomic_patch_is_preserved_in_failure_receipt(self):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
-            return {'status':'proposed', 'summary':'offline', 'files_changed':[], 'assumptions':[], 'confidence':'high',
+            return {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
+                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in ('L0','L1','Q','L2','L4','L3')],
+                    'files_changed':[{'path':name,'why':'fixture repair'} for name in ('Dockerfile','.dockerignore')], 'assumptions':[], 'confidence':'high',
                     'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}, {}
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve(); workspace=base/'workspace'; workspace.mkdir()
@@ -575,6 +579,28 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual((workspace/'Dockerfile').stat().st_mode & 0o777, 0o755)
             self.assertEqual((receipt['error']['phase'], receipt['error']['retry_policy']), ('patch','after_reconcile'))
             self.assertNotIn('private sentinel', json.dumps(receipt))
+            self.assertNotIn('proposal_rejection', receipt)
+
+    def test_validation_only_rejection_has_safe_replan_guidance_without_source_writes(self):
+        def provider(cfg, system, task, schema, workspace, run, deny, emit):
+            emit('session.finished', sdk_status='completed', session_id='offline-fixture')
+            return {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
+                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in ('L0','L1','Q','L2','L4','L3')],
+                    'files_changed':[{'path':'../private-canary.py','why':'invalid fixture'}], 'assumptions':[], 'confidence':'high',
+                    'files':[{'path':'../private-canary.py','content':'wrong'}]}, {}
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory); workspace=base/'work'; workspace.mkdir()
+            run, task=base/'run', base/'task.md'; task.write_text('fixture')
+            argv=['runner','fixer','--workspace',str(workspace),'--run',str(run),'--task',str(task)]
+            with patch.object(run_agent, 'run_codex', side_effect=provider), patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_agent.main(), 1)
+            receipt=json.loads((run/'fixer.json').read_text())
+            self.assertEqual([], receipt['written'])
+            self.assertEqual('none', receipt['error']['side_effect'])
+            self.assertEqual('PATH_SCOPE', receipt['proposal_rejection']['reason'])
+            self.assertTrue(receipt['proposal_rejection']['safe_to_replan'])
+            self.assertNotIn('private-canary', json.dumps(receipt['proposal_rejection']))
+            self.assertFalse((base/'private-canary.py').exists())
 
     def test_private_directory_refuses_foreign_owner_and_auth_route_has_no_secret(self):
         from runtime_boundary import private_directory, effective_auth_route

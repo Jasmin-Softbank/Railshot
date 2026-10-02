@@ -15,6 +15,19 @@ const unavailable = () => new ProductError(409, 'CAPABILITY_UNAVAILABLE', '이 �
 const active = (record) => ['queued', 'running', 'unknown'].includes(record.status);
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const operationError = (code = 'UPSTREAM_FAILURE', unknown = true) => ({ code, request_id: randomUUID(), message: unknown ? '외부 실행 결과를 확인할 수 없습니다. 자동으로 재실행하지 않습니다.' : '실행이 완료되지 않았습니다.', retryable: false, outcome_unknown: unknown });
+function ciObservation(build, previous = {}) {
+  return { ...previous, run_id: build.id, state: build.status, steps: build.steps ?? [],
+    message: build.message || null, diagnostics: build.diagnostics || null, diagnostics_checked_at: new Date().toISOString(),
+    images: build.publication?.images || {}, publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null,
+    producer_attempt: build.publication?.producer_attempt || null };
+}
+function ciFailure(build) {
+  const diagnostic = build.diagnostics?.state === 'ready' ? build.diagnostics : null;
+  const unknown = diagnostic?.outcome === 'UNKNOWN';
+  return { status: unknown ? 'unknown' : diagnostic?.outcome === 'BLOCKED' ? 'blocked' : 'failed',
+    error: { ...operationError(diagnostic?.code || (build.status === 'publication_unverified' ? 'PUBLICATION_UNVERIFIED' : 'CI_FAILED'), unknown),
+      message: [diagnostic?.message || build.message || 'CI 실행이 완료되지 않았습니다.', diagnostic?.guidance].filter(Boolean).join(' ') } };
+}
 export function idempotencyKey(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) throw invalid('유효한 Idempotency-Key가 필요합니다.');
   return value;
@@ -27,23 +40,39 @@ function checkFree(state) {
   if (Object.values(state.operations).some(active)) throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
 }
 
-export async function createProductService({ service, directory, target, deployPublished, environmentAdapter, observeMetrics = createMetricsObserver(), pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+  const targetId = target?.id || service?.targetId;
+  if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
+  const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
+  if (providerTargets !== undefined) {
+    if (!providerTargets || Array.isArray(providerTargets) || typeof providerTargets !== 'object') throw invalid('공급자별 대상 설정이 잘못되었습니다.');
+    for (const [provider, id] of Object.entries(providerTargets)) {
+      if (!['aws', 'gcp', 'openstack', 'proxmox'].includes(provider) || typeof id !== 'string' || !TARGET_ID.test(id)
+          || selections.has(provider) && selections.get(provider) !== id
+          || [...selections].some(([other, value]) => other !== provider && value === id)) throw invalid('공급자별 대상 설정이 잘못되었습니다.');
+      selections.set(provider, id);
+    }
+  }
   const store = await createProductStore(directory);
   const abort = new AbortController();
   function checkCapacity(state, sourceBytes = 0) {
     if (Object.keys(state.operations).length >= maxOperations || store.snapshotBytes() + sourceBytes > maxSourceBytes) throw new ProductError(409, 'CAPACITY_EXCEEDED', 'workspace 보관 한도에 도달했습니다. 운영자가 저장소를 확인해야 합니다.');
   }
   const workers = new Set();
-  const targetId = target?.id || service?.targetId;
-  const sharedTargets = new Set(service?.targetIds || (targetId ? [targetId] : []));
+  const sharedTargets = new Set(service?.targetIds || (service?.targetId ? [service.targetId] : []));
   const scopeKey = (kind, key, sessionId) => `${sessionId ? sessionId + ':' : ''}${kind}:${key}`;
   const owns = (value, sessionId) => value && (!sessionId || value.session_id === sessionId);
-  const cdTarget = deployPublished?.targets?.[targetId];
-  const cdAvailable = Boolean(deployPublished && (!deployPublished.targets || cdTarget));
-  if (targetId && !TARGET_ID.test(targetId)) { await store.close(); throw invalid('등록된 대상 ID가 잘못되었습니다.'); }
+  function providerSelection(provider) {
+    const id = selections.get(provider);
+    const cdTarget = id && deployPublished?.targets && Object.hasOwn(deployPublished.targets, id) ? deployPublished.targets[id] : null;
+    // Older single-target adapters have no registry; they authorize only the existing default.
+    const available = Boolean(service && id && sharedTargets.has(id) && deployPublished
+      && (cdTarget || !deployPublished.targets && id === targetId));
+    return { id, cdTarget, available };
+  }
   function deploymentOptions() {
-    return [['cloud', 'aws', '클라우드 · RailShot AWS'], ['onprem', 'openstack', '온프레미스 · OpenStack'], ['onprem', 'proxmox', '온프레미스 · Proxmox']].map(([environment, provider, label]) => {
-      const available = Boolean(service && cdAvailable && targetId && target?.provider === provider);
+    return [['cloud', 'aws', '클라우드 · AWS'], ['cloud', 'gcp', '클라우드 · Google Cloud'], ['onprem', 'openstack', '온프레미스 · OpenStack'], ['onprem', 'proxmox', '온프레미스 · Proxmox']].map(([environment, provider, label]) => {
+      const { cdTarget, available } = providerSelection(provider);
       return { id: `${environment}-${provider}`, environment, provider, label, available,
         message: available ? `소스 검사부터 앱 배포와 URL 확인까지 진행합니다.${cdTarget?.applicationName ? ` 등록된 앱 ${cdTarget.applicationName}의 소스를 갱신합니다.` : ''}`
           : `${label}에 배포할 인프라가 아직 연결되지 않았습니다. 운영자의 대상 연결이 필요합니다.` };
@@ -56,11 +85,12 @@ export async function createProductService({ service, directory, target, deployP
     const option = deploymentOptions().find((item) => item.environment === environment && item.provider === provider);
     if (!option) throw invalid('배포 환경과 인프라 종류를 확인하세요.');
     if (!option.available) throw new ProductError(409, 'CAPABILITY_UNAVAILABLE', option.message);
+    const { id, cdTarget } = providerSelection(provider);
     const name = input.source_name || input.repository_url?.split('/').at(-1) || 'my-app';
     const normalized = name.normalize('NFKD').toLowerCase().replace(/\.zip$/i, '').replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
     let app = normalized.replace(/^[^a-z]+/, '').slice(0, 30).replace(/-+$/g, '');
     if (!APP_NAME.test(app)) app = `app-${digest(name).slice(0, 10)}`;
-    return { ...input, app: cdTarget?.applicationName || app, target_id: targetId };
+    return { ...input, app: cdTarget?.applicationName || app, target_id: id };
   }
   async function update(id, patch) {
     await store.transaction((state) => { Object.assign(state.operations[id], patch, { updated_at: new Date().toISOString() }); });
@@ -191,7 +221,7 @@ export async function createProductService({ service, directory, target, deployP
     if (observed.publication && (String(observed.publication.run_id) !== runId || observed.publication.target_id !== binding.target_id || observed.publication.app !== binding.app || binding.source_commit && observed.publication.source_commit !== binding.source_commit)) {
       throw new ProductError(502, 'UPSTREAM_FAILURE', '게시 결과와 접수 기록이 일치하지 않습니다.');
     }
-    const { run_id, state: status, status: workflowStatus, conclusion, message, ...rest } = observed;
+    const { run_id, state: status, status: workflowStatus, conclusion, ...rest } = observed;
     return { ...rest, id: runId, app: binding.app, target_id: binding.target_id, source_commit: binding.source_commit,
       status, workflow: { status: workflowStatus, conclusion }, url: null };
   }
@@ -200,7 +230,7 @@ export async function createProductService({ service, directory, target, deployP
       for (;;) {
         if (abort.signal.aborted) return;
         const build = await readBuild(runId);
-        const ci = { run_id: runId, state: build.status, steps: build.steps ?? [], images: build.publication?.images || {}, publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null, producer_attempt: build.publication?.producer_attempt || null };
+        const ci = ciObservation(build);
         await update(record.id, { ci });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
@@ -216,7 +246,7 @@ export async function createProductService({ service, directory, target, deployP
           return;
         }
         if (['failed', 'publication_unverified'].includes(build.status)) {
-          await update(record.id, { status: 'failed', error: operationError('CI_FAILED', false) }); return;
+          await update(record.id, ciFailure(build)); return;
         }
         await pause(pollInterval, undefined, { signal: abort.signal, ref: false });
       }
@@ -248,7 +278,7 @@ export async function createProductService({ service, directory, target, deployP
         const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id, sessionId);
         const available = staticAvailable || Boolean(registered);
         return { id, label: id === targetId ? target?.label || id : id,
-          provider: id === targetId ? target?.provider || null : null, environment: 'registered',
+          provider: [...selections].find(([, selected]) => selected === id)?.[0] || null, environment: 'registered',
           ...(registered?.applicationName ? { application_name: registered.applicationName, deployment_scope: 'registered_application' } : {}),
           capabilities: { ci_submission: Boolean(service), application_deployment: available,
             database_configuration: !staticAvailable && registered?.database_configuration === true },
@@ -283,8 +313,37 @@ export async function createProductService({ service, directory, target, deployP
       return publicRecord(reserved.record);
     },
     async getDeployment(id, sessionId = null) {
-      const record = publicRecord(find('deployments', id, sessionId));
+      let record = publicRecord(find('deployments', id, sessionId));
+      // Older completed records can acquire diagnostics without replaying CI or CD.
+      if (record.stage === 'ci' && ['failed', 'blocked'].includes(record.status) && record.ci?.run_id && record.ci.diagnostics?.state !== 'ready'
+          && (!record.ci.diagnostics_checked_at || Date.now() - Date.parse(record.ci.diagnostics_checked_at) > 30000)) {
+        try {
+          const build = await readBuild(record.ci.run_id, sessionId);
+          if (['failed', 'publication_unverified'].includes(build.status)) {
+            await update(id, { ci: ciObservation(build, record.ci), ...ciFailure(build) });
+            record = publicRecord(find('deployments', id, sessionId));
+          }
+        } catch { /* Keep the recorded failure when read-only diagnostics are unavailable. */ }
+      }
       return { ...record, observation: await observeMetrics(record) };
+    },
+    async getDeploymentLogs(id, sessionId = null) {
+      const record = publicRecord(find('deployments', id, sessionId));
+      const empty = (state) => ({ deployment_id: id, target_id: record.target_id, app: record.app,
+        state, checked_at: new Date().toISOString(), entries: [] });
+      if (!record.cd?.deployed) return empty('not_deployed');
+      // A shared target can be reused even when its image/revision does not change.
+      // Only the most recently admitted CD operation may expose its runtime logs.
+      const current = () => Object.values(store.read().operations).reverse().find((row) => row.kind === 'deployments'
+        && row.target_id === record.target_id && row.app === record.app && row.cd?.state !== 'not_started')?.id === id;
+      if (!current()) return empty('superseded');
+      const observer = record.environment_id ? environmentAdapter?.observeLogs : observeLogs;
+      if (!observer) return empty('not_configured');
+      try {
+        const logs = await (record.environment_id ? observer(record.environment_id, record) : observer(record));
+        return current() ? logs : empty('superseded');
+      }
+      catch { return empty('unavailable'); }
     },
     profiles() { return environmentAdapter?.profiles() || []; },
     async createPlan(input, sessionId = null) {

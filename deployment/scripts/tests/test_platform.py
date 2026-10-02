@@ -142,6 +142,8 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(api['spec']['template']['spec']['initContainers'][0]['image'], images['api'])
         self.assertTrue(any(v.get('persistentVolumeClaim') for v in api['spec']['template']['spec']['volumes']))
         environment = {value['name']: value.get('value') for value in container['env']}
+        self.assertNotIn('RAILSHOT_PROVIDER_TARGETS', environment)
+        self.assertNotIn('RAILSHOT_TARGET_IDS', environment)
         self.assertEqual(environment['TMPDIR'], '/var/lib/railshot/tmp')
         self.assertEqual(environment['TF_PLUGIN_CACHE_DIR'], '/var/lib/railshot/provider-cache')
         profiles = next(value for value in container['env'] if value['name'] == 'RAILSHOT_PROFILES_FILE')
@@ -166,3 +168,22 @@ class PlatformTests(unittest.TestCase):
                 module.render({**images, "api": bad}, "k3s-aws")
         with self.assertRaises(ValueError):
             module.render(images, "../target")
+
+    def test_optional_provider_targets_preserve_aws_and_render_matching_ci_admission(self):
+        images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + 'a' * 64 for name in ('dashboard', 'api')}
+        output = module.render(images, 'k3s-aws', provider_targets={'gcp': 'k3s-gcp', 'openstack': 'k3s-openstack'})
+        containers = {item['metadata']['name']: item['spec']['template']['spec']['containers'][0]
+                      for item in output['items'] if item['kind'] == 'Deployment'}
+        entries = containers['railshot-api']['env']
+        env = {item['name']: item.get('value') for item in entries}
+        self.assertEqual(len(entries), len(env))
+        self.assertEqual(env['RAILSHOT_TARGET_ID'], 'k3s-aws')
+        self.assertEqual(env['RAILSHOT_TARGET_PROVIDER'], 'aws')
+        self.assertEqual(json.loads(env['RAILSHOT_PROVIDER_TARGETS']), {'gcp': 'k3s-gcp', 'openstack': 'k3s-openstack'})
+        self.assertEqual(env['RAILSHOT_TARGET_IDS'], 'k3s-aws,k3s-gcp,k3s-openstack')
+        self.assertFalse(any(item['name'] in {'RAILSHOT_PROVIDER_TARGETS', 'RAILSHOT_TARGET_IDS'}
+                             for item in containers['railshot-dashboard'].get('env', [])))
+        for invalid in ([], 'openstack', {'unknown': 'k3s-unknown'}, {'openstack': '../target'}, {'openstack': 1},
+                        {'aws': 'replacement'}, {'openstack': 'k3s-aws'}, {'openstack': 'shared', 'proxmox': 'shared'}):
+            with self.subTest(provider_targets=invalid), self.assertRaises(ValueError):
+                module.render(images, 'k3s-aws', provider_targets=invalid)
