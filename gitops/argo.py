@@ -124,11 +124,11 @@ def load_review(directory):
     return data
 
 
-def native(args, *, document=None):
+def native(args, *, document=None, timeout=30):
     """Capture native output. Never echo commands, stdin or tool diagnostics."""
     try:
         result = subprocess.run(args, input=None if document is None else json.dumps(document), text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError('native operation did not complete; observe before retrying') from exc
     require(result.returncode == 0, 'native operation failed; no completion is claimed')

@@ -13,7 +13,7 @@ COMPONENTS = ('dashboard', 'api', 'mcp', 'ci-runner')
 SHA = re.compile(r'[0-9a-f]{40}')
 # Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
 API_NATIVE_FILES = {
-    'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml',
+    'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml', 'observability/runtime_health.py',
     'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
     'gitops/edge.py', 'gitops/service_name.py', 'gitops/logs.py',
     'gitops/dns.py', 'gitops/gcp_routes.py',
@@ -31,7 +31,7 @@ API_NATIVE_FILES = {
     'infrastructure/ansible/application-database.yml',
     'deployment/scripts/common.sh', 'deployment/scripts/environment.py', 'deployment/bootstrap/preflight.sh',
     'deployment/scripts/applications.py', 'deployment/scripts/application_release.py', 'deployment/scripts/application_routes.py',
-    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh',
+    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
 }

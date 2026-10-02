@@ -14,6 +14,19 @@ import handoff
 from execution import GATE_ORDER
 
 
+class NativeTimeoutTest(unittest.TestCase):
+    def test_default_and_long_operation_timeout_reach_subprocess(self):
+        for options, expected in [({}, 30), ({'timeout': 300}, 300)]:
+            with self.subTest(timeout=expected), patch('argo.subprocess.run',
+                    return_value=subprocess.CompletedProcess(['fixture'], 0, stdout='ok')) as run:
+                self.assertEqual(argo.native(['fixture'], document={'version': 1}, **options), 'ok')
+                self.assertEqual(run.call_args.kwargs['timeout'], expected)
+                self.assertEqual(json.loads(run.call_args.kwargs['input']), {'version': 1})
+        with patch('argo.subprocess.run', side_effect=subprocess.TimeoutExpired(['fixture'], 300)):
+            with self.assertRaisesRegex(RuntimeError, 'observe before retrying'):
+                argo.native(['fixture'], timeout=300)
+
+
 class ArgoTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)

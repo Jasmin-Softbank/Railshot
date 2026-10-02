@@ -92,7 +92,8 @@
                 <select id="deployment-database"><option value="none">DB 없음</option><option value="patroni">PostgreSQL HA 포함</option></select>
                 <p class="field-note" id="deployment-database-note"></p>
               </div>
-              <p class="field-note" id="connection-status" role="status">인프라 연결을 확인하고 있습니다.</p>
+              <p class="field-note" id="runtime-connection-status" role="status">런타임 연결을 확인하고 있습니다.</p>
+              <p class="field-note" id="connection-status" role="status">앱 배포 설정을 확인하고 있습니다.</p>
             </section>
 
             <div class="form-bottom">
@@ -163,10 +164,10 @@
           <section class="panel environment-panel" aria-labelledby="environment-heading">
             <div class="data-toolbar"><label>클라우드<select id="monitor-provider"><option value="">전체</option><option value="aws">AWS</option><option value="gcp">GCP</option><option value="openstack">OpenStack</option></select></label><label class="environment-filter">환경<select id="monitor-target"><option value="">전체 환경</option></select></label><button id="monitor-refresh" class="secondary-button" type="button">지표 새로고침</button></div>
             <h2 id="environment-heading">등록된 실행 환경</h2>
-            <p class="field-note">공용 환경과 이 세션의 환경만 표시합니다. 노드 수집 상태와 앱 응답은 별도로 관측합니다. 개별 지표의 미수집 여부도 확인하세요.</p>
+            <p class="field-note">공용 환경과 이 세션의 환경만 표시합니다. 런타임 연결은 앱과 독립적인 /healthz로 30초마다 확인합니다. 노드 지표와 앱 응답은 별도로 관측합니다.</p>
             <div id="environment-summary" class="environment-summary" aria-label="환경 상태 요약"></div>
             <p id="environment-message" role="status"></p>
-            <div class="table-scroll" tabindex="0" role="region" aria-label="환경 지표 표"><table class="environment-table"><caption class="sr-only">환경별 실제 관측 지표</caption><thead><tr><th scope="col">환경 / 앱</th><th scope="col">관측 상태</th><th scope="col">CPU</th><th scope="col">메모리</th><th scope="col">디스크</th><th scope="col">HTTP</th><th scope="col">관측 시각</th></tr></thead><tbody id="environment-list"></tbody></table></div>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="환경 지표 표"><table class="environment-table"><caption class="sr-only">환경별 실제 관측 지표</caption><thead><tr><th scope="col">환경 / 앱</th><th scope="col">런타임 연결</th><th scope="col">CPU</th><th scope="col">메모리</th><th scope="col">디스크</th><th scope="col">앱 HTTP</th><th scope="col">연결 확인 시각</th></tr></thead><tbody id="environment-list"></tbody></table></div>
             <div id="environment-detail"></div>
             <p class="field-note metric-scope">CPU·메모리·디스크·네트워크는 대상 노드 전체입니다. HTTP는 관측 서버에서 확인한 앱 응답입니다. 수집된 현재 값만 표시합니다.</p>
           </section>

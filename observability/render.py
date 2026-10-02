@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import secrets
+import ssl
 from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
@@ -204,6 +205,32 @@ def write_json(path, value):
     path.chmod(0o644)
 
 
+def blackbox(bindings=None):
+    http = {'method': 'GET', 'follow_redirects': False, 'preferred_ip_protocol': 'ip4',
+            'ip_protocol_fallback': False}
+    modules = {'http_2xx': {'prober': 'http', 'timeout': '5s', 'http': http}}
+    for target, binding in (bindings or {}).items():
+        if (not re.fullmatch(r'[a-z][a-z0-9-]{1,61}[a-z0-9]', target)
+                or set(binding) != {'healthz_url', 'server_name', 'ca_pem'}):
+            raise ValueError('Runtime health binding must contain only endpoint, server name and public CA')
+        url = urlsplit(binding['healthz_url'])
+        address = ipaddress.IPv4Address(binding['server_name'])
+        if (url.scheme != 'https' or not url.hostname or url.username or url.password
+                or url.path != '/healthz' or url.query or url.fragment
+                or any(c.isspace() for c in binding['healthz_url'])
+                or address.is_unspecified or address.is_loopback or address.is_multicast or address.is_link_local):
+            raise ValueError('Runtime health binding requires a verified HTTPS healthz endpoint and node IPv4')
+        _ = url.port
+        if not re.fullmatch(r'(?:-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----\s*)+', binding['ca_pem']):
+            raise ValueError('Runtime health trust must contain only public PEM certificates')
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=binding['ca_pem'])
+        modules['runtime_healthz_' + target] = {'prober': 'http', 'timeout': '5s', 'http': {
+            **http, 'valid_status_codes': [200], 'tls_config': {
+                'ca_file': '/etc/blackbox/runtime-ca/' + target + '.crt',
+                'server_name': binding['server_name'], 'insecure_skip_verify': False}}}
+    return {'modules': modules}
+
+
 def render_observer(config, output, scrape_config, bind_ip="127.0.0.1"):
     ipaddress.IPv4Address(bind_ip)
     output = Path(output)
@@ -212,9 +239,8 @@ def render_observer(config, output, scrape_config, bind_ip="127.0.0.1"):
     compose = (HERE / 'compose.yaml').read_text().replace('127.0.0.1:9090', bind_ip + ':9090')
     (output / 'compose.yaml').write_text(compose)
     write_json(output / 'prometheus.json', scrape_config)
-    write_json(output / 'blackbox.json', {'modules': {'http_2xx': {'prober': 'http', 'timeout': '5s',
-               'http': {'method': 'GET', 'follow_redirects': False, 'preferred_ip_protocol': 'ip4',
-                        'ip_protocol_fallback': False}}}})
+    write_json(output / 'blackbox.json', blackbox())
+    (output / 'runtime-ca').mkdir(mode=0o755)
     write_json(output / 'dashboards/deployment.json', dashboard(config))
     write_json(output / 'provisioning/datasources/prometheus.yaml', {
         'apiVersion': 1, 'datasources': [{'name': 'Prometheus', 'uid': 'railshot-prometheus',

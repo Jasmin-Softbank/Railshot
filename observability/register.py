@@ -24,6 +24,7 @@ _renderer_spec = importlib.util.spec_from_file_location('railshot_observer_rende
 _renderer = importlib.util.module_from_spec(_renderer_spec)
 _renderer_spec.loader.exec_module(_renderer)
 cluster, prometheus, NAMESPACE, validate = _renderer.cluster, _renderer.prometheus, _renderer.NAMESPACE, _renderer.validate
+blackbox = _renderer.blackbox
 from storage import durable_write
 
 
@@ -83,9 +84,15 @@ def merge_rows(rows, row):
     physical = ('resource_id', 'prometheus_url', 'node_instance', 'cluster_instance', 'node_ip')
     require(all(all(item.get(key) == row.get(key) for key in physical) for item in target))
     existing = [item for item in target if item.get('app') == row.get('app')]
-    require(not existing or existing == [row])
     if existing:
-        return rows
+        require(len(existing) == 1)
+        previous = existing[0]
+        # Add healthz to an existing binding without changing its original identity.
+        require({k: v for k, v in previous.items() if k != 'healthz_url'} ==
+                {k: v for k, v in row.items() if k != 'healthz_url'})
+        require(not (previous.get('healthz_url') and row.get('healthz_url')) or
+                previous['healthz_url'] == row['healthz_url'])
+        return [{**previous, **row} if item is previous else item for item in rows]
     require(len(rows) < 100 and not any(item['target_id'] != row['target_id'] and
                                       item['node_instance'] == row['node_instance'] for item in rows))
     return [*rows, row]
@@ -107,6 +114,17 @@ def scrape_config(rows):
             job['static_configs'] = [{'targets': addresses}]
             jobs.append(job)
     result['scrape_configs'] = jobs
+    health = {row['target_id']: row['healthz_url'] for row in rows if row.get('healthz_url')}
+    if health:
+        jobs.append({'job_name': 'runtime_healthz', 'metrics_path': '/probe',
+            'scrape_interval': '30s', 'scrape_timeout': '10s',
+            'static_configs': [{'targets': [url], 'labels': {'module': 'runtime_healthz_' + target}}
+                               for target, url in sorted(health.items())],
+            'relabel_configs': [
+                {'source_labels': ['module'], 'target_label': '__param_module'},
+                {'source_labels': ['__address__'], 'target_label': '__param_target'},
+                {'source_labels': ['__param_target'], 'target_label': 'instance'},
+                {'target_label': '__address__', 'replacement': 'blackbox:9115'}]})
     return result
 
 
@@ -130,7 +148,7 @@ def observer_ssh(config, request, ansible):
         node = request['inventory']['control_plane'][0]
         node['ssh'].pop('transport_ref', None)
         require(node['ssh'].get('connect_host', node['private_ipv4']) == node['private_ipv4'])
-    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 90) as port:
+    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 360) as port:
         host = next(iter(ansible.build_inventory(request, port)['all']['children']['k3s_server']['hosts'].values()))
         if direct:
             require(port is None and host['ansible_host'] == config['observer_ip'])
@@ -141,8 +159,72 @@ def observer_ssh(config, request, ansible):
         yield prefix
 
 
-def sync_observer(config, request, document, ansible, native):
+SYNC_RUNTIME = '''import json,pathlib,subprocess,sys,time
+p=json.load(sys.stdin); out=pathlib.Path(p['directory'])
+assert out.is_dir() and not out.is_symlink() and (out/'owner').read_text().strip()==p['owner']
+assert (out/'compose.yaml').read_text() in (p['compose'],p['previous_compose'])
+ca=out/'runtime-ca'
+assert not ca.is_symlink()
+ca.mkdir(mode=0o755,exist_ok=True)
+files={'compose.yaml':p['compose'],'prometheus.json':json.dumps(p['prometheus']),
+       'blackbox.json':json.dumps(p['blackbox']),**{'runtime-ca/'+k+'.crt':v for k,v in p['certificates'].items()}}
+before={}
+for name in files:
+    path=out/name
+    assert not path.is_symlink() and (not path.exists() or path.is_file())
+    before[name]=path.read_bytes() if path.exists() else None
+existing=json.loads(before['blackbox.json'])
+assert set(existing)=={'modules'} and isinstance(existing['modules'],dict)
+modules={**p['blackbox']['modules'],**existing['modules']}
+modules.update({name:value for name,value in p['blackbox']['modules'].items() if name.startswith('runtime_healthz_')})
+files['blackbox.json']=json.dumps({'modules':modules})
+def command(*args):
+    subprocess.run(['sudo','docker','compose',*args],cwd=out,check=True,
+                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+def reload_blackbox():
+    command('up','-d','--no-deps','blackbox')
+    for attempt in range(5):
+        try:
+            command('exec','-T','prometheus','wget','-q','-O-','--post-data=',
+                    'http://blackbox:9115/-/reload')
+            return
+        except subprocess.CalledProcessError:
+            if attempt==4: raise
+            time.sleep(0.5)
+try:
+    for name,data in files.items():
+        path=out/name
+        path.write_text(data); path.chmod(0o644)
+    command('exec','-T','prometheus','promtool','check','config','/etc/prometheus/prometheus.json')
+    command('run','--rm','--no-deps','blackbox','--config.file=/etc/blackbox/blackbox.json','--config.check')
+    reload_blackbox()
+    command('kill','-s','SIGHUP','prometheus')
+    assert all((out/name).read_text()==data for name,data in files.items())
+except Exception:
+    for name,data in before.items():
+        path=out/name
+        if data is None: path.unlink(missing_ok=True)
+        else: path.write_bytes(data)
+    reload_blackbox()
+    command('kill','-s','SIGHUP','prometheus')
+    raise
+print(json.dumps({'synced':True}))
+'''
+
+
+def sync_observer(config, request, document, ansible, native, bindings=None):
     with observer_ssh(config, request, ansible) as prefix:
+        if bindings:
+            compose = (ROOT / 'observability/compose.yaml').read_text().replace('127.0.0.1:9090', config['observer_ip'] + ':9090')
+            previous_compose = compose.replace('    volumes:\n      - ./blackbox.json:/etc/blackbox/blackbox.json:ro\n'
+                '      - ./runtime-ca:/etc/blackbox/runtime-ca:ro',
+                '    volumes: ["./blackbox.json:/etc/blackbox/blackbox.json:ro"]')
+            payload = {'directory': config['observer_directory'], 'owner': config['owner'] + ':' + config['lifecycle'],
+                'compose': compose, 'previous_compose': previous_compose, 'prometheus': document,
+                'blackbox': blackbox(bindings), 'certificates': {key: value['ca_pem'] for key, value in bindings.items()}}
+            require(json.loads(native([*prefix, 'python3 -c ' + shlex.quote(SYNC_RUNTIME)],
+                                      document=payload, timeout=300)) == {'synced': True})
+            return
         directory = shlex.quote(config['observer_directory'])
         # Bootstrap owns this exact directory and marker. Registration cannot adopt another stack.
         command = f'cd {directory} && test "$(cat owner)" = {shlex.quote(config["owner"] + ":" + config["lifecycle"])} && cat > prometheus.next.json && '
@@ -201,8 +283,33 @@ def register(config, request, output):
         desired = state / 'desired.json'
         rows = read_private(desired)['targets'] if desired.exists() else read_private(product)['targets'] if product.exists() else []
         rows = merge_rows(rows, row)
+        # Deployment registration includes an app; retain an independent runtime row
+        # so its health survives app deletion and later deployments keep its metadata.
+        node_row = next((dict(item) for item in rows if item['target_id'] == row['target_id'] and not item.get('app')), None)
+        if node_row is None:
+            node_row = {key: value for key, value in row.items() if key not in ('app', 'namespace', 'probe_url')}
+        rows = merge_rows(rows, node_row)
         durable_write(desired, json.dumps({'version': 1, 'targets': rows}).encode())
         save()  # Record an uncertain outcome before the first mutation.
+        bindings_path = state / 'runtime-healthz.json'
+        bindings = read_private(bindings_path)['targets'] if bindings_path.exists() else {}
+        from runtime_health import configure_runtime_healthz
+        binding = configure_runtime_healthz(runtime, descriptor, ansible, native)
+        blackbox({row['target_id']: binding})  # Reject credentials or invalid trust before persistence/transfer.
+        require(binding['server_name'] == request['node_ip'])
+        node_row['healthz_url'] = binding['healthz_url']
+        rows = merge_rows(rows, node_row)
+        bindings[row['target_id']] = binding
+        durable_write(bindings_path, json.dumps({'version': 1, 'targets': bindings}).encode())
+        durable_write(desired, json.dumps({'version': 1, 'targets': rows}).encode())
+        receipt['steps'].append('runtime_healthz_configured'); save()
+        active_bindings = {}
+        for item in rows:
+            if item.get('healthz_url'):
+                binding = bindings.get(item['target_id'])
+                require(binding and binding['healthz_url'] == item['healthz_url'])
+                active_bindings[item['target_id']] = binding
+        blackbox(active_bindings)
         labels = {'app.kubernetes.io/managed-by': 'railshot-observer', 'railshot.io/observer': config['owner']}
         with runtime_kubectl(runtime) as kube:
             cilium = kube('kube-system', 'get', 'pods', '-l', 'k8s-app=cilium', '-o', 'json')['items']
@@ -224,7 +331,7 @@ def register(config, request, output):
                 if document['kind'] == 'CiliumClusterwideNetworkPolicy':
                     wait_network_policy(kube, cilium[0], document)
         receipt['steps'].append('exporters_applied'); save()
-        sync_observer(config, observer, scrape_config(rows), ansible, native)
+        sync_observer(config, observer, scrape_config(rows), ansible, native, bindings=active_bindings)
         receipt['steps'].append('collector_registered'); save()
         durable_write(product, json.dumps({'version': 1, 'targets': rows, 'collector': {
             'id': config['owner'], 'lifecycle': config['lifecycle'], 'expires_at': config['expires_at']}}).encode())
