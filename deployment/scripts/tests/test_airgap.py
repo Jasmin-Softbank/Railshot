@@ -50,6 +50,7 @@ class NetworkModeTests(unittest.TestCase):
         with patch('network_preflight.subprocess.run') as run:
             caps,details=check(parse_input(fixture()).spec,'arm64',True)
         run.assert_not_called();self.assertTrue(details['external_checks_skipped']);self.assertTrue(all(v is None for v in caps.values()))
+        self.assertNotIn('wireguard_udp_51820',caps)
 
     def test_registry_challenge_is_reachable_but_403_is_not(self):
         from network_preflight import probe

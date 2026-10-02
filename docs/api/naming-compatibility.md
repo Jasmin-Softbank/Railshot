@@ -6,7 +6,7 @@ New tested bundles and published artifacts use `railshot.yaml`. Historical `jasm
 
 New API/CLI/MCP configuration uses `RAILSHOT_TENANT`, `RAILSHOT_API_URL`, and `RAILSHOT_SOURCE_ROOT`. Corresponding `JASMIN_*` variables remain fallback aliases; `RAILSHOT_*` takes precedence. The request header is `x-railshot-request: deploy`. The server also reads the old `x-jasmin-request`, and CLI/MCP send both for compatibility with existing servers. Endpoints and payload fields remain unchanged.
 
-Bootstrap enrollment uses `RAILSHOT_ENROLLMENT_TOKEN`, with `JASMIN_ENROLLMENT_TOKEN` as a fallback. Both are removed from the environment before installation operations. New CLI help, OpenStack object descriptions and temporary cloud configuration use Railshot. New etcd units display `Railshot managed etcd`; initialized members retain their exact old description so a cosmetic change does not trigger the existing configuration-drift guard. The guard still compares every other service/config byte and TLS input.
+WireGuard bootstrap enrollment is retired. `RAILSHOT_ENROLLMENT_TOKEN` and `JASMIN_ENROLLMENT_TOKEN` are discarded before installation operations; neither enables registration. New CLI help, OpenStack object descriptions and temporary cloud configuration use Railshot. New etcd units display `Railshot managed etcd`; initialized members retain their exact old description so a cosmetic change does not trigger the existing configuration-drift guard. The guard still compares every other service/config byte and TLS input.
 
 These identities are preserved pending a separate, verified migration:
 

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
 import { createProductStore } from './product-store.js';
-import { APP_NAME, TARGET_ID } from './contract.js';
+import { APP_NAME, TARGET_ID, sourceAppName } from './contract.js';
 import { validateFiles } from './archive.js';
 import { createMetricsObserver } from './metrics.js';
 import { emptyAgentEvents } from './agent-events.js';
@@ -86,12 +86,11 @@ export async function createProductService({ service, directory, target, provide
     const option = deploymentOptions().find((item) => item.environment === environment && item.provider === provider);
     if (!option) throw invalid('배포 환경과 인프라 종류를 확인하세요.');
     if (!option.available) throw new ProductError(409, 'CAPABILITY_UNAVAILABLE', option.message);
-    const { id, cdTarget } = providerSelection(provider);
-    const name = input.source_name || input.repository_url?.split('/').at(-1) || 'my-app';
-    const normalized = name.normalize('NFKD').toLowerCase().replace(/\.zip$/i, '').replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
-    let app = normalized.replace(/^[^a-z]+/, '').slice(0, 30).replace(/-+$/g, '');
-    if (!APP_NAME.test(app)) app = `app-${digest(name).slice(0, 10)}`;
-    return { ...input, app: cdTarget?.applicationName || app, target_id: id };
+    const { id } = providerSelection(provider);
+    const name = input.source_name ?? input.repository_url?.split('/').filter(Boolean).at(-1)?.replace(/\.git$/i, '');
+    let app;
+    try { app = sourceAppName(name); } catch (error) { throw invalid(`소스 이름을 확인하세요. ${error.message}`); }
+    return { ...input, app, target_id: id };
   }
   async function update(id, patch) {
     await store.transaction((state) => { Object.assign(state.operations[id], patch, { updated_at: new Date().toISOString() }); });
@@ -170,7 +169,7 @@ export async function createProductService({ service, directory, target, provide
       checkFree(state);
       checkCapacity(state);
       const applicationName = selectedCdTarget?.applicationName || savedEnvironment?.applicationName;
-      if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid('등록된 배포 앱 이름과 일치하지 않습니다.');
+      if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid(`등록된 배포 앱 이름과 일치하지 않습니다. 이 대상은 ${applicationName} 전용입니다. ${input.app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
       const source = input.files ? input : { ...input, ...await materialize(input.repository_url) };
       const files = validateFiles(source.files);
       const sourceBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.path) + Math.ceil(file.content.length / 3) * 4 + 128, 0);

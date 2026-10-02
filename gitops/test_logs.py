@@ -34,7 +34,7 @@ class LogsTest(unittest.TestCase):
         self.pod.update(kind='Pod', status={'containerStatuses': [{'name': 'web', 'imageID': 'containerd://sha256:' + 'c' * 64}]})
         self.pod['metadata'].update(name='demo-rs-pod', namespace='tenant-demo', uid='pod-uid',
             ownerReferences=[{'kind': 'ReplicaSet', 'uid': 'rs-uid', 'controller': True}])
-        self.calls = []
+        self.calls = []; self.server_name = None
         data = {'name': 'k3s-aws', 'server': 'https://192.0.2.1:6443', 'project': 'railshot',
                 'namespaces': 'tenant-demo', 'clusterResources': 'false',
                 'config': json.dumps({'bearerToken': 'synthetic-sensitive-token', 'tlsClientConfig': {
@@ -49,7 +49,8 @@ class LogsTest(unittest.TestCase):
         self.assertEqual(args[0], 'get')
         return self.secret if args[1] == 'secret' else self.live
 
-    def customer(self, server, ca, token, path):
+    def customer(self, server, ca, token, path, *, server_name=None):
+        self.assertEqual(server_name, self.server_name)
         self.assertEqual((server, ca, token), ('https://192.0.2.1:6443', b'CA', 'synthetic-sensitive-token'))
         self.calls.append(path)
         if '/deployments/' in path:
@@ -87,6 +88,28 @@ class LogsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.execute()
         self.last_read.assert_not_called()
+
+    def test_registered_private_tls_name_reaches_every_metadata_and_log_request(self):
+        auth = json.loads(base64.b64decode(self.secret['data']['config']))
+        auth['tlsClientConfig']['serverName'] = self.server_name = '10.66.0.2'
+        self.secret['data']['config'] = base64.b64encode(json.dumps(auth).encode()).decode()
+        output, read = self.execute()
+        self.assertEqual(output['state'], 'ready')
+        self.assertEqual(read.call_args.kwargs, {'server_name': self.server_name})
+        with patch('logs.ssl.create_default_context') as tls, patch('credentials.RegisteredHTTPSConnection') as factory:
+            response = factory.return_value.getresponse.return_value
+            response.status = 200; response.read.return_value = b'listening\n'
+            self.assertEqual(logs.tail(read.call_args.args[0], read.call_args.args[1], **read.call_args.kwargs), 'listening\n')
+            tls.assert_called_once_with(cadata='CA')
+            factory.assert_called_once_with('192.0.2.1', 6443, server_name='10.66.0.2', context=tls.return_value, timeout=10)
+            factory.return_value.close.assert_called_once()
+            response.status = 302
+            with self.assertRaises(ValueError):
+                logs.tail(read.call_args.args[0], '/fixed', **read.call_args.kwargs)
+        auth['tlsClientConfig']['serverName'] = '34.47.68.21'
+        self.secret['data']['config'] = base64.b64encode(json.dumps(auth).encode()).decode()
+        with self.assertRaises(ValueError):
+            self.execute()
 
     def test_foreign_pod_owner_or_image_is_never_read_and_rollout_race_discards_output(self):
         self.rs['metadata']['ownerReferences'][0]['uid'] = 'foreign'

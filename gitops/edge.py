@@ -57,10 +57,14 @@ def locked(config):
         yield root
 
 
-def base_values(config):
+def base_values(config, *, writable=False):
     values = read_private(config['variables_file'])
     require(values.get('base_domain') == 'railshot.io' and isinstance(values.get('routes'), dict) and
             values['routes'], 'existing railshot.io routes required')
+    if writable:
+        require(all(route.get('provider_kind') == 'aws' for route in values['routes'].values()) and
+                not any(key.startswith('wireguard_') for key in values),
+                'complete the reviewed GCP/WireGuard migration before AWS edge writes')
     return values
 
 
@@ -88,13 +92,12 @@ def prepare(config_path, request):
             re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', request['environment_id']), 'registered environment identity required')
     require(request['namespace'] not in ('default', 'kube-system', 'kube-public', 'kube-node-lease', 'argocd'),
             'dedicated registered namespace required')
-    require(request['provider_kind'] in ('aws', 'gcp'), 'AWS or routed GCP target required')
+    require(request['provider_kind'] == 'aws', 'AWS target required; GCP must use its native L7 entrypoint')
     address = ipaddress.ip_address(request['target_private_ip'])
     require(address.version == 4 and any(address in ipaddress.ip_network(c) for c in
             ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')), 'RFC1918 target required')
     sg = request.get('target_security_group_id')
-    require((request['provider_kind'] == 'aws' and isinstance(sg, str) and re.fullmatch(r'sg-[0-9a-f]{8,17}', sg)) or
-            (request['provider_kind'] == 'gcp' and sg is None), 'provider-specific target security group required')
+    require(isinstance(sg, str) and re.fullmatch(r'sg-[0-9a-f]{8,17}', sg), 'AWS target security group required')
     http_path(request['health_path'])
     require(isinstance(request['expected_json'], dict) and len(encoded(request['expected_json'])) <= 8192,
             'bounded app health contract required')
@@ -104,7 +107,7 @@ def prepare(config_path, request):
     identity = {key: request[key] for key in ('tenant', 'app', 'environment_id')}
     key = 'app-' + digest(identity)[:24]
     with locked(config) as root:
-        values = base_values(config)
+        values = base_values(config, writable=True)
         ledger_path = root / 'allocations.json'
         ledger = read_private(ledger_path) if ledger_path.exists() else {}
         if key in ledger:
@@ -173,6 +176,7 @@ def save(config, row):
 
 def validate_plan(plan, row):
     """Allow only this new route and additive networking. Existing routes never change."""
+    require(row['route']['provider_kind'] == 'aws', 'only AWS routes can be written by this executor')
     require(not plan.get('errored'), 'successful edge plan required')
     actions_by_address = {item['address']: item['change']['actions'] for item in plan.get('resource_changes', [])}
     # Provider refresh can fill computed ALB associations/null collections. No write may accompany that drift.
@@ -183,7 +187,6 @@ def validate_plan(plan, row):
              ('aws_lb_target_group', 'aws_lb_target_group_attachment', 'aws_lb_listener_rule', 'aws_route53_record')}
     exact.add('aws_security_group_rule.target_from_alb[' + json.dumps(
         str(route.get('target_security_group_id')) + ':' + str(route['node_port'])) + ']')
-    exact.add('aws_security_group_rule.forward_from_alb[' + json.dumps(str(route['node_port'])) + ']')
     changed = []
     for item in plan.get('resource_changes', []):
         change, address = item['change'], item['address']
@@ -191,8 +194,6 @@ def validate_plan(plan, row):
         if actions == ['no-op'] or (item.get('mode') == 'data' and actions == ['read']):
             continue
         allowed = address in exact and actions == ['create']
-        if address.startswith('aws_route.gcp[') and actions == ['create'] and route['provider_kind'] == 'gcp':
-            allowed = change['after'].get('destination_cidr_block') == route['target_private_ip'] + '/32'
         if address == 'aws_security_group.alb' and actions == ['update']:
             before, after = change['before'], change['after']
             allowed = {k: v for k, v in before.items() if k != 'egress'} == {k: v for k, v in after.items() if k != 'egress'}
@@ -212,12 +213,13 @@ def plan_route(reference):
     with locked(config):
         config, row = load(reference)
         require(row['phase'] in ('reserved', 'planned'), 'observe interrupted or already applied routes; never replan automatically')
-        values = base_values(config)
+        values = base_values(config, writable=True)
         for key in read_private(Path(config['state_dir']) / 'allocations.json'):
             require(re.fullmatch(r'app-[a-f0-9]{24}', key), 'registered allocation key required')
             other = read_private(Path(config['state_dir']) / (key + '.json'))
             require(other['phase'] != 'applying', 'another edge apply needs reconciliation')
             if other['phase'] == 'applied' or other['route_key'] == row['route_key']:
+                require(other['route']['provider_kind'] == 'aws', 'migrate the legacy GCP allocation before AWS edge writes')
                 key = other['route_key']
                 require(key not in values['routes'] or values['routes'][key] == other['route'], 'base route ownership conflict')
                 values['routes'][key] = other['route']
@@ -239,6 +241,7 @@ def apply_route(reference, plan_sha256):
     with locked(config):
         config, row = load(reference)
         require(row['phase'] == 'planned' and row['plan_sha256'] == plan_sha256, 'reviewed saved plan required')
+        base_values(config, writable=True)
         for key in read_private(Path(config['state_dir']) / 'allocations.json'):
             require(re.fullmatch(r'app-[a-f0-9]{24}', key), 'registered allocation key required')
             require(read_private(Path(config['state_dir']) / (key + '.json'))['phase'] != 'applying',

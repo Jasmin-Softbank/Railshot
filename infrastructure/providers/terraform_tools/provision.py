@@ -89,14 +89,15 @@ def review(plan):
         actions = resource['change']['actions']
         if actions == ['no-op']:
             continue
-        risk = 'replace' if 'delete' in actions and 'create' in actions else 'delete' if 'delete' in actions else 'change'
+        risk = ('replace' if 'delete' in actions and 'create' in actions else
+                'delete' if 'delete' in actions else 'forget' if 'forget' in actions else 'change')
         change = resource['change']
         before, after = change.get('before') or {}, change.get('after') or {}
         resized = any(key in before and key in after and before[key] != after[key]
                       for key in ('instance_type', 'machine_type', 'size', 'disk_size_gb'))
         changes.append({'address': resource['address'], 'actions': actions, 'risk': risk, 'resize': resized})
     return {'changes': changes, 'destructive': any(c['risk'] in {'delete', 'replace'} for c in changes),
-            'maintenance_required': any(c['resize'] or c['risk'] in {'delete', 'replace'} for c in changes),
+            'maintenance_required': any(c['resize'] or c['risk'] in {'delete', 'replace', 'forget'} for c in changes),
             'product_allow': 'not_implemented', 'readiness': 'unverified'}
 
 
@@ -143,6 +144,8 @@ def execute(action, target_path, state_root, plan_sha256=None, *, maintenance=No
     variables = target.get('variables')
     if not isinstance(variables, dict) or variables.get('target_id') != target_id:
         raise ValueError('provider variables required; target_id must match the target binding')
+    if any(key.startswith('wireguard_') for key in variables):
+        raise ValueError('WireGuard provisioning is retired; remove legacy variables and prepare provider-local ingress plus a verified management route')
     try:
         supported = validate_profile(target)
     except ValueError as exc:

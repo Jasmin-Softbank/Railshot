@@ -33,6 +33,8 @@
 | 계획 | `POST /api/v1/plans`, `GET /api/v1/plans/{id}` | 계산·저장한 계획은 201 + Location. 실행 불가 계획도 `executable=false`·`blockers`로 표시 |
 | 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | `plan_id`만 받아 202 접수. 자원·guest·runtime·선택적 Patroni DB·등록 결과를 별도로 기록 |
 
+앱 이름은 업로드 ZIP·폴더·GitHub 저장소에서 결정하며 UI 검토, API, CLI/MCP가 `contracts/application.mjs`의 규칙을 공유한다. 환경 선택은 대상만 고르고 등록된 샘플 앱 이름으로 소스를 바꾸지 않는다. 다른 앱에 묶인 고정 대상은 소스 취득·CI 전에 거절한다. 신규 앱은 기존 `create_per_request` 계획 또는 그 앱의 등록된 대상을 사용한다. 폴더 업로드의 `source_name`은 필수이며 이름 누락·규칙 위반을 예시 이름이나 해시로 대체하지 않는다.
+
 목록은 `{items, next_marker}`, 상세는 자원 객체를 직접 반환한다. 비동기 접수는 화균 님의 `{resource_id, action:"create", status:"accepted", request_id}`와 `Location`, `Retry-After: 2`, `X-Request-ID`를 사용한다. 오류는 `{error:{code,message,request_id,retryable,outcome_unknown}}`다. JSON 필드의 세부 타입·허용 값·입력 한도는 OpenAPI를 따른다.
 
 빌드·배포는 `multipart/form-data`로 `app`, `target_id`와 소스 하나를 받는다. 소스는 공개 GitHub `repository_url`, ZIP `archive`, 또는 반복 `files`와 JSON `paths`다. 화면의 파일명만 전송하지 않고 실제 소스를 전송한다. 등록 target의 ID를 사용하며 provider 문자열을 임의 대상 ID로 취급하지 않는다.

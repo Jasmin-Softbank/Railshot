@@ -3729,7 +3729,7 @@
         "additionalProperties": false
       },
       "DeploymentSource": {
-        "description": "Either explicit app/target_id with optional plan_id, or the original UI environment/provider choice, never both. A plan binds app to its name and target_id to its runtime_target_id. Without a plan, explicit fields may reuse a successful saved environment registration. For environment/provider selection, the server resolves the existing registered target and fixed app name; otherwise it derives a valid app name from the source. An unavailable provider is rejected before source retrieval or execution.",
+        "description": "Either explicit app/target_id with optional plan_id, or the original UI environment/provider choice, never both. A plan binds app to its name and target_id to its runtime_target_id. Without a plan, explicit fields may reuse a successful saved environment registration. For environment/provider selection, the server resolves the target and derives the app name from source_name (required for folders), the ZIP filename or the GitHub repository name using the shared CLI/MCP naming rules. It never substitutes the registered target app. A different app on a fixed target is rejected before source retrieval or execution; a new app needs its own registration or an executable create_per_request plan. Missing or invalid source names are rejected without a placeholder or hash fallback.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/Source"
@@ -3763,7 +3763,8 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 255,
-                "pattern": "^[^\\u0000-\\u001f]+$"
+                "pattern": "^[^\\u0000-\\u001f]+$",
+                "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
               }
             },
             "required": [
@@ -3830,7 +3831,8 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 255,
-                "pattern": "^[^\\u0000-\\u001f]+$"
+                "pattern": "^[^\\u0000-\\u001f]+$",
+                "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
               }
             },
             "required": [
@@ -3904,14 +3906,16 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 255,
-                "pattern": "^[^\\u0000-\\u001f]+$"
+                "pattern": "^[^\\u0000-\\u001f]+$",
+                "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
               }
             },
             "required": [
               "files",
               "paths",
               "environment",
-              "provider"
+              "provider",
+              "source_name"
             ],
             "additionalProperties": false,
             "oneOf": [

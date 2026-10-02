@@ -17,6 +17,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboar
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/contracts/application.mjs', ['../../contracts/application.mjs', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
 ]);
 function json(response, code, data, headers = {}) {
