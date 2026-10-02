@@ -11,8 +11,6 @@ from pathlib import Path, PurePosixPath
 import re
 import resource
 import shlex
-import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -25,7 +23,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from observability import OperationError  # noqa: E402
-from bundle import source_digest  # noqa: E402
+from bundle import stage_source  # noqa: E402
 
 NODE = "22.23.3"
 PYTHON = "3.12.14"
@@ -417,21 +415,6 @@ set -eu""", setup]
     return "\n".join(script)
 
 
-def stage_quality_source(workspace, destination):
-    """Copy only application input; private source and run records keep their modes."""
-    before = source_digest(workspace)  # Reject symlinks/special files before copying.
-    destination = Path(destination)
-    shutil.copytree(workspace, destination, symlinks=True, ignore=shutil.ignore_patterns(".git"))
-    if source_digest(destination) != before or source_digest(workspace) != before:
-        raise ValueError("quality source changed while staging")
-    # The parent stays 0700. Docker binds only this snapshot into the non-root
-    # checker; never chmod the original checkout, credentials or run evidence.
-    for path in (destination, *destination.rglob("*")):
-        mode = path.lstat().st_mode
-        path.chmod(0o755 if stat.S_ISDIR(mode) or mode & 0o111 else 0o644)
-    return destination
-
-
 def docker_command(ws, plan, name, network):
     source = str(ws.resolve())
     if "," in source:
@@ -645,7 +628,7 @@ def run_quality(ws, run, *, network=None, timeout=900, selected_root=None):
             # TMPDIR is the runner's existing same-path host mount, checked by
             # container_preflight; no wider host mount is needed for siblings.
             staging = tempfile.TemporaryDirectory(prefix="railshot-quality-")
-            source = stage_quality_source(ws, Path(staging.name) / "source")
+            source = stage_source(ws, Path(staging.name) / "source")
             phase = "Q.command"
             command = docker_command(source, plan, name, network)
             # Do not buffer unlimited untrusted output in Python memory.

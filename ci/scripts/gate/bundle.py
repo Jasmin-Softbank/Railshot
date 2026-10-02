@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -72,6 +73,21 @@ def source_digest(workspace):
                 visit(path)
     visit(root)
     return digest.hexdigest()
+
+
+def stage_source(workspace, destination):
+    """Readable Q/build input inside a private parent; never chmod the original."""
+    before = source_digest(workspace)  # Reject symlinks/special files before copying.
+    destination = Path(destination)
+    shutil.copytree(workspace, destination, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+    if source_digest(destination) != before or source_digest(workspace) != before:
+        raise ValueError("source changed while staging")
+    # Both the non-root quality checker and Docker COPY consume this snapshot.
+    # Its caller owns a 0700 temporary parent, outside source and run evidence.
+    for path in (destination, *destination.rglob("*")):
+        mode = path.lstat().st_mode
+        path.chmod(0o755 if stat.S_ISDIR(mode) or mode & 0o111 else 0o644)
+    return destination
 
 
 def docker(*args, timeout=900):
