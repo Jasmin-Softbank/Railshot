@@ -47,6 +47,27 @@ DB HA 요청은 승인 profile·배치·TLS/Vault 참조를 확인한 뒤 접수
 
 ## B. Request / Response Contract
 
+### B-0. 제품 REST API와 내부 실행기 경계
+
+2026-10-02 문서 보완입니다. 제품 API는 아래 자원으로 설계하며 **아직 구현된 v1 라우트가 아닙니다.** 현재 Dashboard의 CI 제출·조회는 기존 `/api/deploy`, `/api/runs/{run_id}`를 사용합니다. 기존 내부 Ansible 계약 1.1과 OpenAPI는 그대로 유지합니다.
+
+| 제품 자원 | 생성·요청 | 조회 | Ansible과의 관계 |
+|---|---|---|---|
+| 빌드 | `POST /api/v1/builds` | `GET /api/v1/builds/{id}` | 소스 검사·검증 이미지 게시. Ansible 설치 호출 없음 |
+| 배포 | `POST /api/v1/deployments` | `GET /api/v1/deployments/{id}` | 준비된 target의 CI→GitOps/Argo→공개 HTTP 상태 연결 |
+| 실행 대상 | 없음 | `GET /api/v1/targets` | 인가된 대상과 지원 기능 조회. 등록만으로 준비 완료 처리하지 않음 |
+| 환경 사양 | 없음 | `GET /api/v1/profiles` | 운영자가 허용한 Provider·site·용도·사양 선택 |
+| 환경 계획 | `POST /api/v1/plans` | `GET /api/v1/plans/{id}` | runtime·DB·DCS·proxy 배치 검사. VM 생성·설치 없음 |
+| 실행 환경 | `POST /api/v1/environments` | `GET /api/v1/environments/{id}` | 저장한 plan의 자원 준비 후 내부 Ansible validate/jobs/status 연결 |
+
+경로는 짧은 제품 자원의 복수 명사로 정하고 대시·밑줄로 내부 실행 용어를 조합하지 않습니다. 명명은 팀 규칙이고 HTTP 메서드·상태 의미는 표준을 따릅니다. 화균 님 OpenStack Controller의 상세 자원 직접 반환, 목록 `items/next_marker`, 접수 `202 + Location`, 공통 오류 객체를 신규 제품 API에 재사용합니다. 동기 계획 저장은 `201 + Location`, 비동기 환경·배포 접수는 202입니다. 접수 본문은 `resource_id`, `action`, `status: accepted`, `request_id`; 오류는 `error: {code, message, request_id, retryable, outcome_unknown}`입니다.
+
+제품 HTTP의 `request_id`는 매 요청 서버가 생성하는 추적 ID입니다. 이 내부 Ansible API의 `request_id`는 같은 작업을 조회·중복 방지하는 영속 ID이므로 제품 기록에서는 `ansible_job_id`로 구분합니다. 제품 `Idempotency-Key`도 별개이며 내부 작업의 응답이 유실됐을 때 새 작업 ID로 무조건 재시도하지 않습니다. 내부 Ansible의 기존 입력·상태·오류를 제품 HTTP 형식으로 바꾸어 직접 호출하지 않습니다.
+
+환경 준비는 **제품 API의 권한·plan 확인 → Provider 생성/상세 조회 → 승인된 대상 등록 → Ansible 입력 검사 → guest/runtime 실행 → 결과 저장** 순서입니다. 브라우저는 SSH 키·운영자 Bearer·파일 경로를 받지 않습니다. 현재 대상 등록은 운영자 파일 방식이며 동적 등록 연결은 추가 구현이 필요합니다. DB `nodes/placements`를 화균 님의 `db_nodes/etcd_nodes/proxy_nodes`와 필수 변수·비밀/TLS 참조로 변환하는 연결도 필요합니다. 이 매핑과 실제 실행 검증 전에는 `database.configure`의 501 차단을 유지합니다.
+
+상세 계약은 [제품 API 설계](ci-backend-design.md), [REST 컨벤션](conventions.md), 저장소 작업 지침은 [AGENT.md](../../AGENT.md)를 따릅니다. 성공·오류 외형의 기준 구현은 [화균 님 OpenStack schema](../../infrastructure/providers/openstack/src/control_plane/api/schemas.py)입니다. REST 원칙과 팀 이름 규칙의 구분 및 공식 표준 링크는 컨벤션 문서에 정리했습니다.
+
 ### B-1. 호출 경로
 
 | 메서드·경로 | 입력 | 응답 |
