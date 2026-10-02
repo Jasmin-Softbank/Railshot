@@ -134,10 +134,12 @@ jobs:
       - run: uv sync --frozen --project infrastructure/providers/openstack --group dev
       - working-directory: infrastructure/providers/openstack
         run: |
-          uv run --frozen ruff check .
-          uv run --frozen ruff format --check .
+          uv run --frozen ruff check src tests
+          uv run --frozen ruff format --check src tests
           uv run --frozen mypy
           uv run --frozen pytest -q
+      - name: Customer OpenStack bootstrap and restricted SSH jobs
+        run: uv run --frozen --project infrastructure/providers/openstack --with-requirements deployment/bootstrap/requirements.lock bash ci/scripts/check-bootstrap.sh
 
   database-ansible:
     name: Database Ansible contracts
