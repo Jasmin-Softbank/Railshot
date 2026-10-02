@@ -75,3 +75,5 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 각 대상의 CD 설정은 별도 Kubernetes API, AppProject, namespace, GitOps 경로, pull Secret 참조 및 공개 health URL을 등록한다. CI 게시 결과의 target ID와 요청의 target ID가 다르면 Git push나 Argo sync 전에 거부한다. 같은 빌드·게시 코드를 사용해도 배포 선언과 클러스터 자격은 해당 대상에 묶인다. GCP의 네이티브 LB나 OpenStack의 공개 경로 준비 여부는 별도 운영 검증이며 옵션 표시만으로 완료를 뜻하지 않는다.
 
 앱 자동 배포의 시작점은 `POST /api/v1/deployments`다. API가 소스 commit을 만들고 `railshot-deploy.yml`을 dispatch하면, CI gate·이미지 게시 성공 뒤 제품 worker가 CD를 호출해 고정 Git revision을 Argo에 적용하고 공개 HTTP를 확인한다. `POST /api/v1/builds`는 게시에서 끝난다. 현재 앱 workflow에는 push/PR 자동 배포 trigger가 없으므로 저장소 수정·병합만으로 이 제품 배포 경로가 시작되지는 않는다.
+
+실패 CI의 세부 단계와 검증된 원인은 `steps[].tasks`, `ci.diagnostics`로 전달한다. 결과 불확실 상태는 `unknown`으로 유지한다. 앱 로그 조회는 `GET /api/v1/deployments/{id}/logs`이며 세션·현재 배포 버전·런타임 소유권 검증을 거친다. 상세 제한은 [제품 관측 계약](observations.md)을 따른다.

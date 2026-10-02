@@ -46,6 +46,25 @@ class PythonProfilesTest(unittest.TestCase):
         self.assertTrue(all("--with-requirements" in c for c in plan["commands"] if quality.command_stage(c) in {"lint", "type", "unit"}))
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.root.iterdir()})
 
+    def test_pytest_exit_five_repairs_only_a_valid_native_zero_test_report(self):
+        plan = self.project()
+        command = next(c for c in plan['commands'] if 'pytest --junitxml' in c)
+        wrapper = 'sh -c "exit 5" || ' + command.split(' || ', 1)[1]
+        wrapper = wrapper.replace('/tmp/unit.xml', str(self.root / 'unit.xml'))
+        for xml, expected in (('<testsuites><testsuite tests="0" failures="0" errors="0" skipped="0"/></testsuites>', 204),
+                              ('<broken>', 200), ('<testsuites/>', 200),
+                              ('<testsuites><testsuite tests="0" errors="1"/></testsuites>', 200)):
+            with self.subTest(xml=xml):
+                (self.root / 'unit.xml').write_text(xml)
+                result = subprocess.run(['sh', '-c', quality.quality_script([('unit', wrapper)])],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(expected, result.returncode, result.stderr)
+                classified = quality.quality_failure(result.stdout, result.returncode, repair_scope='source')
+                self.assertEqual(expected == 204, classified.get('source_repair_eligible', False))
+        (self.root / 'unit.xml').unlink()
+        missing = subprocess.run(['sh', '-c', quality.quality_script([('unit', wrapper)])], capture_output=True, text=True, timeout=5)
+        self.assertEqual(200, missing.returncode)
+
     def test_existing_locked_checker_versions_are_not_replaced(self):
         plan = self.project((("ruff", "0.9.0"), ("mypy", "1.14.1"), ("pytest", "8.3.4")))
         self.assertEqual({}, plan["generated_tools"])

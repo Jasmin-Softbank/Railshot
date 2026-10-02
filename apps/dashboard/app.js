@@ -16,6 +16,7 @@ function showView(name) {
   document.title = `RailShot · ${views[name].querySelector('h1').textContent}`;
   savePreferences({ view: name });
   if (sessionReady && name === 'history') loadHistory().catch(showHistoryError);
+  if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
 }
 
 document.querySelectorAll('[data-view]').forEach((button) => {
@@ -56,6 +57,7 @@ let timer;
 let pollController;
 let lastReadAt = null;
 let observationError = false;
+let logSnapshot = null, logController;
 const requests = new Set();
 
 function invalidateReview() {
@@ -174,7 +176,7 @@ deploymentDatabase.addEventListener('change', updateSelection);
 
 async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
-  const timeout = setTimeout(() => controller.abort(), options.method === 'POST' ? (path === '/api/v1/plans' ? 600000 : 120000) : 15000);
+  const timeout = setTimeout(() => controller.abort(), options.method === 'POST' ? (path === '/api/v1/plans' ? 600000 : 120000) : path.endsWith('/logs') ? 60000 : 15000);
   try {
     const response = await fetch(path, { credentials: 'same-origin', ...options, signal: controller.signal, redirect: 'error' });
     const data = response.status === 204 ? null : await response.json();
@@ -308,7 +310,8 @@ function renderRun() {
   for (const [name, value] of [['DB migration', current.cd?.migration?.state], ['앱 적용', current.cd?.state], ['공개 URL', current.public_http?.state]]) {
     if (value) { const item = document.createElement('li'); item.textContent = `${name}: ${value}`; document.querySelector('#run-steps').append(item); }
   }
-  safeLink('#actions-link', current.actions_url || current.ci?.actions_url, true, true);
+  for (const selector of ['#actions-link', '#monitor-actions-link']) safeLink(selector, current.actions_url || current.ci?.actions_url, true, true);
+  document.querySelector('#monitor-message').textContent = document.querySelector('#run-message').textContent;
   const canOpen = current.kind === 'deployments' && current.status === 'succeeded' && current.public_http?.state === 'succeeded' && Boolean(current.public_http?.verified_at);
   for (const selector of ['#application-link', '#monitor-application-link']) safeLink(selector, current.public_http?.site_url || current.url || current.public_http?.url, canOpen);
   const binding = [`앱 / 대상: ${current.app || '—'} / ${current.target_id || '—'}`, `배포: ${current.id}`,
@@ -395,6 +398,7 @@ async function refreshRun() {
     if (pollController !== controller) return;
     if (data.id !== current.id || (current.target_id && data.target_id !== current.target_id)) throw new Error('실행 또는 대상이 요청과 일치하지 않습니다.');
     current = { ...current, ...data }; lastReadAt = Date.now(); observationError = false; remember(); renderRun();
+    if (consoleTab === 'app' && !views.monitor.hidden) refreshLogs();
     if (!terminal.has(current.status) || current.kind === 'deployments') timer = setTimeout(refreshRun, 15000);
     else stopPolling();
   } catch (cause) {
@@ -409,11 +413,34 @@ document.querySelector('#stop-polling').addEventListener('click', () => { stopPo
 document.querySelector('#refresh-run').addEventListener('click', refreshRun);
 window.addEventListener('pagehide', () => { stopPolling(); for (const controller of requests) controller.abort(); });
 let consoleTab = 'work';
+const logLabels = { loading: '앱 로그를 조회하고 있습니다.', not_deployed: '앱 적용 전입니다. 작업 로그에서 CI 진행과 실패 원인을 확인하세요.',
+  not_configured: '이 배포 대상의 로그 조회 설정이 없습니다.', unavailable: '앱 로그 조회에 실패했습니다. 다음 조회에서 다시 확인합니다.',
+  no_data: '현재 컨테이너에서 출력한 로그가 없습니다.', superseded: '다른 배포 버전이 적용되어 이 기록의 앱 로그를 표시하지 않습니다.' };
+async function refreshLogs() {
+  if (logController && logSnapshot?.deployment_id === current?.id) return;
+  logController?.abort();
+  if (!current || current.kind !== 'deployments') return;
+  const id = current.id, controller = new AbortController(); logController = controller;
+  logSnapshot = { deployment_id: id, state: 'loading' }; renderConsole();
+  try {
+    const { data } = await request(`/api/v1/deployments/${encodeURIComponent(id)}/logs`, {}, controller);
+    if (logController !== controller || current?.id !== id) return;
+    if (data.deployment_id !== id || data.app !== current.app || data.target_id !== current.target_id) throw new Error('로그 대상 불일치');
+    logSnapshot = data;
+  } catch {
+    if (logController !== controller || current?.id !== id) return;
+    logSnapshot = { deployment_id: id, state: 'unavailable' };
+  } finally { if (logController === controller) { logController = null; renderConsole(); } }
+}
 function renderConsole() {
+  const logs = logSnapshot?.deployment_id === current?.id ? logSnapshot : null;
   const data = !current ? '실행을 시작하면 확인된 상태가 여기에 표시됩니다.'
-    : consoleTab === 'app' ? '앱 로그 수집은 아직 연결되지 않았습니다. 배포 작업 기록은 작업 로그에서, 앱 응답 확인 결과는 환경 상태에서 확인하세요.'
+    : consoleTab === 'app' ? (logs?.state === 'ready'
+      ? [`조회 ${new Date(logs.checked_at).toLocaleString()}`, ...logs.entries.map((entry) => `[${entry.pod} / ${entry.container}]\n${entry.text}`)].join('\n\n')
+      : logLabels[logs?.state] || '앱 로그 탭을 선택하면 현재 배포의 로그를 조회합니다.')
     : consoleTab === 'environment' ? { target_id: current.target_id, environment: current.environment || null, cd: current.cd || null, public_http: current.public_http || null, observation: current.observation || null }
-    : { status: current.status, stage: current.stage || 'ci', steps: current.steps || current.ci?.steps || [], error: current.error || null };
+    : { status: current.status, stage: current.stage || 'ci', diagnostics: current.ci?.diagnostics || current.diagnostics || null,
+      steps: current.steps || current.ci?.steps || [], error: current.error || null };
   document.querySelector('#console-output').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
 const metricLabels = { not_configured: '연결 전', unsupported: '대상 미지원', unavailable: '수집 연결 실패', collection_failed: '수집 실패', no_data: '데이터 없음', stale: '오래된 값' };
@@ -446,6 +473,7 @@ document.querySelectorAll('[data-console]').forEach((button) => button.addEventL
   consoleTab = button.dataset.console;
   document.querySelectorAll('[data-console]').forEach((tab) => tab.setAttribute('aria-selected', String(tab === button)));
   renderConsole();
+  if (consoleTab === 'app') refreshLogs();
 }));
 function savePreferences(patch) {
   if (!sessionReady) return;
@@ -531,9 +559,11 @@ async function initializeDashboard() {
     provider.value = ['openstack', 'proxmox'].includes(saved.provider) ? saved.provider : '';
     showView(saved.view);
     await checkConnection();
-    await loadHistory(); await loadConnections();
     document.querySelector('#session-note').textContent = `이 브라우저 세션 · ${new Date(session.expires_at).toLocaleDateString()}까지 유지`;
     sessionReady = true;
+    await Promise.allSettled([loadHistory().catch(showHistoryError), loadConnections().catch((cause) => {
+      document.querySelector('#connection-message').textContent = cause.message;
+    })]);
     if (history.length) { current = history[0]; renderRun(); refreshRun(); }
   } catch (cause) {
     connectionError = cause.message; updateSelection();

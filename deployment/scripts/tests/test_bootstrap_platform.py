@@ -41,6 +41,21 @@ class BootstrapTests(unittest.TestCase):
                     'change': {'actions': ['update'], 'before': {}, 'after': {}}}]}
         self.assertEqual(bootstrap.plan_changes(allowed)[0]['actions'], ['update'])
 
+    def test_product_logs_can_read_only_the_registered_cluster_secret(self):
+        captured = []
+        def capture(documents):
+            captured.extend(documents)
+            raise StopIteration  # Inspect the actual bootstrap render before any credentials or remote writes.
+        task = types.SimpleNamespace(root=Path(__file__).resolve().parents[3], objects=capture,
+            config={'github': {'application': 'demo-application', 'target_id': 'k3s-aws'}})
+        with self.assertRaises(StopIteration):
+            bootstrap.Bootstrap.bootstrap_secrets(task)
+        role = next(document for document in captured if document['kind'] == 'Role')
+        self.assertEqual(role['metadata']['namespace'], 'argocd')
+        self.assertEqual([rule for rule in role['rules'] if rule['resources'] == ['secrets']],
+            [{'apiGroups': [''], 'resources': ['secrets'], 'resourceNames': ['railshot-k3s-aws'], 'verbs': ['get']}])
+        self.assertNotIn('REQUIRED', json.dumps(captured))
+
     def test_existing_secret_rotation_is_preserved_but_executor_drift_and_uid_change_are_refused(self):
         wanted = {'kind': 'Secret', 'metadata': {'name': 'railshot-github', 'namespace': 'railshot-system'},
                   'type': 'Opaque', 'data': {'token': 'old'}}

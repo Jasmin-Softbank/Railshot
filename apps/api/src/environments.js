@@ -182,6 +182,11 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       const deploy = createCdAdapter({ configPath: join(stateDir, id, 'cd.json'), loadPublished, python });
       return deploy(args);
     },
+    async observeLogs(id, record) {
+      if (!validId(id)) throw new EnvironmentError('INVALID_ENVIRONMENT_ID', 422);
+      const { createAppLogsObserver } = await import('./logs.js');
+      return createAppLogsObserver({ configPath: join(stateDir, id, 'cd.json'), python })(record);
+    },
     async plan(input, { id }) {
       if (!validId(id) || !exact(input, ['name', 'runtime', 'database']) || typeof input.name !== 'string'
           || !APP_NAME.test(input.name)

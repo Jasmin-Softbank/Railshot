@@ -15,7 +15,7 @@ SHA = re.compile(r'[0-9a-f]{40}')
 API_NATIVE_FILES = {
     'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml',
     'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
-    'gitops/edge.py', 'gitops/service_name.py',
+    'gitops/edge.py', 'gitops/service_name.py', 'gitops/logs.py',
     'ci/scripts/execution.py', 'ci/scripts/observability.py', 'ci/scripts/process.py',
     'ci/scripts/publication.py', 'ci/scripts/storage.py', 'ci/scripts/gate/bundle.py',
     'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/railshot.schema.json',

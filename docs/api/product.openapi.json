@@ -1820,6 +1820,85 @@
           }
         }
       }
+    },
+    "/api/v1/deployments/{id}/logs": {
+      "get": {
+        "operationId": "getDeploymentLogs",
+        "summary": "Read bounded application log tail",
+        "description": "Only the owning anonymous session may read logs. Current registered application, source/run receipt, Argo revision, image digests and Deployment/ReplicaSet/Pod ownership must match. A later CD operation on the same shared target supersedes old access. Reads up to 100 lines per container and 32 KiB total from at most three containers. No caller-controlled query parameters or commands. Common credential patterns are redacted; this is not a general secret detection guarantee.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppLogs"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2141,7 +2220,7 @@
           "steps": {
             "type": "array",
             "items": {
-              "type": "object"
+              "$ref": "#/components/schemas/CiStep"
             }
           },
           "publication": {
@@ -2150,6 +2229,22 @@
               "null"
             ],
             "description": "CI artifact receipt validated by the registered GitHub workflow; publication is not application deployment."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "diagnostics": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CiDiagnostics"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2215,7 +2310,7 @@
               "steps": {
                 "type": "array",
                 "items": {
-                  "type": "object"
+                  "$ref": "#/components/schemas/CiStep"
                 }
               },
               "publication_artifact_id": {
@@ -2236,6 +2331,26 @@
                   "type": "string"
                 },
                 "description": "Verified immutable image references from the bound publication receipt."
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "diagnostics": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CiDiagnostics"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "diagnostics_checked_at": {
+                "type": "string",
+                "format": "date-time"
               }
             },
             "required": [
@@ -3926,6 +4041,214 @@
         "required": [
           "items",
           "next_marker"
+        ],
+        "additionalProperties": false
+      },
+      "CiTask": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "conclusion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "number",
+          "name",
+          "status",
+          "conclusion"
+        ],
+        "additionalProperties": false
+      },
+      "CiStep": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "conclusion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_attempt": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "tasks": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/CiTask"
+            }
+          }
+        },
+        "required": [
+          "key",
+          "status",
+          "conclusion"
+        ],
+        "additionalProperties": false
+      },
+      "CiDiagnostics": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "enum": [
+              "ready",
+              "unavailable"
+            ]
+          },
+          "run_attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "artifact_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reason": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "enum": [
+              "FAIL",
+              "BLOCKED",
+              "UNKNOWN",
+              "NOT_RUN",
+              "INCOMPLETE"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "guidance": {
+            "type": "string"
+          },
+          "repair_scope": {
+            "enum": [
+              "packaging",
+              "source",
+              null
+            ]
+          },
+          "agent_attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "changed_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "changed_file_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "state",
+          "run_attempt",
+          "reason",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "AppLogs": {
+        "type": "object",
+        "properties": {
+          "deployment_id": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "app": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "ready",
+              "not_deployed",
+              "not_configured",
+              "unavailable",
+              "no_data",
+              "superseded"
+            ]
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entries": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "type": "object",
+              "properties": {
+                "pod": {
+                  "type": "string"
+                },
+                "container": {
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string",
+                  "maxLength": 32768
+                }
+              },
+              "required": [
+                "pod",
+                "container",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "deployment_id",
+          "target_id",
+          "app",
+          "state",
+          "checked_at",
+          "entries"
         ],
         "additionalProperties": false
       }
