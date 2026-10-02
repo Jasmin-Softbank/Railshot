@@ -33,3 +33,9 @@ UI만 개발할 때는 루트에서 `npm ci && npm run dev`로 Vite를 실행한
 (`http://127.0.0.1:4181`). Vite 단독 실행에는 API가 연결되지 않아 제출이 차단된다.
 `npm run build`는 정적 배포용 `dist/`를 만든다. 실제 API 통합 검사는
 [`ci/browser/README.md`](../../ci/browser/README.md)의 브라우저 검사를 사용한다.
+
+## 컨테이너 이미지
+
+저장소 루트에서 `docker build -f apps/dashboard/Dockerfile --target dashboard -t railshot-dashboard .`로 정적 이미지를 만든다. build stage에서 lockfile로 Vite를 설치하고 `dist/`만 Nginx 이미지에 복사한다. 최종 이미지는 UID 101, HTTP 8080으로 실행하며 `/healthz`가 준비 확인 경로다. root filesystem을 읽기 전용으로 사용할 때 `/tmp`에 쓰기 가능한 임시 볼륨이 필요하다. `NODE_IMAGE`와 `NGINX_IMAGE` build argument로 검토한 base image digest를 지정할 수 있다.
+
+이 이미지에는 API 자격증명·Node 서버·MCP가 없다. 위의 API 동시 실행과 달리 정적 Nginx 컨테이너의 `/api` 프록시는 아직 없으므로 이 컨테이너 단독 실행은 CI 제출 연결을 제공하지 않는다. 분리 배포의 API 경로와 사용자별 인가는 별도 연결 작업이며 내부 운영자 token을 이미지나 프런트 코드에 포함하지 않는다.

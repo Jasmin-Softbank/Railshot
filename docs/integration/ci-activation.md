@@ -34,7 +34,7 @@
 
 게시 위치는 `ghcr.io/jasmin-softbank/demo-fixture-npm-js-web`입니다. 정상 digest는 `sha256:48cf1c0ab9c4251cf60c41256f96a45bf6a9430a1e7e42bdbbf396a26fde5b86`, AI 수정 digest는 `sha256:8ded0180c728ae5a6d2e359a7313ec1fbf0d1fa1ca4569bdd75e68243333e54d`입니다. 두 artifact의 파일 해시·source·target·registry 계약을 확인했고 API의 `url`은 모두 `null`입니다. 이는 이미지 게시 완료이며 고객 앱 배포 완료는 아닙니다.
 
-- **Worker:** `railshot-ci-k3s-aws` 전용 VM 한 대, 서울 리전 t3.xlarge(4 vCPU/16 GiB), 암호화 60 GiB. 외부 inbound 없이 SSM으로 접속하며 cloud-init·실제 격리 probe·runner online을 확인했습니다. 자동 STOP은 **2026-10-02 17:12:05 KST**, 디스크는 보존됩니다. 고객 K3s나 검토 중인 다중 노드 클러스터를 생성한 것은 아닙니다.
+- **Worker:** `railshot-build-worker-aws-01` 한 대(2026-10-02 표시 이름 변경, 종전 `railshot-ci-k3s-aws`, ID `i-09955d23ad1d8dbe2`), 서울 리전 t3.xlarge(4 vCPU/16 GiB), 암호화 60 GiB. 외부 inbound 없이 SSM으로 접속하며 cloud-init·실제 격리 probe·runner online을 확인했습니다. 자동 STOP은 **2026-10-02 17:12:05 KST**, 디스크는 보존됩니다. 고객 K3s나 검토 중인 다중 노드 클러스터를 생성한 것은 아닙니다.
 - **AI:** `gpt-5.6-sol` / `xhigh` / 구독 인증을 SDK metadata로 확인했습니다. 최종 AI 실행은 SDK 1회, Dockerfile만 작성, 거부된 변경 없음, 수정 후 전체 gate PASS입니다. 테스트·manifest·lockfile은 바꾸지 않았습니다.
 - **Private 자격:** 관리자 본인 인증 후 PAT classic의 `read:packages`만 부여하고 `railshot-release`의 암호화 Secret에 등록했습니다. 만료는 **2026-10-09**이며 release 환경 허용 branch는 `main`, `ci/fixture-packaging-repair`입니다. 비밀값은 Git·문서·artifact에 넣지 않았습니다. 조직 공개 정책은 변경하지 않았습니다.
 - **대상 참조:** `k3s-aws` / `tenant-demo` / `ghcr-pull`은 운영자 설정입니다. 실제 대상 Secret 설치·노드 pull은 아직 수행하지 않았습니다. CI가 확인한 것은 별도 읽기 자격의 digest manifest 접근입니다.

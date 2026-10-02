@@ -1,0 +1,116 @@
+# Render with deployment/scripts/render-platform.py before applying.
+# Namespace and Secrets are operator-owned; no public API route is installed.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: railshot-dashboard, namespace: railshot-system}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: railshot-dashboard}}
+  template:
+    metadata: {labels: {app: railshot-dashboard}}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {kubernetes.io/arch: amd64, railshot.io/node-role: platform}
+      imagePullSecrets: [{name: ghcr-pull}]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: dashboard
+          image: BUILD_REQUIRED/dashboard
+          ports: [{name: http, containerPort: 8080}]
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+          readinessProbe: {httpGet: {path: /healthz, port: http}}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 10}
+      volumes: [{name: tmp, emptyDir: {sizeLimit: 32Mi}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: railshot-dashboard, namespace: railshot-system}
+spec:
+  type: ClusterIP
+  selector: {app: railshot-dashboard}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: railshot-api, namespace: railshot-system}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: railshot-api}}
+  template:
+    metadata: {labels: {app: railshot-api}}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {kubernetes.io/arch: amd64, railshot.io/node-role: platform}
+      imagePullSecrets: [{name: ghcr-pull}]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: api
+          image: BUILD_REQUIRED/api
+          ports: [{name: http, containerPort: 4173}]
+          env:
+            - {name: RAILSHOT_BIND_HOST, value: 0.0.0.0}
+            - {name: RAILSHOT_ALLOWED_HOSTS, value: "localhost,127.0.0.1,railshot-api,railshot-api.railshot-system.svc.cluster.local"}
+            - {name: RAILSHOT_API_TOKEN_FILE, value: /run/secrets/api/token}
+            - {name: GITHUB_TOKEN, valueFrom: {secretKeyRef: {name: railshot-github, key: token}}}
+            - {name: GITHUB_OWNER, value: Jasmin-Softbank}
+            - {name: GITHUB_REPO, value: railshot-apps}
+            - {name: GITHUB_REF, value: main}
+            - {name: GITHUB_WORKFLOW, value: railshot-deploy.yml}
+            - {name: JASMIN_TENANT, value: demo}
+            - {name: RAILSHOT_TARGET_ID, value: TARGET_REQUIRED}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: '1', memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: api-token, mountPath: /run/secrets/api, readOnly: true}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http, httpHeaders: [{name: Host, value: localhost}]}
+            initialDelaySeconds: 10
+          readinessProbe:
+            exec:
+              command: [node, -e, "fetch('http://127.0.0.1:4173/healthz').then(async r=>{if(!r.ok||!(await r.json()).configured)process.exit(1)}).catch(()=>process.exit(1))"]
+      volumes:
+        - {name: tmp, emptyDir: {sizeLimit: 128Mi}}
+        - name: api-token
+          secret: {secretName: railshot-api, defaultMode: 288}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: railshot-api-private, namespace: railshot-system}
+spec:
+  podSelector: {matchLabels: {app: railshot-api}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {railshot.io/api-client: 'true'}}
+      ports: [{port: 4173, protocol: TCP}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: railshot-api, namespace: railshot-system}
+spec:
+  type: ClusterIP
+  selector: {app: railshot-api}
+  ports: [{name: http, port: 4173, targetPort: http}]
