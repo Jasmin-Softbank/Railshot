@@ -58,9 +58,9 @@ h2 { letter-spacing: -.025em; }
 .source-divider { display: flex; align-items: center; gap: 12px; color: var(--color-soft); font-size: 12px; }
 .source-divider::before, .source-divider::after { content: ""; height: 1px; flex: 1; background: #e4eaf0; }
 .field-label { color: #68788d; font-size: 12px; font-weight: 600; }
-input[type="url"], select { width: 100%; min-height: 46px; border: 1px solid #e0e7ed; border-radius: 8px; background: var(--color-surface); padding: 11px 13px; color: var(--color-ink); font-size: 13px; }
+input[type="url"], input[type="text"], input[type="password"], select { width: 100%; min-height: 46px; border: 1px solid #e0e7ed; border-radius: 8px; background: var(--color-surface); padding: 11px 13px; color: var(--color-ink); font-size: 13px; }
 input[type="url"]::placeholder { color: #98a5b5; }
-input[type="url"]:focus, select:focus { outline: 2px solid #8bd4bd; outline-offset: 1px; }
+input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid #8bd4bd; outline-offset: 2px; }
 .selection { margin: 0; overflow-wrap: anywhere; color: var(--color-accent); font-size: 12px; font-weight: 600; }
 .target-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; padding: 0; border: 0; }
 .target-option { position: relative; display: flex; align-items: center; gap: 14px; min-height: 92px; padding: 17px; border: 1px solid #e1e8ed; border-radius: 11px; cursor: pointer; }
@@ -71,6 +71,7 @@ input[type="url"]:focus, select:focus { outline: 2px solid #8bd4bd; outline-offs
 .target-copy { display: grid; gap: 4px; min-width: 0; }
 .target-copy strong { font-size: 14px; }
 .target-copy small { color: var(--color-muted); font-size: 12px; }
+.target-copy small, #run-meta, #history-summary { overflow-wrap: anywhere; }
 .radio-mark { margin-left: auto; flex: 0 0 18px; height: 18px; border: 1px solid var(--color-inactive); border-radius: 50%; background: var(--color-surface); }
 .target-option:has(input:checked) .radio-mark { border: 5px solid var(--color-accent); }
 .provider-field { display: grid; gap: 9px; max-width: 480px; }
