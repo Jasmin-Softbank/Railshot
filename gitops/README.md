@@ -150,6 +150,8 @@ python3 gitops/edge.py apply --reference /private/reference.json \
 
 AWS 경로는 private IP+SG로 ALB에서 접근합니다. GCP도 같은 할당/검증 계약을 쓰지만 WireGuard peer/AllowedIPs·guest forwarding·GCP 방화벽·복귀 경로를 준비하는 기능은 포함하지 않습니다. 다른 클라우드 DB 연결 역시 별도 네트워크 계약입니다. target healthy와 실제 공개 HTTP가 확인되지 않은 GCP 경로를 지원 완료로 표시하지 않습니다.
 
+온프레·cloudflared 자동 공개는 현재 지원하지 않습니다. 승민 원본 `feature/deployment-runtime-seungmin@ec6a9df0258eee9843aa457bc10703aa7026db40`와 통합본의 `deployment/cloudflared/README.md`는 자동 설치가 없는 선택 모듈임을 명시합니다. `deployment/scripts/exposure.py`의 `cloudflare-tunnel`은 운영자가 이미 만든 HTTPS URL을 검사하는 hook이며 tunnel/DNS/자격을 생성하지 않습니다. 따라서 제품 신규 앱 할당은 AWS/GCP ALB로만 진행하고 다른 provider를 차단합니다. 기존 cloudflared URL hook을 ALB hostname의 별도 writer로 연결하지 않습니다. 향후 온프레 connector를 추가할 때는 운영자 route 소유권에서 ALB와 tunnel 중 하나를 명시적으로 선택하고 기존 hostname·NodePort 점유와 중복되지 않게 검증해야 합니다.
+
 형식 근거: [Terraform saved plan JSON](https://developer.hashicorp.com/terraform/internals/json-format), [AWS target health 조회](https://docs.aws.amazon.com/cli/latest/reference/elbv2/describe-target-health.html). 로컬 검사는 `python -m unittest discover -s gitops -p 'test_*.py'`이며 네이티브 경계 모의 검사와 실제 cloud 검증은 별도 증거입니다.
 
 ## 짧은 Argo 고객 토큰 갱신
