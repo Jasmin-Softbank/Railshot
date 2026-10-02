@@ -215,6 +215,11 @@ class RegistrationTest(unittest.TestCase):
             self.assertEqual(env.aws_security_group(self.descriptor), 'sg-12345678')
             with self.assertRaisesRegex(Exception, 'attached runtime security group'):
                 env.aws_security_group(self.descriptor, 'sg-99999999')
+        response['Reservations'][0]['Instances'][0]['SecurityGroups'].append({'GroupId': 'sg-87654321'})
+        with patch.object(env.argo, 'native', return_value=json.dumps(response)):
+            self.assertEqual(env.aws_security_group({**self.descriptor, 'security_group_id': 'sg-12345678'}), 'sg-12345678')
+            with self.assertRaisesRegex(Exception, 'attached runtime security group'):
+                env.aws_security_group(self.descriptor)
 
     def test_gcp_contract_and_db_secrets_remain_separate_and_private(self):
         descriptor = json.loads((ROOT / 'examples/ansible/gcp-node-descriptor.json').read_text()); descriptor['target_id'] = self.target

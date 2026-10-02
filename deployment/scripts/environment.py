@@ -332,6 +332,7 @@ def bind_ci(settings, registered, target_id):
 
 
 def aws_security_group(descriptor, configured=None):
+    configured = configured or descriptor.get('security_group_id')
     _, region, instance = ansible.transport_parts(descriptor['transport_ref'])
     result = json.loads(argo.native(['aws', 'ec2', 'describe-instances', '--region', region,
         '--instance-ids', instance, '--output', 'json', '--no-cli-pager']))
