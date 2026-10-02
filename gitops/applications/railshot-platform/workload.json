@@ -46,7 +46,7 @@
             "containers": [
               {
                 "name": "dashboard",
-                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:c74ad7431bc1e5ff1f0cc5dc547577fae567e9b9145ba46d4928d681fcd0e906",
+                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:01c57dde5953348e0a26d1095e8b74f0de318aca4aaae83af3a914a78655066b",
                 "ports": [
                   {
                     "name": "http",
@@ -188,7 +188,7 @@
             "initContainers": [
               {
                 "name": "private-config",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:4b4f44ef947375401a0058eadc01b45fefb246052eaf97b031bfe61eb4643ed9",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:6e5a7126f94e44bf8b0c52a5674cd401895157d48996a8182b337058613f90e7",
                 "command": [
                   "node",
                   "/app/apps/api/prepare-state.js"
@@ -206,6 +206,16 @@
                   {
                     "name": "HOME",
                     "value": "/var/lib/railshot"
+                  },
+                  {
+                    "name": "RAILSHOT_OBSERVER_PRODUCT_FILE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "railshot-environments",
+                        "key": "observer_file",
+                        "optional": true
+                      }
+                    }
                   }
                 ],
                 "securityContext": {
@@ -243,7 +253,7 @@
             "containers": [
               {
                 "name": "api",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:4b4f44ef947375401a0058eadc01b45fefb246052eaf97b031bfe61eb4643ed9",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:6e5a7126f94e44bf8b0c52a5674cd401895157d48996a8182b337058613f90e7",
                 "ports": [
                   {
                     "name": "http",
@@ -280,6 +290,16 @@
                     "value": "/var/lib/railshot/config/observer.json"
                   },
                   {
+                    "name": "RAILSHOT_OBSERVER_PRODUCT_FILE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "railshot-environments",
+                        "key": "observer_file",
+                        "optional": true
+                      }
+                    }
+                  },
+                  {
                     "name": "RAILSHOT_PROFILES_FILE",
                     "valueFrom": {
                       "configMapKeyRef": {
@@ -304,6 +324,18 @@
                   {
                     "name": "TF_PLUGIN_CACHE_DIR",
                     "value": "/var/lib/railshot/provider-cache"
+                  },
+                  {
+                    "name": "AWS_REGION",
+                    "value": "ap-northeast-2"
+                  },
+                  {
+                    "name": "AWS_DEFAULT_REGION",
+                    "value": "ap-northeast-2"
+                  },
+                  {
+                    "name": "AWS_EC2_METADATA_V1_DISABLED",
+                    "value": "true"
                   },
                   {
                     "name": "GITHUB_TOKEN",
