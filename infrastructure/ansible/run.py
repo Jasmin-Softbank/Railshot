@@ -100,6 +100,14 @@ def validate(request):
             if '..' in p.parts:
                 raise ContractError('ssh: parent traversal is not allowed')
         reference = node['ssh'].get('transport_ref')
+        if 'connect_host' in node['ssh']:
+            try:
+                connect = ipaddress.IPv4Address(node['ssh']['connect_host'])
+            except ipaddress.AddressValueError as exc:
+                raise ContractError('ssh: invalid relay IPv4 address') from exc
+            if (request['target']['provider'] != 'openstack' or reference is not None
+                    or not any(connect in network for network in PRIVATE)):
+                raise ContractError('ssh: relay requires an OpenStack RFC1918 address without transport_ref')
         if reference is not None:
             kind, *parts = transport_parts(reference)
             if node['ssh']['port'] != 22:
@@ -176,9 +184,9 @@ def build_inventory(request, forwarded=None):
               '-o ClearAllForwardings=yes -o PasswordAuthentication=no '
               '-o KbdInteractiveAuthentication=no -o GSSAPIAuthentication=no '
               f'-o UserKnownHostsFile={ssh["known_hosts_file"]}')
-    if forwarded is not None:
+    if forwarded is not None or 'connect_host' in ssh:
         common += f' -o HostKeyAlias={node["private_ipv4"]}'
-    host = {'ansible_host': '127.0.0.1' if forwarded is not None else node['private_ipv4'], 'ansible_user': ssh['user'],
+    host = {'ansible_host': '127.0.0.1' if forwarded is not None else ssh.get('connect_host', node['private_ipv4']), 'ansible_user': ssh['user'],
             'ansible_port': forwarded or ssh['port'], 'ansible_connection': 'ssh',
             'ansible_ssh_private_key_file': ssh['identity_file'],
             'ansible_ssh_common_args': common,

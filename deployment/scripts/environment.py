@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register one operator-bound AWS/GCP runtime and application after runtime_ready."""
+"""Register one operator-bound runtime and application after runtime_ready."""
 import argparse
 import base64
 from contextlib import contextmanager
@@ -52,17 +52,54 @@ def label(value):
     return isinstance(value, str) and re.fullmatch(argo.LABEL, value)
 
 
+def registered_node(selected, target_id, request_id, *, timeout_seconds=None):
+    """Resolve the existing Ansible registry without claiming live cloud readiness."""
+    timeout = selected.get('timeout_seconds', 1200) if timeout_seconds is None else timeout_seconds
+    if 'server_file' in selected:
+        fields = {'resource_id', 'project_id', 'management_network', 'placement',
+                  'architecture', 'initialization', 'ssh'}
+        argo.require(fields | {'server_file'} <= set(selected)
+                     and not set(selected) - fields - {'server_file', 'purpose', 'timeout_seconds', 'management_endpoint'},
+                     'OpenStack registry fields differ')
+        server = read_private(selected['server_file'])
+        request = ansible.from_openstack(server, request_id=request_id, operation='guest.check',
+            target_id=target_id, **{key: selected[key] for key in fields}, timeout_seconds=timeout)
+        node = request['inventory']['control_plane'][0]
+        # This is a verified resource binding, not a fabricated Terraform descriptor.
+        # Retain all source/connection inputs in the private registration identity.
+        resource = {'target_id': target_id, 'provider_kind': 'openstack', 'resource_id': node['resource_id'],
+                    'addresses': {'private': node['private_ipv4']}, 'openstack_server': server,
+                    'registered_request': request}
+        connect_host = node['ssh'].get('connect_host', node['private_ipv4'])
+        if connect_host != node['private_ipv4']:
+            resource['addresses']['metrics'] = connect_host
+        if 'management_endpoint' in selected:
+            endpoint = selected['management_endpoint']
+            argo.require(isinstance(endpoint, str), 'registered HTTPS management endpoint required')
+            parsed = urlsplit(endpoint)
+            argo.require(parsed.scheme == 'https' and parsed.hostname == connect_host
+                         and parsed.port is not None and 1 <= parsed.port <= 65535
+                         and parsed.netloc == f'{connect_host}:{parsed.port}'
+                         and not parsed.path and not parsed.query and not parsed.fragment,
+                         'management endpoint must match the registered private connection host')
+            resource['management_endpoint'] = endpoint
+    else:
+        argo.require('management_endpoint' not in selected, 'management endpoint override requires OpenStack')
+        resource = read_private(selected['descriptor_file'])
+        argo.require(resource['target_id'] == target_id, 'descriptor identity mismatch')
+        request = ansible.from_descriptor(resource, request_id=request_id, operation='guest.check',
+            ssh=selected['ssh'], timeout_seconds=timeout)
+    for key in ('identity_file', 'known_hosts_file'):
+        ansible.private_file(selected['ssh'][key], identity=key == 'identity_file')
+    return request, resource
+
+
 def load(registry_file, target_id, config_file, binding_file=None):
     registry, config = read_private(registry_file), read_private(config_file)
     argo.require(registry.get('version') == 1 and isinstance(registry.get('targets'), dict), 'registry v1 required')
     selected = registry['targets'][target_id]
     argo.require(selected['purpose'] == 'runtime', 'registered runtime required')
-    descriptor = read_private(selected['descriptor_file'])
-    argo.require(descriptor['target_id'] == target_id, 'descriptor identity mismatch')
-    request = ansible.from_descriptor(descriptor, request_id='registration.' + target_id,
-        operation='guest.check', ssh=selected['ssh'], timeout_seconds=selected.get('timeout_seconds', 1200))
-    for key in ('identity_file', 'known_hosts_file'):
-        ansible.private_file(selected['ssh'][key], identity=key == 'identity_file')
+    request, descriptor = registered_node(selected, target_id, 'registration.' + target_id)
     argo.require(set(config) == {'version', 'cd', 'registration'} and config['version'] == 1, 'registration config v1 required')
     cd, settings = config['cd'], config['registration']
     argo.require(set(cd) == {'version', 'state_dir', 'repository', 'branch', 'context', 'targets'} and cd['version'] == 1
@@ -87,8 +124,11 @@ def load(registry_file, target_id, config_file, binding_file=None):
                  and target['namespace'] not in {'default', 'argocd', 'kube-system', 'kube-public', 'kube-node-lease'},
                  'dedicated application namespace required')
     expected_server = 'https://' + descriptor['addresses']['private'] + ':6443'
-    argo.require(target.get('cluster_server', expected_server) == expected_server and target['architecture'] == 'amd64',
-                 'cluster endpoint must match the provisioned private runtime')
+    if request['target']['provider'] == 'openstack':
+        expected_server = descriptor.get('management_endpoint', expected_server)
+    argo.require(target.get('cluster_server', expected_server) == expected_server
+                 and target['architecture'] == request['target']['architecture'] == 'amd64',
+                 'cluster endpoint must match the registered private runtime')
     target['cluster_server'] = expected_server
     path = PurePosixPath(target['path'])
     argo.require(not path.is_absolute() and '..' not in path.parts and str(path) not in ('', '.')
@@ -135,7 +175,7 @@ def load(registry_file, target_id, config_file, binding_file=None):
 @contextmanager
 def runtime_kubectl(request):
     node = request['inventory']['control_plane'][0]
-    with ansible.forwarded_port(node['ssh']['transport_ref'], time.monotonic() + 540) as port:
+    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 540) as port:
         host = next(iter(ansible.build_inventory(request, port)['all']['children']['k3s_server']['hosts'].values()))
         prefix = ['ssh', *shlex.split(host['ansible_ssh_common_args']), '-i', host['ansible_ssh_private_key_file'],
                   '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15', host['ansible_user'] + '@' + host['ansible_host']]
@@ -194,7 +234,7 @@ def runtime_documents(target, owner, pull, binding):
     return result
 
 
-def register_argo(kube, cd, registered, target_id, owner, binding):
+def register_argo(kube, cd, registered, target_id, owner, binding, *, tls_server_name=None):
     target = registered['target']; namespace = target['namespace']
     control = lambda ns, *args, **kwargs: argo.kubectl(cd['context'], ns, *args, **kwargs)
     app = {'metadata': {'namespace': 'argocd', 'name': target_id}, 'spec': {'project': target['project'],
@@ -225,6 +265,8 @@ def register_argo(kube, cd, registered, target_id, owner, binding):
     renewal = {'secret': 'railshot-' + target_id, 'target_id': target_id, 'server': target['cluster_server'],
                'project': target['project'], 'namespaces': [namespace], 'service_account': {'name': SA, 'namespace': namespace, 'uid': sa['metadata']['uid']},
                'ca_sha256': hashlib.sha256(ca).hexdigest(), 'audiences': audiences}
+    if tls_server_name is not None:
+        renewal['tls_server_name'] = tls_server_name
     credentials.validate_policy({'version': 1, 'targets': [renewal]})
     credentials.claims(token, renewal, time.time())
     for ns, resource, group, verb, allowed in [(namespace, 'deployments', 'apps', 'create', True),
@@ -232,9 +274,13 @@ def register_argo(kube, cd, registered, target_id, owner, binding):
             ('', 'clusterroles', 'rbac.authorization.k8s.io', 'create', False)]:
         access = credentials.customer(target['cluster_server'], ca, token, '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews',
             {'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectAccessReview', 'spec': {
-                'resourceAttributes': {'namespace': ns, 'resource': resource, 'group': group, 'verb': verb}}})
+                'resourceAttributes': {'namespace': ns, 'resource': resource, 'group': group, 'verb': verb}}},
+            **({'server_name': tls_server_name} if tls_server_name is not None else {}))
         argo.require(access['status']['allowed'] is allowed, 'runtime credential scope differs')
-    argo.register_cluster([review], cd['context'], {'bearerToken': token, 'tlsClientConfig': {'caData': ca_data, 'insecure': False}})
+    tls_config = {'caData': ca_data, 'insecure': False}
+    if tls_server_name is not None:
+        tls_config['serverName'] = tls_server_name
+    argo.register_cluster([review], cd['context'], {'bearerToken': token, 'tlsClientConfig': tls_config})
     return renewal, token_response['status']['expirationTimestamp']
 
 
@@ -411,7 +457,10 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                     owned_apply(kube, document)
                 complete('namespace')
                 checkpoint('argo')
-                renewal, expiration = register_argo(kube, cd, registered, target_id, owner, binding)
+                tls_options = {}
+                if request['target']['provider'] == 'openstack' and request['inventory']['control_plane'][0]['ssh'].get('connect_host'):
+                    tls_options['tls_server_name'] = identity['descriptor']['addresses']['private']
+                renewal, expiration = register_argo(kube, cd, registered, target_id, owner, binding, **tls_options)
                 save(home / 'renewal.json', renewal); complete('argo')
             checkpoint('credentials')
             install_renewal(cd, renewal)

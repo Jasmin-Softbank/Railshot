@@ -15,10 +15,15 @@ Node 22 이상에서 `npm ci --ignore-scripts`, `npm start`를 실행한다. 이
 | `GITHUB_REF`, `GITHUB_WORKFLOW` | 기본 `main`, `railshot-deploy.yml` |
 | `RAILSHOT_TENANT` | 소문자·숫자 1–20자. 기본 `demo` |
 | `RAILSHOT_TARGET_ID` | 필수 운영자 target ID. CI 저장소의 같은 이름 변수와 일치해야 함 |
+| `RAILSHOT_TARGET_IDS` | 선택 CI 대상 ID의 쉼표 목록. 기본 target을 포함해야 하며 생략 시 기본 target만 허용 |
+| `RAILSHOT_TARGET_PROVIDER` | 기본 target의 명시적 provider. 플랫폼 기본값은 `aws` |
+| `RAILSHOT_PROVIDER_TARGETS` | 선택 JSON provider→target 매핑. 예: `{"openstack":"k3s-openstack"}`. 해당 ID의 CI 허용 및 CD 등록이 모두 있어야 선택 가능 |
 | `RAILSHOT_API_URL` | CLI/MCP의 API 주소. 기본 `http://127.0.0.1:4173` |
 | `RAILSHOT_SOURCE_ROOT` | MCP local source의 허용 root |
 
 `npm run cli -- deploy <폴더 또는 ZIP 또는 공개 GitHub URL> --app my-app --target aws-demo`, `npm run cli -- status <run_id>`가 같은 HTTP API를 사용한다. target 생략 시 API의 운영자 설정을 사용한다. 임의 target은 거부한다. 이 제출 명령은 실제 설정이 있을 때 GitHub에 소스를 등록하고 CI를 실행하므로 로컬 검증 과정에서는 실행하지 않는다.
+
+provider 매핑은 기존 AWS 기본 대상을 덮어쓰지 않고 추가한다. 서로 다른 provider에 같은 ID를 지정할 수 없다. 대상 등록 후 플랫폼 저장소의 같은 이름 Actions 변수를 설정하면 [플랫폼 릴리스](../../docs/architecture/container-deployment.md)가 매핑과 기본값을 포함한 `RAILSHOT_TARGET_IDS`를 계속 렌더링한다. 매핑 설정은 인프라 생성이나 배포 성공의 증거가 아니다. OpenStack의 기존 서버 등록 범위는 [런타임 등록 계약](../../docs/api/runtime-registration.md)을 따른다.
 
 MCP는 `npm run mcp`로 stdio transport를 사용한다. 기존 deploy/status 도구를 유지하며 CI의 published 상태를 앱 deployed로 바꾸지 않는다.
 

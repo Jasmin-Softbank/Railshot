@@ -61,6 +61,13 @@ Node Ready와 Pod 상태는 kube-state-metrics가 관측한 API 객체 상태이
 
 ## 설치
 
+`bootstrap.py`와 `register.py`의 운영자 설정은 등록된 관측 VM의 SSH transport를 기본으로
+사용합니다. 실행기와 관측 스택을 기존 control VM에 함께 배치하고 그 사설 주소에 직접
+접속할 때만 `"observer_transport": "direct"`를 명시할 수 있습니다. 이 설정도 등록된
+`observer_ip`, 전용 SSH identity와 고정 known-hosts를 사용하며, 임의 접속 주소를 받지
+않습니다. 같은 VM에서는 해당 사설 송신 주소로 제한한 별도 키를 생성하고 사용자 개인 키를
+복사하지 않습니다. 기본 AWS SSM/GCP IAP 동작은 유지됩니다.
+
 실제 IP와 자격증명은 `.local/`에만 둡니다. 예제 `192.0.2.x`와 `example.com`은 설명용입니다.
 아래 생성 명령은 **관측 Linux VM**의 이 저장소에서 실행하는 것을 권장합니다.
 

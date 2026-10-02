@@ -254,6 +254,40 @@ class APIJourney(unittest.TestCase):
         finally:
             self.release.set(); server.shutdown(); server.server_close(); thread.join(2)
 
+    def test_operator_registered_openstack_relay_keeps_native_binding_and_rejects_endpoint_changes(self):
+        self.register_openstack()
+        config = json.loads((self.root / 'targets.json').read_text())
+        target = config['targets']['demo-openstack']
+        target['ssh'].update(connect_host='172.31.0.172', port=10022)
+        target['management_endpoint'] = 'https://172.31.0.172:16443'
+        self.write('targets.json', json.dumps(config))
+        jobs = api.Jobs(self.root / 'targets.json', self.root / 'relay-state')
+        try:
+            request = jobs.resolve('demo-openstack', 'relay-check')
+            node = request['inventory']['control_plane'][0]
+            self.assertEqual(node['private_ipv4'], '192.168.50.10')
+            self.assertEqual(node['resource_id'], target['resource_id'])
+            self.assertEqual(node['ssh']['connect_host'], '172.31.0.172')
+            for endpoint in ('http://172.31.0.172:16443', 'https://172.31.0.173:16443',
+                             'https://172.31.0.172', 'https://172.31.0.172:0', 'https://172.31.0.172:65536',
+                             'https://user@172.31.0.172:16443', 'https://172.31.0.172:16443/',
+                             'https://172.31.0.172:16443?query', 'https://172.31.0.172:16443#fragment', None):
+                jobs.targets['demo-openstack']['management_endpoint'] = endpoint
+                with self.subTest(endpoint=endpoint), self.assertRaises(api.APIError) as failure:
+                    jobs.resolve('demo-openstack', 'invalid-relay')
+                self.assertEqual(failure.exception.code, 'TARGET_CONFIGURATION_INVALID')
+            jobs.targets['demo-openstack']['management_endpoint'] = target['management_endpoint']
+            server = json.loads((self.root / 'demo-openstack.json').read_text())
+            self.write('demo-openstack.json', json.dumps({**server, 'project_id': 'foreign-project'}))
+            with self.assertRaises(api.APIError):
+                jobs.resolve('demo-openstack', 'foreign-server')
+        finally:
+            jobs.pool.shutdown(); jobs.instance_lock.close()
+        config['targets']['demo-aws']['management_endpoint'] = 'https://172.31.0.172:16443'
+        self.write('targets.json', json.dumps(config))
+        with self.assertRaisesRegex(ValueError, 'invalid registered target'):
+            api.Jobs(self.root / 'targets.json', self.root / 'invalid-relay-state')
+
     def test_database_inventory_is_external_and_cannot_dispatch_installation(self):
         self.register_openstack()
         body = json.loads((api.ansible.ROOT / 'examples/ansible/database-validate.json').read_text())

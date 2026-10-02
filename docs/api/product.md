@@ -68,7 +68,9 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 
 대시보드는 소스와 `environment=cloud|onprem`, `provider=aws|gcp|openstack|proxmox`를 기존 배포 endpoint로 보낸다. 이 모드는 `app`·`target_id`와 함께 사용할 수 없다. API가 운영자의 `RAILSHOT_PROVIDER_TARGETS` 매핑과 CD 등록에서 대상·앱을 결정하며, 등록 앱이 없으면 GitHub/ZIP/폴더 이름에서 유효한 앱 이름을 생성한다. 폴더명은 선택적 `source_name`(1–255자, 제어 문자 금지)으로 전달한다. 알 수 없는 provider와 잘못된 조합은 422, 연결되지 않은 선택은 409이며 다른 대상으로 대체하지 않는다. 기존 app/target_id 요청과 builds API는 유지한다.
 
-`RAILSHOT_TARGET_ID`·`RAILSHOT_TARGET_PROVIDER`는 기존 기본 대상을 유지한다. 추가 provider는 `RAILSHOT_PROVIDER_TARGETS` JSON 객체에 명시한다. 예를 들어 `{"gcp":"k3s-gcp","openstack":"k3s-openstack"}`이며, 값은 실제 등록한 target ID여야 한다. 하나의 target ID를 여러 provider에 배정하거나 기존 기본 대상을 다른 ID로 바꾸는 설정은 거부한다. provider 미설정 시 화면 선택 실행은 차단되며 대상 ID 문자열로 provider를 추측하지 않는다. UI의 클라우드/온프레미스 카드와 provider 선택을 backend의 target ID나 실행 종류 드롭다운으로 대체하지 않는다.
+현재 공개 플랫폼 manifest는 AWS 기본 대상에 `RAILSHOT_TARGET_PROVIDER=aws`를 명시한다. 추가 provider는 선택 JSON 설정 `RAILSHOT_PROVIDER_TARGETS={"gcp":"k3s-gcp","openstack":"k3s-openstack"}`으로 연결하며 기본 AWS 대상은 유지한다. 추가 ID가 `RAILSHOT_TARGET_IDS`의 CI 허용 목록과 CD adapter의 등록 대상 양쪽에 있을 때만 `/api/v1/options`에서 사용 가능하다. 선택은 해당 대상의 등록 앱으로 바인딩되며 다른 provider로 대체하지 않는다. 잘못된 매핑, 기본 provider의 대상 교체, 같은 ID의 여러 provider 선언은 거부한다. provider가 명시되지 않은 대상은 ID 문자열로 종류를 추측하지 않는다. UI의 클라우드/온프레미스 카드와 provider 선택은 그대로 유지한다.
+
+플랫폼 릴리스는 같은 이름의 선택 Actions 변수를 `--provider-targets`로 전달하고, 매핑과 기본 AWS를 포함한 CI 목록을 이미지 선언에 함께 보존한다. 기본값은 빈 매핑이다. 먼저 [런타임 등록](runtime-registration.md), CI 대상·앱 바인딩과 API의 CD 등록을 완료한 뒤 이 변수를 설정한다. OpenStack은 기존 서버·K3s의 등록과 재배포 경로이며, AWS/GCP의 Terraform 기반 신규 환경 생성 범위를 확장하지 않는다.
 
 `GET /api/v1/builds`, `/api/v1/deployments`, `/api/v1/environments`는 현재 세션의 실행 요약 목록을, `GET /api/v1/plans`는 현재 세션의 계획 목록을 반환한다. 배포 내역은 서버 목록으로 복원하며 localStorage의 기존 마지막 실행 ID를 사용하지 않는다. 세션·설정·OpenStack 연결 API는 [별도 명세](dashboard-sessions.md)에 정리했다.
 

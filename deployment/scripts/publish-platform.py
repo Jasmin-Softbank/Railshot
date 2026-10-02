@@ -28,7 +28,7 @@ def git(*args, check=True):
     return result
 
 
-def render(artifacts, target, port):
+def render(artifacts, target, port, provider_targets="{}"):
     images = {}
     for item in sorted(artifacts.iterdir()):
         if item.is_symlink() or not item.is_file() or item.suffix != ".json" or item.stem not in COMPONENTS:
@@ -48,19 +48,19 @@ def render(artifacts, target, port):
         image_file.write_text(json.dumps(images))
         rendered = subprocess.run([sys.executable, str(ROOT / "deployment/scripts/render-platform.py"),
                                    str(image_file), "--target-id", target,
-                                   "--dashboard-node-port", str(port)], text=True, capture_output=True)
+                                   "--dashboard-node-port", str(port), "--provider-targets", provider_targets], text=True, capture_output=True)
         if rendered.returncode:
             raise ValueError("platform renderer rejected deployment configuration")
         return json.dumps(json.loads(rendered.stdout), indent=2) + "\n"
 
 
-def publish(artifacts, source_sha, target, port):
+def publish(artifacts, source_sha, target, port, provider_targets="{}"):
     if not re.fullmatch(r"[a-f0-9]{40}", source_sha) or git("rev-parse", "HEAD").stdout.strip() != source_sha:
         raise ValueError("checkout must match the reviewed source SHA")
     if git("status", "--porcelain").stdout:
         raise ValueError("release requires a clean ephemeral checkout")
     # Render before switching branches so the checked source manifest is used.
-    declaration = render(artifacts, target, port)
+    declaration = render(artifacts, target, port, provider_targets)
     digests = {container["name"] + "_digest": container["image"].rsplit(":", 1)[1]
                for item in json.loads(declaration)["items"] if item["kind"] == "Deployment"
                for container in item["spec"]["template"]["spec"]["containers"]}
@@ -101,9 +101,10 @@ if __name__ == "__main__":
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--target-id", required=True)
     parser.add_argument("--dashboard-node-port", type=int, required=True)
+    parser.add_argument("--provider-targets", default="{}", help="optional registered provider-to-target JSON map")
     args = parser.parse_args()
     try:
-        result = publish(args.artifacts, args.source_sha, args.target_id, args.dashboard_node_port)
+        result = publish(args.artifacts, args.source_sha, args.target_id, args.dashboard_node_port, args.provider_targets)
         if os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                 for key in ("revision", "dashboard_digest", "api_digest"):

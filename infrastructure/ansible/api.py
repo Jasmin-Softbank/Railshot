@@ -15,6 +15,7 @@ import stat
 import sys
 import threading
 import time
+from urllib.parse import urlsplit
 
 import run as ansible
 import inputs
@@ -88,8 +89,9 @@ class Jobs:
             openstack = {'server_file', 'resource_id', 'project_id', 'management_network',
                          'placement', 'architecture', 'initialization'}
             required = openstack if isinstance(target, dict) and 'server_file' in target else {'descriptor_file'}
+            optional = {'management_endpoint'} if required == openstack else set()
             if (not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', target_id) or not isinstance(target, dict)
-                    or set(target) - (required | common) or not (required | {'ssh'}) <= set(target)
+                    or set(target) - (required | common | optional) or not (required | {'ssh'}) <= set(target)
                     or target.get('purpose', 'runtime') not in ('runtime', 'database')):
                 raise ValueError('invalid registered target')
         self.state_dir = private_directory(state_dir)
@@ -160,11 +162,21 @@ class Jobs:
             raise APIError('TARGET_PURPOSE_MISMATCH', 400)
         try:
             if 'server_file' in target:
-                return ansible.from_openstack(private_json(target['server_file']),
+                request = ansible.from_openstack(private_json(target['server_file']),
                     request_id=request_id, operation=operation, target_id=target_id,
                     **{key: target[key] for key in ('resource_id', 'project_id', 'management_network',
                        'placement', 'architecture', 'initialization', 'ssh')},
                     timeout_seconds=target.get('timeout_seconds', 1200))
+                if 'management_endpoint' in target:
+                    endpoint = target['management_endpoint']
+                    if not isinstance(endpoint, str):
+                        raise ValueError('invalid registered management endpoint')
+                    node = request['inventory']['control_plane'][0]
+                    host = node['ssh'].get('connect_host', node['private_ipv4'])
+                    url = urlsplit(endpoint)
+                    if url.scheme != 'https' or not url.port or endpoint != f'https://{host}:{url.port}':
+                        raise ValueError('management endpoint must match the registered SSH host')
+                return request
             descriptor = private_json(target['descriptor_file'])
             if descriptor.get('target_id') != target_id:
                 raise ValueError('target binding mismatch')

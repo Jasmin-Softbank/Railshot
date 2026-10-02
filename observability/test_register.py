@@ -43,6 +43,39 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(result['scrape_configs'][0]['static_configs'][0]['targets'], ['192.0.2.10:30910', '192.0.2.11:30910'])
         self.assertEqual(len(rows), 1)
 
+    def test_direct_observer_ssh_keeps_identity_and_default_transport(self):
+        request = {'inventory': {'control_plane': [{'private_ipv4': self.config['observer_ip'],
+            'ssh': {'transport_ref': 'ssm:ap-northeast-2:i-12345678'}}]}}
+        references = []
+        @contextmanager
+        def forward(reference, deadline):
+            references.append(reference)
+            yield 2222 if reference else None
+        def inventory(value, port):
+            return {'all': {'children': {'k3s_server': {'hosts': {'observer': {
+                'ansible_ssh_common_args': '-o StrictHostKeyChecking=yes -o UserKnownHostsFile=/private/known_hosts',
+                'ansible_ssh_private_key_file': '/private/observer_key', 'ansible_port': port or 22,
+                'ansible_user': 'railshot-operator',
+                'ansible_host': '127.0.0.1' if port else value['inventory']['control_plane'][0]['private_ipv4']}}}}}}
+        ansible = SimpleNamespace(forwarded_port=forward, build_inventory=inventory)
+        with registration.observer_ssh(self.config, request, ansible) as prefix:
+            self.assertEqual(prefix[-1], 'railshot-operator@127.0.0.1')
+        direct = {**self.config, 'observer_transport': 'direct'}
+        settings(direct)
+        with registration.observer_ssh(direct, request, ansible) as prefix:
+            self.assertEqual(prefix[-1], 'railshot-operator@192.0.2.20')
+            self.assertIn('HostKeyAlias=192.0.2.20', prefix)
+            self.assertIn('StrictHostKeyChecking=yes', prefix)
+            self.assertIn('/private/observer_key', prefix)
+        self.assertEqual(references, ['ssm:ap-northeast-2:i-12345678', None])
+        self.assertEqual(request['inventory']['control_plane'][0]['ssh']['transport_ref'], references[0])
+        request['inventory']['control_plane'][0]['ssh']['connect_host'] = '192.0.2.99'
+        with self.assertRaises(ValueError):
+            with registration.observer_ssh(direct, request, ansible):
+                self.fail('unregistered observer address accepted')
+        with self.assertRaises(ValueError):
+            settings({**direct, 'observer_transport': 'arbitrary'})
+
     def test_bootstrap_is_empty_and_idempotent_without_rotating_password_or_promoting_acceptance(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root) / 'observer'
