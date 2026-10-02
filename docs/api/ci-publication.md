@@ -39,7 +39,7 @@ Secret 참조는 설치할 위치와 이름입니다. API와 CD는 v2를 검사�
 
 ## 소비 경계
 
-API는 GitHub run/attempt/jobs와 artifact metadata를 읽고 고유 artifact ID의 ZIP을 다운로드합니다. 최신 실제 release producer와 run SHA를 결합한 뒤 handoff, 파일 해시, manifest/verdict/service의 일치를 확인합니다. 검사가 통과하면 `published` 상태를 반환합니다. 실패한 job을 재실행하면서 이전 producer 결과를 사용하는 경우에는 해당 결과의 producer attempt를 유지합니다.
+API는 GitHub run/attempt/jobs와 artifact metadata를 읽고 고유 artifact ID의 ZIP을 다운로드합니다. 최신 실제 release producer와 run SHA를 결합한 뒤 handoff, 파일 해시, manifest/verdict/service의 일치를 확인합니다. 검사가 통과하면 `published` 상태를 반환합니다. 실패한 job을 재실행하면서 이전 산출물을 재사용해도 원래 bundle artifact ID를 유지합니다. GitHub가 과거 성공 job을 새 attempt 목록에 복제할 수 있으므로 `steps.observed_attempt`는 조회 회차만 뜻합니다. 실제 게시 생산 회차는 검증한 `publication.producer_attempt`로 확인합니다.
 
 CD 담당자는 [인계 CLI](https://github.com/Jasmin-Softbank/Railshot/blob/integration/team-assembly-20261002/gitops/README.md)에 게시 디렉터리의 images/spec/verdict/manifest와 운영자가 선택한 target·destination·GitOps 설정을 전달합니다. `handoff.json`은 출처를 추가로 확인하는 metadata입니다. CLI는 검토용 Deployment/Service/Argo Application 파일을 생성합니다. API는 이 CLI를 자동 호출하지 않으며, `published`는 이미지 게시가 확인되었다는 뜻입니다.
 
