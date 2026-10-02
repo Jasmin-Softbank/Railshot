@@ -69,6 +69,7 @@ def installed(rows):
     # All probes are local. Isolated config prevents discovery of host/operator credentials.
     with tempfile.TemporaryDirectory(prefix='railshot-runtime-smoke-') as temporary:
         env = {**os.environ, 'HOME': temporary, 'CLOUDSDK_CONFIG': temporary,
+               'ANSIBLE_CONFIG': str(ROOT / 'infrastructure/ansible/ansible.cfg'),
                'CLOUDSDK_CORE_DISABLE_PROMPTS': '1', 'CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK': 'true',
                'AWS_EC2_METADATA_DISABLED': 'true', 'AWS_PAGER': '', 'PYTHONDONTWRITEBYTECODE': '1', 'CHECKPOINT_DISABLE': '1'}
         def run(*args):
