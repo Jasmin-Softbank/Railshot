@@ -49,7 +49,10 @@ class ProvisionTest(unittest.TestCase):
                 target = json.loads(self.target.read_text())
                 return json.dumps({'schema_version': 'v1', 'provider_kind': target['provider_kind'],
                                    'target_id': target['target_id'], 'execution_driver': 'terraform',
-                                   'owner_ref': 'terraform:local:' + str(work.parent / 'terraform.tfstate')})
+                                   'owner_ref': 'terraform:local:' + str(work.parent / 'terraform.tfstate'),
+                                   'purpose': target['variables'].get('purpose', 'runtime'),
+                                   'data_disk': {'mount_path': '/var/lib/postgresql' if target['variables'].get('purpose') == 'database' else '/var/lib/rancher'},
+                                   'runtime': {'readiness': 'not_configured'}})
             if args[0] == 'apply' and self.fail_apply:
                 raise ValueError('Terraform failed')
             return ''
@@ -259,6 +262,51 @@ provision.execute('apply',Path(sys.argv[3]),Path(sys.argv[4]),sys.argv[5],mainte
                 provision.execute('apply', self.target, self.state, result['plan_sha256'], maintenance=data)
             self.assertEqual(caught.exception.code, 'INFRA_MAINTENANCE_REQUIRED')
         self.assertFalse(any(args[0] == 'apply' for args, _ in self.calls))
+
+    def test_database_profile_uses_same_saved_plan_and_requires_matching_purpose(self):
+        for provider in ('aws', 'gcp'):
+            target = self.target_for(provider)
+            target['profile']['kind'] = 'database_cluster'
+            self.target.write_text(json.dumps(target))
+            with self.assertRaises(provision.OperationError):
+                provision.execute('plan', self.target, self.state)
+            target['variables']['purpose'] = 'database'
+            self.target.write_text(json.dumps(target))
+            plan = provision.execute('plan', self.target, self.state)
+            self.assertEqual(plan['capabilities']['kind'], 'database_cluster')
+            applied = provision.execute('apply', self.target, self.state, plan['plan_sha256'], maintenance=self.maintenance(plan))
+            self.assertEqual(applied['readiness'], 'unverified')
+        target = self.target_for('azure')
+        target['profile']['kind'] = 'database_cluster'
+        target['variables']['purpose'] = 'database'
+        self.target.write_text(json.dumps(target))
+        with self.assertRaises(provision.OperationError):
+            provision.execute('plan', self.target, self.state)
+        target = self.target_for('gcp')
+        target['variables']['purpose'] = 'database'
+        self.target.write_text(json.dumps(target))
+        with self.assertRaises(provision.OperationError):
+            provision.execute('plan', self.target, self.state)
+
+    def test_database_apply_rejects_runtime_storage_output_as_unknown(self):
+        target = self.target_for('gcp')
+        target['profile']['kind'] = 'database_cluster'
+        target['variables']['purpose'] = 'database'
+        self.target.write_text(json.dumps(target))
+        plan = provision.execute('plan', self.target, self.state)
+        original = self.command_mock.side_effect
+        def wrong_storage(args, work, log):
+            result = original(args, work, log)
+            if args[0] == 'output':
+                descriptor = json.loads(result)
+                descriptor['data_disk']['mount_path'] = '/var/lib/rancher'
+                return json.dumps(descriptor)
+            return result
+        self.command_mock.side_effect = wrong_storage
+        with self.assertRaises(provision.OperationError) as caught:
+            provision.execute('apply', self.target, self.state, plan['plan_sha256'], maintenance=self.maintenance(plan))
+        self.assertEqual(caught.exception.outcome, 'UNKNOWN')
+        self.assertEqual(caught.exception.side_effect, 'completed')
 
     def test_registered_profile_is_required_before_terraform(self):
         target = self.target_for('gcp')

@@ -4,7 +4,7 @@ umask 077
 export DEBIAN_FRONTEND=noninteractive
 
 device=${device}
-mount_path=/var/lib/rancher
+mount_path=${data_mount_path}
 for attempt in $(seq 1 120); do
   [ ! -b "$device" ] || break
   sleep 1

@@ -31,11 +31,15 @@ const sourceBox = document.querySelector('#source-box');
 const error = document.querySelector('#form-error');
 const provider = document.querySelector('#provider');
 const providerField = document.querySelector('#provider-field');
+const deploymentDatabase = document.querySelector('#deployment-database');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
 let selectedSource = null;
 let reviewed = null;
 let deploymentOptions = [];
+let profiles = [];
+let reviewing = false;
+let reviewGeneration = 0;
 let connectionError = null;
 let submitting = false;
 // ponytail: remember one resource locator per browser; server owns durable execution records.
@@ -49,6 +53,7 @@ let observationError = false;
 const requests = new Set();
 
 function invalidateReview() {
+  reviewGeneration += 1;
   reviewed = null;
   document.querySelector('#review-panel').hidden = true;
   deployButton.disabled = true;
@@ -110,7 +115,7 @@ sourceBox.addEventListener('drop', (event) => {
 const terminal = new Set(['succeeded', 'failed', 'blocked', 'unknown', 'published', 'publication_unverified']);
 const labels = { queued: '실행 대기 중', running: '실행 중', succeeded: '앱 배포 완료', published: '이미지 게시 완료',
   failed: '실행 실패', blocked: '실행 조건 확인 필요', unknown: '실행 결과 확인 필요', publication_unverified: '게시 결과 확인 필요' };
-function activeRun() { return current && !terminal.has(current.status); }
+function activeRun() { return current && (current.status === 'unknown' || !terminal.has(current.status)); }
 function deploymentSelection() {
   const environment = document.querySelector('[name="environment"]:checked').value;
   return { environment, provider: environment === 'cloud' ? 'aws' : provider.value };
@@ -119,19 +124,48 @@ function selectedOption() {
   const selected = deploymentSelection();
   return deploymentOptions.find((item) => item.environment === selected.environment && item.provider === selected.provider);
 }
+function selectedProfiles() {
+  return profiles.filter((item) => item.provider === deploymentSelection().provider && item.deployment_supported);
+}
+function selectedProfile() { const matches = selectedProfiles(); return matches.length === 1 ? matches[0] : null; }
+function planCost(plan) {
+  return plan.cost ? ` 추가 비용 예상 ${plan.cost.incremental_estimate} ${plan.cost.currency} · 기존 사용·예약을 포함한 예상 ${plan.cost.projected_total} / 한도 ${plan.cost.limit} ${plan.cost.currency}.` : '';
+}
+
+function databaseSummary(profile, mode) {
+  const database = profile?.database;
+  return mode === 'patroni' && database ? `PostgreSQL ${database.database_nodes}대 · DCS 투표 노드 ${database.dcs_voters}대 · 프록시 ${database.proxy_nodes}대` : 'DB 없음';
+}
+function databaseChoice(select, profile, reset = false) {
+  const available = profile?.database?.mode === 'patroni';
+  const required = available && profile.database.required === true;
+  select.querySelector('[value="none"]').disabled = required;
+  const option = select.querySelector('[value="patroni"]');
+  option.disabled = !available;
+  option.textContent = required ? 'PostgreSQL HA 포함 (필수)' : 'PostgreSQL HA 포함';
+  if (!available) select.value = 'none';
+  else if (reset || required) select.value = 'patroni';
+}
 function updateSelection() {
   const selected = deploymentSelection();
   providerField.hidden = selected.environment !== 'onprem';
-  document.querySelector('#connection-status').textContent = connectionError || selectedOption()?.message
-    || (selected.environment === 'onprem' && !selected.provider ? '온프레미스 인프라 종류를 선택하세요.' : '실행 가능한 인프라 연결을 준비 중입니다.');
+  const profile = selectedProfile();
+  document.querySelector('#deployment-database-field').hidden = !profile?.database;
+  databaseChoice(deploymentDatabase, profile);
+  document.querySelector('#deployment-database-note').textContent = databaseSummary(profile, deploymentDatabase.value);
+  document.querySelector('#connection-status').textContent = connectionError || (selectedProfiles().length > 1
+    ? '사용할 배포 사양을 운영자가 하나로 지정해야 합니다.'
+    : profile ? (profile.supported ? '새 실행 환경과 앱을 함께 준비합니다. 선택 내용을 확인하면 비용과 실행 계획을 표시합니다.' : '환경 생성 사양을 아직 실행할 수 없습니다.')
+    : selectedOption()?.message || (selected.environment === 'onprem' && !selected.provider ? '온프레미스 인프라 종류를 선택하세요.' : '실행 가능한 인프라 연결을 준비 중입니다.'));
   invalidateReview();
 }
 document.querySelectorAll('[name="environment"]').forEach((input) => input.addEventListener('change', updateSelection));
 provider.addEventListener('change', updateSelection);
+deploymentDatabase.addEventListener('change', updateSelection);
 
 async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
-  const timeout = setTimeout(() => controller.abort(), options.method === 'POST' ? 120000 : 15000);
+  const timeout = setTimeout(() => controller.abort(), options.method === 'POST' ? (path === '/api/v1/plans' ? 600000 : 120000) : 15000);
   try {
     const response = await fetch(path, { ...options, signal: controller.signal, redirect: 'error' });
     const data = await response.json();
@@ -142,33 +176,80 @@ async function request(path, options = {}, controller = new AbortController()) {
 
 async function checkConnection() {
   try {
-    const { data } = await request('/api/v1/options');
+    const [{ data }, { data: catalog }] = await Promise.all([request('/api/v1/options'), request('/api/v1/profiles?limit=100')]);
+    if (!Array.isArray(catalog.items) || catalog.next_marker) throw new Error('배포 사양 목록을 확인하지 못했습니다.');
+    profiles = catalog.items;
     if (!Array.isArray(data.items)) throw new Error('인프라 연결 상태를 확인하지 못했습니다.');
     deploymentOptions = data.items;
     connectionError = null;
   } catch (cause) {
-    deploymentOptions = [];
+    deploymentOptions = []; profiles = [];
     connectionError = cause.message;
   }
   updateSelection();
 }
 
-document.querySelector('#deploy-form').addEventListener('submit', (event) => {
+async function createPlan(name, profile, mode) {
+  const database = mode === 'patroni' ? { mode, placements: [{ profile_id: profile.id,
+    database_nodes: profile.database.database_nodes, dcs_voters: profile.database.dcs_voters, proxy_nodes: profile.database.proxy_nodes }] } : { mode: 'none' };
+  const { data } = await request('/api/v1/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, runtime: { profile_id: profile.id, node_count: 1 }, database }) });
+  if (typeof data.id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(data.id) || data.name !== name || data.runtime?.profile_id !== profile.id
+      || data.database?.mode !== mode || !Number.isFinite(Date.parse(data.expires_at))
+      || (data.runtime_target_id !== undefined && (typeof data.runtime_target_id !== 'string' || !/^[a-z][a-z0-9-]{2,39}$/.test(data.runtime_target_id)))) throw new Error('환경 계획 응답이 선택 내용과 일치하지 않습니다.');
+  return data;
+}
+
+async function sourceApplication(profile, source) {
+  if (!profile.create_per_request && profile.application_name) return profile.application_name;
+  const name = source.kind === 'repository' ? source.label.split('/').filter(Boolean).at(-1).replace(/\.git$/, '')
+    : source.kind === 'archive' ? archive.files[0].name : (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0];
+  const app = name.normalize('NFKD').toLowerCase().replace(/\.zip$/i, '').replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '').replace(/^[^a-z]+/, '').slice(0, 30).replace(/-+$/g, '');
+  if (/^[a-z][a-z0-9-]{1,28}[a-z0-9]$/.test(app)) return app;
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(name))));
+  return `app-${[...hash].map((value) => value.toString(16).padStart(2, '0')).join('').slice(0, 10)}`;
+}
+
+document.querySelector('#deploy-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (submitting) return;
+  if (submitting || reviewing) return;
   const selected = deploymentSelection();
+  const profile = selectedProfile();
   const option = selectedOption();
   if (!selectedSource) error.textContent = '배포할 소스를 선택하세요.';
   else if (selectedSource.kind === 'repository' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s?#]+\/?$/.test(selectedSource.label)) error.textContent = '공개 GitHub 저장소 URL을 입력하세요.';
   else if (selectedSource.kind === 'archive' && !archive.files[0].name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
   else if (selected.environment === 'onprem' && !selected.provider) error.textContent = '온프레미스 인프라 종류를 선택하세요.';
-  else if (!option?.available) error.textContent = connectionError || option?.message || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
+  else if (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available)) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
   else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
-    reviewed = { ...selected, source: selectedSource, kind: 'deployments', key: crypto.randomUUID() };
-    document.querySelector('#review-source').textContent = selectedSource.label;
-    document.querySelector('#review-target').textContent = option.label;
-    document.querySelector('#review-note').textContent = option.message;
+    invalidateReview();
+    const generation = reviewGeneration, source = selectedSource;
+    let plan;
+    reviewing = true;
+    const reviewButton = document.querySelector('#deploy-form button[type="submit"]');
+    reviewButton.disabled = true;
+    try {
+      if (profile) {
+        const app = await sourceApplication(profile, source);
+        if (generation !== reviewGeneration) return;
+        plan = await createPlan(app, profile, deploymentDatabase.value);
+        if (generation !== reviewGeneration) return;
+        if (!plan.executable) throw new Error(`현재 실행할 수 없는 계획입니다: ${(plan.blockers || []).join(', ')}${planCost(plan)}`);
+        if (Date.parse(plan.expires_at) <= Date.now()) throw new Error('환경 계획이 만료됐습니다. 선택 내용을 다시 확인하세요.');
+      }
+    } catch (cause) {
+      if (generation === reviewGeneration) { error.textContent = cause.message; error.hidden = false; }
+      return;
+    } finally { reviewing = false; reviewButton.disabled = false; }
+    reviewed = { ...selected, source, kind: 'deployments', key: crypto.randomUUID(), plan,
+      targetId: plan?.runtime_target_id || profile?.target_id };
+    document.querySelector('#review-source').textContent = source.label;
+    document.querySelector('#review-target').textContent = profile ? `클라우드 · ${profile.label || profile.id} · ${databaseSummary(profile, plan.database.mode)}` : option.label;
+    document.querySelector('#review-note').textContent = plan
+      ? `앱 ${plan.name}: 새 자원을 생성하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.${planCost(plan)}`
+      : option.message;
     deployButton.disabled = false;
     requestError.hidden = true;
     error.hidden = true;
@@ -248,9 +329,14 @@ deployButton.addEventListener('click', async () => {
   const controls = document.querySelectorAll('#deploy-form input, #deploy-form button, #deploy-form select, #edit-selection');
   controls.forEach((control) => { control.disabled = true; });
   try {
+    if (draft.plan && !draft.attempted && Date.parse(draft.plan.expires_at) <= Date.now()) {
+      reviewed = null; throw new Error('환경 계획이 만료됐습니다. 선택 내용을 다시 확인하세요.');
+    }
     const payload = new FormData();
-    payload.set('environment', draft.environment); payload.set('provider', draft.provider);
-    if (draft.source.kind === 'folder') payload.set('source_name', (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0]);
+    if (draft.plan) {
+      payload.set('app', draft.plan.name); payload.set('target_id', draft.targetId); payload.set('plan_id', draft.plan.id);
+    } else { payload.set('environment', draft.environment); payload.set('provider', draft.provider); }
+    if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0]);
     if (draft.source.kind === 'repository') payload.set('repository_url', draft.source.label);
     else if (draft.source.kind === 'archive') payload.set('archive', archive.files[0]);
     else {
@@ -263,6 +349,7 @@ deployButton.addEventListener('click', async () => {
       }
       payload.set('paths', JSON.stringify(paths));
     }
+    draft.attempted = true;
     const { data, location } = await request(`/api/v1/${draft.kind}`, {
       method: 'POST', headers: { 'Idempotency-Key': draft.key }, body: payload,
     });

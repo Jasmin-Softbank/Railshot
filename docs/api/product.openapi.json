@@ -85,7 +85,8 @@
           "503": {
             "$ref": "#/components/responses/Error503"
           }
-        }
+        },
+        "description": "List configured CI targets and successfully registered environment targets, including application and DB capability. Successful environment bindings restore after API restart; runtime unknown is not a readiness observation."
       }
     },
     "/api/v1/profiles": {
@@ -161,21 +162,33 @@
           "503": {
             "$ref": "#/components/responses/Error503"
           }
-        }
+        },
+        "description": "List operator-registered runtime targets, optional fixed application names and Patroni role counts. supported and deployment_supported describe configured capabilities, not completed provisioning, database readiness or a deployed application."
       }
     },
     "/api/v1/builds": {
       "post": {
         "operationId": "createBuild",
         "summary": "Create build",
-        "description": "Uses the existing CI submitter. id is the GitHub run ID as a string. A shared-workspace binding is saved before 202. No build idempotency guarantee; do not automatically replay a lost response.",
+        "description": "Uses the existing CI submitter. id is the GitHub run ID as a string. A shared-workspace binding is saved before 202. No build idempotency guarantee; do not automatically replay a lost response. plan_id is not accepted for builds.",
         "parameters": [],
         "requestBody": {
           "required": true,
           "content": {
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/Source"
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/Source"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "plan_id"
+                      ]
+                    }
+                  }
+                ]
               }
             }
           }
@@ -307,7 +320,7 @@
       "post": {
         "operationId": "createDeployment",
         "summary": "Create deployment",
-        "description": "Persist a normalized private source snapshot and execution intent before any CI/CD mutation. One unfinished operation including unknown occupies the single worker. Same GitHub URL/key reuses the first SHA without refetching HEAD. Requires the registered target and application in the CD configuration.",
+        "description": "Persist a normalized private source snapshot and execution intent before any external mutation. Without plan_id, require the app-bound target in server CD configuration or a successful saved environment registration; reuse does not provision VMs or databases again. An environment/provider selection resolves the existing registered target server-side. Optional plan_id is only accepted with explicit app/target_id and consumes an executable, unexpired, unchanged plan for the same app and runtime target; its profile must include deployment registration. Complete environment execution and registration before CI, verified publication and CD. Environment or database success alone does not mean application deployment succeeded. One unfinished operation including unknown occupies the single worker. Same GitHub URL/key reuses the first SHA without refetching HEAD; plan_id and environment/provider selection are part of idempotent input.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -478,7 +491,7 @@
       "post": {
         "operationId": "createPlan",
         "summary": "Create plan",
-        "description": "Strict JSON. Operator profiles expose no credentials. Currently executable only for a registered AWS/GCP single runtime node and database.mode=none. Unsupported counts/providers/DB requests produce a saved non-executable plan. Plan creation uses the same execution admission lock.",
+        "description": "Strict JSON. name is an application name of 3 through 30 characters. Operator profiles expose no credentials or local paths. Execution supports one registered AWS/GCP amd64 runtime node with database.mode=none or configured Patroni placements. Each placement must exactly match its registered database, DCS voter and proxy role counts; the combined topology needs at least two database nodes, at least three odd-numbered DCS voters and at least one proxy. standalone and unsupported runtime counts/providers/topologies produce a saved non-executable plan with blockers. Plans expire after 15 minutes, bind policy and target snapshots plus every provider plan digest, and admit only new resources without changes to existing resources. Plan creation uses the same execution admission lock. A saved or executable plan is not deployment evidence. For profiles with deployment configuration, the target database binding requirement must equal whether the request uses patroni; mismatches produce DATABASE_BINDING_PROFILE_MISMATCH before Terraform planning. Profiles without deployment configuration can independently select database preparation.",
         "parameters": [],
         "requestBody": {
           "required": true,
@@ -642,7 +655,7 @@
       "post": {
         "operationId": "createEnvironment",
         "summary": "Create environment",
-        "description": "Execute a saved, unexpired, unchanged, operator-enabled plan once. A plan cannot be consumed by another idempotency key. Provisioning and native guest/runtime results remain distinct. Runtime readiness does not register a deployable application target or configure a database.",
+        "description": "Execute a saved, unexpired, unchanged, operator-enabled plan once. The same plan cannot also be consumed by a deployment or another idempotency key. Record resource, guest, runtime, optional Patroni database and optional deployment registration results separately. deployment_supported becomes true only after registration succeeds; successful runtime preparation alone does not register the target. This endpoint does not build or deploy application source and does not verify public application HTTP.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -1073,13 +1086,76 @@
             }
           },
           "supported": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Whether provider, runtime purpose and operator execution policy permit this profile. Not a live readiness result."
           },
           "blockers": {
             "type": "array",
             "items": {
               "type": "string"
             }
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Operator target ID, or the naming template when create_per_request is true."
+          },
+          "application_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Configured fixed application, or null when requests may choose an application name or no application is configured."
+          },
+          "deployment_supported": {
+            "type": "boolean",
+            "description": "Whether the profile contains deployment configuration. This is configuration capability, not completed target registration."
+          },
+          "database": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "patroni"
+                  },
+                  "database_nodes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16
+                  },
+                  "dcs_voters": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16
+                  },
+                  "proxy_nodes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16
+                  },
+                  "required": {
+                    "type": "boolean",
+                    "description": "Whether this profile's registered application target requires a database binding. When deployment configuration exists, its binding requirement must match database.mode=patroni before Terraform planning."
+                  }
+                },
+                "required": [
+                  "mode",
+                  "database_nodes",
+                  "dcs_voters",
+                  "proxy_nodes",
+                  "required"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Configured Patroni role counts, or null. One VM may have both database and DCS roles, so the counts are not necessarily distinct VM counts. Plan validation checks the requested topology."
+          },
+          "create_per_request": {
+            "type": "boolean",
+            "description": "Derive a new runtime and database target set per plan from this operator template. This is capability, not a completed allocation."
           }
         },
         "required": [
@@ -1089,7 +1165,12 @@
           "site",
           "purposes",
           "supported",
-          "blockers"
+          "blockers",
+          "target_id",
+          "application_name",
+          "deployment_supported",
+          "database",
+          "create_per_request"
         ],
         "additionalProperties": false
       },
@@ -1208,10 +1289,11 @@
           "stage": {
             "type": "string",
             "enum": [
+              "environment",
               "ci",
               "cd",
-              "http",
-              "complete"
+              "complete",
+              "http"
             ]
           },
           "ci": {
@@ -1274,6 +1356,27 @@
               },
               "deployed": {
                 "type": "boolean"
+              },
+              "migration": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "succeeded",
+                      "unverified"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "state"
+                ],
+                "additionalProperties": false,
+                "description": "Optional observed migration Job result. Its success alone does not establish application deployment or public HTTP success."
               }
             },
             "required": [
@@ -1434,6 +1537,17 @@
             "type": "string",
             "format": "date-time"
           },
+          "plan_id": {
+            "type": "string",
+            "description": "Optional saved plan consumed before CI for this deployment."
+          },
+          "environment_id": {
+            "type": "string",
+            "description": "Present with plan_id; the deployment UUID followed by .environment identifies its private execution state. This is not a separately registered /environments/{id} resource."
+          },
+          "environment": {
+            "$ref": "#/components/schemas/EnvironmentProgress"
+          },
           "source_digest": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$",
@@ -1466,7 +1580,9 @@
         "properties": {
           "name": {
             "type": "string",
-            "pattern": "^[a-z][a-z0-9-]{2,62}$"
+            "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$",
+            "minLength": 3,
+            "maxLength": 30
           },
           "runtime": {
             "type": "object",
@@ -1477,7 +1593,8 @@
               "node_count": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 64
+                "maximum": 64,
+                "description": "Accepted range is 1 through 64; current execution supports exactly one runtime node. Other values produce SINGLE_NODE_ONLY."
               }
             },
             "required": [
@@ -1495,7 +1612,8 @@
                   "none",
                   "standalone",
                   "patroni"
-                ]
+                ],
+                "description": "none skips database preparation and requires absent or empty placements. patroni uses registered placements. standalone is accepted as input but produces STANDALONE_DATABASE_UNSUPPORTED."
               },
               "placements": {
                 "type": "array",
@@ -1503,7 +1621,8 @@
                   "type": "object",
                   "properties": {
                     "profile_id": {
-                      "type": "string"
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
                     },
                     "database_nodes": {
                       "type": "integer",
@@ -1529,13 +1648,35 @@
                   ],
                   "additionalProperties": false
                 },
-                "maxItems": 16
+                "maxItems": 16,
+                "description": "Requested role counts must exactly match each referenced profile. Duplicate profiles and unsupported or insufficient combined topologies block execution."
               }
             },
             "required": [
               "mode"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "none"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "placements": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            ]
           }
         },
         "required": [
@@ -1550,7 +1691,9 @@
         "properties": {
           "name": {
             "type": "string",
-            "pattern": "^[a-z][a-z0-9-]{2,62}$"
+            "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$",
+            "minLength": 3,
+            "maxLength": 30
           },
           "runtime": {
             "type": "object",
@@ -1561,7 +1704,8 @@
               "node_count": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 64
+                "maximum": 64,
+                "description": "Accepted range is 1 through 64; current execution supports exactly one runtime node. Other values produce SINGLE_NODE_ONLY."
               }
             },
             "required": [
@@ -1579,7 +1723,8 @@
                   "none",
                   "standalone",
                   "patroni"
-                ]
+                ],
+                "description": "none skips database preparation and requires absent or empty placements. patroni uses registered placements. standalone is accepted as input but produces STANDALONE_DATABASE_UNSUPPORTED."
               },
               "placements": {
                 "type": "array",
@@ -1587,7 +1732,8 @@
                   "type": "object",
                   "properties": {
                     "profile_id": {
-                      "type": "string"
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
                     },
                     "database_nodes": {
                       "type": "integer",
@@ -1613,13 +1759,35 @@
                   ],
                   "additionalProperties": false
                 },
-                "maxItems": 16
+                "maxItems": 16,
+                "description": "Requested role counts must exactly match each referenced profile. Duplicate profiles and unsupported or insufficient combined topologies block execution."
               }
             },
             "required": [
               "mode"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "none"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "placements": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            ]
           },
           "id": {
             "type": "string"
@@ -1629,7 +1797,8 @@
           },
           "expires_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Plan-ready time plus 15 minutes, capped by the earliest provider cost quote expiry. Verification and replay do not extend it."
           },
           "executable": {
             "type": "boolean"
@@ -1641,19 +1810,60 @@
             }
           },
           "cost": {
-            "type": "null"
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "incremental_estimate": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "projected_total": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "limit": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "currency": {
+                    "const": "USD"
+                  },
+                  "within_budget": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "currency",
+                  "incremental_estimate",
+                  "projected_total",
+                  "limit",
+                  "within_budget"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fresh AWS billing and price estimate when automatic budget refresh is configured; null otherwise. Includes existing held reservations and unreported-cost allowance. This is admission estimation, not a hard spending cap."
           },
           "steps": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Planned work: resources, guest, runtime; database and binding when a database is requested; registration when deployment configuration exists. These labels do not prove execution or map one-to-one to progress.stage."
           },
           "plan_sha256": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "runtime_target_id": {
+            "type": "string",
+            "description": "Exact runtime target derived and fixed by this plan. Use this ID with plan_id when submitting a deployment."
           }
         },
         "required": [
@@ -1667,7 +1877,8 @@
           "blockers",
           "cost",
           "steps",
-          "plan_sha256"
+          "plan_sha256",
+          "runtime_target_id"
         ],
         "additionalProperties": false
       },
@@ -1708,7 +1919,8 @@
             ]
           },
           "stage": {
-            "type": "string"
+            "type": "string",
+            "description": "Current or last environment step, such as provision, resources, guest, runtime, database or binding. A succeeded environment may retain its last step name."
           },
           "resources": {
             "type": "object",
@@ -1718,6 +1930,26 @@
               },
               "ansible_job_id": {
                 "type": "string"
+              },
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "target_id": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "target_id",
+                    "provider"
+                  ],
+                  "additionalProperties": false
+                },
+                "description": "Applied runtime and database VM descriptors. Present after all resource applications succeed; not guest, runtime or database readiness."
               }
             },
             "required": [
@@ -1777,7 +2009,8 @@
             ]
           },
           "deployment_supported": {
-            "const": false
+            "type": "boolean",
+            "description": "True only after deployment target registration succeeds. Runtime or database success alone is insufficient."
           },
           "blockers": {
             "type": "array",
@@ -1800,6 +2033,19 @@
           },
           "updated_at": {
             "type": "string"
+          },
+          "binding": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false,
+            "description": "Deployment target registration, including the private database binding when one was produced."
           }
         },
         "required": [
@@ -1833,6 +2079,11 @@
                 "type": "string",
                 "format": "uri",
                 "description": "Public HTTPS GitHub owner/repository URL. Default branch SHA is pinned once."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
               }
             },
             "required": [
@@ -1860,6 +2111,11 @@
                 "type": "string",
                 "format": "binary",
                 "description": "ZIP; at most 100 MiB expanded and 2,000 files."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
               }
             },
             "required": [
@@ -1894,6 +2150,11 @@
               "paths": {
                 "type": "string",
                 "description": "JSON string array, one safe relative path per files entry."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
               }
             },
             "required": [
@@ -1905,7 +2166,7 @@
             "additionalProperties": false
           }
         ],
-        "description": "Exactly one source. source_type is optional and must match if supplied. Reject unknown fields and duplicate singleton fields; only files may repeat. Credentials, provider URLs and SSH paths are not accepted."
+        "description": "Exactly one source. source_type is optional and must match if supplied. Reject unknown fields and duplicate singleton fields; only files may repeat. Credentials, provider URLs and SSH paths are not accepted. Optional plan_id is accepted only by deployments, not builds or legacy deploy."
       },
       "TargetList": {
         "type": "object",
@@ -1950,6 +2211,150 @@
           "next_marker"
         ],
         "additionalProperties": false
+      },
+      "EnvironmentProgress": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "blocked",
+              "unknown"
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "description": "Current or last environment step, such as provision, resources, guest, runtime, database or binding. A succeeded environment may retain its last step name."
+          },
+          "resources": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              },
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "target_id": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "target_id",
+                    "provider"
+                  ],
+                  "additionalProperties": false
+                },
+                "description": "Applied runtime and database VM descriptors. Present after all resource applications succeed; not guest, runtime or database readiness."
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "guest": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "database": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "runtime_target_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deployment_supported": {
+            "type": "boolean",
+            "description": "True only after deployment target registration succeeds. Runtime or database success alone is insufficient."
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "binding": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false,
+            "description": "Deployment target registration, including the private database binding when one was produced."
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false,
+        "description": "Embedded environment execution progress. Initially only status=queued is present. Environment completion is separate from CI, application CD and public HTTP verification."
       },
       "Metric": {
         "type": "object",
@@ -2117,7 +2522,7 @@
         "additionalProperties": false
       },
       "DeploymentSource": {
-        "description": "Either explicit app/target_id or the original UI environment/provider choice, never both. Server resolves the registered target and fixed app name; otherwise it derives a valid app name from the source. An unavailable provider is rejected before source retrieval or execution.",
+        "description": "Either explicit app/target_id with optional plan_id, or the original UI environment/provider choice, never both. A plan binds app to its name and target_id to its runtime_target_id. Without a plan, explicit fields may reuse a successful saved environment registration. For environment/provider selection, the server resolves the existing registered target and fixed app name; otherwise it derives a valid app name from the source. An unavailable provider is rejected before source retrieval or execution.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/Source"

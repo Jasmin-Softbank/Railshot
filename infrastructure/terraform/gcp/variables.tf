@@ -184,3 +184,59 @@ variable "node_name" {
     error_message = "node_name must be empty or a lowercase DNS subdomain, at most 253 characters. Renaming an existing node is not a normal bootstrap update."
   }
 }
+
+variable "purpose" {
+  type        = string
+  default     = "runtime"
+  description = "Approved node role; database prepares PostgreSQL storage without installing a runtime or database."
+  validation {
+    condition     = contains(["runtime", "database"], var.purpose)
+    error_message = "purpose must be runtime or database."
+  }
+}
+
+variable "database_ingress" {
+  type        = list(object({ port = number, cidr = string }))
+  default     = []
+  description = "Approved private TCP ingress for PostgreSQL, etcd and Patroni; RFC1918 /16-/32 only. No routing or database installation."
+  validation {
+    condition = length(var.database_ingress) <= 64 && alltrue([for rule in var.database_ingress :
+      contains([5432, 2379, 2380, 8008], rule.port) && can(cidrnetmask(rule.cidr)) &&
+      can(regex("^(10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.)[0-9.]+/(1[6-9]|2[0-9]|3[0-2])$", rule.cidr))
+    ])
+    error_message = "Supply at most 64 private IPv4 /16-/32 rules on TCP 5432, 2379, 2380 or 8008."
+  }
+}
+
+variable "database_egress" {
+  type        = list(object({ port = number, cidr = string }))
+  default     = []
+  description = "Approved private TCP egress for PostgreSQL, etcd and Patroni; RFC1918 /16-/32 only. No routing or database installation."
+  validation {
+    condition = length(var.database_egress) <= 64 && alltrue([for rule in var.database_egress :
+      contains([5432, 2379, 2380, 8008], rule.port) && can(cidrnetmask(rule.cidr)) &&
+      can(regex("^(10\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|192\\.168\\.)[0-9.]+/(1[6-9]|2[0-9]|3[0-2])$", rule.cidr))
+    ])
+    error_message = "Supply at most 64 private IPv4 /16-/32 rules on TCP 5432, 2379, 2380 or 8008."
+  }
+}
+
+variable "existing_network_name" {
+  type        = string
+  default     = null
+  description = "Existing same-project network; provide both names to share one environment network."
+  validation {
+    condition     = var.existing_network_name == null ? true : can(regex("^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.existing_network_name))
+    error_message = "Use a registered GCP network name or null."
+  }
+}
+
+variable "existing_subnetwork_name" {
+  type        = string
+  default     = null
+  description = "Existing same-project subnetwork; provide both names to share one environment network."
+  validation {
+    condition     = var.existing_subnetwork_name == null ? true : can(regex("^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.existing_subnetwork_name))
+    error_message = "Use a registered GCP subnetwork name or null."
+  }
+}

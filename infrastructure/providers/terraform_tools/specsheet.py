@@ -96,10 +96,13 @@ def build(descriptor, *, cost_report=None, cost_scope=None, now=None, max_age_ho
     architecture = descriptor.get('architecture')
     runtime = descriptor.get('runtime_limit')
     if runtime is not None:
-        if runtime.get('instance_termination_action') != 'STOP' or runtime.get('automatic_restart') is not False:
+        guest_timer = runtime.get('implementation') == 'guest_systemd_timer'
+        if runtime.get('instance_termination_action') != 'STOP' or (not guest_timer and runtime.get('automatic_restart') is not False):
             raise ValueError('only the implemented STOP runtime policy is supported')
         runtime = {'seconds': positive_number(runtime.get('seconds')), 'action': 'STOP',
-                   'automatic_restart': False, 'verification': 'unverified', 'resets_on_start': True}
+                   'automatic_restart': None if guest_timer else False,
+                   'implementation': 'guest_systemd_timer' if guest_timer else 'provider_scheduling',
+                   'verification': 'unverified', 'resets_on_start': True}
     sheet = {
         'schema_version': 'v1', 'document': 'node_specsheet', 'generated_at': now.isoformat(),
         'source': 'terraform_node_descriptor', 'live_verification': 'unverified',

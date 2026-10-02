@@ -73,13 +73,16 @@ def prepare(body, profiles, resolve):
         profile = json.loads(raw, object_pairs_hook=ansible.unique_pairs)
         required = {'parameters', 'cluster_name', 'client_cidrs', 'certificates',
                     'vault_file', 'vault_password_file', 'timeout_seconds'}
-        optional = {'backup_enabled', 'pgbackrest_repo_path', 'retention_full'}
+        backup_fields = {'backup_enabled', 'pgbackrest_repo_path', 'retention_full'}
+        optional = backup_fields | {'require_postgres_mount'}
         if not isinstance(profile, dict) or not required <= set(profile) or set(profile) - required - optional:
             raise ValueError('invalid profile fields')
         if type(profile.get('backup_enabled', False)) is not bool:
             raise ValueError('invalid backup policy')
+        if type(profile.get('require_postgres_mount', False)) is not bool:
+            raise ValueError('invalid mount policy')
         if profile.get('backup_enabled'):
-            if not optional <= set(profile) or not re.fullmatch(r'/mnt/[A-Za-z0-9_/-]+', profile['pgbackrest_repo_path']):
+            if not backup_fields <= set(profile) or not re.fullmatch(r'/mnt/[A-Za-z0-9_/-]+', profile['pgbackrest_repo_path']):
                 raise ValueError('approved mounted backup path required')
             if type(profile['retention_full']) is not int or not 1 <= profile['retention_full'] <= 30:
                 raise ValueError('invalid backup retention')
@@ -201,6 +204,7 @@ def _run(request, runner):
             variables = work / 'vars.json'
             variables.write_text(json.dumps({**credentials, 'cluster_name': profile['cluster_name'],
                 'client_cidrs': profile['client_cidrs'], 'backup_enabled': profile.get('backup_enabled', False),
+                'railshot_require_postgres_mount': profile.get('require_postgres_mount', False),
                 **{key: profile[key] for key in ('pgbackrest_repo_path', 'retention_full') if key in profile},
                 'railshot_database_receipt': expected, 'railshot_database_receipt_path': str(receipt)}))
             variables.chmod(0o600)

@@ -54,13 +54,33 @@ resource "aws_security_group" "node" {
   vpc_id      = var.vpc_id == null ? data.aws_vpc.default[0].id : var.vpc_id
 
   dynamic "ingress" {
-    for_each = concat(var.http_enabled ? [80] : [], var.https_enabled ? [443] : [])
+    for_each = var.purpose == "database" ? [] : concat(var.http_enabled ? [80] : [], var.https_enabled ? [443] : [])
     content {
       description = "web ${ingress.value}"
       from_port   = ingress.value
       to_port     = ingress.value
       protocol    = "tcp"
       cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+  dynamic "ingress" {
+    for_each = var.database_ingress
+    content {
+      description = "database private ingress"
+      from_port   = ingress.value.port
+      to_port     = ingress.value.port
+      protocol    = "tcp"
+      cidr_blocks = [ingress.value.cidr]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.database_egress
+    content {
+      description = "database private egress"
+      from_port   = egress.value.port
+      to_port     = egress.value.port
+      protocol    = "tcp"
+      cidr_blocks = [egress.value.cidr]
     }
   }
   dynamic "egress" {
@@ -76,7 +96,8 @@ resource "aws_security_group" "node" {
 }
 
 resource "aws_iam_role" "node" {
-  name = "${var.name}-node"
+  count = var.existing_instance_profile == null ? 1 : 0
+  name  = "${var.name}-node"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }]
@@ -84,19 +105,22 @@ resource "aws_iam_role" "node" {
 }
 
 resource "aws_iam_role_policy_attachment" "ssm" {
-  role       = aws_iam_role.node.name
+  count      = var.existing_instance_profile == null ? 1 : 0
+  role       = aws_iam_role.node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 resource "aws_iam_role_policy" "node_params" {
+  count  = var.existing_instance_profile == null ? 1 : 0
   name   = "read-railshot-params"
-  role   = aws_iam_role.node.id
+  role   = aws_iam_role.node[0].id
   policy = jsonencode(local.node_parameter_policy)
 }
 
 resource "aws_iam_instance_profile" "node" {
-  name = "${var.name}-node"
-  role = aws_iam_role.node.name
+  count = var.existing_instance_profile == null ? 1 : 0
+  name  = "${var.name}-node"
+  role  = aws_iam_role.node[0].name
 }
 
 resource "aws_instance" "node" {
@@ -104,7 +128,7 @@ resource "aws_instance" "node" {
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnet.selected.id
   vpc_security_group_ids = concat([aws_security_group.node.id], var.additional_security_group_ids)
-  iam_instance_profile   = aws_iam_instance_profile.node.name
+  iam_instance_profile   = var.existing_instance_profile == null ? aws_iam_instance_profile.node[0].name : var.existing_instance_profile
 
   metadata_options {
     http_tokens                 = "required"
@@ -121,6 +145,10 @@ resource "aws_instance" "node" {
   user_data_replace_on_change = false # guest changes require a separate approved configuration job
   tags                        = { Name = "${var.name}-node" }
   lifecycle {
+    precondition {
+      condition     = var.purpose == "database" || length(var.database_ingress) == 0
+      error_message = "Database ingress requires an approved database node."
+    }
     precondition {
       condition     = (var.vpc_id == null) == (var.subnet_id == null)
       error_message = "Specify both vpc_id and subnet_id, or neither for legacy default selection."
@@ -201,7 +229,8 @@ resource "aws_volume_attachment" "data" {
 }
 locals {
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    operator_ssh_public_key = var.operator_ssh_public_key
+    operator_ssh_public_key  = var.operator_ssh_public_key
+    max_run_duration_seconds = var.max_run_duration_seconds
     host_config = yamlencode({
       name           = var.name, node_name = coalesce(var.node_name, var.name), cloud_provider = "aws", region = var.region,
       runtime_status = "not_configured"
@@ -210,11 +239,28 @@ locals {
     bootstrap_script = templatefile("${path.module}/bootstrap.sh.tftpl", {
       device                     = "/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${replace(aws_ebs_volume.data.id, "-", "")}",
       initialize_empty_data_disk = var.initialize_empty_data_disk ? "true" : "false"
+      data_mount_path            = var.purpose == "database" ? "/var/lib/postgresql" : "/var/lib/rancher"
     })
   })
 }
 
 # Preserve existing resource identities when the legacy defaults remain enabled.
+moved {
+  from = aws_iam_role.node
+  to   = aws_iam_role.node[0]
+}
+moved {
+  from = aws_iam_role_policy_attachment.ssm
+  to   = aws_iam_role_policy_attachment.ssm[0]
+}
+moved {
+  from = aws_iam_role_policy.node_params
+  to   = aws_iam_role_policy.node_params[0]
+}
+moved {
+  from = aws_iam_instance_profile.node
+  to   = aws_iam_instance_profile.node[0]
+}
 moved {
   from = aws_eip.node
   to   = aws_eip.node[0]
