@@ -45,6 +45,21 @@ done
 install -d -o root -g root -m 0700 /var/lib/railshot-runner/work/_temp
 # These empty host directories let container preflight see any later K3s install.
 install -d -o root -g root -m 0755 /etc/rancher /var/lib/rancher
+# Install only on the dedicated host accepted above. Missing profiles fail Pod creation.
+runner_source=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+command -v apparmor_parser >/dev/null
+for profile in /etc/apparmor.d/railshot-codex-bwrap /etc/railshot/runner-seccomp.json; do
+  test ! -L "$profile" || { echo "Refusing symlink: $profile" >&2; exit 2; }
+done
+install -o root -g root -m 0644 "$runner_source/railshot-codex-bwrap.apparmor" /etc/apparmor.d/railshot-codex-bwrap
+apparmor_parser -r /etc/apparmor.d/railshot-codex-bwrap
+install -o root -g root -m 0644 "$runner_source/railshot-codex-bwrap.json" /etc/railshot/runner-seccomp.json
+if [ "$marker" = ops-k3s-build-worker-ubuntu-24.04 ]; then
+  test ! -L /var/lib/kubelet/seccomp
+  install -d -o root -g root -m 0755 /var/lib/kubelet/seccomp
+  test ! -L /var/lib/kubelet/seccomp/railshot-codex-bwrap.json
+  install -o root -g root -m 0644 "$runner_source/railshot-codex-bwrap.json" /var/lib/kubelet/seccomp/railshot-codex-bwrap.json
+fi
 printf '%s\n' "$marker" > /etc/railshot/ci-runner-host
 chown root:root /etc/railshot/ci-runner-host
 chmod 0644 /etc/railshot/ci-runner-host

@@ -16,6 +16,8 @@ import sys
 ROOT = "/var/lib/railshot-runner"
 TOKEN = "/run/secrets/github-runner-registration-token"
 KUBERNETES = "/run/railshot-kubernetes"
+SECCOMP = {"type": "Localhost", "localhostProfile": "railshot-codex-bwrap.json"}
+APPARMOR = {"type": "Localhost", "localhostProfile": "railshot-codex-bwrap"}
 NAMESPACE = "railshot-build"
 SERVICE_ACCOUNT = "railshot-build-runner"
 HOST_MARKER = "/etc/railshot/ci-runner-host"
@@ -39,6 +41,14 @@ def validate_container(container):
         raise ValueError("runner requires host network without privileged/host PID mode")
     if set(host.get("CapAdd") or []) != {"NET_ADMIN"}:
         raise ValueError("runner requires only NET_ADMIN in addition to Docker default capabilities")
+    options = ["no-new-privileges" if item in {"no-new-privileges=true", "no-new-privileges:true"} else item.replace("apparmor:", "apparmor=", 1)
+               for item in host.get("SecurityOpt") or []]
+    expected_seccomp = json.loads((Path(__file__).parent / "railshot-codex-bwrap.json").read_text())
+    seccomp = [item.split("=", 1)[1] for item in options if item.startswith("seccomp=")]
+    if (len(seccomp) != 1 or json.loads(seccomp[0]) != expected_seccomp
+            or set(item for item in options if not item.startswith("seccomp=")) != {"no-new-privileges", "apparmor=railshot-codex-bwrap"}
+            or container.get("AppArmorProfile") != "railshot-codex-bwrap"):
+        raise ValueError("reviewed seccomp/AppArmor profiles and no-new-privileges are required")
     mounts = {mount["Destination"]: mount for mount in container["Mounts"]}
     if set(mounts) != set(READ_ONLY) | set(READ_WRITE) | {TOKEN}:
         raise ValueError("unexpected/missing mount; do not mount kubeconfig or cloud credentials")
@@ -123,7 +133,8 @@ def validate_pod(pod, namespace, name, uid):
     if (security.get("privileged", False) or security.get("runAsUser", spec.get("securityContext", {}).get("runAsUser")) != 0
             or set(security.get("capabilities", {}).get("add", [])) != {"NET_ADMIN"}
             or security.get("allowPrivilegeEscalation") is not False
-            or security.get("seccompProfile", spec.get("securityContext", {}).get("seccompProfile")) != {"type": "RuntimeDefault"}):
+            or security.get("seccompProfile", spec.get("securityContext", {}).get("seccompProfile")) != SECCOMP
+            or security.get("appArmorProfile", spec.get("securityContext", {}).get("appArmorProfile")) != APPARMOR):
         raise ValueError("unexpected runner Pod privileges")
     mounts = {mount["mountPath"]: mount for mount in runner.get("volumeMounts", [])}
     volumes = {volume["name"]: volume for volume in spec.get("volumes", [])}
