@@ -17,7 +17,7 @@
 4. 바뀐 연결부의 테스트와 빌드를 실행하고 PR 본문에 원본 SHA·해결 내용·검증 범위를 적는다. 기존 클라우드 배포 결과를 새 merge commit의 배포 결과로 취급하지 않는다.
 5. PR을 integration으로 merge한다. squash·rebase·force push 없이 feature 이력을 보존하고, 원격 HEAD와 포함된 feature SHA를 다시 확인한다.
 
-Vercel Preview는 별도 웹 배포 연동이다. 런타임·Ansible·CI 검증과 구분하며, 프로젝트 설정·로그가 확인되지 않은 Vercel 실패를 팀 런타임 테스트 실패로 기록하지 않는다. 현재 강제 필수 검사 설정은 없으며 위 절차는 이번 통합의 운영 규칙이다.
+Vercel Preview는 별도 웹 배포 연동이다. 런타임·Ansible·CI 검증과 구분하며, 프로젝트 설정·로그가 확인되지 않은 Vercel 실패를 팀 런타임 테스트 실패로 기록하지 않는다. 2026-10-02 후속 통합부터 GitHub branch protection으로 `Railshot CI gate` 성공과 최신 integration 반영을 강제한다. 관리자도 적용 대상이며 force push와 브랜치 삭제를 허용하지 않는다. feature 원본은 병합 후에도 보존한다.
 
 ## 2026-10-02 전체 팀 브랜치 대조
 
