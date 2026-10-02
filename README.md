@@ -7,33 +7,7 @@
 - [회의 결정·R&R](docs/meetings/2026-10-01.md) · [공식 제출 요건](docs/submission-requirements.md)
 - [조립 출처](docs/integration/source-map.json) · [이번 검증과 미연결 경계](docs/integration/validation.md)
 
-## A. Directory Architecture
-
-```text
-apps/
-  api/                         홍진기 HTTP API·CLI·MCP
-  dashboard/                   홍진기 웹 UI
-ci/
-  workflows/                   apps 저장소에 설치할 Actions/CodeBuild 소스
-  scripts/                     류지환 기본 검사·제한된 AI 수정·동일 이미지 게시
-infrastructure/
-  providers/openstack/         김화균 REST Controller / OpenStack SDK
-  providers/terraform_tools/   기존 CSP 운영 도구
-  terraform/{aws,gcp,azure}/    기존 CSP host 준비. runtime 배포와 구분
-  terraform/aws-edge/          선택형 Route53·ALB + gateway EIP·UDP51820
-  ansible/                     김정빈 guest 검사 + 승민 runtime 호출
-deployment/                   이승민 K3s/Cilium 및 기존 샘플
-gitops/                       게시 digest → 검토용 Argo 선언 인계
-contracts/                     공유 요청 형식
-examples/ansible/               설명용 요청 JSON
-docs/                         기획·회의·출처
-  architecture/               전체 구조와 편집 가능한 다이어그램
-  api/                        Ansible·CI 인터페이스
-```
-
-상위 폴더는 팀 scaffold를 따르며, 각 담당자의 내부 패키지 구조는 유지합니다. 아직 구현이 없는 기능의 빈 폴더는 포함하지 않습니다. AGENT/AGENTS, 계정·키·state, 로컬 cache와 원문 전사는 Git에서 제외합니다. 이전 연구와 원본 브랜치·cleanup archive는 보존하며, 원본 Jasmin과 다른 worktree의 미커밋 변경도 유지했습니다.
-
-## B. Interface and Result Boundaries
+## A. Interface and Result Boundaries
 
 | 생산자 → 소비자 | 전달 | 현재 결과 의미 |
 |---|---|---|
@@ -45,7 +19,7 @@ docs/                         기획·회의·출처
 
 Controller의 Python `Protocol`은 같은 프로세스에서 Adapter가 구현하는 규약입니다. 자격증명은 요청 DTO와 공유 artifact에 포함하지 않습니다. 기본 runtime 경로는 **JB guest 검사 → 승민 runtime 설치**입니다. 이 경로에서는 JB standalone K3s 설치를 추가로 실행하지 않습니다.
 
-## C. Local User Journeys
+## B. Local User Journeys
 
 ### Case 1. UI/API와 업로드 계약 검사
 
