@@ -177,7 +177,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(set(jobs['gate']['needs']), set(ci_scope.JOBS) | {'changes'})
         self.assertEqual(jobs['gate']['if'], 'always()')
         self.assertEqual(set(jobs['changes']['outputs']),
-                         set(ci_scope.JOBS) | {'selected', 'container_components'})
+                         set(ci_scope.JOBS) | {'selected', 'container_components', 'release'})
         events = workflow.get('on', workflow.get(True))  # PyYAML's YAML 1.1 "on" key.
         for event in ('pull_request', 'push'):
             self.assertFalse({'paths', 'paths-ignore'} & set(events[event] or {}))
@@ -187,6 +187,19 @@ class WorkflowPolicyTest(unittest.TestCase):
             self.assertEqual(jobs[job]['if'], f"needs.changes.outputs{output} == 'true'")
         self.assertEqual(jobs['containers']['uses'], './.github/workflows/platform-containers.yml')
         self.assertEqual(jobs['containers']['permissions'], {'contents': 'read'})
+        trusted = "github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && vars.RAILSHOT_AUTO_RELEASE == 'true'"
+        selection = next(step for step in jobs['changes']['steps'] if step.get('id') == 'select')
+        self.assertEqual(selection['env']['AUTO_RELEASE'], '${{ ' + trusted + ' }}')
+        self.assertEqual(jobs['containers']['with']['components'], '${{ needs.changes.outputs.container_components }}')
+        self.assertEqual(jobs['containers']['with']['export_image'], "${{ needs.changes.outputs.release == 'true' && " + trusted + ' }}')
+        release = jobs['release']
+        self.assertEqual(release['needs'], ['changes', 'gate'])
+        self.assertEqual(release['if'], "${{ always() && !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.release == 'true' && " + trusted + ' }}')
+        self.assertEqual(release['uses'], './.github/workflows/platform-publish.yml')
+        self.assertEqual(release['with'], {'components': '["dashboard","api","mcp","ci-runner"]',
+            'publish': True, 'deploy': True, 'multicloud': "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}", 'skip_build': True,
+            'ci_run_id': "${{ format('{0}', github.run_id) }}"})
+        self.assertEqual(release['permissions'], {'contents': 'write', 'actions': 'read', 'packages': 'write', 'id-token': 'write'})
 
     def test_pull_credential_delivery_is_write_only_scoped_and_cleans_private_file(self):
         workflow = yaml.safe_load((HERE.parent / 'workflows/railshot-pull-credential.yml').read_text())

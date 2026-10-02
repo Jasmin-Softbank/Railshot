@@ -10,9 +10,10 @@ import ipaddress
 import json
 import os
 from pathlib import Path
-from urllib.parse import urlsplit
 import re
 import shlex
+import stat
+import subprocess
 import sys
 import time
 
@@ -34,7 +35,7 @@ def require(ok):
 
 
 def settings(config):
-    require(set(config) - {'observer_transport', 'observer_source_cidr'} == {'version', 'owner', 'lifecycle', 'expires_at', 'state_dir', 'prometheus_url', 'observer_ip',
+    require(set(config) - {'observer_transport', 'observer_source_cidr', 'api_registrar'} == {'version', 'owner', 'lifecycle', 'expires_at', 'state_dir', 'prometheus_url', 'observer_ip',
                            'observer_registry_file', 'observer_target_id', 'observer_directory',
                            'node_metrics_port', 'cluster_metrics_port'} and config['version'] == 1)
     require(config.get('observer_transport', 'registered') in ('registered', 'direct'))
@@ -45,6 +46,10 @@ def settings(config):
     require(config['prometheus_url'] == 'http://' + config['observer_ip'] + ':9090')
     source = ipaddress.IPv4Network(config.get('observer_source_cidr', config['observer_ip'] + '/32'), strict=True)
     require(source.prefixlen == 32 and not (source.is_unspecified or source.is_loopback or source.is_multicast or source.is_link_local))
+    if 'observer_source_cidr' in config:
+        address = source.network_address
+        private = any(address in ipaddress.IPv4Network(value) for value in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+        require(str(source) == config['observer_source_cidr'] and (private or address.is_global and not address.is_multicast))
     for key in ('state_dir', 'observer_registry_file', 'observer_directory'):
         path = Path(config[key])
         require(path.is_absolute() and '..' not in path.parts and str(path) != '/')
@@ -52,7 +57,21 @@ def settings(config):
     require(type(config['node_metrics_port']) is int and type(config['cluster_metrics_port']) is int)
     require(30000 <= config['node_metrics_port'] <= 32767 and 30000 <= config['cluster_metrics_port'] <= 32767
             and config['node_metrics_port'] != config['cluster_metrics_port'])
+    if 'api_registrar' in config:
+        api_binding(config['api_registrar'])
     return config
+
+
+def metrics_host(descriptor, node_ip):
+    address = descriptor['addresses'].get('metrics', node_ip)
+    if descriptor.get('provider_kind') == 'openstack':
+        return address
+    if descriptor.get('provider_kind') == 'gcp' and ('metrics' in descriptor['addresses'] or descriptor.get('management_endpoint')):
+        public = ipaddress.IPv4Address(descriptor['addresses'].get('public', ''))
+        require(public.is_global and not public.is_multicast and address == str(public)
+                and descriptor.get('management_endpoint') == f'https://{public}:6443')
+        return address
+    return node_ip
 
 
 def registration_row(config, request, descriptor):
@@ -66,15 +85,11 @@ def registration_row(config, request, descriptor):
     rendered = validate({'name': config['owner'], 'node_ip': request['node_ip'],
         'observer_source_cidr': config.get('observer_source_cidr', config['observer_ip'] + '/32'), 'node_metrics_port': config['node_metrics_port'],
         'cluster_metrics_port': config['cluster_metrics_port'], 'probe_urls': [request['probe_url']] if app_fields else [], 'argocd_metrics': None})
-    metrics_host = (descriptor['addresses'].get('metrics', request['node_ip'])
-                    if descriptor.get('provider_kind') == 'openstack' else request['node_ip'])
-    if descriptor.get('provider_kind') == 'gcp' and descriptor.get('management_endpoint'):
-        # registered_node already binds this endpoint to the provisioned public IPv4.
-        metrics_host = urlsplit(descriptor['management_endpoint']).hostname
+    metrics_address = metrics_host(descriptor, request['node_ip'])
     return {'target_id': request['target_id'], **{key: request[key] for key in app_fields},
-            **({'node_ip': request['node_ip']} if metrics_host != request['node_ip'] else {}),
-            'prometheus_url': config['prometheus_url'], 'node_instance': f"{metrics_host}:{config['node_metrics_port']}",
-            'cluster_instance': f"{metrics_host}:{config['cluster_metrics_port']}",
+            **({'node_ip': request['node_ip']} if metrics_address != request['node_ip'] else {}),
+            'prometheus_url': config['prometheus_url'], 'node_instance': f"{metrics_address}:{config['node_metrics_port']}",
+            'cluster_instance': f"{metrics_address}:{config['cluster_metrics_port']}",
             'environment_id': request['environment_id'], 'resource_id': descriptor['resource_id']}, rendered
 
 
@@ -261,55 +276,194 @@ def wait_network_policy(kube, pod, document):
          'cilium-dbg policy wait "$1" --max-wait-time 15 --fail-wait-time 10 >/dev/null && printf null', 'sh', str(revision))
 
 
-def register(config, request, output):
-    # Supplied by the runtime registration owner (PR27); imports make no cloud calls.
-    from environment import read_private, runtime_kubectl
+def collector(config):
+    return {'id': config['owner'], 'lifecycle': config['lifecycle'], 'expires_at': config['expires_at']}
+
+
+def collector_route(config):
+    return {key: config[key] for key in ('owner', 'lifecycle', 'expires_at', 'prometheus_url', 'observer_ip',
+                                         'observer_directory', 'node_metrics_port', 'cluster_metrics_port')}
+
+
+def local_product(config):
+    from environment import read_private
+    path = Path(config['state_dir']) / 'product.json'
+    bound = os.environ.get('RAILSHOT_OBSERVER_PRODUCT_FILE')
+    require(not bound or str(path) == bound)
+    product = read_private(path)
+    require(product.get('version') == 1 and product.get('collector') == collector(config))
+    return product
+
+
+def commit_row(config, row, before_commit):
+    """Both API registrations and operator deltas commit under this one PVC lock."""
+    from environment import read_private
     import run as ansible
     from argo import native
-    config = settings(config)
-    state = Path(config['state_dir']); state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    require('api_registrar' not in config)
+    state = Path(config['state_dir'])
+    bound = os.environ.get('RAILSHOT_OBSERVER_PRODUCT_FILE')
+    require(not bound or str(state / 'product.json') == bound)
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
     require(state.resolve() == state and state.stat().st_uid == os.geteuid() and not state.stat().st_mode & 0o077)
-    runtime, descriptor = node_request(request['registry_file'], request['target_id'])
-    observer, _ = node_request(config['observer_registry_file'], config['observer_target_id'])
-    row, rendering = registration_row(config, request, descriptor)
-    product = state / 'product.json'
-    receipt = {'status': 'unknown', 'target_id': row['target_id'], 'app': row.get('app'), 'registered': False,
-               'collection_state': 'pending', 'steps': []}
-    def save():
-        durable_write(output, json.dumps(receipt).encode())
     lock = os.open(state / 'registration.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
+        info = os.fstat(lock)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077)
         fcntl.flock(lock, fcntl.LOCK_EX)
+        product = local_product(config) if (state / 'product.json').exists() else None
         desired = state / 'desired.json'
-        rows = read_private(desired)['targets'] if desired.exists() else read_private(product)['targets'] if product.exists() else []
+        rows = read_private(desired)['targets'] if desired.exists() else product['targets'] if product else []
+        # A pending desired file may add rows, but must never erase committed registrations.
+        for previous in product['targets'] if product else []:
+            rows = merge_rows(rows, previous)
         rows = merge_rows(rows, row)
-        # Deployment registration includes an app; retain an independent runtime row
-        # so its health survives app deletion and later deployments keep its metadata.
+        # Keep runtime health independent of any application registered on this node.
         node_row = next((dict(item) for item in rows if item['target_id'] == row['target_id'] and not item.get('app')), None)
         if node_row is None:
             node_row = {key: value for key, value in row.items() if key not in ('app', 'namespace', 'probe_url')}
         rows = merge_rows(rows, node_row)
         durable_write(desired, json.dumps({'version': 1, 'targets': rows}).encode())
-        save()  # Record an uncertain outcome before the first mutation.
+        binding = before_commit()
+        blackbox({row['target_id']: binding})
+        require(binding['server_name'] == row.get('node_ip', row['node_instance'].split(':')[0]))
         bindings_path = state / 'runtime-healthz.json'
         bindings = read_private(bindings_path)['targets'] if bindings_path.exists() else {}
-        from runtime_health import configure_runtime_healthz
-        binding = configure_runtime_healthz(runtime, descriptor, ansible, native)
-        blackbox({row['target_id']: binding})  # Reject credentials or invalid trust before persistence/transfer.
-        require(binding['server_name'] == request['node_ip'])
+        bindings[row['target_id']] = binding
         node_row['healthz_url'] = binding['healthz_url']
         rows = merge_rows(rows, node_row)
-        bindings[row['target_id']] = binding
         durable_write(bindings_path, json.dumps({'version': 1, 'targets': bindings}).encode())
         durable_write(desired, json.dumps({'version': 1, 'targets': rows}).encode())
-        receipt['steps'].append('runtime_healthz_configured'); save()
         active_bindings = {}
         for item in rows:
             if item.get('healthz_url'):
-                binding = bindings.get(item['target_id'])
-                require(binding and binding['healthz_url'] == item['healthz_url'])
-                active_bindings[item['target_id']] = binding
+                bound = bindings.get(item['target_id'])
+                require(bound and bound['healthz_url'] == item['healthz_url'])
+                active_bindings[item['target_id']] = bound
         blackbox(active_bindings)
+        observer, _ = node_request(config['observer_registry_file'], config['observer_target_id'])
+        sync_observer(config, observer, scrape_config(rows), ansible, native, bindings=active_bindings)
+        product = {'version': 1, 'targets': rows, 'collector': collector(config)}
+        durable_write(state / 'product.json', json.dumps(product).encode())
+        require(local_product(config) == product)
+        return product
+    finally:
+        os.close(lock)
+
+
+def api_binding(binding):
+    require(isinstance(binding, dict) and set(binding) == {'context', 'deployment_uid', 'pvc_uid', 'config_file'})
+    require(isinstance(binding['context'], str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/@-]{0,200}', binding['context']))
+    for key in ('deployment_uid', 'pvc_uid'):
+        require(isinstance(binding[key], str) and re.fullmatch(r'[a-f0-9-]{36}', binding[key]))
+    path = Path(binding['config_file'])
+    require(str(path).startswith('/var/lib/railshot/config/') and '..' not in path.parts and str(path) == binding['config_file'])
+    return binding
+
+
+def api_pod(binding, kube):
+    def owned(obj, kind, uid):
+        return any(o.get('controller') is True and o.get('kind') == kind and o.get('uid') == uid
+                   for o in obj['metadata'].get('ownerReferences', []))
+    deployment = kube('get', 'deployment', 'railshot-api', '-o', 'json')
+    pvc = kube('get', 'pvc', 'railshot-api', '-o', 'json')
+    require(deployment['metadata']['uid'] == binding['deployment_uid'] and pvc['metadata']['uid'] == binding['pvc_uid'])
+    containers = deployment['spec']['template']['spec']['containers']
+    require(len(containers) == 1 and containers[0]['name'] == 'api')
+    image = containers[0]['image']
+    require(re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-api@sha256:[a-f0-9]{64}', image))
+    expected = os.environ.get('RAILSHOT_RELEASE_API_IMAGE')
+    require(not expected or image == expected)
+    owned_sets = {r['metadata']['uid'] for r in kube('get', 'replicasets', '-o', 'json')['items']
+                  if owned(r, 'Deployment', binding['deployment_uid'])}
+    pods = [p for p in kube('get', 'pods', '-l', 'app=railshot-api', '-o', 'json')['items']
+            if not p['metadata'].get('deletionTimestamp')
+            and any(owned(p, 'ReplicaSet', uid) for uid in owned_sets)
+            and any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in p.get('status', {}).get('conditions', []))]
+    require(len(pods) == 1)
+    pod = pods[0]; spec = pod['spec']; containers = spec['containers']
+    require(spec.get('serviceAccountName') == 'railshot-product' and not spec.get('hostNetwork')
+            and len(containers) == 1 and containers[0]['name'] == 'api' and containers[0]['image'] == image
+            and {'name': 'state', 'persistentVolumeClaim': {'claimName': 'railshot-api'}} in spec['volumes']
+            and any(m.get('name') == 'state' and m.get('mountPath') == '/var/lib/railshot'
+                    and not m.get('subPath') and not m.get('subPathExpr') and not m.get('readOnly') for m in containers[0]['volumeMounts']))
+    return {'name': pod['metadata']['name'], 'uid': pod['metadata']['uid'], 'image': image}
+
+
+def api_exchange(config, *, request=None, descriptor=None, health_binding=None):
+    from argo import kubectl
+    binding = api_binding(config['api_registrar'])
+    kube = lambda *args: kubectl(binding['context'], 'railshot-system', *args)
+    before = api_pod(binding, kube)
+    payload = {'version': 1, 'action': 'read' if request is None else 'commit',
+               'config_file': binding['config_file'], 'collector': collector_route(config)}
+    if request is not None:
+        blackbox({request['target_id']: health_binding})
+        require(health_binding['server_name'] == request['node_ip'])
+        payload.update(request=request, descriptor=descriptor, health_binding=health_binding)
+    command = ['kubectl', '--context', binding['context'], '--request-timeout=420s', '-n', 'railshot-system',
+               'exec', '-i', before['name'], '-c', 'api', '--', '/opt/railshot-python/bin/python3',
+               '/app/observability/register.py', '--api-registrar']
+    # Send once: a timeout or Pod replacement is unknown, never an automatic retry.
+    result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, timeout=420)
+    require(result.returncode == 0 and len(result.stdout) <= 131072)
+    response = json.loads(result.stdout)
+    require(api_pod(binding, kube) == before and response.get('status') == 'succeeded')
+    product = response['product']
+    require(product.get('version') == 1 and product.get('collector') == collector(config))
+    if request is not None:
+        row, _ = registration_row(config, request, descriptor)
+        require(merge_rows(product['targets'], row) == product['targets'])
+        nodes = [item for item in product['targets'] if item['target_id'] == row['target_id'] and not item.get('app')]
+        require(len(nodes) == 1 and nodes[0].get('healthz_url') == health_binding['healthz_url'])
+    return product
+
+
+def product(config, *, require_api=False):
+    config = settings(config)
+    require(not require_api or 'api_registrar' in config)
+    return api_exchange(config) if 'api_registrar' in config else local_product(config)
+
+
+def api_request(payload):
+    from environment import read_private
+    require(payload.get('version') == 1 and payload.get('action') in ('read', 'commit'))
+    require(set(payload) == {'version', 'action', 'config_file', 'collector'} |
+            ({'request', 'descriptor', 'health_binding'} if payload['action'] == 'commit' else set()))
+    path = Path(payload['config_file'])
+    require(str(path).startswith('/var/lib/railshot/config/') and '..' not in path.parts and str(path) == payload['config_file'])
+    config = settings(read_private(path))
+    require('api_registrar' not in config and collector_route(config) == payload['collector']
+            and os.environ.get('RAILSHOT_OBSERVER_PRODUCT_FILE') == str(Path(config['state_dir']) / 'product.json'))
+    if payload['action'] == 'read':
+        result = local_product(config)
+    else:
+        row, _ = registration_row(config, payload['request'], payload['descriptor'])
+        binding = payload['health_binding']
+        blackbox({row['target_id']: binding})
+        require(binding['server_name'] == payload['request']['node_ip'])
+        result = commit_row(config, row, lambda: binding)
+    return {'status': 'succeeded', 'product': result}
+
+
+def register(config, request, output):
+    from environment import runtime_kubectl
+    import run as ansible
+    from argo import native
+    config = settings(config)
+    runtime, descriptor = node_request(request['registry_file'], request['target_id'])
+    row, rendering = registration_row(config, request, descriptor)
+    receipt = {'status': 'unknown', 'target_id': row['target_id'], 'app': row.get('app'), 'registered': False,
+               'collection_state': 'pending', 'steps': []}
+    def save():
+        durable_write(output, json.dumps(receipt).encode())
+    def apply_exporters():
+        save()  # Record an uncertain outcome before the first mutation.
+        from runtime_health import configure_runtime_healthz
+        binding = configure_runtime_healthz(runtime, descriptor, ansible, native)
+        blackbox({row['target_id']: binding})
+        require(binding['server_name'] == request['node_ip'])
+        receipt['steps'].append('runtime_healthz_configured'); save()
         labels = {'app.kubernetes.io/managed-by': 'railshot-observer', 'railshot.io/observer': config['owner']}
         with runtime_kubectl(runtime) as kube:
             cilium = kube('kube-system', 'get', 'pods', '-l', 'k8s-app=cilium', '-o', 'json')['items']
@@ -331,26 +485,35 @@ def register(config, request, output):
                 if document['kind'] == 'CiliumClusterwideNetworkPolicy':
                     wait_network_policy(kube, cilium[0], document)
         receipt['steps'].append('exporters_applied'); save()
-        sync_observer(config, observer, scrape_config(rows), ansible, native, bindings=active_bindings)
-        receipt['steps'].append('collector_registered'); save()
-        durable_write(product, json.dumps({'version': 1, 'targets': rows, 'collector': {
-            'id': config['owner'], 'lifecycle': config['lifecycle'], 'expires_at': config['expires_at']}}).encode())
-        receipt.update(status='succeeded', registered=True)
-        receipt['steps'].append('product_registered'); save()
-        return receipt
-    finally:
-        os.close(lock)
+        return binding
+    if 'api_registrar' in config:
+        # Validate the live canonical binding before touching any exporter.
+        merge_rows(product(config, require_api=True)['targets'], row)
+        binding = apply_exporters()
+        api_exchange(config, request=request, descriptor=descriptor, health_binding=binding)
+    else:
+        commit_row(config, row, apply_exporters)
+    receipt.update(status='succeeded', registered=True)
+    receipt['steps'].extend(['collector_registered', 'product_registered']); save()
+    return receipt
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', required=True)
-    parser.add_argument('--request', required=True)
-    parser.add_argument('--out', required=True)
+    parser.add_argument('--api-registrar', action='store_true')
+    parser.add_argument('--config')
+    parser.add_argument('--request')
+    parser.add_argument('--out')
     args = parser.parse_args()
     from environment import read_private
     try:
-        result = register(read_private(args.config), read_private(args.request), Path(args.out))
+        if args.api_registrar:
+            require(not any((args.config, args.request, args.out)))
+            raw = sys.stdin.read(131073); require(len(raw) <= 131072)
+            result = api_request(json.loads(raw))
+        else:
+            require(all((args.config, args.request, args.out)))
+            result = register(read_private(args.config), read_private(args.request), Path(args.out))
     except Exception as error:
         # Internal paths, SSH diagnostics, descriptors and credentials stay private.
         print(json.dumps({'status': 'unknown', 'registered': False, 'collection_state': 'pending', 'error_type': type(error).__name__}))
