@@ -54,9 +54,12 @@ def registration_row(config, request, descriptor):
     rendered = validate({'name': config['owner'], 'node_ip': request['node_ip'],
         'observer_source_cidr': config['observer_ip'] + '/32', 'node_metrics_port': config['node_metrics_port'],
         'cluster_metrics_port': config['cluster_metrics_port'], 'probe_urls': [request['probe_url']], 'argocd_metrics': None})
+    metrics_host = (descriptor['addresses'].get('metrics', request['node_ip'])
+                    if descriptor.get('provider_kind') == 'openstack' else request['node_ip'])
     return {'target_id': request['target_id'], 'app': request['app'], 'namespace': request['namespace'],
-            'prometheus_url': config['prometheus_url'], 'node_instance': f"{request['node_ip']}:{config['node_metrics_port']}",
-            'cluster_instance': f"{request['node_ip']}:{config['cluster_metrics_port']}", 'probe_url': request['probe_url'],
+            **({'node_ip': request['node_ip']} if metrics_host != request['node_ip'] else {}),
+            'prometheus_url': config['prometheus_url'], 'node_instance': f"{metrics_host}:{config['node_metrics_port']}",
+            'cluster_instance': f"{metrics_host}:{config['cluster_metrics_port']}", 'probe_url': request['probe_url'],
             'environment_id': request['environment_id'], 'resource_id': descriptor['resource_id']}, rendered
 
 
@@ -82,24 +85,20 @@ def scrape_config(rows):
     return result
 
 
-def node_request(registry_file, target_id, read_private, ansible):
-    registry = read_private(registry_file)
+def node_request(registry_file, target_id, read_private=None, ansible=None):
+    # Retain the existing observer bootstrap's four-argument call contract.
+    from environment import read_private as read_registered, registered_node
+    registry = (read_private or read_registered)(registry_file)
     require(registry.get('version') == 1 and target_id in registry.get('targets', {}))
-    target = registry['targets'][target_id]
-    descriptor = read_private(target['descriptor_file'])
-    require(descriptor['target_id'] == target_id)
-    request = ansible.from_descriptor(descriptor, request_id='observation.' + target_id,
-        operation='guest.check', ssh=target['ssh'], timeout_seconds=300)
-    for key in ('identity_file', 'known_hosts_file'):
-        ansible.private_file(target['ssh'][key], identity=key == 'identity_file')
-    return request, descriptor
+    return registered_node(registry['targets'][target_id], target_id, 'observation.' + target_id,
+                           timeout_seconds=300)
 
 
 @contextmanager
 def observer_ssh(config, request, ansible):
     node = request['inventory']['control_plane'][0]
     require(node['private_ipv4'] == config['observer_ip'])
-    with ansible.forwarded_port(node['ssh']['transport_ref'], time.monotonic() + 90) as port:
+    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 90) as port:
         host = next(iter(ansible.build_inventory(request, port)['all']['children']['k3s_server']['hosts'].values()))
         prefix = ['ssh', *shlex.split(host['ansible_ssh_common_args']), '-i', host['ansible_ssh_private_key_file'],
                   '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15', host['ansible_user'] + '@' + host['ansible_host']]
@@ -127,8 +126,8 @@ def register(config, request, output):
     config = settings(config)
     state = Path(config['state_dir']); state.mkdir(mode=0o700, parents=True, exist_ok=True)
     require(state.resolve() == state and state.stat().st_uid == os.geteuid() and not state.stat().st_mode & 0o077)
-    runtime, descriptor = node_request(request['registry_file'], request['target_id'], read_private, ansible)
-    observer, _ = node_request(config['observer_registry_file'], config['observer_target_id'], read_private, ansible)
+    runtime, descriptor = node_request(request['registry_file'], request['target_id'])
+    observer, _ = node_request(config['observer_registry_file'], config['observer_target_id'])
     row, rendering = registration_row(config, request, descriptor)
     product = state / 'product.json'
     receipt = {'status': 'unknown', 'target_id': row['target_id'], 'app': row['app'], 'registered': False,

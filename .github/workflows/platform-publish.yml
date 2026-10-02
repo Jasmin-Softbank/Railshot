@@ -32,6 +32,7 @@ jobs:
           COMPONENTS: ${{ inputs.components }}
           PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
           PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
+          PROVIDER_TARGETS: ${{ vars.RAILSHOT_PROVIDER_TARGETS || '{}' }}
           VERIFY_REF: ${{ vars.RAILSHOT_PLATFORM_VERIFY_REF }}
           VERIFY_ROLE: ${{ vars.RAILSHOT_PLATFORM_VERIFY_ROLE_ARN }}
           VERIFY_VERSION: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_VERSION }}
@@ -55,6 +56,12 @@ jobs:
               assert os.environ['PUBLISH'] == 'true', 'deploy requires publish=true'
               assert {'dashboard', 'api'} <= set(components), 'deploy requires dashboard and api from this run'
               assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', os.environ['PLATFORM_TARGET']), 'RAILSHOT_PLATFORM_TARGET_ID is required'
+              providers = json.loads(os.environ['PROVIDER_TARGETS'])
+              assert isinstance(providers, dict) and set(providers) <= {'aws', 'openstack', 'proxmox'}, 'RAILSHOT_PROVIDER_TARGETS must be a supported provider-to-target JSON map'
+              assert all(isinstance(value, str) and re.fullmatch(r'[a-z][a-z0-9-]{0,62}', value) for value in providers.values()), 'provider target IDs must be valid'
+              assert providers.get('aws', os.environ['PLATFORM_TARGET']) == os.environ['PLATFORM_TARGET'], 'provider targets must preserve the default AWS target'
+              selections = {'aws': os.environ['PLATFORM_TARGET'], **providers}
+              assert len(set(selections.values())) == len(selections), 'provider target IDs must be distinct'
               port = os.environ['PLATFORM_PORT']
               assert re.fullmatch(r'[0-9]+', port) and 30000 <= int(port) <= 32767, 'RAILSHOT_PLATFORM_NODE_PORT must be 30000..32767'
           PYCODE
@@ -144,12 +151,14 @@ jobs:
         env:
           PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
           PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
+          PROVIDER_TARGETS: ${{ vars.RAILSHOT_PROVIDER_TARGETS || '{}' }}
         run: |
           python3 deployment/scripts/publish-platform.py \
             --artifacts "$RUNNER_TEMP/platform-published" \
             --source-sha "$GITHUB_SHA" \
             --target-id "$PLATFORM_TARGET" \
-            --dashboard-node-port "$PLATFORM_PORT"
+            --dashboard-node-port "$PLATFORM_PORT" \
+            --provider-targets "$PROVIDER_TARGETS"
 
   verify:
     if: inputs.deploy && inputs.publish

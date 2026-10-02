@@ -59,12 +59,13 @@ class PlatformReleaseTests(unittest.TestCase):
                "VERIFY_ROLE": "arn:aws:iam::721622471953:role/railshot-platform-verifier",
                "VERIFY_VERSION": "1", "VERIFY_HASH": "e" * 64,
                "COMPONENTS": '["dashboard","api"]', "PLATFORM_TARGET": "k3s-aws", "PLATFORM_PORT": "31080",
+               "PROVIDER_TARGETS": "{}",
                **(overrides or {})}
         return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], cwd=self.repo,
                               env=env, text=True, capture_output=True)
 
-    def deploy(self):
-        return self.run_step("deploy", "Commit the tested digest declaration to the platform branch")
+    def deploy(self, overrides=None):
+        return self.run_step("deploy", "Commit the tested digest declaration to the platform branch", overrides)
 
     def remote_revision(self):
         result = self.git("ls-remote", "--exit-code", "origin", REFERENCE, check=False)
@@ -78,19 +79,53 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertEqual(deploy["if"], "inputs.deploy && inputs.publish")
         self.assertIn("publish", deploy["needs"])
         self.assertEqual(deploy["permissions"], {"contents": "write", "actions": "read"})
+        for job, name in [('admission', 'Validate publication and deployment inputs'),
+                          ('deploy', 'Commit the tested digest declaration to the platform branch')]:
+            step = next(step for step in self.workflow['jobs'][job]['steps'] if step.get('name') == name)
+            self.assertEqual(step['env']['PROVIDER_TARGETS'], "${{ vars.RAILSHOT_PROVIDER_TARGETS || '{}' }}")
         name = "Validate publication and deployment inputs"
         self.assertEqual(self.run_step("admission", name).returncode, 0)
         for overrides in ({"PUBLISH": "false"}, {"COMPONENTS": '["dashboard"]'},
                           {"PLATFORM_TARGET": ""}, {"PLATFORM_PORT": ""}, {"PLATFORM_PORT": "443"},
                           {"GITHUB_REF": "refs/heads/feature/unreviewed"},
                           {"COMPONENTS": '["dashboard","api","api"]'}, {"VERIFY_REF": "refs/heads/main"},
-                          {"VERIFY_HASH": ""}, {"VERIFY_ROLE": ""}, {"GITHUB_REPOSITORY_ID": "1"}):
+                          {"VERIFY_HASH": ""}, {"VERIFY_ROLE": ""}, {"GITHUB_REPOSITORY_ID": "1"},
+                          *({'PROVIDER_TARGETS': value} for value in ('bad-json', 'null', '[]', '{"aws":"replacement"}',
+                                                                     '{"openstack":"k3s-aws"}', '{"gcp":"k3s-gcp"}'))):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.run_step("admission", name, overrides).returncode, 0)
         self.assertIsNone(self.remote_revision())
         verification = self.workflow["jobs"]["verify"]
         self.assertEqual(verification["needs"], "deploy")
         self.assertEqual(verification["permissions"], {"contents": "read", "id-token": "write"})
+
+    def test_release_keeps_enabled_provider_targets_across_image_updates(self):
+        settings = {'PROVIDER_TARGETS': '{"openstack":"k3s-openstack"}'}
+        self.assertEqual(self.run_step('admission', 'Validate publication and deployment inputs', settings).returncode, 0)
+        revisions = []
+        for digest in ('a', 'b'):
+            self.git('switch', '--detach', self.source_sha)
+            self.write_images(digest)
+            result = self.deploy(settings)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            revisions.append(self.remote_revision())
+            workload = json.loads(self.git('show', f'{revisions[-1]}:{WORKLOAD}').stdout)
+            api = next(item for item in workload['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-api')
+            container = api['spec']['template']['spec']['containers'][0]
+            self.assertTrue(container['image'].endswith(digest * 64))
+            env = {item['name']: item.get('value') for item in container['env']}
+            self.assertEqual(env['RAILSHOT_TARGET_ID'], 'k3s-aws')
+            self.assertEqual(env['RAILSHOT_TARGET_PROVIDER'], 'aws')
+            self.assertEqual(json.loads(env['RAILSHOT_PROVIDER_TARGETS']), {'openstack': 'k3s-openstack'})
+            self.assertEqual(env['RAILSHOT_TARGET_IDS'], 'k3s-aws,k3s-openstack')
+        self.assertEqual(self.git('rev-parse', f'{revisions[1]}^').stdout.strip(), revisions[0])
+        self.assertEqual(self.git('diff', '--name-only', *revisions).stdout.strip(), WORKLOAD)
+
+    def test_invalid_provider_map_blocks_release_before_branch_creation(self):
+        for value in ('bad-json', 'null', '[]', '{"openstack":"k3s-aws"}'):
+            with self.subTest(provider_targets=value):
+                self.assertNotEqual(self.deploy({'PROVIDER_TARGETS': value}).returncode, 0)
+                self.assertIsNone(self.remote_revision())
 
     def test_release_creates_reviewed_branch_and_preserves_its_existing_files(self):
         first = self.deploy()
