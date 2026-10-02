@@ -39,7 +39,9 @@ def unpack(path, destination):
     if path.stat().st_size > MAX_ARCHIVE_BYTES: raise ValueError('archive too large')
     with zipfile.ZipFile(path) as archive:
         items = archive.infolist()
-        if (len(items) != 4 or {i.filename for i in items} != bundle.FILES | {'manifest.json'}
+        names = {i.filename for i in items}
+        spec = bundle.spec_name(names)
+        if (len(items) != 4 or names != {spec, 'verdict.json', 'images.tar', 'manifest.json'}
                 or sum(i.file_size for i in items) > MAX_ARCHIVE_BYTES
                 or any(i.flag_bits & 1 or stat.S_ISLNK(i.external_attr >> 16) for i in items)):
             raise ValueError('invalid bundle archive')

@@ -25,6 +25,11 @@ variable "account_id" {
     error_message = "Use the existing registered AWS account."
   }
 }
+variable "enable_product_executor" {
+  type        = bool
+  default     = false
+  description = "Operator opt-in for the reviewed product executor. Bootstrap must verify the fixed Cilium metadata deny policy before applying this setting."
+}
 variable "vpc_id" { type = string }
 variable "subnet_id" {
   type        = string
@@ -162,6 +167,31 @@ resource "aws_iam_role_policy" "codex_auth" {
     }]
   })
 }
+resource "aws_iam_role_policy" "product_executor" {
+  count  = var.enable_product_executor ? 1 : 0
+  role   = aws_iam_role.control.id
+  name   = "railshot-product-executor"
+  policy = file("${path.module}/product-executor-policy.json")
+  lifecycle {
+    precondition {
+      condition     = var.account_id == "721622471953" && var.region == "ap-northeast-2" && var.vpc_id == "vpc-085e5a8268cf2b206"
+      error_message = "The reviewed executor policy is bound to the existing registered account, region and VPC."
+    }
+  }
+}
+# Kept separate: the reviewed VM policy plus edge would exceed the role's
+# aggregate inline-policy quota. This document fits one managed policy.
+resource "aws_iam_policy" "product_edge" {
+  count       = var.enable_product_executor ? 1 : 0
+  name        = "railshot-product-edge"
+  description = "Registered Railshot app routes; native edge plan validation is required"
+  policy      = file("${path.module}/product-edge-policy.json")
+}
+resource "aws_iam_role_policy_attachment" "product_edge" {
+  count      = var.enable_product_executor ? 1 : 0
+  role       = aws_iam_role.control.name
+  policy_arn = aws_iam_policy.product_edge[0].arn
+}
 resource "aws_iam_instance_profile" "control" {
   name = local.name
   role = aws_iam_role.control.name
@@ -179,7 +209,7 @@ resource "aws_instance" "control" {
   credit_specification { cpu_credits = "standard" }
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_put_response_hop_limit = var.enable_product_executor ? 2 : 1
   }
   root_block_device {
     volume_type           = "gp3"
@@ -191,7 +221,7 @@ resource "aws_instance" "control" {
   # reconstruct legacy cloud-init/Ansible/accounts files in their old layout.
   user_data_replace_on_change = false
   tags                        = { Name = local.name }
-  depends_on                  = [aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.codex_auth]
+  depends_on                  = [aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.codex_auth, aws_iam_role_policy.product_executor, aws_iam_role_policy_attachment.product_edge]
   lifecycle {
     prevent_destroy = true
     ignore_changes  = [user_data, user_data_base64]

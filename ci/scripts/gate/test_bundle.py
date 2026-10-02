@@ -22,9 +22,9 @@ class BundleTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.ws = self.root / "workspace"
-        (self.ws / ".jasmin").mkdir(parents=True)
-        (self.ws / ".jasmin/jasmin.yaml").write_text(
-            "apiVersion: jasmin/v0\napp: demo\nservices:\n"
+        (self.ws / ".railshot").mkdir(parents=True)
+        (self.ws / ".railshot/railshot.yaml").write_text(
+            "apiVersion: railshot/v0\napp: demo\nservices:\n"
             "  - name: web\n    build: {dockerfile: Dockerfile}\n    port: 3000\n    route: /\n")
         (self.ws / "Dockerfile").write_text("FROM node:22\nUSER 10001\n")
         (self.ws / "untracked.py").write_text("print('source')\n")
@@ -66,6 +66,42 @@ class BundleTest(unittest.TestCase):
     def export(self):
         with patch("bundle.run_bounded", side_effect=self.docker_run):
             return bundle.export(self.ws, self.verdict_path, self.out)
+
+    def test_legacy_source_exports_canonical_filename_without_rewriting_bytes(self):
+        canonical = self.ws / '.railshot/railshot.yaml'
+        content = canonical.read_bytes().replace(b'railshot/v0', b'jasmin/v0')
+        canonical.unlink()
+        (self.ws / '.jasmin').mkdir()
+        (self.ws / '.jasmin/jasmin.yaml').write_bytes(content)
+        self.verdict['source_sha256'] = bundle.source_digest(self.ws)
+        self.write_verdict()
+        self.export()
+        self.assertEqual((self.out / 'railshot.yaml').read_bytes(), content)
+        self.assertFalse((self.out / 'jasmin.yaml').exists())
+        bundle.verify(self.out)
+
+    def test_historical_bundle_keeps_its_original_names_and_hashes(self):
+        self.export()
+        (self.out / 'railshot.yaml').rename(self.out / 'jasmin.yaml')
+        manifest_path = self.out / 'manifest.json'
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest['files']['jasmin.yaml'] = manifest['files'].pop('railshot.yaml')
+        manifest_path.write_text(json.dumps(manifest))
+        before = {p.name: p.read_bytes() for p in self.out.iterdir()}
+        bundle.verify(self.out)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in self.out.iterdir()})
+        (self.out / 'railshot.yaml').write_bytes(before['jasmin.yaml'])
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            bundle.verify(self.out)
+
+    def test_ambiguous_source_specs_fail_before_export(self):
+        (self.ws / '.jasmin').mkdir()
+        (self.ws / '.jasmin/jasmin.yaml').write_bytes((self.ws / '.railshot/railshot.yaml').read_bytes())
+        self.verdict['source_sha256'] = bundle.source_digest(self.ws)
+        self.write_verdict()
+        with patch('bundle.run_bounded') as run, self.assertRaisesRegex(ValueError, 'exactly one'):
+            bundle.export(self.ws, self.verdict_path, self.out)
+        run.assert_not_called()
 
     def test_skopeo_publishes_exact_config_without_docker_daemon(self):
         self.export()
@@ -159,7 +195,7 @@ class BundleTest(unittest.TestCase):
         source.chmod(source.stat().st_mode ^ 0o100)
         self.assertNotEqual(before_mode, bundle.source_digest(self.ws))
         before_spec = bundle.source_digest(self.ws)
-        (self.ws / ".jasmin/jasmin.yaml").write_text("changed")
+        (self.ws / ".railshot/railshot.yaml").write_text("changed")
         self.assertNotEqual(before_spec, bundle.source_digest(self.ws))
 
     def test_source_symlinks_are_rejected(self):
@@ -181,7 +217,7 @@ class BundleTest(unittest.TestCase):
             with self.subTest(change=change):
                 verdict = {**self.verdict, **change}
                 with self.assertRaises(ValueError):
-                    bundle.contract((self.ws / ".jasmin/jasmin.yaml").read_bytes(), json.dumps(verdict))
+                    bundle.contract((self.ws / ".railshot/railshot.yaml").read_bytes(), json.dumps(verdict))
 
     def test_export_has_only_spec_verdict_tar_and_manifest_and_immutable_ids(self):
         manifest = self.export()
@@ -252,7 +288,7 @@ class BundleTest(unittest.TestCase):
                 run.assert_not_called()
 
     def test_partial_publish_is_durable_and_uncertain_push_requires_readback(self):
-        spec = self.ws / ".jasmin/jasmin.yaml"
+        spec = self.ws / ".railshot/railshot.yaml"
         spec.write_text(spec.read_text() + "  - name: api\n    build: {dockerfile: Dockerfile}\n    port: 3001\n")
         self.verdict["images"]["api"] = LOCAL
         self.verdict["image_ids"]["api"] = IMAGE
@@ -281,7 +317,7 @@ class BundleTest(unittest.TestCase):
         self.assertNotIn("push", operations)
 
     def test_build_context_outside_source_digest_is_rejected(self):
-        spec = (self.ws / ".jasmin/jasmin.yaml").read_text()
+        spec = (self.ws / ".railshot/railshot.yaml").read_text()
         for path in ("../outside", "/tmp/outside", "nested/../../outside"):
             with self.assertRaisesRegex(ValueError, "within workspace"):
                 bundle.contract(spec.replace("{dockerfile: Dockerfile}", "{dockerfile: Dockerfile, context: " + path + "}"),

@@ -55,6 +55,14 @@ native worker는 기존 Cilium의 NetworkPolicy를 사용하는 exporter manifes
 실패하면 이전 파일을 복원한다. API의 `RAILSHOT_OBSERVER_CONFIG`는 `state_dir/product.json`을 가리킨다.
 이 파일은 원자적으로 교체되며 API가 요청마다 읽기 때문에 API 재시작 없이 새 target/app을 관측한다.
 
+플랫폼에서는 `state_dir`를 `/var/lib/railshot/state/` 하위에 둔다. 검증된 private import의
+profiles → deployment → `observability_config_file`을 따라 bootstrap이 이 `product.json` 경로를
+`railshot-environments` ConfigMap의 `observer_file`에 한 번 등록한다. API와 초기화 컨테이너는
+optional `RAILSHOT_OBSERVER_PRODUCT_FILE`로 같은 경로를 받는다. 이후 초기화는 오래된 Secret의
+`observer.json`을 다시 복사하지 않으며, 동적 파일이 없거나 잘못되면 이전 정상값으로 대체하지 않는다.
+관측 등록 설정이 없는 기존 설치는 `RAILSHOT_OBSERVER_CONFIG`의 정적 파일을 계속 사용한다.
+기존 ConfigMap에는 새 key만 추가할 수 있고, 이미 지정된 경로를 바꾸려면 운영자가 별도로 이행해야 한다.
+
 하나의 파일 lock이 공유 대상 목록을 보호한다. 외부 변경 전에 `desired.json`과 unknown receipt를 저장한다.
 collector 전송 실패 이후 다른 등록이 들어와도 이전 의도를 목록에서 지우지 않는다. unknown 작업의
 자동 재실행은 제품 규약에 따라 금지하며 운영자가 동일 입력으로 인수·복구한다.

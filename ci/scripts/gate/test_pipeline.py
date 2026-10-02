@@ -305,8 +305,8 @@ class GateObservationTest(unittest.TestCase):
         secret = "schema-private-canary-c17e"
         with tempfile.TemporaryDirectory() as tmp:
             ws = workspace(tmp)
-            (ws / ".jasmin").mkdir()
-            (ws / ".jasmin/jasmin.yaml").write_text("apiVersion: " + secret)
+            (ws / ".railshot").mkdir()
+            (ws / ".railshot/railshot.yaml").write_text("apiVersion: " + secret)
             verdict = gate.run_gate(ws, Path(tmp) / "run", ["L1"])
         self.assertEqual(verdict["status"], "FAIL")
         self.assertEqual(verdict["failure"]["class"], "F5")

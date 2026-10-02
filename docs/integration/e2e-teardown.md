@@ -2,6 +2,8 @@
 
 PR 검증이 만든 일회성 자원과 기존 AWS/GCP PoC 자원은 소유자가 다르다. PR CI는 자신의 실행에서 만든 자원만 정리한다. 이 문서는 종료 경로이며, 기존 클라우드 자원을 삭제했다는 기록은 아니다.
 
+새 OpenStack L7 모듈의 생성 자원과 saved destroy plan 절차는 [Octavia edge 실행·정리](../../infrastructure/terraform/openstack-edge/README.md)를 따른다. 이 모듈의 state는 기존 앱 VM·DB·Cloudflare·Barbican 인증서의 state와 분리한다. 기존 OVN 시험 LB나 공유 자원을 자동 인수하지 않는다.
+
 ## 1. GitHub hosted runner의 E2E
 
 일회성 GitHub hosted Linux amd64 runner의 저장소 root에서 실행한다. 로컬 개발 장비와 기존 self-hosted runner에서는 guard가 거부한다. run ID·attempt·job·commit SHA로 실행을 구분하고, 동일한 `--output-dir`로 결과와 정리 상태를 이어받는다.

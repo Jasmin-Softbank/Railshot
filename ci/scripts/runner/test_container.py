@@ -13,7 +13,8 @@ from container_preflight import READ_ONLY, READ_WRITE, TOKEN, validate_container
 class ContainerBoundaryTest(unittest.TestCase):
     def setUp(self):
         self.container = {
-            "HostConfig": {"NetworkMode": "host", "Privileged": False, "PidMode": "", "CapAdd": ["NET_ADMIN"]},
+            "HostConfig": {"NetworkMode": "host", "Privileged": False, "PidMode": "", "CapAdd": ["NET_ADMIN"], "SecurityOpt": ["no-new-privileges", "apparmor=railshot-codex-bwrap", "seccomp=" + (Path(preflight.__file__).parent / "railshot-codex-bwrap.json").read_text()]},
+            "AppArmorProfile": "railshot-codex-bwrap",
             "Mounts": [
                 {"Type": "bind", "Source": source, "Destination": target, "RW": writable}
                 for paths, writable in ((READ_ONLY, False), (READ_WRITE, True))
@@ -22,6 +23,8 @@ class ContainerBoundaryTest(unittest.TestCase):
         }
 
     def test_same_path_private_vm_profile(self):
+        validate_container(self.container)
+        self.container["HostConfig"]["SecurityOpt"] = [value.replace("no-new-privileges", "no-new-privileges:true").replace("apparmor=", "apparmor:") for value in self.container["HostConfig"]["SecurityOpt"]]
         validate_container(self.container)
 
     def test_wrong_host_privilege_or_network(self):
@@ -32,6 +35,19 @@ class ContainerBoundaryTest(unittest.TestCase):
                 container["HostConfig"][key] = value
                 with self.assertRaises(ValueError):
                     validate_container(container)
+
+    def test_compose_refuses_missing_or_unconfined_profiles(self):
+        for options in ([], ["seccomp=unconfined"],
+                        [value for value in self.container["HostConfig"]["SecurityOpt"] if value != "no-new-privileges"]):
+            with self.subTest(options=options):
+                container = copy.deepcopy(self.container)
+                container["HostConfig"]["SecurityOpt"] = options
+                with self.assertRaises(ValueError):
+                    validate_container(container)
+        container = copy.deepcopy(self.container)
+        container["AppArmorProfile"] = "unconfined"
+        with self.assertRaises(ValueError):
+            validate_container(container)
 
     def test_unexpected_credentials_mount(self):
         self.container["Mounts"].append({"Type": "bind", "Source": "/root/.kube", "Destination": "/root/.kube", "RW": False})
@@ -75,7 +91,7 @@ def pod_fixture():
                  "tolerations": [{"key": "railshot.io/dedicated", "operator": "Equal", "value": "build", "effect": "NoSchedule"},
                                  {"key": "node.kubernetes.io/not-ready", "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}],
                  "volumes": volumes, "containers": [{"name": "runner", "securityContext": {
-                     "runAsUser": 0, "allowPrivilegeEscalation": False, "seccompProfile": {"type": "RuntimeDefault"},
+                     "runAsUser": 0, "allowPrivilegeEscalation": False, "seccompProfile": preflight.SECCOMP, "appArmorProfile": preflight.APPARMOR,
                      "capabilities": {"add": ["NET_ADMIN"]}}, "volumeMounts": mounts,
                      "env": [{"name": key, "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": value}}}
                              for key, value in (("RAILSHOT_POD_NAMESPACE", "metadata.namespace"),
@@ -124,7 +140,8 @@ class KubernetesBoundaryTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.validate(pod)
         for key, value in (("privileged", True), ("runAsUser", 1000), ("allowPrivilegeEscalation", True),
-                           ("capabilities", {"add": ["NET_ADMIN", "SYS_ADMIN"]}), ("seccompProfile", {"type": "Unconfined"})):
+                           ("capabilities", {"add": ["NET_ADMIN", "SYS_ADMIN"]}), ("seccompProfile", {"type": "Unconfined"}), ("seccompProfile", {"type": "RuntimeDefault"}),
+                           ("appArmorProfile", {"type": "Unconfined"}), ("appArmorProfile", {"type": "RuntimeDefault"})):
             with self.subTest(key=key):
                 pod = pod_fixture(); pod["spec"]["containers"][0]["securityContext"][key] = value
                 with self.assertRaises(ValueError):

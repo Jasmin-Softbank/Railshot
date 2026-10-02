@@ -150,7 +150,7 @@ function accepted(response, kind, record, requestId) {
 
 export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
   service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({ token: process.env.GITHUB_TOKEN,
-    owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.JASMIN_TENANT,
+    owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.RAILSHOT_TENANT || process.env.JASMIN_TENANT,
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
   deployPublished, environmentAdapter, observeMetrics, product, pollInterval,
@@ -167,7 +167,9 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     }
     const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments'), loadPublished: service?.publishedFiles }) : undefined);
     const { createMetricsObserver } = await import('./metrics.js');
-    const observer = observeMetrics || createMetricsObserver({ configPath: process.env.RAILSHOT_OBSERVER_CONFIG });
+    const observer = observeMetrics || createMetricsObserver({
+      configPath: process.env.RAILSHOT_OBSERVER_PRODUCT_FILE || process.env.RAILSHOT_OBSERVER_CONFIG,
+    });
     return createProductService({ observeMetrics: observer, service, target, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
@@ -230,7 +232,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         }
         if (!service) throw new ServiceError('CI 실행 기능이 설정되지 않았습니다.', 503);
         if (request.method === 'POST' && url.pathname === '/api/deploy') {
-          if (request.headers['x-jasmin-request'] !== 'deploy') throw new ServiceError('요청 헤더가 필요합니다.', 403);
+          if ((request.headers['x-railshot-request'] ?? request.headers['x-jasmin-request']) !== 'deploy') throw new ServiceError('요청 헤더가 필요합니다.', 403);
           const input = await uploadedSource(request);
           input.target_id ??= service.targetId;
           const result = products ? await products.createBuild(input, sourceLoader) : await service.deploy(input.files ? input : { ...input, ...await sourceLoader(input.repository_url) });

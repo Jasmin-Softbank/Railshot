@@ -18,6 +18,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator
+
 import api
 import database
 import test_api
@@ -93,17 +95,26 @@ class DatabaseTests(unittest.TestCase):
             return database.run(request, state_dir=state_dir, runner=runner or self.runner)
 
     def test_http_ha_completion_replay_and_config_hash_binding_without_secret_readback(self):
+        spec = json.loads((api.ansible.ROOT / 'docs/api/ansible.openapi.json').read_text())
+
+        def validate_response(path, method, status, value):
+            schema = spec['paths'][path][method]['responses'][str(status)]['content']['application/json']['schema']
+            Draft202012Validator({**schema, 'components': spec['components']}).validate(value)
+
         self.http.executor = self.execute
         server, thread = self.http.server()
         try:
             self.assertEqual(self.http.request(server, 'POST', '/v1/ansible/jobs', self.body, token=False)[0], 401)
             status, plan, _ = self.http.request(server, 'POST', '/v1/ansible/validate', self.body)
             self.assertEqual(status, 200); self.assertTrue(plan['execution_supported'])
-            status, _, location = self.http.request(server, 'POST', '/v1/ansible/jobs', self.body)
+            validate_response('/v1/ansible/validate', 'post', status, plan)
+            status, accepted, location = self.http.request(server, 'POST', '/v1/ansible/jobs', self.body)
             self.assertEqual(status, 202)
+            validate_response('/v1/ansible/jobs', 'post', status, accepted)
             deadline = time.monotonic() + 10
             while True:
-                result = self.http.request(server, 'GET', location)[1]
+                status, result, _ = self.http.request(server, 'GET', location)
+                validate_response('/v1/ansible/jobs/{request_id}', 'get', status, result)
                 if result['status'] not in ('queued', 'running') or time.monotonic() > deadline: break
                 time.sleep(.01)
             self.assertEqual(result['status'], 'succeeded', result)
@@ -112,7 +123,9 @@ class DatabaseTests(unittest.TestCase):
                 self.assertFalse(result['result'][key])
             for value in (str(self.root), *self.secret_values.values(), 'vault_file', 'identity_file'):
                 self.assertNotIn(value, json.dumps([plan, result]))
-            self.assertEqual(self.http.request(server, 'POST', '/v1/ansible/jobs', self.body)[0], 200)
+            status, replayed, _ = self.http.request(server, 'POST', '/v1/ansible/jobs', self.body)
+            self.assertEqual(status, 200)
+            validate_response('/v1/ansible/jobs', 'post', status, replayed)
             self.assertEqual(len(self.calls), 1)
             self.http.write('db1-etcd_ca_src', 'changed private certificate')
             self.assertEqual(self.http.request(server, 'POST', '/v1/ansible/jobs', self.body)[0], 409)

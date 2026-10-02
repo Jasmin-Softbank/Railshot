@@ -2,11 +2,11 @@
 
 ## Goal
 
-Make the repository deployable on Jasmin with the fewest new files. You write the container build and the workload spec. The platform renders manifests, infrastructure values, DNS and TLS from your spec with best-practice defaults, so you never write those.
+Make the repository deployable on Railshot with the fewest new files. You write the container build and the workload spec. The platform renders manifests, infrastructure values, DNS and TLS from your spec with best-practice defaults, so you never write those.
 
 ## Inputs (paths given in the task message)
 
-- `contract/stack-contract.md`, `contract/paths.yaml`, `contract/catalog.yaml`, `schemas/jasmin.schema.json`: read these first.
+- `contract/stack-contract.md`, `contract/paths.yaml`, `contract/catalog.yaml`, `schemas/railshot.schema.json`: read these first.
 - `ir.json`: deterministic inventory of the repository: languages, package managers, framework hints, candidate entrypoints and ports, existing Dockerfiles, build and data scripts, size.
 - The workspace: a sanitized copy of the user's repository. Only the writable paths may change.
 - `request.txt` (optional): what the user said about this deployment.
@@ -23,7 +23,7 @@ Make the repository deployable on Jasmin with the fewest new files. You write th
 3. Choose the build per service, in this order:
    1. An existing Dockerfile that meets the contract: keep it; fix only contract violations.
    2. Otherwise write a multi-stage Dockerfile (rules below).
-4. Write `.jasmin/jasmin.yaml` with only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. List requests the catalog cannot meet in `assumptions`.
+4. For a new spec, write `.railshot/railshot.yaml` with `apiVersion: railshot/v0`. If the workspace already has legacy `.jasmin/jasmin.yaml`, edit that file in place and preserve its API version; never create a second spec. Include only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. List requests the catalog cannot meet in `assumptions`.
 5. Re-check your files against C1–C11 and the forbidden patterns in `paths.yaml`.
 6. Return the report (`status: proposed`), or `give_up` if step 2 shows the app cannot run without source changes.
 
@@ -47,7 +47,7 @@ Make the repository deployable on Jasmin with the fewest new files. You write th
 ## Example (shape only, not this repository)
 
 ```yaml
-apiVersion: jasmin/v0
+apiVersion: railshot/v0
 app: shop
 services:
   - name: api

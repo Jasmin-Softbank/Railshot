@@ -77,8 +77,40 @@ test('HTTP enforces exact Host, Origin and Bearer before accessing deployment se
     assert.equal(accepted.status, 200);
     assert.equal(accepted.headers['access-control-allow-origin'], undefined);
     assert.equal((await http(server, '/api/deploy', { host: 'railshot-api', ...auth }, 'POST')).status, 403);
+    assert.equal((await http(server, '/api/deploy', { host: 'railshot-api', ...auth,
+      'x-railshot-request': 'invalid', 'x-jasmin-request': 'deploy' }, 'POST')).status, 403);
     assert.deepEqual(calls, [['status', '123']]);
   });
+});
+
+test('client uses Railshot configuration first and retains legacy URL/header compatibility', async () => {
+  const keys = ['RAILSHOT_API_URL', 'JASMIN_API_URL'];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const fetchBefore = globalThis.fetch;
+  const observed = [];
+  try {
+    globalThis.fetch = async (url, options) => {
+      observed.push({ url: String(url), headers: options.headers });
+      return Response.json({ run_id: 123 });
+    };
+    process.env.JASMIN_API_URL = 'https://legacy.example';
+    delete process.env.RAILSHOT_API_URL;
+    const legacy = await import('../src/client.js?legacy-configuration-test');
+    await legacy.deployRepository({ app: 'demo-app', repositoryUrl: 'https://github.com/example/demo' });
+    process.env.RAILSHOT_API_URL = 'https://railshot.example';
+    const canonical = await import('../src/client.js?canonical-configuration-test');
+    await canonical.deployRepository({ app: 'demo-app', repositoryUrl: 'https://github.com/example/demo' });
+    assert.deepEqual(observed.map((call) => call.url), ['https://legacy.example/api/deploy', 'https://railshot.example/api/deploy']);
+    for (const call of observed) {
+      assert.equal(call.headers['x-railshot-request'], 'deploy');
+      assert.equal(call.headers['x-jasmin-request'], 'deploy');
+    }
+  } finally {
+    globalThis.fetch = fetchBefore;
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
+    }
+  }
 });
 
 test('container API rejects browser origins unless explicitly enabled', async () => {

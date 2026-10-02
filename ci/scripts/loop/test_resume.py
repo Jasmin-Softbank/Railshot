@@ -159,8 +159,8 @@ s.step('agent:1', lambda: os._exit(9))
             return result
         def proposal(*args):
             (self.run / 'work/Dockerfile').write_text('FROM scratch\n')
-            (self.run / 'work/.jasmin').mkdir()
-            (self.run / 'work/.jasmin/jasmin.yaml').write_text('app: sample\n')
+            (self.run / 'work/.railshot').mkdir()
+            (self.run / 'work/.railshot/railshot.yaml').write_text('app: sample\n')
             return 0, {'output': {'status': 'proposed'}, 'written': ['Dockerfile'], 'meta': {'duration_ms': 1, 'sdk_status': 'completed'}}
         with self.gate_result(fail), self.agent_result(side_effect=proposal), \
                 patch.object(RunState, 'step', crash_after_agent):

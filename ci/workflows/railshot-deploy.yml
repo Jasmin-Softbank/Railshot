@@ -228,7 +228,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -q pyyaml jsonschema
-          python -c 'import os,yaml; s=yaml.safe_load(open("release-bundle/jasmin.yaml")); assert s["app"]==os.environ["APP"], "APP/spec.app mismatch"'
+          python -c 'import os,yaml; from pathlib import Path; names=[p for p in Path("release-bundle").iterdir() if p.name in ("railshot.yaml","jasmin.yaml")]; assert len(names)==1, "exactly one spec required"; s=yaml.safe_load(names[0].read_bytes()); assert s["app"]==os.environ["APP"], "APP/spec.app mismatch"'
           python .railshot/ci/scripts/gate/bundle.py publish release-bundle \
             "$REGISTRY_PREFIX/${TENANT}-${APP}" "${SOURCE_COMMIT::12}" --output images.json \
             --journal-dir release-bundle-publish --github-history release-history.json --github-journals recovered-journals

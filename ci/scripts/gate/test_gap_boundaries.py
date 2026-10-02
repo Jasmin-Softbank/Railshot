@@ -2,7 +2,9 @@
 import json
 import hashlib
 import io
+import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import tempfile
@@ -71,6 +73,65 @@ class BoundaryTest(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertTrue(inspected)
             self.assertIn('web', images)
+
+    def test_private_build_context_is_readable_by_nonroot_and_preserves_source_on_success_or_failure(self):
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                previous = os.umask(0o077)
+                try:
+                    ws = root / 'source'; ws.mkdir()
+                    for name in ('src/server.js', 'start.sh', 'Dockerfile', '.git/config', '.env.secret'):
+                        path = ws / name; path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text('fixture\n')
+                    (ws / 'start.sh').chmod(0o700)
+                    evidence = root / 'run'; evidence.mkdir()
+                    (evidence / 'record.json').write_text('{}')
+                    auth = root / 'auth.json'; auth.write_text('{}')
+                    before = gate.source_digest(ws)
+                    contexts = []
+                    def build(command, **kwargs):
+                        context = Path(command[-1]); contexts.append(context)
+                        self.assertNotEqual(context, ws)
+                        self.assertEqual(stat.S_IMODE(context.parent.stat().st_mode), 0o700)
+                        for name, mode in (('.', 0o755), ('src', 0o755), ('src/server.js', 0o644),
+                                           ('start.sh', 0o755), ('Dockerfile', 0o644)):
+                            self.assertEqual(stat.S_IMODE((context / name).stat().st_mode), mode)
+                        self.assertEqual((context / 'src/server.js').read_bytes(), (ws / 'src/server.js').read_bytes())
+                        self.assertFalse((context / '.git').exists())
+                        self.assertFalse((context / '.env.secret').exists())
+                        self.assertEqual(command[:3], ['docker', 'buildx', 'build'])
+                        self.assertEqual(command[command.index('--network') + 1], 'default')
+                        self.assertEqual(command[command.index('--platform') + 1], 'linux/amd64')
+                        self.assertIn('--load', command)
+                        return subprocess.CompletedProcess(command, returncode, '', 'synthetic build failure' if returncode else '')
+                    with patch.object(gate, 'require_ci_network'), patch.object(gate, 'require_ci_builder'), patch.object(gate, 'sh', side_effect=build):
+                        errors, images = gate.l2(ws, {'app': 'test', 'services': [{'name': 'web', 'build': {'dockerfile': 'Dockerfile'}}]},
+                                                '0123456789abcdef', network='railshot-quality')
+                finally:
+                    os.umask(previous)
+                self.assertEqual(bool(errors), bool(returncode))
+                self.assertEqual(bool(images), not bool(returncode))
+                self.assertEqual(gate.source_digest(ws), before)
+                for path, mode in ((ws, 0o700), (ws / 'src', 0o700), (ws / 'src/server.js', 0o600),
+                                   (ws / '.git/config', 0o600), (ws / '.env.secret', 0o600), (ws / 'start.sh', 0o700),
+                                   (auth, 0o600), (evidence, 0o700), (evidence / 'record.json', 0o600)):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), mode)
+                self.assertEqual(len(contexts), 1)
+                self.assertFalse(contexts[0].parent.exists())
+
+    def test_build_rejects_linked_or_special_source_before_docker(self):
+        for kind in ('symlink', 'fifo'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                ws = Path(tmp)
+                (ws / 'Dockerfile').write_text('FROM scratch\n')
+                if kind == 'symlink': (ws / 'input').symlink_to(ws / 'Dockerfile')
+                else: os.mkfifo(ws / 'input')
+                with patch.object(gate, 'require_ci_network'), patch.object(gate, 'require_ci_builder'), \
+                        patch.object(gate, 'sh') as docker, self.assertRaises(ValueError):
+                    gate.l2(ws, {'app': 'test', 'services': [{'name': 'web', 'build': {'dockerfile': 'Dockerfile'}}]},
+                            '0123456789abcdef', network='railshot-quality')
+                docker.assert_not_called()
 
     def test_external_copy_is_checked_but_previous_stage_is_allowed(self):
         with tempfile.TemporaryDirectory() as tmp:

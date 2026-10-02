@@ -196,6 +196,38 @@ function form() {
   const value = new FormData(); value.set('app', 'demo-app'); value.set('target_id', 'demo'); value.set('source_type', 'folder');
   value.append('files', new Blob(['hello']), 'app.js'); value.set('paths', '["app.js"]'); return value;
 }
+test('API reads registrar updates and never falls back to a legacy observer after handoff', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-observer-binding-'));
+  const legacy = join(directory, 'observer.json'), live = join(directory, 'product.json');
+  const previous = Object.fromEntries(['RAILSHOT_OBSERVER_CONFIG', 'RAILSHOT_OBSERVER_PRODUCT_FILE'].map((key) => [key, process.env[key]]));
+  t.after(async () => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
+  const collector = { id: 'shared-observer', lifecycle: 'shared', expires_at: new Date(Date.now() + 3600000).toISOString() };
+  await writeFile(legacy, JSON.stringify({ version: 1, targets: [], collector: { ...collector, id: 'legacy-observer' } }), { mode: 0o600 });
+  process.env.RAILSHOT_OBSERVER_CONFIG = legacy;
+  process.env.RAILSHOT_OBSERVER_PRODUCT_FILE = live;
+  const { base, server } = await httpFixture(t);
+  const product = await server.productReady;
+  const operation = await product.createDeployment(input, 'observer-binding');
+  await settle(() => product.getDeployment(operation.id));
+  const read = async () => (await (await fetch(`${base}/api/v1/deployments/${operation.id}`)).json()).observation;
+  assert.equal((await read()).metrics.pods.state, 'unavailable', 'missing live state must not restore legacy values');
+  await writeFile(live, JSON.stringify({ version: 1, targets: [], collector }), { mode: 0o600 });
+  assert.equal((await read()).collector.id, collector.id, 'the same API process reads registrar output');
+  await rm(live);
+  assert.equal((await read()).metrics.pods.state, 'unavailable');
+  delete process.env.RAILSHOT_OBSERVER_PRODUCT_FILE;
+  const oldServer = await httpFixture(t);
+  const oldProduct = await oldServer.server.productReady;
+  const oldOperation = await oldProduct.createDeployment(input, 'legacy-observer');
+  await settle(() => oldProduct.getDeployment(oldOperation.id));
+  assert.equal((await oldProduct.getDeployment(oldOperation.id)).observation.collector.id, 'legacy-observer', 'existing static configuration remains supported');
+});
+
 test('deployment polling preserves normalized CI steps while running and after publication', async (t) => {
   const runningSteps = [
     { key: 'loop', status: 'in_progress', conclusion: null, observed_attempt: 2 },

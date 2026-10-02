@@ -2,7 +2,7 @@
 
 ## POST /api/deploy
 
-multipart/form-data와 `x-jasmin-request: deploy` 헤더를 받는다. `app`과 ZIP `archive`, 폴더 `files`+`paths`, 또는 공개 GitHub `repository_url` 중 정확히 하나를 제공한다. 선택 `target_id`는 서버의 `RAILSHOT_TARGET_ID`와 같아야 한다. 생략하면 서버 설정을 쓴다. target은 준비·배포 성공을 뜻하지 않는 운영자 식별자다.
+multipart/form-data와 `x-railshot-request: deploy` (legacy: `x-jasmin-request: deploy`) 헤더를 받는다. `app`과 ZIP `archive`, 폴더 `files`+`paths`, 또는 공개 GitHub `repository_url` 중 정확히 하나를 제공한다. 선택 `target_id`는 서버의 `RAILSHOT_TARGET_ID`와 같아야 한다. 생략하면 서버 설정을 쓴다. target은 준비·배포 성공을 뜻하지 않는 운영자 식별자다.
 
 응답 202는 `{run_id, tenant, app, source_commit, target_id, state: "queued", changes, actions_url}`이며 공개 GitHub 입력이면 별도의 원본 `{source: {type, repository, sha}}`를 추가한다. 원본 repo SHA와 apps repo 등록 `source_commit`은 다르다. 단지 202를 받았다고 CI나 앱 배포가 성공한 것은 아니다.
 

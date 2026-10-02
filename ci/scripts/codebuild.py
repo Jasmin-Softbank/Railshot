@@ -87,7 +87,7 @@ def start(config, source, job, job_id, approved):
     archive = job / 'bundle.zip'
     with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_STORED) as output:
         os.chmod(archive, 0o600)
-        for name in sorted(bundle.FILES | {'manifest.json'}): output.write(source / name, name)
+        for name in sorted(set(manifest['files']) | {'manifest.json'}): output.write(source / name, name)
     if bundle.verify(source) != manifest: raise fail('source.binding')
     archive_sha = bundle.file_hash(archive)
     state = {'schema_version': 1, 'job_id': job_id, 'config': config, 'manifest_sha256': manifest_sha,

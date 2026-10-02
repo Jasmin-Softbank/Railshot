@@ -147,7 +147,7 @@ MCP 클라이언트의 command는 `docker`, args는 아래와 같다. `-T`로 �
 compose -f /absolute/path/to/Railshot/deployment/compose.yaml run --rm -T --no-deps mcp
 ```
 
-MCP에는 HTTP 포트가 없다. 로컬 폴더를 배포하려면 필요한 폴더만 `/sources` 같은 경로에 읽기 전용으로 마운트하고 `JASMIN_SOURCE_ROOT=/sources`를 지정한다. 전체 home, Docker socket, cloud 자격을 마운트하지 않는다. 공개 GitHub URL 입력에는 소스 폴더 mount가 필요 없다.
+MCP에는 HTTP 포트가 없다. 로컬 폴더를 배포하려면 필요한 폴더만 `/sources` 같은 경로에 읽기 전용으로 마운트하고 `RAILSHOT_SOURCE_ROOT=/sources`를 지정한다. 전체 home, Docker socket, cloud 자격을 마운트하지 않는다. 공개 GitHub URL 입력에는 소스 폴더 mount가 필요 없다.
 
 ## CI와 이미지 게시
 

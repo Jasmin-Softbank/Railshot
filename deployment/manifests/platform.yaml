@@ -75,6 +75,9 @@ spec:
           env:
             - {name: GITHUB_TOKEN, valueFrom: {secretKeyRef: {name: railshot-github, key: token}}}
             - {name: HOME, value: /var/lib/railshot}
+            - name: RAILSHOT_OBSERVER_PRODUCT_FILE
+              valueFrom:
+                configMapKeyRef: {name: railshot-environments, key: observer_file, optional: true}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -97,6 +100,9 @@ spec:
             - {name: RAILSHOT_STATE_DIR, value: /var/lib/railshot/state}
             - {name: RAILSHOT_CD_CONFIG, value: /var/lib/railshot/config/cd.json}
             - {name: RAILSHOT_OBSERVER_CONFIG, value: /var/lib/railshot/config/observer.json}
+            - name: RAILSHOT_OBSERVER_PRODUCT_FILE
+              valueFrom:
+                configMapKeyRef: {name: railshot-environments, key: observer_file, optional: true}
             - name: RAILSHOT_PROFILES_FILE
               valueFrom:
                 configMapKeyRef: {name: railshot-environments, key: profiles_file, optional: true}
@@ -104,12 +110,15 @@ spec:
             - {name: HOME, value: /var/lib/railshot}
             - {name: TMPDIR, value: /var/lib/railshot/tmp}
             - {name: TF_PLUGIN_CACHE_DIR, value: /var/lib/railshot/provider-cache}
+            - {name: AWS_REGION, value: ap-northeast-2}
+            - {name: AWS_DEFAULT_REGION, value: ap-northeast-2}
+            - {name: AWS_EC2_METADATA_V1_DISABLED, value: 'true'}
             - {name: GITHUB_TOKEN, valueFrom: {secretKeyRef: {name: railshot-github, key: token}}}
             - {name: GITHUB_OWNER, value: Jasmin-Softbank}
             - {name: GITHUB_REPO, value: railshot-apps}
             - {name: GITHUB_REF, value: main}
             - {name: GITHUB_WORKFLOW, value: railshot-deploy.yml}
-            - {name: JASMIN_TENANT, value: demo}
+            - {name: RAILSHOT_TENANT, value: demo}
             - {name: RAILSHOT_TARGET_ID, value: TARGET_REQUIRED}
             - {name: RAILSHOT_TARGET_PROVIDER, value: aws}
           resources:

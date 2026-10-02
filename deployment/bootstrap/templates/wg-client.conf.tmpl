@@ -1,0 +1,10 @@
+# 참고용 양식입니다. 실제 생성은 검증된 wireguard.render_config()에서 수행합니다.
+[Interface]
+PrivateKey = {{ private_key }}
+Address = {{ address }}
+
+[Peer]
+PublicKey = {{ server_public_key }}
+Endpoint = {{ endpoint }}
+AllowedIPs = {{ allowed_ips }}
+PersistentKeepalive = 25

@@ -34,7 +34,7 @@ sys.path.insert(0, str(PLATFORM / "runner"))
 from observability import OperationError, event_record  # noqa: E402
 from run_agent import path_ok, writable_rules  # noqa: E402
 from quality import run_quality  # noqa: E402
-from bundle import source_digest  # noqa: E402
+from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
 from execution import APP_UID, GATE_ORDER, docker_security, docker_command  # noqa: E402
 from progress import Progress  # noqa: E402
@@ -231,7 +231,7 @@ def dockerignore_errors(path):
 def validate_semantics(spec):
     """Validate CI workload inputs without generating deployment resources."""
     import jsonschema
-    jsonschema.validate(spec, json.loads((PLATFORM / "schemas/jasmin.schema.json").read_text()))
+    jsonschema.validate(spec, json.loads((PLATFORM / "schemas/railshot.schema.json").read_text()))
     names = [svc["name"] for svc in spec["services"]]
     if len(names) != len(set(names)):
         raise ValueError("service names must be unique")
@@ -242,12 +242,13 @@ def validate_semantics(spec):
 
 def l1(ws):
     import jsonschema
-    spec_path = ws / ".jasmin/jasmin.yaml"
-    if not spec_path.exists():
-        return ["missing .jasmin/jasmin.yaml"], None
+    try:
+        spec_path = source_spec(ws)
+    except ValueError as exc:
+        return [str(exc)], None
     try:
         spec = yaml.safe_load(spec_path.read_text())
-        jsonschema.validate(spec, json.loads((PLATFORM / "schemas/jasmin.schema.json").read_text()))
+        jsonschema.validate(spec, json.loads((PLATFORM / "schemas/railshot.schema.json").read_text()))
     except (yaml.YAMLError, jsonschema.ValidationError) as exc:
         raise OperationError("GATE_CHECK_FAILED", component="gate", phase="L1", outcome="FAIL", cause=exc) from exc
     allow = yaml.safe_load((PLATFORM / "contract/catalog.yaml").read_text())["base_images"]
@@ -366,9 +367,14 @@ def l2(ws, spec, run_id, *, network=None):
         # The digest excludes Git metadata. Exclude it physically from every
         # context, including nested contexts and Dockerfile-specific ignore files.
         with tempfile.TemporaryDirectory(prefix="railshot-build-") as staging:
-            clean = Path(staging) / "source"
-            shutil.copytree(ws, clean, ignore=lambda _directory, names:
-                            [name for name in names if name == ".git" or name.startswith(".env")])
+            clean = stage_source(ws, Path(staging) / "source")
+            # Preserve L2's physical secret exclusion regardless of Dockerignore
+            # negations. Filter only the verified private copy, never source.
+            for path in sorted(clean.rglob(".env*"), key=lambda p: len(p.parts), reverse=True):
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
             p = sh(["docker", "buildx", "build", "--builder", builder["name"], "--network", "default",
                     "--platform", "linux/amd64", "--load", "-f", str(clean / df.relative_to(ws)),
                     "-t", tag, str(clean / ctx.relative_to(ws))], timeout=1800)
@@ -857,8 +863,8 @@ def self_test():
         sh(["git", "add", "-A"], cwd=ws, check=True)
         sh(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "import"], cwd=ws, check=True)
         # good patch
-        (ws / ".jasmin").mkdir()
-        (ws / ".jasmin/jasmin.yaml").write_text(yaml.safe_dump({"apiVersion": "jasmin/v0", "app": "demo", "services": [
+        (ws / ".railshot").mkdir()
+        (ws / ".railshot/railshot.yaml").write_text(yaml.safe_dump({"apiVersion": "railshot/v0", "app": "demo", "services": [
             {"name": "web", "build": {"dockerfile": "Dockerfile"}, "port": 8080, "health": "/", "route": "/"}]}))
         (ws / "Dockerfile").write_text("FROM python:3.12-slim-bookworm AS base\nCOPY app.py /app/app.py\n"
                                        "FROM gcr.io/distroless/base-debian12\nCOPY --from=base /app /app\nUSER 65532\n"
