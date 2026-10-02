@@ -61,7 +61,7 @@
                 <label class="target-option">
                   <input type="radio" name="environment" value="cloud" checked />
                   <span class="target-icon" aria-hidden="true">☁</span>
-                  <span class="target-copy"><strong>클라우드</strong><small>RailShot AWS</small></span>
+                  <span class="target-copy"><strong>클라우드</strong><small>AWS · Google Cloud</small></span>
                   <span class="radio-mark" aria-hidden="true"></span>
                 </label>
                 <label class="target-option">
@@ -71,6 +71,13 @@
                   <span class="radio-mark" aria-hidden="true"></span>
                 </label>
               </fieldset>
+              <div class="provider-field" id="cloud-provider-field">
+                <label class="field-label" for="cloud-provider">클라우드 종류</label>
+                <select id="cloud-provider">
+                  <option value="aws">AWS</option>
+                  <option value="gcp">Google Cloud</option>
+                </select>
+              </div>
               <div class="provider-field" id="provider-field" hidden>
                 <label class="field-label" for="provider">인프라 종류</label>
                 <select id="provider" name="provider">

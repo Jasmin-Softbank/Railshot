@@ -6,7 +6,7 @@
 
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
-| 화면 선택 | `GET /api/v1/options` | 기존 환경의 클라우드(AWS)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. 서버에 명시한 provider와 CI/CD 연결이 일치할 때만 available이다. |
+| 화면 선택 | `GET /api/v1/options` | 기존 환경의 클라우드(AWS/GCP)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. provider에 배정된 대상이 CI 허용 목록과 CD 등록에 모두 있을 때만 available이다. |
 | 대상 | `GET /api/v1/targets` | CI 서비스에 등록한 대상 목록. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
 | 빌드 | `POST /api/v1/builds`, `GET /api/v1/builds/{id}` | ZIP·폴더·공개 GitHub를 기존 CI로 제출한다. ID는 GitHub run ID 문자열이며 등록한 run만 조회한다. `published`는 검증한 이미지 게시다. |
 | 배포 | `POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | 선택한 계획으로 환경 준비·대상 등록을 먼저 수행하거나, 이미 등록된 대상으로 바로 CI를 실행한다. CI 게시 결과를 검증한 후 CD 어댑터를 한 번 호출한다. 같은 source/target의 고정 revision 배포 및 기대 공개 HTTP 검증까지 확인해야 succeeded와 최상위 url을 반환한다. |
@@ -66,10 +66,14 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 
 신규 edge 등록을 사용한 배포는 공개 검증 성공 시 `public_http.site_url`과 `public_http.receipt`를 추가한다. `url`은 검증한 health 경로이고 `site_url`은 HTTPS 200을 확인한 앱 경로다. 제품 최상위 `url`은 `site_url`이 있으면 이를 사용하고 기존 고정 앱은 health URL을 유지한다. receipt는 deployment·target·tenant·app·environment·namespace, source/Git revision, image/route/plan digest, 만료 정책과 DNS/TLS/target health 결과를 연결한다. IP·자격·응답 body는 공개 receipt에 넣지 않는다. 검증되지 않은 결과에는 이 선택 필드가 없다.
 
-대시보드는 소스와 `environment=cloud|onprem`, `provider=aws|openstack|proxmox`를 기존 배포 endpoint로 보낸다. 이 모드는 `app`·`target_id`와 함께 사용할 수 없다. API가 `RAILSHOT_TARGET_ID`·`RAILSHOT_TARGET_PROVIDER`와 CD 등록 앱을 결정하며, 등록 앱이 없으면 GitHub/ZIP/폴더 이름에서 유효한 앱 이름을 생성한다. 폴더명은 선택적 `source_name`(1–255자, 제어 문자 금지)으로 전달한다. 알 수 없는 provider와 잘못된 조합은 422, 연결되지 않은 선택은 409이며 다른 대상으로 대체하지 않는다. 기존 app/target_id 요청과 builds API는 유지한다.
+대시보드는 소스와 `environment=cloud|onprem`, `provider=aws|gcp|openstack|proxmox`를 기존 배포 endpoint로 보낸다. 이 모드는 `app`·`target_id`와 함께 사용할 수 없다. API가 운영자의 `RAILSHOT_PROVIDER_TARGETS` 매핑과 CD 등록에서 대상·앱을 결정하며, 등록 앱이 없으면 GitHub/ZIP/폴더 이름에서 유효한 앱 이름을 생성한다. 폴더명은 선택적 `source_name`(1–255자, 제어 문자 금지)으로 전달한다. 알 수 없는 provider와 잘못된 조합은 422, 연결되지 않은 선택은 409이며 다른 대상으로 대체하지 않는다. 기존 app/target_id 요청과 builds API는 유지한다.
 
-현재 공개 플랫폼 manifest는 검증된 AWS 대상에 `RAILSHOT_TARGET_PROVIDER=aws`를 명시한다. 대상 인프라를 바꾸면 이 운영자 설정도 함께 바꿔야 한다. provider 미설정 시 화면 선택 실행은 차단되며 대상 ID 문자열로 provider를 추측하지 않는다. UI의 클라우드/온프레미스 카드와 provider 선택을 backend의 target ID나 실행 종류 드롭다운으로 대체하지 않는다.
+`RAILSHOT_TARGET_ID`·`RAILSHOT_TARGET_PROVIDER`는 기존 기본 대상을 유지한다. 추가 provider는 `RAILSHOT_PROVIDER_TARGETS` JSON 객체에 명시한다. 예를 들어 `{"gcp":"k3s-gcp","openstack":"k3s-openstack"}`이며, 값은 실제 등록한 target ID여야 한다. 하나의 target ID를 여러 provider에 배정하거나 기존 기본 대상을 다른 ID로 바꾸는 설정은 거부한다. provider 미설정 시 화면 선택 실행은 차단되며 대상 ID 문자열로 provider를 추측하지 않는다. UI의 클라우드/온프레미스 카드와 provider 선택을 backend의 target ID나 실행 종류 드롭다운으로 대체하지 않는다.
 
 `GET /api/v1/builds`, `/api/v1/deployments`, `/api/v1/environments`는 현재 세션의 실행 요약 목록을, `GET /api/v1/plans`는 현재 세션의 계획 목록을 반환한다. 배포 내역은 서버 목록으로 복원하며 localStorage의 기존 마지막 실행 ID를 사용하지 않는다. 세션·설정·OpenStack 연결 API는 [별도 명세](dashboard-sessions.md)에 정리했다.
+
+각 대상의 CD 설정은 별도 Kubernetes API, AppProject, namespace, GitOps 경로, pull Secret 참조 및 공개 health URL을 등록한다. CI 게시 결과의 target ID와 요청의 target ID가 다르면 Git push나 Argo sync 전에 거부한다. 같은 빌드·게시 코드를 사용해도 배포 선언과 클러스터 자격은 해당 대상에 묶인다. GCP의 네이티브 LB나 OpenStack의 공개 경로 준비 여부는 별도 운영 검증이며 옵션 표시만으로 완료를 뜻하지 않는다.
+
+앱 자동 배포의 시작점은 `POST /api/v1/deployments`다. API가 소스 commit을 만들고 `railshot-deploy.yml`을 dispatch하면, CI gate·이미지 게시 성공 뒤 제품 worker가 CD를 호출해 고정 Git revision을 Argo에 적용하고 공개 HTTP를 확인한다. `POST /api/v1/builds`는 게시에서 끝난다. 현재 앱 workflow에는 push/PR 자동 배포 trigger가 없으므로 저장소 수정·병합만으로 이 제품 배포 경로가 시작되지는 않는다.
 
 실패 CI의 세부 단계와 검증된 원인은 `steps[].tasks`, `ci.diagnostics`로 전달한다. 결과 불확실 상태는 `unknown`으로 유지한다. 앱 로그 조회는 `GET /api/v1/deployments/{id}/logs`이며 세션·현재 배포 버전·런타임 소유권 검증을 거친다. 상세 제한은 [제품 관측 계약](observations.md)을 따른다.
