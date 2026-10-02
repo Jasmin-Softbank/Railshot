@@ -147,6 +147,11 @@ class PlatformTests(unittest.TestCase):
         profiles = next(value for value in container['env'] if value['name'] == 'RAILSHOT_PROFILES_FILE')
         self.assertEqual(profiles['valueFrom']['configMapKeyRef'],
                          {'name': 'railshot-environments', 'key': 'profiles_file', 'optional': True})
+        for entry in (container, api['spec']['template']['spec']['initContainers'][0]):
+            observer = next(value for value in entry['env'] if value['name'] == 'RAILSHOT_OBSERVER_PRODUCT_FILE')
+            self.assertEqual(observer['valueFrom']['configMapKeyRef'],
+                             {'name': 'railshot-environments', 'key': 'observer_file', 'optional': True})
+        self.assertEqual(environment['RAILSHOT_OBSERVER_CONFIG'], '/var/lib/railshot/config/observer.json')
         self.assertIn({'name': 'state', 'mountPath': '/var/lib/railshot'}, container['volumeMounts'])
         self.assertIn("configured", container["readinessProbe"]["exec"]["command"][-1])
         self.assertTrue(all(item["spec"]["type"] == "ClusterIP" for item in output["items"] if item["kind"] == "Service"))
