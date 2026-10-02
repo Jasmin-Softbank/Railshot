@@ -143,6 +143,8 @@ terraform -chdir="$RAILSHOT_TF_WORK" state pull \
 
 ## 5. 완료 확인과 잔존 자원
 
+Named Tunnel을 설치했다면 [cloudflared 해제 절차](../../deployment/cloudflared/README.md#정리와-소유권)를 따른다. 이번 실행이 소유한 hostname의 DNS 경로, connector Deployment, 전용 Tunnel을 각각 확인해 해제하며, 공유 namespace·인증 Secret·CA·DNS zone은 일괄 삭제하지 않는다. connector Pod가 사라졌다는 사실만으로 Cloudflare DNS와 Tunnel이 삭제됐다고 판단하지 않는다.
+
 선택형 하이브리드 DB 역할은 이번 CI에서 임시 localhost 경로의 입력·설정 생성만 검사한다. 실제 PostgreSQL/Patroni/etcd 설치·해제는 수행하지 않는다. 이 담당 구현에는 운영 DB uninstall/destroy playbook이 없고, `restore.yml`은 별도 빈 경로에 복원 파일을 만드는 작업이다. 향후 DB를 설치한 경우 SQL 데이터·WAL·백업 보존과 서비스 중지 절차를 확정한 뒤 provider의 해당 DB VM state로 삭제해야 한다. K3s cleanup을 DB 삭제 경로로 사용하지 않는다.
 
 관측 도구를 별도로 설치했다면 [observability 정리 절차](../../observability/README.md)를 따른다. 해당 출력 디렉터리의 `docker compose down`은 named volume을 보존하며 `down -v`는 관측 데이터를 삭제한다. 고객 클러스터에서는 검토한 `cluster.json`의 자원만 제거한다. 이 manifest에는 ClusterRole/ClusterRoleBinding도 있어 namespace만 지우면 자원이 남는다. 공유 이름을 쓰므로 다른 대상의 관측 구성이 같은 자원을 사용하는지 먼저 확인한다. 현재 PR CI는 관측 VM·exporter를 설치하지 않으며, 도구 추출 컨테이너와 loopback 테스트 프로세스만 자체 정리한다.
