@@ -47,7 +47,7 @@ export async function createProductService({ service, directory, target, provide
   if (providerTargets !== undefined) {
     if (!providerTargets || Array.isArray(providerTargets) || typeof providerTargets !== 'object') throw invalid('공급자별 대상 설정이 잘못되었습니다.');
     for (const [provider, id] of Object.entries(providerTargets)) {
-      if (!['aws', 'openstack', 'proxmox'].includes(provider) || typeof id !== 'string' || !TARGET_ID.test(id)
+      if (!['aws', 'gcp', 'openstack', 'proxmox'].includes(provider) || typeof id !== 'string' || !TARGET_ID.test(id)
           || selections.has(provider) && selections.get(provider) !== id
           || [...selections].some(([other, value]) => other !== provider && value === id)) throw invalid('공급자별 대상 설정이 잘못되었습니다.');
       selections.set(provider, id);
@@ -71,7 +71,7 @@ export async function createProductService({ service, directory, target, provide
     return { id, cdTarget, available };
   }
   function deploymentOptions() {
-    return [['cloud', 'aws', '클라우드 · RailShot AWS'], ['onprem', 'openstack', '온프레미스 · OpenStack'], ['onprem', 'proxmox', '온프레미스 · Proxmox']].map(([environment, provider, label]) => {
+    return [['cloud', 'aws', '클라우드 · AWS'], ['cloud', 'gcp', '클라우드 · Google Cloud'], ['onprem', 'openstack', '온프레미스 · OpenStack'], ['onprem', 'proxmox', '온프레미스 · Proxmox']].map(([environment, provider, label]) => {
       const { cdTarget, available } = providerSelection(provider);
       return { id: `${environment}-${provider}`, environment, provider, label, available,
         message: available ? `소스 검사부터 앱 배포와 URL 확인까지 진행합니다.${cdTarget?.applicationName ? ` 등록된 앱 ${cdTarget.applicationName}의 소스를 갱신합니다.` : ''}`

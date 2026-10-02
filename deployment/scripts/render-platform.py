@@ -23,7 +23,7 @@ def render(images, target_id, dashboard_node_port=None, provider_targets=None):
         raise ValueError("dashboard NodePort must be in 30000..32767")
     if provider_targets is None:
         provider_targets = {}
-    if not isinstance(provider_targets, dict) or set(provider_targets) - {'aws', 'openstack', 'proxmox'}:
+    if not isinstance(provider_targets, dict) or set(provider_targets) - {'aws', 'gcp', 'openstack', 'proxmox'}:
         raise ValueError("provider targets must map supported providers to registered target IDs")
     selections = {'aws': target_id}
     for provider, selected in provider_targets.items():

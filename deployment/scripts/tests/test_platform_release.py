@@ -91,7 +91,7 @@ class PlatformReleaseTests(unittest.TestCase):
                           {"COMPONENTS": '["dashboard","api","api"]'}, {"VERIFY_REF": "refs/heads/main"},
                           {"VERIFY_HASH": ""}, {"VERIFY_ROLE": ""}, {"GITHUB_REPOSITORY_ID": "1"},
                           *({'PROVIDER_TARGETS': value} for value in ('bad-json', 'null', '[]', '{"aws":"replacement"}',
-                                                                     '{"openstack":"k3s-aws"}', '{"gcp":"k3s-gcp"}'))):
+                                                                     '{"openstack":"k3s-aws"}', '{"unknown":"k3s-unknown"}'))):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.run_step("admission", name, overrides).returncode, 0)
         self.assertIsNone(self.remote_revision())

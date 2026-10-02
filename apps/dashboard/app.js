@@ -35,6 +35,7 @@ const sourceBox = document.querySelector('#source-box');
 const error = document.querySelector('#form-error');
 const provider = document.querySelector('#provider');
 const providerField = document.querySelector('#provider-field');
+const cloudProvider = document.querySelector('#cloud-provider');
 const deploymentDatabase = document.querySelector('#deployment-database');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
@@ -125,7 +126,7 @@ const labels = { queued: '실행 대기 중', running: '실행 중', succeeded: 
 function activeRun() { return current && (current.status === 'unknown' || !terminal.has(current.status)); }
 function deploymentSelection() {
   const environment = document.querySelector('[name="environment"]:checked').value;
-  return { environment, provider: environment === 'cloud' ? 'aws' : provider.value };
+  return { environment, provider: environment === 'cloud' ? cloudProvider.value : provider.value };
 }
 function selectedOption() {
   const selected = deploymentSelection();
@@ -156,6 +157,7 @@ function databaseChoice(select, profile, reset = false) {
 function updateSelection() {
   const selected = deploymentSelection();
   providerField.hidden = selected.environment !== 'onprem';
+  document.querySelector('#cloud-provider-field').hidden = selected.environment !== 'cloud';
   const profile = selectedProfile();
   document.querySelector('#deployment-database-field').hidden = !profile?.database;
   databaseChoice(deploymentDatabase, profile);
@@ -165,10 +167,11 @@ function updateSelection() {
     : profile ? (profile.supported ? '새 실행 환경과 앱을 함께 준비합니다. 선택 내용을 확인하면 비용과 실행 계획을 표시합니다.' : '환경 생성 사양을 아직 실행할 수 없습니다.')
     : selectedOption()?.message || (selected.environment === 'onprem' && !selected.provider ? '온프레미스 인프라 종류를 선택하세요.' : '실행 가능한 인프라 연결을 준비 중입니다.'));
   invalidateReview();
-  savePreferences({ environment: selected.environment, provider: provider.value });
+  savePreferences(selected);
 }
 document.querySelectorAll('[name="environment"]').forEach((input) => input.addEventListener('change', updateSelection));
 provider.addEventListener('change', updateSelection);
+cloudProvider.addEventListener('change', updateSelection);
 deploymentDatabase.addEventListener('change', updateSelection);
 
 async function request(path, options = {}, controller = new AbortController()) {
@@ -552,7 +555,8 @@ async function initializeDashboard() {
     const { data: saved } = await request('/api/v1/preferences');
     preferences = saved;
     document.querySelector(`[name="environment"][value="${saved.environment}"]`).checked = true;
-    provider.value = saved.provider;
+    cloudProvider.value = ['aws', 'gcp'].includes(saved.provider) ? saved.provider : 'aws';
+    provider.value = ['openstack', 'proxmox'].includes(saved.provider) ? saved.provider : '';
     showView(saved.view);
     await checkConnection();
     document.querySelector('#session-note').textContent = `이 브라우저 세션 · ${new Date(session.expires_at).toLocaleDateString()}까지 유지`;

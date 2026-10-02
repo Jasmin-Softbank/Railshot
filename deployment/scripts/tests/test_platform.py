@@ -171,7 +171,7 @@ class PlatformTests(unittest.TestCase):
 
     def test_optional_provider_targets_preserve_aws_and_render_matching_ci_admission(self):
         images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + 'a' * 64 for name in ('dashboard', 'api')}
-        output = module.render(images, 'k3s-aws', provider_targets={'openstack': 'k3s-openstack'})
+        output = module.render(images, 'k3s-aws', provider_targets={'gcp': 'k3s-gcp', 'openstack': 'k3s-openstack'})
         containers = {item['metadata']['name']: item['spec']['template']['spec']['containers'][0]
                       for item in output['items'] if item['kind'] == 'Deployment'}
         entries = containers['railshot-api']['env']
@@ -179,11 +179,11 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(len(entries), len(env))
         self.assertEqual(env['RAILSHOT_TARGET_ID'], 'k3s-aws')
         self.assertEqual(env['RAILSHOT_TARGET_PROVIDER'], 'aws')
-        self.assertEqual(json.loads(env['RAILSHOT_PROVIDER_TARGETS']), {'openstack': 'k3s-openstack'})
-        self.assertEqual(env['RAILSHOT_TARGET_IDS'], 'k3s-aws,k3s-openstack')
+        self.assertEqual(json.loads(env['RAILSHOT_PROVIDER_TARGETS']), {'gcp': 'k3s-gcp', 'openstack': 'k3s-openstack'})
+        self.assertEqual(env['RAILSHOT_TARGET_IDS'], 'k3s-aws,k3s-gcp,k3s-openstack')
         self.assertFalse(any(item['name'] in {'RAILSHOT_PROVIDER_TARGETS', 'RAILSHOT_TARGET_IDS'}
                              for item in containers['railshot-dashboard'].get('env', [])))
-        for invalid in ([], 'openstack', {'gcp': 'k3s-gcp'}, {'openstack': '../target'}, {'openstack': 1},
+        for invalid in ([], 'openstack', {'unknown': 'k3s-unknown'}, {'openstack': '../target'}, {'openstack': 1},
                         {'aws': 'replacement'}, {'openstack': 'k3s-aws'}, {'openstack': 'shared', 'proxmox': 'shared'}):
             with self.subTest(provider_targets=invalid), self.assertRaises(ValueError):
                 module.render(images, 'k3s-aws', provider_targets=invalid)

@@ -568,12 +568,13 @@ test('original UI environment selection is resolved server-side and never falls 
     service: { targetId: 'demo', deploy: async (value) => { submitted.push(value); return { run_id: '123', source_commit: publication.source_commit }; },
       status: async () => ({ run_id: 123, state: 'published', publication }) } });
   const options = await (await fetch(`${base}/api/v1/options`)).json();
-  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['openstack', false], ['proxmox', false]]);
+  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['gcp', false], ['openstack', false], ['proxmox', false]]);
   const selection = () => { const value = form(); value.delete('app'); value.delete('target_id'); value.set('environment', 'cloud'); value.set('provider', 'aws'); value.set('source_name', 'different-source'); return value; };
   for (const [mutate, status] of [
     [(value) => { value.set('environment', 'onprem'); value.set('provider', 'openstack'); }, 409],
     [(value) => { value.set('environment', 'onprem'); value.set('provider', 'proxmox'); }, 409],
-    [(value) => value.set('provider', 'gcp'), 422],
+    [(value) => value.set('provider', 'gcp'), 409],
+    [(value) => { value.set('environment', 'onprem'); value.set('provider', 'gcp'); }, 422],
     [(value) => value.set('target_id', 'foreign'), 422],
     [(value) => value.set('app', 'foreign-app'), 422],
     [(value) => value.set('plan_id', 'foreign-plan'), 422],
@@ -597,18 +598,18 @@ test('original UI environment selection is resolved server-side and never falls 
   assert.deepEqual(onprem.product.deploymentOptions().filter((option) => option.available).map((option) => option.provider), ['openstack']);
 });
 
-test('HTTP provider selection keeps AWS and routes registered OpenStack to its own CI, app and CD binding', async (t) => {
+test('HTTP provider selection binds AWS, GCP and OpenStack to separate CI, app and CD targets', async (t) => {
   const previous = process.env.RAILSHOT_PROVIDER_TARGETS;
-  process.env.RAILSHOT_PROVIDER_TARGETS = JSON.stringify({ openstack: 'stack-openstack' });
+  process.env.RAILSHOT_PROVIDER_TARGETS = JSON.stringify({ gcp: 'stack-gcp', openstack: 'stack-openstack' });
   t.after(() => { if (previous === undefined) delete process.env.RAILSHOT_PROVIDER_TARGETS; else process.env.RAILSHOT_PROVIDER_TARGETS = previous; });
   const submissions = [], deliveries = [], runs = new Map();
   const deployPublished = async ({ app, targetId }) => {
     deliveries.push({ app, targetId });
     return { ...deployed, public_http: { ...deployed.public_http, url: `https://${targetId}.example.test` } };
   };
-  deployPublished.targets = { demo: { applicationName: 'demo-app' }, 'stack-openstack': { applicationName: 'openstack-app' } };
+  deployPublished.targets = { demo: { applicationName: 'demo-app' }, 'stack-gcp': { applicationName: 'gcp-app' }, 'stack-openstack': { applicationName: 'openstack-app' } };
   const { base } = await httpFixture(t, { target: { provider: 'aws' }, deployPublished,
-    service: { targetId: 'demo', targetIds: ['demo', 'stack-openstack'],
+    service: { targetId: 'demo', targetIds: ['demo', 'stack-gcp', 'stack-openstack'],
       deploy: async (value) => {
         submissions.push({ app: value.app, targetId: value.target_id });
         const runId = String(123 + runs.size);
@@ -620,10 +621,10 @@ test('HTTP provider selection keeps AWS and routes registered OpenStack to its o
         return { state: 'published', publication: runs.get(runId) };
       } } });
   const options = await (await fetch(`${base}/api/v1/options`)).json();
-  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['openstack', true], ['proxmox', false]]);
+  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['gcp', true], ['openstack', true], ['proxmox', false]]);
   const targets = await (await fetch(`${base}/api/v1/targets`)).json();
-  assert.deepEqual(targets.items.map(({ id, provider }) => [id, provider]), [['demo', 'aws'], ['stack-openstack', 'openstack']]);
-  for (const [provider, environment, id, app] of [['aws', 'cloud', 'demo', 'demo-app'], ['openstack', 'onprem', 'stack-openstack', 'openstack-app']]) {
+  assert.deepEqual(targets.items.map(({ id, provider }) => [id, provider]), [['demo', 'aws'], ['stack-gcp', 'gcp'], ['stack-openstack', 'openstack']]);
+  for (const [provider, environment, id, app] of [['aws', 'cloud', 'demo', 'demo-app'], ['gcp', 'cloud', 'stack-gcp', 'gcp-app'], ['openstack', 'onprem', 'stack-openstack', 'openstack-app']]) {
     const post = () => {
       const body = form(); body.delete('app'); body.delete('target_id');
       body.set('provider', provider); body.set('environment', environment); body.set('source_name', 'different-source');
@@ -635,7 +636,7 @@ test('HTTP provider selection keeps AWS and routes registered OpenStack to its o
     assert.equal(completed.url, `https://${id}.example.test`);
     const replay = await post(); assert.equal(replay.status, 200); assert.equal((await replay.json()).id, completed.id);
   }
-  assert.deepEqual(submissions, [{ app: 'demo-app', targetId: 'demo' }, { app: 'openstack-app', targetId: 'stack-openstack' }]);
+  assert.deepEqual(submissions, [{ app: 'demo-app', targetId: 'demo' }, { app: 'gcp-app', targetId: 'stack-gcp' }, { app: 'openstack-app', targetId: 'stack-openstack' }]);
   assert.deepEqual(deliveries, submissions);
 });
 

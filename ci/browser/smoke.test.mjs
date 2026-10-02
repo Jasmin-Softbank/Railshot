@@ -196,6 +196,45 @@ test('anonymous browser sessions persist settings and write-only OpenStack conne
   assert.deepEqual(errors, []);
 });
 
+test('each provider selection keeps the assigned CI and CD target through reload', { timeout: 90000 }, async (t) => {
+  for (const provider of ['aws', 'gcp', 'openstack']) await t.test(provider, async (t) => {
+    const targetId = `assigned-${provider}`, app = `${provider}-app`, commit = 'a'.repeat(40);
+    const submissions = [], deliveries = [];
+    const publication = { run_id: 1, target_id: targetId, app, tenant: 'demo', source_commit: commit, artifact_id: 2, producer_attempt: 1 };
+    const service = { targetId,
+      deploy: async (input) => { submissions.push(input); return { run_id: 1, source_commit: commit }; },
+      status: async () => ({ state: 'published', status: 'completed', conclusion: 'success', source_commit: commit, publication }),
+    };
+    const deployPublished = Object.assign(async (input) => {
+      deliveries.push(input);
+      return { cd: { state: 'deployed', deployed: true, revision: 'b'.repeat(40) },
+        public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: `https://${provider}.example.test/health` } };
+    }, { targets: { [targetId]: { applicationName: app, tenant: 'demo' } } });
+    const { page, origin, errors } = await start(t, { service, target: { provider }, deployPublished,
+      sourceLoader: async () => ({ files: [{ path: 'index.js', content: Buffer.from('provider fixture') }] }),
+    });
+    await page.goto(origin);
+    await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+    const saved = page.waitForResponse((res) => res.url().endsWith('/api/v1/preferences') && res.request().method() === 'PUT');
+    if (provider === 'openstack') {
+      await page.getByRole('radio', { name: /온프레미스/ }).check();
+      await page.locator('#provider').selectOption(provider);
+    } else await page.locator('#cloud-provider').selectOption(provider);
+    await saved; await page.reload();
+    await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+    assert.equal(await page.locator(provider === 'openstack' ? '#provider' : '#cloud-provider').inputValue(), provider);
+    await page.locator('#repository-url').fill('https://github.com/example/provider-fixture');
+    await page.locator('#deploy-form button[type="submit"]').click();
+    await page.locator('#deploy-button').click();
+    await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+    assert.equal(submissions.length, 1); assert.equal(deliveries.length, 1);
+    assert.equal(submissions[0].target_id, targetId); assert.equal(submissions[0].app, app);
+    assert.equal(deliveries[0].targetId, targetId); assert.equal(deliveries[0].publication.target_id, targetId);
+    assert.equal(await page.locator('#application-link').getAttribute('href'), `https://${provider}.example.test/health`);
+    assert.deepEqual(errors, []);
+  });
+});
+
 test('deployment monitor binds metrics, restores progress, and distinguishes stale, collection and HTTP failure', { timeout: 45000 }, async (t) => {
   let state = 'ready', age = 0, http = 1, broken = false;
   const record = { id: 'monitor-demo', app: 'demo-app', target_id: 'demo-aws', status: 'running', stage: 'cd',
