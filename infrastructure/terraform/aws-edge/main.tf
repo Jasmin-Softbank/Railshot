@@ -186,7 +186,7 @@ resource "aws_lb_listener_rule" "app" {
   }
 }
 resource "aws_route53_record" "app" {
-  for_each = var.routes
+  for_each = { for key, route in var.routes : key => route if route.manage_dns }
   zone_id  = local.zone_id
   name     = each.value.host
   type     = "A"

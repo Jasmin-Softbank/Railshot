@@ -31,6 +31,7 @@ variable "routes" {
     health_path              = string
     priority                 = number
     target_security_group_id = optional(string)
+    manage_dns               = optional(bool, true)
   }))
   validation {
     condition = length(var.routes) > 0 && length(var.routes) <= 50 && alltrue([for key, route in var.routes :

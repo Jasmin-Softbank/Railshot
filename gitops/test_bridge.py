@@ -137,9 +137,11 @@ class BridgeTest(unittest.TestCase):
     def test_apply_pins_git_argo_and_public_receipt_then_replay_only_observes(self):
         verified = {'state': 'succeeded', 'verified_at': '2026-10-02T12:00:00+00:00', 'url': 'https://app.example/health'}
         with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
-                patch('bridge.public_probe', return_value=verified):
+                patch('bridge.public_probe', return_value=verified), patch('bridge.site_probe', return_value=True) as site:
             result = bridge.execute(self.config, self.request)
-            self.assertTrue(result['cd']['deployed']); self.assertEqual(result['public_http'], verified)
+            self.assertTrue(result['cd']['deployed'])
+            self.assertEqual(result['public_http'], {**verified, 'site_url': 'https://app.example/health'})
+            site.assert_called_once_with('https://app.example/health')
             self.assertEqual(result['cd']['revision'], self.git('rev-parse', 'HEAD'))
             remote_revision = subprocess.check_output(['git', '--git-dir', str(self.remote), 'rev-parse', 'main'], text=True).strip()
             self.assertEqual(result['cd']['revision'], remote_revision)
@@ -150,6 +152,63 @@ class BridgeTest(unittest.TestCase):
             bad = copy.deepcopy(self.request); bad['publication']['artifact_id'] = 4
             with self.assertRaisesRegex(ValueError, 'binding conflict'):
                 bridge.execute(self.config, bad)
+
+    def test_status_health_requires_current_argo_revision_images_and_site_before_url(self):
+        self.config['targets']['k3s-aws']['public_http'] = {'url': 'https://app.example/health', 'expected_status': 200}
+        files = {name: base64.b64decode(value) for name, value in self.request['files'].items()}
+        spec = json.loads(files['railshot.yaml']); spec['services'][0]['route'] = '/app'
+        files['railshot.yaml'] = json.dumps(spec).encode()
+        manifest = json.loads(files['manifest.json'])
+        manifest['files']['railshot.yaml'] = hashlib.sha256(files['railshot.yaml']).hexdigest()
+        files['manifest.json'] = json.dumps(manifest).encode()
+        receipt = json.loads(files['handoff.json'])
+        receipt['files'] = {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items() if name != 'handoff.json'}
+        files['handoff.json'] = json.dumps(receipt).encode()
+        self.request['publication'].update(receipt)
+        self.request['files'] = {name: base64.b64encode(raw).decode() for name, raw in files.items()}
+        verified = {'state': 'succeeded', 'verified_at': '2026-10-03T00:00:00Z', 'url': 'https://app.example/health'}
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value=verified) as health, patch('bridge.site_probe', return_value=False) as site:
+            result = bridge.execute(self.config, self.request)
+            self.assertTrue(result['cd']['deployed'])
+            self.assertEqual(result['public_http'], {'state': 'unverified', 'verified_at': None, 'url': None})
+            site.assert_called_once_with('https://app.example/app')
+            site.return_value = True
+            result = bridge.execute(self.config, {**self.request, 'action': 'observe'})
+            self.assertEqual(result['public_http'], {**verified, 'site_url': 'https://app.example/app'})
+            for field in ('revision', 'images'):
+                def stale(context, namespace, *args, document=None):
+                    live = self.kubectl(context, namespace, *args, document=document)
+                    if args[0:2] == ('get', 'application'):
+                        if field == 'revision':
+                            live['status']['sync']['revision'] = 'a' * 40
+                        else:
+                            live['status']['summary']['images'] = ['ghcr.io/example/web@sha256:' + 'a' * 64]
+                    return live
+                health.reset_mock(); site.reset_mock()
+                with self.subTest(field=field), patch('argo.kubectl', side_effect=stale):
+                    result = bridge.execute(self.config, {**self.request, 'action': 'observe'})
+                    self.assertFalse(result['cd']['deployed'])
+                    self.assertEqual(result['public_http']['state'], 'not_run')
+                    health.assert_not_called(); site.assert_not_called()
+
+    def test_public_contract_rejects_ambiguous_unbound_or_invalid_expectations_before_push(self):
+        valid = {'url': 'https://app.example/health', 'expected_status': 200}
+        invalid = [{'expected_status': status} for status in (True, '200', 200.0, 206, 500)] + [
+            {'url': url} for url in ('http://app.example/health', 'https://user:secret@app.example/health',
+                                     'https://app.example/wrong', 'https://app.example/health?x=1',
+                                     'https://app.example/health#fragment', 'https://*.example/health')] + [
+            {'expected_json': {}}, {'extra': True}]
+        for index, fields in enumerate(invalid):
+            with self.subTest(fields=fields):
+                self.config['targets']['k3s-aws']['public_http'] = {**valid, **fields}
+                self.calls.clear()
+                request = {**self.request, 'deployment_id': f'invalid-{index}'}
+                with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl') as kube:
+                    result = bridge.execute(self.config, request)
+                self.assertEqual(result['cd']['state'], 'blocked')
+                kube.assert_not_called()
+                self.assertFalse(any('push' in args for args in self.calls))
 
     def test_uncertain_push_is_never_repeated_and_forged_input_never_dispatches(self):
         def failed(args, **kwargs):
@@ -226,12 +285,13 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertFalse(any('push' in args for args in self.calls))
 
-    def test_real_local_http_requires_exact_body_and_never_follows_redirect(self):
+    def test_real_local_http_checks_json_or_bounded_status_and_never_follows_redirect(self):
         class Handler(BaseHTTPRequestHandler):
-            body, redirect = b'{"status":"ready"}', False
+            body, status, calls = b'{"status":"ready"}', 200, []
             def do_GET(self):
-                self.send_response(302 if self.redirect else 200)
-                if self.redirect:
+                self.calls.append(self.path)
+                self.send_response(self.status)
+                if self.status == 302:
                     self.send_header('Location', '/other')
                 self.end_headers(); self.wfile.write(self.body)
             def log_message(self, *_args):
@@ -251,8 +311,19 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(bridge.public_probe(config, '/health')['state'], 'succeeded')
             Handler.body = b'{"status":"wrong"}'
             self.assertEqual(bridge.public_probe(config, '/health')['state'], 'unverified')
-            Handler.body = b'{"status":"ready"}'; Handler.redirect = True
-            self.assertEqual(bridge.public_probe(config, '/health')['state'], 'unverified')
+            status_only = {'url': config['url'], 'expected_status': 200}
+            for body in (b'<html>ready</html>', b'OK', b''):
+                Handler.body = body
+                self.assertEqual(bridge.public_probe(status_only, '/health')['state'], 'succeeded')
+            for status, body in ((206, b'OK'), (500, b'failure'), (200, b'x' * 65537), (302, b'')):
+                with self.subTest(status=status, size=len(body)):
+                    Handler.status, Handler.body = status, body
+                    Handler.calls.clear()
+                    self.assertEqual(bridge.public_probe(status_only, '/health')['state'], 'unverified')
+                    self.assertEqual(Handler.calls, ['/health'])
+                    self.assertFalse(bridge.site_probe(config['url']))
+            Handler.status, Handler.body = 200, b'<html>ready</html>'
+            self.assertTrue(bridge.site_probe(config['url']))
         with self.assertRaises(ValueError):
             bridge.public_probe({'url': local, 'expected_json': {}}, '/health')
 

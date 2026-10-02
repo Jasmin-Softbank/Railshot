@@ -344,5 +344,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return verified.files;
   }
 
-  return { deploy, status, events, publishedFiles, allowTarget, targetId, get targetIds() { return Object.freeze([...targetIds]); } };
+  return { deploy, status, events, publishedFiles, allowTarget, targetId,
+    identity: Object.freeze({ tenant, sourceRepository: `${owner}/${repo}` }),
+    get targetIds() { return Object.freeze([...targetIds]); } };
 }

@@ -293,6 +293,23 @@ def register_argo(kube, cd, registered, target_id, owner, binding, *, tls_server
     return renewal, token_response['status']['expirationTimestamp']
 
 
+def preflight_renewal(cd, registered, target_id, *, allow_existing=False):
+    """Reject capacity/identity conflicts before creating any runtime or Argo object."""
+    cm = argo.kubectl(cd['context'], 'argocd', 'get', 'configmap', 'railshot-credentials', '-o', 'json')
+    policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    target = registered['target']
+    expected = {'secret': 'railshot-' + target_id, 'target_id': target_id, 'server': target['cluster_server'],
+                'project': target['project'], 'namespaces': [target['namespace']]}
+    previous = next((item for item in policy['targets'] if item['target_id'] == target_id), None)
+    if previous is not None:
+        argo.require(allow_existing and all(previous[key] == value for key, value in expected.items())
+                     and previous['service_account']['name'] == SA
+                     and previous['service_account']['namespace'] == target['namespace'], 'renewal target binding conflict')
+    else:
+        # Existing credentials.validate_policy contract has a 20-target ceiling.
+        argo.require(len(policy['targets']) < 20, 'renewal target capacity exhausted')
+
+
 def install_renewal(cd, renewal):
     def control(*args, **kwargs):
         return argo.kubectl(cd['context'], 'argocd', *args, **kwargs)
@@ -304,6 +321,10 @@ def install_renewal(cd, renewal):
     policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
     previous = next((t for t in policy['targets'] if t['target_id'] == renewal['target_id']), None)
     argo.require(previous is None or previous == renewal, 'renewal target binding conflict')
+    # Recheck the complete candidate immediately before writes; preflight is not a reservation.
+    if previous is None:
+        policy['targets'].append(renewal)
+    credentials.validate_policy(policy)
     role = control('get', 'role', 'railshot-credentials', '-o', 'json')
     argo.require(len(role['rules']) == 1 and role['rules'][0]['apiGroups'] == ['']
                  and role['rules'][0]['resources'] == ['secrets'] and role['rules'][0]['verbs'] == ['get', 'patch'], 'renewal role differs')
@@ -312,7 +333,6 @@ def install_renewal(cd, renewal):
         names.append(renewal['secret'])
         control('replace', '-f', '-', '-o', 'json', document=role)  # resourceVersion prevents lost updates.
     if previous is None:
-        policy['targets'].append(renewal); credentials.validate_policy(policy)
         cm['data']['policy.json'] = json.dumps(policy)
         control('replace', '-f', '-', '-o', 'json', document=cm)
     observed = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
@@ -427,6 +447,7 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                 argo.require(record['cd_sha256'] == hashlib.sha256(read_private(home / 'cd.json', raw=True)).hexdigest(), 'CD_REGISTRATION_CHANGED')
                 return record
         registered = cd['targets'][target_id]; target = registered['target']
+        preflight_renewal(cd, registered, target_id, allow_existing=record_path.exists())
         record.update(status='running', app=registered['app'], namespace=target['namespace'], cluster_server=target['cluster_server'])
         def checkpoint(stage):
             record['stage'] = stage; save(record_path, record)

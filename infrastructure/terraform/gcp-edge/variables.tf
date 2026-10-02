@@ -45,3 +45,31 @@ variable "health_path" {
     error_message = "Use a plain absolute HTTP path without query, fragment or traversal."
   }
 }
+
+variable "routes" {
+  description = "Additional application bindings on the existing VM and shared public load balancer, keyed by application ID."
+  type = map(object({
+    hostname    = string
+    node_port   = number
+    health_path = string
+  }))
+  default  = {}
+  nullable = false
+  validation {
+    condition = alltrue([for id, route in var.routes :
+      can(regex("^[a-z][a-z0-9-]{0,61}[a-z0-9]$", id)) &&
+      length(route.hostname) <= 253 && can(regex("^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$", route.hostname)) &&
+      route.node_port == floor(route.node_port) && route.node_port >= 30000 && route.node_port <= 32767 &&
+      can(regex("^/[A-Za-z0-9/._~-]*$", route.health_path)) && !strcontains(route.health_path, "//") &&
+      !contains(split("/", route.health_path), "..") && !contains(split("/", route.health_path), ".")
+    ])
+    error_message = "Routes need a lowercase application ID, exact DNS hostname, allocated NodePort and plain absolute health path."
+  }
+  validation {
+    condition = (
+      length(distinct([for route in var.routes : route.hostname])) == length(var.routes) &&
+      length(distinct([for route in var.routes : route.node_port])) == length(var.routes)
+    )
+    error_message = "Applications on this VM must have distinct hostnames and NodePorts."
+  }
+}
