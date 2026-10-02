@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Register an operator-bound runtime with one existing shared observer."""
 import argparse
+import copy
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
@@ -31,9 +32,10 @@ def require(ok):
 
 
 def settings(config):
-    require(set(config) == {'version', 'owner', 'lifecycle', 'expires_at', 'state_dir', 'prometheus_url', 'observer_ip',
+    require(set(config) - {'observer_transport'} == {'version', 'owner', 'lifecycle', 'expires_at', 'state_dir', 'prometheus_url', 'observer_ip',
                            'observer_registry_file', 'observer_target_id', 'observer_directory',
                            'node_metrics_port', 'cluster_metrics_port'} and config['version'] == 1)
+    require(config.get('observer_transport', 'registered') in ('registered', 'direct'))
     require(config['lifecycle'] in ('acceptance', 'shared'))
     require(datetime.fromisoformat(config['expires_at'].replace('Z', '+00:00')) > datetime.now(timezone.utc))
     require(isinstance(config['owner'], str) and re.fullmatch(r'[a-z][a-z0-9-]{2,39}', config['owner']))
@@ -103,10 +105,21 @@ def node_request(registry_file, target_id, read_private=None, ansible=None):
 def observer_ssh(config, request, ansible):
     node = request['inventory']['control_plane'][0]
     require(node['private_ipv4'] == config['observer_ip'])
+    direct = config.get('observer_transport', 'registered') == 'direct'
+    if direct:
+        # Operator opt-in changes only the route to the already registered observer.
+        request = copy.deepcopy(request)
+        node = request['inventory']['control_plane'][0]
+        node['ssh'].pop('transport_ref', None)
+        require(node['ssh'].get('connect_host', node['private_ipv4']) == node['private_ipv4'])
     with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 90) as port:
         host = next(iter(ansible.build_inventory(request, port)['all']['children']['k3s_server']['hosts'].values()))
+        if direct:
+            require(port is None and host['ansible_host'] == config['observer_ip'])
         prefix = ['ssh', *shlex.split(host['ansible_ssh_common_args']), '-i', host['ansible_ssh_private_key_file'],
-                  '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15', host['ansible_user'] + '@' + host['ansible_host']]
+                  '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15',
+                  *(['-o', 'HostKeyAlias=' + node['private_ipv4']] if direct else []),
+                  host['ansible_user'] + '@' + host['ansible_host']]
         yield prefix
 
 
