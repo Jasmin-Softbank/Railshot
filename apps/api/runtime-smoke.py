@@ -88,6 +88,7 @@ def installed(rows):
         subprocess.run(['ssh', '-V'], env=env, check=True, capture_output=True, timeout=10)
         run('ansible-playbook', '--version')
         for script in ['gitops/bridge.py', 'gitops/edge.py', 'gitops/credentials.py', 'ci/scripts/runner/replenish.py',
+                       'deployment/scripts/environment.py',
                        'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py']:
             run(sys.executable, script, '--help')
         # Ansible builtin task imports and all runtime copy sources must actually be packaged.

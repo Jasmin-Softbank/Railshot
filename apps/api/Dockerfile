@@ -38,7 +38,7 @@ COPY infrastructure/ansible/run.py infrastructure/ansible/transport.py infrastru
 COPY infrastructure/ansible/tasks/guest-checks.yml /app/infrastructure/ansible/tasks/
 COPY infrastructure/ansible/group_vars/all.yml /app/infrastructure/ansible/group_vars/
 COPY contracts/ansible-request.schema.json /app/contracts/
-COPY deployment/scripts/common.sh /app/deployment/scripts/
+COPY deployment/scripts/common.sh deployment/scripts/environment.py /app/deployment/scripts/
 COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh /app/deployment/bootstrap/
 COPY deployment/cilium/install.sh deployment/cilium/preflight.py deployment/cilium/health.sh /app/deployment/cilium/
 COPY deployment/airgap/versions.json /app/deployment/airgap/
