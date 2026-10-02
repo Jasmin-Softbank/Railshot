@@ -26,6 +26,7 @@ class BootstrapTests(unittest.TestCase):
         script = next(f['content'] for f in config['write_files'] if f['path']=='/usr/local/sbin/railshot-ci-bootstrap')
         subprocess.run(['bash','-n'],input=script,text=True,check=True)
         self.assertIn('sha256sum --check --status',script)
+        self.assertIn('https://codeload.github.com/Jasmin-Softbank/Railshot/tar.gz/' + variables['platform_ref'], script)
         self.assertIn('/infrastructure/ansible/ci.yml',script)
         self.assertIn('DOCKER_CONFIG=/var/lib/railshot-console/docker-config',script)
         self.assertNotIn('platform/control',json.dumps(config))

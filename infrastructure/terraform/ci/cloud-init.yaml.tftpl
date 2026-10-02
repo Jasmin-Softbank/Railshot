@@ -41,7 +41,7 @@ write_files:
       source=/opt/railshot/source-${platform_ref}
       archive=/var/tmp/railshot-ci-source.tar.gz
       curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
-        https://codeload.github.com/Jasmin-Softbank/Jasmin/tar.gz/${platform_ref} -o "$archive"
+        https://codeload.github.com/Jasmin-Softbank/Railshot/tar.gz/${platform_ref} -o "$archive"
       echo '${archive_sha256}  /var/tmp/railshot-ci-source.tar.gz' | sha256sum --check --status
       test ! -e "$source"
       install -d -m 0755 "$source"

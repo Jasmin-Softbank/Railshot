@@ -63,11 +63,17 @@ class WorkflowPolicyTest(unittest.TestCase):
         login = next(s for s in release['steps'] if s.get('name') == 'Log in to GHCR')
         cleanup = next(s for s in release['steps'] if s.get('name') == 'Remove ephemeral registry credentials')
         self.assertEqual(cleanup['if'], 'always()')
+        self.assertNotIn('runner.', json.dumps(release['env']))
+        prepare = next(s for s in release['steps'] if s.get('name') == 'Set registry credential path')
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            env = {**os.environ, 'CAPTURE': tmp, 'DOCKER_CONFIG': str(root / 'docker'),
+            env = {**os.environ, 'CAPTURE': tmp, 'RUNNER_TEMP': tmp,
+                   'GITHUB_ENV': str(root / 'env'), 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
                    'REGISTRY_PREFIX': 'ghcr.io/owner',
                    'GITHUB_ACTOR': 'workflow-actor', 'GHCR_TOKEN': 'synthetic-test-secret'}
+            subprocess.run(['bash', '-c', prepare['run']], env=env, check=True)
+            self.assertEqual((root / 'env').read_text(), f'DOCKER_CONFIG={tmp}/railshot-registry-123-2\n')
+            env['DOCKER_CONFIG'] = str(root / 'railshot-registry-123-2')
             # This shell function captures the actual workflow's argv/stdin without contacting a registry.
             stub = 'docker() { printf "%s\\n" "$@" > "$CAPTURE/argv"; cat > "$CAPTURE/stdin"; }\n'
             result = subprocess.run(['bash', '-c', stub + login['run']], env=env, capture_output=True, text=True)
@@ -76,9 +82,9 @@ class WorkflowPolicyTest(unittest.TestCase):
                              ['login', 'ghcr.io', '--username', 'workflow-actor', '--password-stdin'])
             self.assertEqual((root / 'stdin').read_text(), env['GHCR_TOKEN'])
             self.assertNotIn(env['GHCR_TOKEN'], result.stdout + result.stderr + (root / 'argv').read_text())
-            self.assertEqual((root / 'docker').stat().st_mode & 0o777, 0o700)
+            self.assertEqual(Path(env['DOCKER_CONFIG']).stat().st_mode & 0o777, 0o700)
             subprocess.run(['bash', '-c', cleanup['run']], env=env, check=True)
-            self.assertFalse((root / 'docker').exists())
+            self.assertFalse(Path(env['DOCKER_CONFIG']).exists())
 
     def test_public_mode_requires_each_digest_without_inherited_docker_credentials(self):
         release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
