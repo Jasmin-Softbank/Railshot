@@ -104,6 +104,9 @@ spec:
             - {name: HOME, value: /var/lib/railshot}
             - {name: TMPDIR, value: /var/lib/railshot/tmp}
             - {name: TF_PLUGIN_CACHE_DIR, value: /var/lib/railshot/provider-cache}
+            - {name: AWS_REGION, value: ap-northeast-2}
+            - {name: AWS_DEFAULT_REGION, value: ap-northeast-2}
+            - {name: AWS_EC2_METADATA_V1_DISABLED, value: 'true'}
             - {name: GITHUB_TOKEN, valueFrom: {secretKeyRef: {name: railshot-github, key: token}}}
             - {name: GITHUB_OWNER, value: Jasmin-Softbank}
             - {name: GITHUB_REPO, value: railshot-apps}
