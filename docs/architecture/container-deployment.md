@@ -155,7 +155,7 @@ Railshot 자체의 변경 검사는 [railshot-ci.yml](../../.github/workflows/ra
 
 `Platform containers` workflow는 선택된 이미지마다 빌드 후 실제 entrypoint를 실행한다. UI assets, API Host/인증/Secret 파일, MCP 초기화, runner 도구를 검사한다. CI runner의 전용 VM firewall·등록·실제 job과 클라우드 배포는 이 smoke 검사와 별개다.
 
-`Railshot CI`는 이미지에 영향이 있는 변경이 `RAILSHOT_PLATFORM_VERIFY_REF`와 정확히 같은 브랜치에 push됐을 때 컨테이너 4종을 한 번 빌드·smoke 검사하고 이미지 tar를 보관한다. 선택된 검사와 최종 gate가 모두 통과하면 같은 run의 tar를 `Publish platform containers`에 넘겨 GHCR 게시 → `deployment/platform` 선언 갱신 → Argo·Pod·공개 HTTPS 검증을 자동으로 수행한다. PR, 다른 브랜치, 일반 CI 수동 실행과 문서만 바뀐 push는 운영을 변경하지 않는다. Agent SDK 호출이나 채팅 에이전트의 중계는 필요하지 않다.
+저장소 Actions 변수 `RAILSHOT_AUTO_RELEASE`가 `true`일 때만 자동 릴리스를 활성화한다. 미설정 또는 `false`이면 CI는 영향받은 이미지 검사만 수행하고 자동 게시용 tar를 내보내거나 GHCR 게시·운영 배포를 시작하지 않는다. 활성화된 `Railshot CI`는 이미지에 영향이 있는 변경이 `RAILSHOT_PLATFORM_VERIFY_REF`와 정확히 같은 브랜치에 push됐을 때 컨테이너 4종을 한 번 빌드·smoke 검사하고 이미지 tar를 보관한다. 선택된 검사와 최종 gate가 모두 통과하면 같은 run의 tar를 `Publish platform containers`에 넘겨 GHCR 게시 → `deployment/platform` 선언 갱신 → Argo·Pod·공개 HTTPS 검증을 자동으로 수행한다. PR, 다른 브랜치, 일반 CI 수동 실행과 문서만 바뀐 push는 운영을 변경하지 않는다. Agent SDK 호출이나 채팅 에이전트의 중계는 필요하지 않다.
 
 `Publish platform containers` 수동 실행도 유지한다. 검토한 `main` 또는 `integration/**` ref에서 `publish=true`이면 해당 실행에서 빌드·smoke를 통과한 이미지 tar를 그대로 게시한다. 자동 경로는 CI가 만든 tar를 사용하므로 다시 빌드하지 않는다. component별 JSON artifact에는 `ghcr.io/jasmin-softbank/railshot-<component>@sha256:...`가 남으며 이미지 revision label은 실행의 source SHA와 일치해야 한다.
 

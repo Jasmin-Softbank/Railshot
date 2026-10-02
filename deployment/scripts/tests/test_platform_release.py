@@ -101,12 +101,12 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertEqual(verification["needs"], "deploy")
         self.assertEqual(verification["permissions"], {"contents": "read", "id-token": "write"})
 
-    def test_ci_reuses_same_run_images_only_after_trusted_push_gate(self):
+    def test_ci_reuses_same_run_images_only_after_opted_in_trusted_push_gate(self):
         ci = yaml.safe_load((ROOT / '.github/workflows/railshot-ci.yml').read_text())
         jobs = ci['jobs']
         self.assertEqual(ci['permissions'], {'contents': 'read'})
         self.assertEqual(jobs['containers']['if'], "needs.changes.outputs.containers == 'true'")
-        trusted_push = "github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF"
+        trusted_push = "vars.RAILSHOT_AUTO_RELEASE == 'true' && github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF"
         components = '["dashboard","api","mcp","ci-runner"]'
         self.assertEqual(jobs['containers']['with'], {
             'components': "${{ " + trusted_push + " && '" + components + "' || needs.changes.outputs.container_components }}",
