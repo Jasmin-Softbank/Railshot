@@ -88,7 +88,7 @@ class SourceRepairTest(unittest.TestCase):
         self.assertTrue(quality.quality_failure("Cannot find package jsdom; API_KEY required", 204, repair_scope="source").get("blocked"))
 
     def test_every_failed_gate_can_plan_all_gates_and_plan_precedes_writes(self):
-        for layer, failure_class in (("L0", "F5"), ("L1", "F5"), ("Q", "QUALITY"),
+        for layer, failure_class in (("L0", "F5"), ("L1", "F5"),
                                      ("L2", "F3"), ("L4", "F6"), ("L3", "F7")):
             with self.subTest(layer=layer), tempfile.TemporaryDirectory() as tmp:
                 verdict = {"ok": False, "layers": [{"layer": layer, "ok": False}],
@@ -127,7 +127,7 @@ class SourceRepairTest(unittest.TestCase):
             self.assertIn("NO_TESTS", initial["errors"][0])
             verdict = {"ok": False, "failure": {"class": "QUALITY", "layer": "Q", "signature": "missing",
                         "source_repair_eligible": True}, "layers": [{"layer": "Q"}]}
-            self.assertIsNone(loop.decide(verdict, None, set(), "source"))
+            self.assertIn("stop:", loop.decide(verdict, None, set(), "source"))
             allow, deny = writable_rules("contract/paths.yaml", "source")
             package["scripts"]["test"] = "node --test"
             proposal = [{"path": "package.json", "content": json.dumps(package)}, {"path": "tests/calculator.test.mjs", "content": TEST}]
@@ -151,8 +151,11 @@ class SourceRepairTest(unittest.TestCase):
                 self.assertEqual(1, checked["layers"][1]["projects"][0]["tests"])
                 (ws / "src/calculator.mjs").write_text(SOURCE.replace("a + b", "a - b"))
                 broken = gate.run_gate(ws, Path(tmp) / "broken", ["L0", "Q"], repair_scope="source", quality_network="trusted")
-                self.assertEqual("unit", broken["failure"]["check"])
-                self.assertEqual("FAIL", broken["status"])
+                self.assertEqual("unit", broken["layers"][1]["check"])
+                self.assertEqual("FAIL", broken["layers"][1]["outcome"])
+                self.assertTrue(broken["layers"][1]["advisory"])
+                self.assertIsNone(broken["failure"])
+                self.assertEqual("INCOMPLETE", broken["status"])
             with self.assertRaisesRegex(ValueError, "immutable"):
                 apply_files(ws, [{"path": "tests/calculator.test.mjs", "content": TEST.replace(", 5)", ", -1)")}], allow, deny, repair_scope="source")
 

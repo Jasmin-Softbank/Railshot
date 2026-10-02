@@ -441,7 +441,7 @@ for (const origin of ['environments', 'deployments']) {
     const cdEnvironments = [];
     const environmentAdapter = {
       plan: async (value, { id }) => ({ public: { ...value, id, runtime_target_id: request.target_id },
-        private: { profile: { create_per_request: true, target: { target_id: request.target_id }, deployment: {} } } }),
+        private: { profile: { provider: 'aws', create_per_request: true, target: { target_id: request.target_id }, deployment: {} } } }),
       verifyPlan: async () => { verifications++; },
       execute: async () => {
         executions++; registrationComplete = true;
@@ -483,6 +483,11 @@ for (const origin of ['environments', 'deployments']) {
     const environmentId = origin === 'environments' ? first.id : first.environment_id;
     const registered = f.product.targets().find(({ id }) => id === request.target_id);
     assert.equal(registered.application_name, request.app);
+    assert.equal(registered.provider, 'aws'); assert.equal(registered.environment_id, environmentId);
+    const observation = await f.product.getTargetObservation(request.target_id, owner);
+    assert.equal(observation.environment_id, environmentId); assert.equal(observation.app, request.app);
+    assert.equal(observation.metrics.node_up.state, 'not_configured');
+    await assert.rejects(f.product.getTargetObservation(request.target_id, stranger), { status: 404 });
     assert.deepEqual(registered.capabilities, { ci_submission: true, application_deployment: true, database_configuration: true });
     await assert.rejects(f.product.createDeployment({ ...request, app: 'wrong-app' }, 'wrong-app'), { code: 'INVALID_INPUT' });
     await assert.rejects(f.product.createBuild({ ...request, app: 'wrong-app' }), { code: 'INVALID_INPUT' });
@@ -502,6 +507,8 @@ for (const origin of ['environments', 'deployments']) {
       assert.deepEqual(restartedService.targetIds, ['demo', request.target_id]);
       assert.ok(restarted.targets(owner).some(({ id }) => id === request.target_id));
       assert.ok(!restarted.targets(stranger).some(({ id }) => id === request.target_id));
+      await assert.rejects(restarted.getTargetObservation(request.target_id, stranger), { status: 404 });
+      assert.equal((await restarted.getTargetObservation(request.target_id, owner)).environment_id, environmentId);
       await assert.rejects(restarted.createDeployment(request, 'foreign-restart', undefined, stranger), { code: 'INVALID_INPUT' });
       assert.equal(restarted.targets().find(({ id }) => id === request.target_id).capabilities.database_configuration, true);
       assert.equal((await restarted.getBuild(reusedComplete.ci.run_id)).status, 'published');
@@ -813,4 +820,27 @@ test('agent events are not fabricated before dispatch and require the persisted 
     assert.equal(reads, 0);
     await assert.rejects(restarted.getDeploymentEvents(created.id, 'foreign'), { status: 404 });
   } finally { await restarted.close(); }
+});
+
+test('HTTP target observations authorize IDs before collecting and need no deployment history', async (t) => {
+  const calls = [];
+  const deployPublished = async () => assert.fail('read-only observation dispatched CD');
+  deployPublished.targets = { demo: { applicationName: 'demo-app' }, 'stack-gcp': { applicationName: 'gcp-app' }, 'stack-openstack': { applicationName: 'openstack-app' } };
+  const { base } = await httpFixture(t, { target: { provider: 'aws' }, providerTargets: { gcp: 'stack-gcp', openstack: 'stack-openstack' }, deployPublished,
+    service: { targetId: 'demo', targetIds: ['demo', 'stack-gcp', 'stack-openstack'], deploy: async () => assert.fail('read-only observation dispatched CI') },
+    observeMetrics: async (record) => {
+      calls.push(record);
+      return { deployment_id: null, target_id: record.target_id, app: record.app, checked_at: new Date().toISOString(), stale_after_seconds: 90,
+        metrics: { node_up: { state: record.target_id === 'stack-gcp' ? 'collection_failed' : 'ready', value: record.target_id === 'stack-gcp' ? null : 1, observed_at: '2026-10-03T00:00:00.000Z', scope: 'target_node' } } };
+    } });
+  for (const [id, app] of [['demo', 'demo-app'], ['stack-gcp', 'gcp-app'], ['stack-openstack', 'openstack-app']]) {
+    const response = await fetch(`${base}/api/v1/targets/${id}/observations`), body = await response.json();
+    assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store'); assert.ok(response.headers.get('x-request-id'));
+    assert.equal(body.target_id, id); assert.equal(body.app, app); assert.equal(body.environment_id, null); assert.equal(body.deployment_id, null);
+    assert.deepEqual(body.runtime, { status: body.metrics.node_up.state, observed_at: body.metrics.node_up.observed_at });
+  }
+  for (const id of ['unknown', '__proto__', 'BAD-ID']) assert.equal((await fetch(`${base}/api/v1/targets/${id}/observations`)).status, 404);
+  assert.equal((await fetch(`${base}/api/v1/targets/demo/observations?app=another-app`)).status, 422);
+  const method = await fetch(`${base}/api/v1/targets/demo/observations`, { method: 'POST' });
+  assert.equal(method.status, 405); assert.equal(method.headers.get('allow'), 'GET'); assert.equal(calls.length, 3);
 });

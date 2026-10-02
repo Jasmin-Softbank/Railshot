@@ -56,13 +56,22 @@
 | `POST /api/v1/sessions`, `GET /api/v1/sessions` | `{expires_at}`. POST에서 새 발급 201, 기존 세션 200. 토큰은 Set-Cookie에만 있다. |
 | `GET /api/v1/preferences` | `{view, environment, provider}` |
 | `PUT /api/v1/preferences` | 허용 필드만 부분 갱신 후 전체 설정 반환 |
-| `GET /api/v1/deployments`, `/api/v1/builds`, `/api/v1/environments` | 본인 실행 요약 `{items, next_marker}`. 최근 접수 순. 외부 provider를 polling하지 않는다. |
+| `GET /api/v1/deployments`, `/api/v1/builds`, `/api/v1/environments` | 본인 실행 요약 `{items, next_marker, total}`. 생성 시각·내부 실행 ID 내림차순. 외부 provider를 polling하지 않는다. |
 | `GET /api/v1/plans` | 본인 공개 계획 목록 |
 | `GET /api/v1/connections` | 본인 OpenStack 연결 목록 |
 | `POST /api/v1/connections` | 연결 저장 201 + Location |
 | `GET /api/v1/connections/{id}` | 본인 연결 메타데이터 조회 |
 | `PUT /api/v1/connections/{id}` | 메타데이터와 선택적 비밀번호 변경 200 |
 | `DELETE /api/v1/connections/{id}` | 본인 연결 삭제 204 |
+
+실행 목록은 SQLite의 현재 세션·종류 조건으로 직접 조회한다. `limit` 기본 20, 범위 1–100이며 `marker`는
+직전 응답의 `next_marker`다. deployment/environment는 실행 ID, build는 기존 GitHub run ID다.
+다른 세션·종류·소유자 없는 legacy 기록의 marker는 422다. 같은 시각의 기록은 내부 실행 ID로
+정렬하며 시각 없는 legacy 기록은 운영자 경로에서만 마지막에 놓는다. 재시작해도 정렬은 같다.
+첫 페이지 이후 앞쪽에 새 기록이 들어와도 이미 본 기록을 다음 페이지에서 중복하지 않는다.
+고정 snapshot은 아니므로 생성 시각이 같은 신규 기록은 ID 순서에 따라 다음 페이지에 포함될 수 있고,
+`total`은 요청 시점 해당 종류의 전체 수다. 처음부터 새 기록을 보려면 marker 없이 다시 조회한다.
+필터·page 번호·별도 cursor 형식은 추가하지 않으며 기존 전체 작업 100개 보관 상한을 유지한다.
 
 연결 입력 예:
 

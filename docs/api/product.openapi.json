@@ -300,7 +300,8 @@
           "503": {
             "$ref": "#/components/responses/Error503"
           }
-        }
+        },
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/builds/{id}": {
@@ -539,7 +540,8 @@
           "503": {
             "$ref": "#/components/responses/Error503"
           }
-        }
+        },
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/deployments/{id}": {
@@ -1008,7 +1010,8 @@
           "503": {
             "$ref": "#/components/responses/Error503"
           }
-        }
+        },
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/environments/{id}": {
@@ -1900,6 +1903,86 @@
         }
       }
     },
+    "/api/v1/targets/{id}/observations": {
+      "get": {
+        "operationId": "getTargetObservation",
+        "summary": "Observe an authorized registered target without a deployment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,62}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current bounded node/application observations; unavailable metrics remain null.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetObservation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "Authorize the operator-shared or session-owned registered target before reading its private observation binding. Unknown and foreign targets return 404 before collector access. Missing, failed or stale metrics return explicit states and null values with HTTP 200; each collector group fails independently. A target without a bound application exposes node metrics only, with app=null and app metrics unsupported. Never dispatches or polls CI. No query parameters."
+      }
+    },
     "/api/v1/deployments/{id}/events": {
       "get": {
         "operationId": "getDeploymentEvents",
@@ -2113,6 +2196,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "environment_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Owning session environment operation ID, or null for operator-shared targets."
           }
         },
         "required": [
@@ -2122,7 +2212,8 @@
           "environment",
           "capabilities",
           "runtime",
-          "blockers"
+          "blockers",
+          "environment_id"
         ],
         "additionalProperties": false
       },
@@ -3531,15 +3622,32 @@
               },
               "http": {
                 "$ref": "#/components/schemas/Metric"
+              },
+              "node_up": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "disk_percent": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "network_receive_bytes_per_second": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "network_transmit_bytes_per_second": {
+                "$ref": "#/components/schemas/Metric"
               }
             },
             "required": [
               "pods",
               "cpu_percent",
               "memory_percent",
-              "http"
+              "http",
+              "node_up",
+              "disk_percent",
+              "network_receive_bytes_per_second",
+              "network_transmit_bytes_per_second"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "description": "CPU, memory and root filesystem usage are node-wide percentages. Network rates sum non-loopback interfaces (including virtual interfaces) over 2 minutes, in bytes/s. Missing collectors yield no_data/null. node_up reports node exporter collection, not application readiness. No synthetic history."
           },
           "collector": {
             "type": "object",
@@ -4093,11 +4201,17 @@
               "string",
               "null"
             ]
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Current count of visible records of this kind; can grow between pages. Not a frozen snapshot."
           }
         },
         "required": [
           "items",
-          "next_marker"
+          "next_marker",
+          "total"
         ],
         "additionalProperties": false
       },
@@ -4328,6 +4442,72 @@
           "state",
           "checked_at",
           "entries"
+        ],
+        "additionalProperties": false
+      },
+      "TargetObservation": {
+        "type": "object",
+        "properties": {
+          "deployment_id": {
+            "type": "null"
+          },
+          "target_id": {
+            "$ref": "#/components/schemas/Observation/properties/target_id"
+          },
+          "app": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "checked_at": {
+            "$ref": "#/components/schemas/Observation/properties/checked_at"
+          },
+          "stale_after_seconds": {
+            "$ref": "#/components/schemas/Observation/properties/stale_after_seconds"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/Observation/properties/metrics"
+          },
+          "collector": {
+            "$ref": "#/components/schemas/Observation/properties/collector"
+          },
+          "environment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "$ref": "#/components/schemas/Metric/properties/state"
+              },
+              "observed_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "observed_at"
+            ],
+            "additionalProperties": false,
+            "description": "Mirrors node_up state and sample timestamp; never a deployment or application health verdict."
+          }
+        },
+        "required": [
+          "deployment_id",
+          "target_id",
+          "app",
+          "checked_at",
+          "stale_after_seconds",
+          "metrics",
+          "environment_id",
+          "runtime"
         ],
         "additionalProperties": false
       },

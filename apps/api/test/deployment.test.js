@@ -250,11 +250,12 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
   } finally { server.close(); }
 });
 
-function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app' } = {}) {
+function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app', gateResult } = {}) {
   const hash = (value) => createHash('sha256').update(value).digest('hex');
   const verdict = { ok: true, release_eligible: true, status: 'PASS', source_sha256: 'c'.repeat(64),
     layers: ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'].map((layer) => ({ layer, ok: true, errors: [] })),
     images: { web: 'local/web:gate' }, image_ids: { web: 'sha256:' + 'd'.repeat(64) } };
+  if (gateResult) Object.assign(verdict.layers.find((row) => row.layer === gateResult.layer), gateResult);
   const files = { [specName]: 'app: my-app\n', 'verdict.json': JSON.stringify(verdict),
     'images.json': JSON.stringify({ web: 'ghcr.io/org/demo-my-app-web@sha256:' + 'e'.repeat(64) }) };
   files['manifest.json'] = JSON.stringify({ version: 1, trust: 'trusted-ci-artifact-not-a-signature',
@@ -281,6 +282,22 @@ test('canonical and historical publications retain exact filename/hash bindings;
     const renamed = { ...files, [other]: files[specName] }; delete renamed[specName];
     assert.throws(() => readPublished(entries(renamed), identity));
   }
+});
+
+test('publication accepts quality advisories but rejects runtime, isolation and unknown failures', () => {
+  const identity = { runId: 789, attempt: 1, headSha: 'a'.repeat(40), targetId: 'aws-demo', tenant: 'demo' };
+  const read = (gateResult) => readPublished(Object.entries(publishedFiles({ gateResult }))
+    .map(([path, content]) => ({ path, content: Buffer.from(content) })), identity);
+  const q = { layer: 'Q', ok: false, advisory: true, outcome: 'BLOCKED', blocked: 'NO_TESTS',
+    error: { code: 'GATE_CONFIG_INVALID', phase: 'Q.discovery', outcome: 'BLOCKED' } };
+  assert.equal(read(q).status, 'published');
+  assert.equal(read({ ...q, outcome: 'FAIL', error: { code: 'GATE_CHECK_FAILED', phase: 'Q.unit', outcome: 'FAIL' } }).status, 'published');
+  for (const layer of ['L0', 'L1', 'L2', 'L4', 'L3']) assert.throws(() => read({ ...q, layer }), /gate 단계/);
+  for (const [phase, code, outcome] of [
+    ['Q.snapshot', 'GATE_CONFIG_INVALID', 'BLOCKED'], ['network', 'GATE_ENVIRONMENT_UNAVAILABLE', 'BLOCKED'],
+    ['Q.cleanup', 'GATE_EXECUTION_FAILED', 'UNKNOWN'], ['Q.evidence-write', 'OBSERVATION_WRITE_FAILED', 'UNKNOWN'],
+  ]) assert.throws(() => read({ ...q, outcome, error: { phase, code, outcome } }), /gate 단계/);
+  assert.throws(() => read({ ...q, advisory: false }), /gate 단계/);
 });
 
 test('source ZIP root detection supports either specification name', async () => {

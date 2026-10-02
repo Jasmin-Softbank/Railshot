@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { createDashboardData } from './sessions.js';
+import { DashboardError, createDashboardData } from './sessions.js';
 
 const run = promisify(execFile);
 async function processIdentity(pid) {
@@ -119,6 +119,20 @@ export async function createProductStore(directory) {
   return {
     dashboard,
     read: () => structuredClone(state),
+    operationPage(kind, sessionId, { limit, marker }) {
+      if (!['builds', 'deployments', 'environments'].includes(kind)) throw new Error('Invalid operation kind');
+      const where = `kind = ?${sessionId ? ' AND session_id = ?' : ''}${kind === 'builds' ? " AND json_extract(record, '$.ci.run_id') IS NOT NULL" : ''}`;
+      const args = sessionId ? [kind, sessionId] : [kind];
+      const publicId = kind === 'builds' ? "CAST(json_extract(record, '$.ci.run_id') AS TEXT)" : 'id';
+      const anchor = marker === null ? null : db.prepare(`SELECT id, COALESCE(created_at, '') AS created FROM operations WHERE ${where} AND ${publicId} = ?`).get(...args, marker);
+      if (marker !== null && !anchor) throw new DashboardError('marker가 잘못되었습니다.');
+      const total = db.prepare(`SELECT count(*) AS total FROM operations WHERE ${where}`).get(...args).total;
+      const rows = db.prepare(`SELECT record FROM operations WHERE ${where}
+        ${anchor ? "AND (COALESCE(created_at, ''), id) < (?, ?)" : ''}
+        ORDER BY COALESCE(created_at, '') DESC, id DESC LIMIT ?`)
+        .all(...args, ...(anchor ? [anchor.created, anchor.id] : []), limit + 1);
+      return { records: rows.slice(0, limit).map((row) => JSON.parse(row.record)), hasMore: rows.length > limit, total };
+    },
     snapshotBytes: () => snapshotBytes,
     transaction(update) {
       const pending = tail.then(async () => {
