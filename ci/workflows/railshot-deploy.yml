@@ -134,7 +134,6 @@ jobs:
     env:
       REGISTRY_PREFIX: ${{ vars.REGISTRY_PREFIX }}
       REGISTRY_VISIBILITY: ${{ vars.REGISTRY_VISIBILITY || 'private' }}
-      DOCKER_CONFIG: ${{ runner.temp }}/railshot-registry-${{ github.run_id }}-${{ github.run_attempt }}
     outputs:
       published_id: ${{ steps.published.outputs.artifact-id }}
       bundle_id: ${{ needs.loop.outputs.bundle_id }}
@@ -152,6 +151,8 @@ jobs:
             private) echo "BLOCKED: target pull authorization is not connected; private GHCR release cannot publish" >&2; exit 1 ;;
             *) echo "BLOCKED: REGISTRY_VISIBILITY must be private or explicitly public" >&2; exit 1 ;;
           esac
+      - name: Set registry credential path
+        run: echo "DOCKER_CONFIG=$RUNNER_TEMP/railshot-registry-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {persist-credentials: false}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
