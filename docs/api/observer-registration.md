@@ -47,8 +47,17 @@ python3 observability/register.py --config /private/observer-config.json \
 
 request에는 `version,target_id,environment_id,app,namespace,node_ip,probe_url,registry_file,context`만 둔다.
 registrar가 검증한 descriptor와 edge allocation에서 생성하며, 관측 helper가 target/private IP를 다시 대조한다.
-같은 target을 다른 환경·앱·물리 자원으로 바꾸는 요청은 거부한다. 기존 NodePort나 관측 소유권이 다른
+노드만 등록할 때는 `app,namespace,probe_url`을 생략한다. 같은 target의 앱 행은 함께 보관하되 물리 자원 변경은 거부한다. 기존 NodePort나 관측 소유권이 다른
 동명 Kubernetes 자원을 덮어쓰지 않는다.
+
+앱을 포함한 등록도 독립적인 노드 행을 남기며, 앱 제거 후에도 런타임 연결 관측을 유지한다.
+관리 소유권과 버전을 확인한 K3s에 경로 제한 `AuthenticationConfiguration`을 적용해 `/healthz`만
+인증 없이 확인한다. 기존 노드 배포 잠금 아래 설정을 백업하고 필요한 경우 K3s를 재시작한다.
+`/healthz=200`, 일반 API `401`, 기존 workload 식별자·설정 보존을 검증하고 실패 시 원복한다.
+control/API 노드는 이 변경 대상이 아니다. 관측기에는 공개 CA 인증서와 정확한 TLS 서버 이름만
+전달하며 앱 토큰·관리자 인증서는 복사하지 않는다. 기존 Blackbox가 `runtime_healthz` job으로
+30초마다 검사하고, API의 `healthz_url` 바인딩으로 실제 샘플을 읽는다. 관리 API의 기존 네트워크
+접근 제한을 유지하며 사용자 입력 URL이나 앱 URL로 이 검사를 대신하지 않는다.
 
 native worker는 기존 Cilium의 NetworkPolicy를 사용하는 exporter manifest를 적용하고, 공유 Prometheus
 설정에 기존 모든 대상을 보존하며 새 대상을 추가한 다음 SIGHUP으로 다시 읽게 한다. Promtool 검증이

@@ -484,7 +484,7 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                 save(home / 'observability-request.json', observation)
                 rc = ansible.execute([sys.executable, str(ROOT / 'observability/register.py'),
                     '--config', settings['observability_config_file'], '--request', str(home / 'observability-request.json'),
-                    '--out', str(home / 'observability.json')], 300, dict(os.environ))
+                    '--out', str(home / 'observability.json')], 900, dict(os.environ))
                 argo.require(rc == 0, 'observability registration did not complete')
                 observed = read_private(home / 'observability.json')
                 argo.require(observed.get('status') == 'succeeded' and observed.get('target_id') == target_id

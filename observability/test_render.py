@@ -101,6 +101,8 @@ class ConfigurationTests(unittest.TestCase):
             out = Path(root) / 'observer'
             render(self.config, out)
             self.assertTrue((out / 'compose.yaml').exists())
+            self.assertTrue((out / 'runtime-ca').is_dir())
+            self.assertIn('./runtime-ca:/etc/blackbox/runtime-ca:ro', (out / 'compose.yaml').read_text())
             password = (out / 'secrets/grafana_password').read_text()
             self.assertGreater(len(password.strip()), 30)
             for path in out.rglob('*.json'):

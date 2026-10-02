@@ -421,7 +421,7 @@ class RegistrationTest(unittest.TestCase):
             self.assertEqual(request['node_ip'], self.descriptor['addresses']['private'])
             self.assertEqual(request['target_id'], self.target)
             self.assertEqual(request['registry_file'], str(self.root / 'registry.json'))
-            self.assertEqual(timeout, 300)
+            self.assertEqual(timeout, 900)
             env.save(Path(argv[argv.index('--out') + 1]), {'status': 'succeeded', 'target_id': self.target,
                 'app': 'new-app', 'registered': True, 'collection_state': 'pending'})
             return 0

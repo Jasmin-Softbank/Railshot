@@ -166,7 +166,8 @@ cat observability/.local/aws-demo/secrets/grafana_password
 수집 성공(`up`)과 검사 성공(`probe_success`)을 각각 확인합니다. 첫 CPU rate 계산은 최소 두 번
 수집이 필요합니다. Pod 재시작 증가량은 exporter가 놓친 짧은 Pod 수명을 완전히 복원하지 못합니다.
 플랫폼 API는 기본 localhost 바인딩이며, 명시적 Host·token 설정을 갖춘 비로컬 모드도 지원합니다.
-이 관측 구성은 API `/healthz`를 자동 공개하거나 수집하지 않습니다.
+플랫폼 API의 `/healthz`는 자동 공개하거나 수집하지 않습니다. 등록된 런타임의 native K3s `/healthz`는
+앱과 독립적으로 CA/TLS를 검증해 30초마다 수집합니다. 설정은 [등록 경로](../docs/api/observer-registration.md)를 참조하세요.
 승인된 접근 경로가 생기면 `probe_urls`에 추가하되 설정 유무와 실제 CI 실행 가능 여부를 구분합니다.
 
 ## 버전과 검증

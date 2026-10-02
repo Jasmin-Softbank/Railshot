@@ -23,7 +23,9 @@ services:
     image: prom/blackbox-exporter:v0.28.0
     restart: unless-stopped
     command: ["--config.file=/etc/blackbox/blackbox.json"]
-    volumes: ["./blackbox.json:/etc/blackbox/blackbox.json:ro"]
+    volumes:
+      - ./blackbox.json:/etc/blackbox/blackbox.json:ro
+      - ./runtime-ca:/etc/blackbox/runtime-ca:ro
     mem_limit: 128m
     cpus: 0.25
     read_only: true

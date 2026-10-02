@@ -103,7 +103,8 @@ def installed(rows):
                          'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/group_vars/all.yml',
                          'infrastructure/ansible/tasks/guest-checks.yml',
                          'deployment/scripts/common.sh', 'deployment/bootstrap/preflight.sh', 'deployment/bootstrap/install-k3s.sh',
-                         'deployment/bootstrap/health.sh', 'deployment/cilium/install.sh', 'deployment/cilium/preflight.py', 'deployment/cilium/health.sh']:
+                         'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py', 'observability/runtime_health.py',
+                         'deployment/cilium/install.sh', 'deployment/cilium/preflight.py', 'deployment/cilium/health.sh']:
             if not (ROOT / relative).is_file():
                 raise ValueError('Missing native runtime source: ' + relative)
         for provider in ['aws', 'gcp']:
