@@ -31,7 +31,7 @@ class ScopeTests(unittest.TestCase):
             'deployment/manifests/build-controller.yaml': {'contracts', 'containers'},
             'deployment/bootstrap/install-k3s.sh': {'contracts', 'runtime-smoke', 'api-browser', 'containers'},
             'gitops/argo/render.py': {'contracts'},
-            'observability/compose.yaml': {'observability'},
+            'observability/compose.yaml': {'observability', 'api-browser', 'containers'},
             'docs/api/ansible.openapi.json': {'contracts'},
             'docs/api/product.openapi.json': {'contracts', 'api-browser'},
             'examples/ansible/runtime-single-node.json': {'contracts'},

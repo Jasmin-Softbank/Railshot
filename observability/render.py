@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 import re
 import secrets
-import shutil
 from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
@@ -187,17 +186,17 @@ def write_json(path, value):
     path.chmod(0o644)
 
 
-def render(config, output):
-    validate(config)
+def render_observer(config, output, scrape_config, bind_ip="127.0.0.1"):
+    ipaddress.IPv4Address(bind_ip)
     output = Path(output)
     # Refuse existing paths so rerendering never silently rotates credentials or changes a running stack.
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
-    shutil.copyfile(HERE / 'compose.yaml', output / 'compose.yaml')
-    write_json(output / 'prometheus.json', prometheus(config))
+    compose = (HERE / 'compose.yaml').read_text().replace('127.0.0.1:9090', bind_ip + ':9090')
+    (output / 'compose.yaml').write_text(compose)
+    write_json(output / 'prometheus.json', scrape_config)
     write_json(output / 'blackbox.json', {'modules': {'http_2xx': {'prober': 'http', 'timeout': '5s',
                'http': {'method': 'GET', 'follow_redirects': False, 'preferred_ip_protocol': 'ip4',
                         'ip_protocol_fallback': False}}}})
-    write_json(output / 'cluster.json', cluster(config))
     write_json(output / 'dashboards/deployment.json', dashboard(config))
     write_json(output / 'provisioning/datasources/prometheus.yaml', {
         'apiVersion': 1, 'datasources': [{'name': 'Prometheus', 'uid': 'railshot-prometheus',
@@ -213,6 +212,12 @@ def render(config, output):
     password = secret_dir / 'grafana_password'
     password.write_text(secrets.token_urlsafe(32) + '\n', encoding='ascii')
     password.chmod(0o444)
+
+
+def render(config, output):
+    validate(config)
+    render_observer(config, output, prometheus(config))
+    write_json(Path(output) / 'cluster.json', cluster(config))
 
 
 def main():

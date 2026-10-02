@@ -41,6 +41,12 @@ test('bound observations expire, fail closed, and never expose backend details',
   assert.equal((await observe({ ...record, app: 'other-app' })).metrics.pods.state, 'unsupported');
   assert.equal(calls, before, 'unregistered app cannot query Prometheus');
   assert.equal((await createMetricsObserver() (record)).metrics.pods.state, 'not_configured');
+  config.collector = { id: 'shared-observer', lifecycle: 'acceptance', expires_at: new Date(now - 1000).toISOString() };
+  await writeFile(configPath, JSON.stringify(config));
+  const expired = await observe(record);
+  assert.equal(expired.collector.lifecycle, 'acceptance');
+  assert.equal(expired.metrics.http.state, 'unavailable');
+  assert.equal(calls, before, 'expired observer does not claim current successful measurements');
   await chmod(configPath, 0o644);
   assert.equal((await observe(record)).metrics.pods.state, 'unavailable');
   assert.equal((await createMetricsObserver({ configPath })(record)).metrics.pods.state, 'unavailable');

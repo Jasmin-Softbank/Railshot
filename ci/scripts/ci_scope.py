@@ -13,6 +13,7 @@ COMPONENTS = ('dashboard', 'api', 'mcp', 'ci-runner')
 SHA = re.compile(r'[0-9a-f]{40}')
 # Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
 API_NATIVE_FILES = {
+    'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml',
     'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
     'gitops/edge.py', 'gitops/service_name.py',
     'ci/scripts/execution.py', 'ci/scripts/observability.py', 'ci/scripts/process.py',
