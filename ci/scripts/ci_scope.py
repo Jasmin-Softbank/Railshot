@@ -24,14 +24,18 @@ API_NATIVE_FILES = {
     'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/guest.yml',
     'infrastructure/ansible/runtime.yml', 'infrastructure/ansible/tasks/guest-checks.yml',
     'infrastructure/ansible/group_vars/all.yml', 'contracts/ansible-request.schema.json',
+    'contracts/ansible-job.schema.json', 'infrastructure/ansible/cluster.py',
+    'infrastructure/ansible/database.py', 'infrastructure/ansible/inputs.py',
+    'infrastructure/ansible/application_database.py', 'infrastructure/ansible/database.yml',
+    'infrastructure/ansible/application-database.yml',
     'deployment/scripts/common.sh', 'deployment/scripts/environment.py', 'deployment/bootstrap/preflight.sh',
     'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
 }
-API_NATIVE_PREFIXES = ('infrastructure/providers/terraform_tools/',
-                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/',
-                       'infrastructure/terraform/aws-edge/')
+API_NATIVE_PREFIXES = ('infrastructure/ansible/roles/', 'infrastructure/ansible/playbooks/',
+                       'infrastructure/providers/terraform_tools/',
+                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/', 'infrastructure/terraform/aws-edge/')
 
 
 def api_native_dependency(path):

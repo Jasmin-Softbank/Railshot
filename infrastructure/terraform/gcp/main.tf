@@ -1,6 +1,6 @@
 locals {
-  labels    = { project = "railshot", environment = "poc", component = "app-node", managed_by = "terraform" }
-  web_ports = concat(var.allow_http ? ["80"] : [], var.allow_https ? ["443"] : [])
+  labels    = { project = "railshot", environment = "poc", component = var.purpose == "database" ? "database-node" : "app-node", managed_by = "terraform" }
+  web_ports = var.purpose == "database" ? [] : concat(var.allow_http ? ["80"] : [], var.allow_https ? ["443"] : [])
   # OAuth scope permits the metadata credential flow; repository IAM is owned
   # separately and must grant only the registered Artifact Registry repository.
   node_oauth_scopes = var.enable_gcp_registry_pull ? ["https://www.googleapis.com/auth/devstorage.read_only"] : []
@@ -26,11 +26,13 @@ locals {
     })
     bootstrap_script = templatefile("${path.module}/bootstrap.sh.tftpl", {
       initialize_empty_data_disk = var.initialize_empty_data_disk ? "true" : "false"
+      data_mount_path            = var.purpose == "database" ? "/var/lib/postgresql" : "/var/lib/rancher"
     })
   })
 }
 
 resource "google_compute_network" "node" {
+  count                           = var.existing_network_name == null ? 1 : 0
   name                            = "${var.name}-vpc"
   auto_create_subnetworks         = false
   routing_mode                    = "REGIONAL"
@@ -38,9 +40,10 @@ resource "google_compute_network" "node" {
 }
 
 resource "google_compute_subnetwork" "node" {
+  count                    = var.existing_network_name == null ? 1 : 0
   name                     = "${var.name}-subnet"
   region                   = var.region
-  network                  = google_compute_network.node.id
+  network                  = google_compute_network.node[0].id
   ip_cidr_range            = var.subnet_cidr
   private_ip_google_access = true
 }
@@ -54,7 +57,7 @@ resource "google_service_account" "node" {
 resource "google_compute_firewall" "web" {
   count                   = length(local.web_ports) > 0 ? 1 : 0
   name                    = "${var.name}-web"
-  network                 = google_compute_network.node.name
+  network                 = local.network_ref
   direction               = "INGRESS"
   source_ranges           = var.web_source_ranges
   target_service_accounts = [google_service_account.node.email]
@@ -68,7 +71,7 @@ resource "google_compute_firewall" "web" {
 resource "google_compute_firewall" "iap_ssh" {
   count                   = local.iap_ssh == null ? 0 : 1
   name                    = "${var.name}-iap-ssh"
-  network                 = google_compute_network.node.name
+  network                 = local.network_ref
   direction               = "INGRESS"
   source_ranges           = local.iap_ssh.source_ranges
   target_service_accounts = [google_service_account.node.email]
@@ -132,7 +135,7 @@ resource "google_compute_instance" "node" {
     mode        = "READ_WRITE"
   }
   network_interface {
-    subnetwork = google_compute_subnetwork.node.id
+    subnetwork = local.subnetwork_ref
     access_config {
       nat_ip = google_compute_address.node.address
     }
@@ -154,6 +157,18 @@ resource "google_compute_instance" "node" {
   }
   lifecycle {
     precondition {
+      condition     = var.purpose == "database" || length(var.database_ingress) == 0
+      error_message = "Database ingress requires an approved database node."
+    }
+    precondition {
+      condition     = (var.existing_network_name == null) == (var.existing_subnetwork_name == null)
+      error_message = "Specify both existing network and subnetwork names, or neither."
+    }
+    precondition {
+      condition     = var.existing_network_name == null ? true : data.google_compute_subnetwork.existing[0].network == data.google_compute_network.existing[0].self_link
+      error_message = "The selected subnet must belong to the selected network."
+    }
+    precondition {
       condition     = startswith(var.zone, "${var.region}-")
       error_message = "The explicit zone must belong to the explicit region."
     }
@@ -173,7 +188,7 @@ locals {
 }
 resource "google_compute_firewall" "host_https" {
   name                    = "${var.name}-host-https"
-  network                 = google_compute_network.node.name
+  network                 = local.network_ref
   direction               = "EGRESS"
   priority                = 1000
   destination_ranges      = ["0.0.0.0/0"]
@@ -185,7 +200,7 @@ resource "google_compute_firewall" "host_https" {
 }
 resource "google_compute_firewall" "host_deny_other" {
   name                    = "${var.name}-host-deny-other"
-  network                 = google_compute_network.node.name
+  network                 = local.network_ref
   direction               = "EGRESS"
   priority                = 2000
   destination_ranges      = ["0.0.0.0/0"]
@@ -199,7 +214,7 @@ resource "google_compute_firewall" "host_deny_other" {
 resource "google_compute_firewall" "wireguard_ingress" {
   count                   = length(var.wireguard_peer_public_cidrs) == 0 ? 0 : 1
   name                    = "${var.name}-wireguard-in"
-  network                 = google_compute_network.node.name
+  network                 = local.network_ref
   direction               = "INGRESS"
   source_ranges           = var.wireguard_peer_public_cidrs
   target_service_accounts = [google_service_account.node.email]
@@ -212,7 +227,7 @@ resource "google_compute_firewall" "wireguard_ingress" {
 resource "google_compute_firewall" "wireguard_egress" {
   count                   = length(var.wireguard_peer_public_cidrs) == 0 ? 0 : 1
   name                    = "${var.name}-wireguard-out"
-  network                 = google_compute_network.node.name
+  network                 = local.network_ref
   direction               = "EGRESS"
   priority                = 1000
   destination_ranges      = var.wireguard_peer_public_cidrs
@@ -221,4 +236,53 @@ resource "google_compute_firewall" "wireguard_egress" {
     protocol = "udp"
     ports    = ["51820"]
   }
+}
+
+# Existing network ownership remains with the environment/operator, not each VM.
+data "google_compute_network" "existing" {
+  count = var.existing_network_name == null ? 0 : 1
+  name  = var.existing_network_name
+}
+data "google_compute_subnetwork" "existing" {
+  count  = var.existing_network_name == null ? 0 : 1
+  name   = var.existing_subnetwork_name
+  region = var.region
+}
+locals {
+  network_ref    = var.existing_network_name == null ? google_compute_network.node[0].self_link : data.google_compute_network.existing[0].self_link
+  subnetwork_ref = var.existing_network_name == null ? google_compute_subnetwork.node[0].self_link : data.google_compute_subnetwork.existing[0].self_link
+}
+resource "google_compute_firewall" "database_ingress" {
+  for_each                = { for rule in var.database_ingress : "${rule.port}-${replace(replace(rule.cidr, ".", "-"), "/", "-")}" => rule }
+  name                    = "${var.name}-db-in-${each.key}"
+  network                 = local.network_ref
+  direction               = "INGRESS"
+  source_ranges           = [each.value.cidr]
+  target_service_accounts = [google_service_account.node.email]
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(each.value.port)]
+  }
+}
+resource "google_compute_firewall" "database_egress" {
+  for_each                = { for rule in var.database_egress : "${rule.port}-${replace(replace(rule.cidr, ".", "-"), "/", "-")}" => rule }
+  name                    = "${var.name}-db-out-${each.key}"
+  network                 = local.network_ref
+  direction               = "EGRESS"
+  priority                = 1000
+  destination_ranges      = [each.value.cidr]
+  target_service_accounts = [google_service_account.node.email]
+  allow {
+    protocol = "tcp"
+    ports    = [tostring(each.value.port)]
+  }
+}
+# Preserve legacy standalone network resource addresses.
+moved {
+  from = google_compute_network.node
+  to   = google_compute_network.node[0]
+}
+moved {
+  from = google_compute_subnetwork.node
+  to   = google_compute_subnetwork.node[0]
 }

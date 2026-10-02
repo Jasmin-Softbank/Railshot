@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Render a reviewable stateless Argo handoff from a trusted published artifact.
+"""Render a reviewable Argo handoff from a trusted published artifact.
 
 No Git push, cluster registration, sync, network access or deployed claim.
 """
 import argparse
+import copy
 import hashlib
 import ipaddress
 import json
@@ -21,6 +22,27 @@ import yaml
 from jsonschema import ValidationError
 
 FILES = ('images.json', 'jasmin.yaml', 'verdict.json', 'manifest.json')
+CA_PATH = '/etc/railshot/db/ca.crt'
+MIGRATION_ANNOTATIONS = {'argocd.argoproj.io/sync-wave': '-1',
+                         'argocd.argoproj.io/compare-options': 'IgnoreExtraneous'}
+
+
+def database_binding(value):
+    """Only names and a private IP cross the Git boundary; credentials never do."""
+    require(isinstance(value, dict) and set(value) == {
+        'host', 'port', 'runtime_secret', 'migration_secret', 'ca_secret'}, 'approved PostgreSQL binding required')
+    require(isinstance(value['host'], str), 'literal private IPv4 required')
+    address = ipaddress.IPv4Address(value['host'])
+    require(any(address in ipaddress.ip_network(cidr) for cidr in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')) and
+            type(value['port']) is int and value['port'] == 5432, 'private PostgreSQL endpoint on TCP 5432 required')
+    names = [value[k] for k in ('runtime_secret', 'migration_secret', 'ca_secret')]
+    require(all(isinstance(name, str) and re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', name) for name in names)
+            and len(set(names)) == 3, 'three distinct namespace-local Secret names required')
+    return value
+
+
+def secret_env(name, secret, key):
+    return {'name': name, 'valueFrom': {'secretKeyRef': {'name': secret, 'key': key}}}
 
 
 def document_hash(value):
@@ -110,39 +132,75 @@ def render(directory, target):
     if receipt['registry']['visibility'] == 'private':
         require(target.get('image_pull_secret') == pull_secret and pull_secret['namespace'] == target['namespace'],
                 'private registry requires the published pull Secret in the target namespace')
-    require(len(spec['services']) == 1 and not spec.get('resources') and not spec.get('egress'),
-            'initial CD handoff supports one stateless service without external egress')
+    require(len(spec['services']) == 1 and not spec.get('egress'),
+            'CD handoff supports one service with only its approved PostgreSQL egress')
     svc = spec['services'][0]
-    require(not svc.get('migrate') and not svc.get('secrets'),
-            'DB and secret injection require the CD owner contract')
+    database = database_binding(target.get('database')) if spec.get('resources') else None
+    require(bool(database) == bool(target.get('database')), 'workload and target database bindings must agree')
+    require(not set(svc.get('env', {})) & {'PORT', 'DATABASE_URL', 'MIGRATION_DATABASE_URL', 'PGSSLMODE', 'PGSSLROOTCERT'},
+            'platform-owned connection environment cannot be overridden')
+    require(set(svc.get('secrets', [])) <= ({'DATABASE_URL'} if database else set()),
+            'only the approved DATABASE_URL Secret is supported')
     require(target.get('path_mode', 'preserve') == 'preserve', 'HTTP paths must be forwarded without rewriting')
     route, health = http_path(svc.get('route')), http_path(svc.get('health'))
     name, namespace = spec['app'], target['namespace']
     labels = {'app.kubernetes.io/name': name, 'railshot.io/target': target['id']}
+    runtime_labels = {**labels, 'railshot.io/role': 'runtime'} if database else labels
     container = {'name': svc['name'], 'image': images[svc['name']], 'ports': [{'containerPort': svc['port']}],
                  'env': [{'name': k, 'value': v} for k, v in {**svc.get('env', {}), 'PORT': str(svc['port'])}.items()],
                  'resources': resources, 'securityContext': container_security(),
                  'volumeMounts': [{'name': 'tmp', 'mountPath': '/tmp'}]}
     if svc.get('command'):
         container['command'] = svc['command']
+    if database:
+        container['env'].append(secret_env('DATABASE_URL', database['runtime_secret'], 'DATABASE_URL'))
+        container['env'].extend([{'name': 'PGSSLMODE', 'value': 'verify-full'},
+                                 {'name': 'PGSSLROOTCERT', 'value': CA_PATH}])
+        container['volumeMounts'].append({'name': 'database-ca', 'mountPath': '/etc/railshot/db', 'readOnly': True})
     container['readinessProbe'] = {'httpGet': {'path': health, 'port': svc['port']}, 'periodSeconds': 5}
     workload = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': name, 'namespace': namespace},
-                'spec': {'replicas': svc.get('replicas', 1), 'selector': {'matchLabels': labels},
-                         'template': {'metadata': {'labels': labels}, 'spec': {
+                'spec': {'replicas': svc.get('replicas', 1), 'selector': {'matchLabels': runtime_labels},
+                         'template': {'metadata': {'labels': runtime_labels}, 'spec': {
                              'automountServiceAccountToken': False, 'nodeSelector': {'kubernetes.io/arch': 'amd64'},
                              'securityContext': pod_security(), 'containers': [container],
                              'volumes': [{'name': 'tmp', 'emptyDir': {'sizeLimit': '64Mi'}}]}}}}
     if pull_secret is not None:
         workload['spec']['template']['spec']['imagePullSecrets'] = [{'name': pull_secret['name']}]
+    if database:
+        workload['spec']['template']['spec']['volumes'].append({'name': 'database-ca', 'secret': {
+            'secretName': database['ca_secret'], 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}], 'defaultMode': 0o444}})
     service = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': name, 'namespace': namespace},
-               'spec': {'type': 'NodePort', 'selector': labels, 'externalTrafficPolicy': 'Local',
+               'spec': {'type': 'NodePort', 'selector': runtime_labels, 'externalTrafficPolicy': 'Local',
                         'ports': [{'port': svc['port'], 'targetPort': svc['port'], 'nodePort': target['node_port']}]}}
-    # ponytail: one stateless service has no runtime egress; add a Cilium policy only with an agreed external dependency.
     policy = {'apiVersion': 'networking.k8s.io/v1', 'kind': 'NetworkPolicy',
               'metadata': {'name': name, 'namespace': namespace}, 'spec': {
                   'podSelector': {'matchLabels': labels}, 'policyTypes': ['Ingress', 'Egress'], 'egress': [],
                   'ingress': [{'from': [{'ipBlock': {'cidr': c}} for c in cidrs],
                                'ports': [{'protocol': 'TCP', 'port': svc['port']}]}]}}
+    items = [workload, service, policy]
+    migration = None
+    if database:
+        policy['metadata']['annotations'] = {'argocd.argoproj.io/sync-wave': '-2'}
+        policy['spec']['egress'] = [{'to': [{'ipBlock': {'cidr': database['host'] + '/32'}}],
+                                    'ports': [{'protocol': 'TCP', 'port': 5432}]}]
+        if svc.get('migrate'):
+            # A retained normal Job runs once for this immutable image/command/binding.
+            # Retained older Jobs do not require pruning; their health still gates the Application.
+            identity = document_hash({'image': images[svc['name']], 'command': svc['migrate']['command'], 'database': database})[:12]
+            migration_name = name + '-migrate-' + identity
+            pod = copy.deepcopy(workload['spec']['template'])
+            pod['metadata']['labels'] = {**labels, 'railshot.io/role': 'migration'}
+            pod['spec']['restartPolicy'] = 'Never'
+            migrate = pod['spec']['containers'][0]
+            migrate.pop('readinessProbe'); migrate.pop('ports')
+            migrate['command'] = svc['migrate']['command']
+            migrate['env'] = [entry for entry in migrate['env'] if entry['name'] != 'DATABASE_URL'] + [
+                secret_env(key, database['migration_secret'], 'MIGRATION_DATABASE_URL')
+                for key in ('DATABASE_URL', 'MIGRATION_DATABASE_URL')]
+            items.append({'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': {
+                'name': migration_name, 'namespace': namespace, 'annotations': dict(MIGRATION_ANNOTATIONS)},
+                'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 300, 'template': pod}})
+            migration = {'name': migration_name, 'image': images[svc['name']]}
     app_name = application_name(target['id'], namespace, name)
     app = {'apiVersion': 'argoproj.io/v1alpha1', 'kind': 'Application',
            'metadata': {'name': app_name, 'namespace': target['argocd_namespace'],
@@ -150,13 +208,14 @@ def render(directory, target):
            'spec': {'project': target['project'], 'source': {'repoURL': target['repo_url'],
                      'targetRevision': target['revision'], 'path': str(git_path), 'directory': {'recurse': False}},
                     'destination': {'server': target['cluster_server'], 'namespace': namespace}}}
-    workload_list = {'apiVersion': 'v1', 'kind': 'List', 'items': [workload, service, policy]}
+    workload_list = {'apiVersion': 'v1', 'kind': 'List', 'items': items}
     return {'workload': workload_list,
             'application': app, 'status': 'rendered_for_review', 'deployed': False,
             'documents': {'workload': document_hash(workload_list), 'application': document_hash(app)},
             'http': {'route': route, 'health_path': health, 'path_mode': 'preserve',
                      'container_port': svc['port'], 'node_port': target['node_port']},
             'source_commit': receipt['source_commit'], 'target_id': target['id'],
+            **({'database': database, 'migration': migration} if database else {}),
             **{k: receipt[k] for k in ('tenant', 'app', 'run_id', 'producer_attempt', 'bundle_artifact_id', 'registry')}}
 
 
