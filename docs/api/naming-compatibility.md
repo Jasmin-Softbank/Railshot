@@ -6,6 +6,8 @@ New tested bundles and published artifacts use `railshot.yaml`. Historical `jasm
 
 New API/CLI/MCP configuration uses `RAILSHOT_TENANT`, `RAILSHOT_API_URL`, and `RAILSHOT_SOURCE_ROOT`. Corresponding `JASMIN_*` variables remain fallback aliases; `RAILSHOT_*` takes precedence. The request header is `x-railshot-request: deploy`. The server also reads the old `x-jasmin-request`, and CLI/MCP send both for compatibility with existing servers. Endpoints and payload fields remain unchanged.
 
+Bootstrap enrollment uses `RAILSHOT_ENROLLMENT_TOKEN`, with `JASMIN_ENROLLMENT_TOKEN` as a fallback. Both are removed from the environment before installation operations. New CLI help, OpenStack object descriptions and temporary cloud configuration use Railshot. New etcd units display `Railshot managed etcd`; initialized members retain their exact old description so a cosmetic change does not trigger the existing configuration-drift guard. The guard still compares every other service/config byte and TLS input.
+
 These identities are preserved pending a separate, verified migration:
 
 | Identity | Reason |
@@ -14,7 +16,7 @@ These identities are preserved pending a separate, verified migration:
 | Historical `Jasmin` repository, validation records and pinned commit links | Original evidence and provenance. |
 | `/opt/jasmin/bootstrap`, `/etc/jasmin`, `/var/lib/jasmin/bootstrap`, `.jasmin-install.json` | Installed code ownership, credentials, and progress state. |
 | `jasmin0`, `wg-quick@jasmin0`, `/etc/wireguard/jasmin0.conf` | Installed tunnel, peers, routes, and systemd unit ownership. |
-| `jasmin-job-v1`, `JASMIN_ENROLLMENT_TOKEN` | Installed SSH forced command and bootstrap enrollment interface. |
+| `jasmin-job-v1` | Installed SSH forced command. |
 | etcd `jasmin` data/config and `.jasmin-managed`; `jasmin-backup` units; Grafana `jasmin-patroni` UID | Persistent database, service and dashboard identities; renaming could orphan or duplicate them. |
 | OpenStack resource prefixes and enrollment names; historical CodeBuild `Jasmin` source binding | Existing cloud objects and source binding require live reconciliation. |
 

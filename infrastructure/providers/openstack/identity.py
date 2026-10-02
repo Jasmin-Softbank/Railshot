@@ -87,7 +87,7 @@ def configure_identity(config, admin_password, on_resource=lambda resource: None
     service_password = secrets.token_urlsafe(48)
     created, _ = client.request('POST', '/users', {'user': {'name': config['service_username'],
         'domain_id': domain_id, 'password': service_password, 'enabled': True,
-        'description': 'Jasmin customer-local bootstrap account'}}, token=admin_token)
+        'description': 'Railshot customer-local bootstrap account'}}, token=admin_token)
     user_id = _field(created,'user','id')
     on_resource({'type': 'user', 'id': user_id, 'name': config['service_username'], 'domain_id': domain_id})
     path = '/projects/{}/users/{}/roles/{}'.format(*map(_segment, (config['project_id'],user_id,config['role_id'])))

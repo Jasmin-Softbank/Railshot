@@ -131,16 +131,22 @@ def test_stage_failure_overwrites_previous_success(tmp_path):
     assert reloaded.data["stages"]["discovery"] == {"status": "failed", "error_type": "TimeoutError"}
 
 
-def test_main_removes_token_environment_before_execution(monkeypatch, tmp_path):
+@pytest.mark.parametrize('canonical,expected', [(None, 'one-use-token'), ('new-one-use-token', 'new-one-use-token')])
+def test_main_removes_token_environment_before_execution(monkeypatch, tmp_path, canonical, expected):
     from client_setup import main
     monkeypatch.setattr(main.os, "geteuid", lambda: 0)
     monkeypatch.setattr(main, "private_directory", lambda path: path)
     from contextlib import nullcontext
     monkeypatch.setattr(main, "installation_lock", lambda path: nullcontext())
     monkeypatch.setenv("JASMIN_ENROLLMENT_TOKEN", "one-use-token")
+    if canonical:
+        monkeypatch.setenv("RAILSHOT_ENROLLMENT_TOKEN", canonical)
+    else:
+        monkeypatch.delenv("RAILSHOT_ENROLLMENT_TOKEN", raising=False)
     def execute(args):
-        assert args.enrollment_token == "one-use-token"
+        assert args.enrollment_token == expected
         assert "JASMIN_ENROLLMENT_TOKEN" not in os.environ
+        assert "RAILSHOT_ENROLLMENT_TOKEN" not in os.environ
     monkeypatch.setattr(main, "initialize", execute)
     assert main.main(["init", "--config", "/unused"]) == 0
 

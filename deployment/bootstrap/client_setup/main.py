@@ -160,7 +160,7 @@ def require_root():
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Jasmin 고객 OpenStack 설치·진단")
+    parser = argparse.ArgumentParser(description="Railshot 고객 OpenStack 설치·진단")
     parser.add_argument("--state-dir", type=Path, default=Path("/var/lib/jasmin/bootstrap"))
     parser.add_argument("--config-dir", type=Path, default=Path("/etc/jasmin"))
     commands = parser.add_subparsers(dest="command", required=True)
@@ -173,7 +173,8 @@ def main(argv=None):
     verify.add_argument("--profile", type=Path, required=True)
     verify.add_argument("--known-hosts", type=Path, required=True)
     args = parser.parse_args(argv)
-    args.enrollment_token = os.environ.pop("JASMIN_ENROLLMENT_TOKEN", None)
+    legacy_token = os.environ.pop("JASMIN_ENROLLMENT_TOKEN", None)
+    args.enrollment_token = os.environ.pop("RAILSHOT_ENROLLMENT_TOKEN", None) or legacy_token
     failure_stage = "configuration"
     try:
         require_root()

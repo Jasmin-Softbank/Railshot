@@ -4,6 +4,8 @@
 
 **구현 기준: integration `bc61a5a2e00873191d3fee710d391ca6a8c57020` (2026-10-02).** AI 보조 검사·수정·이미지 게시, 운영자 GitOps/Argo 배포 도구, AWS/GCP 관리자 배포 인수 기록을 반영합니다. 작업 중인 제품 API 브랜치와 실시간 운영 상태를 이 기준에 합치지 않습니다.
 
+**명칭 갱신(2026-10-03):** 본문과 data-flow 원본·SVG·PNG의 신규 bundle 이름을 `railshot.yaml`로 맞췄습니다. 위 구현 기준과 당시 인수 기록은 그대로이며, 과거 `jasmin.yaml` 산출물은 [이름·해시 읽기 호환](../api/naming-compatibility.md)을 유지합니다.
+
 RAILSHOT은 앱 소스를 검사하고, 필요한 경우 AI가 제한된 범위를 수정한 뒤 같은 검사를 다시 통과시켜 배포 가능한 이미지를 만듭니다. 운영 서비스와 전용 빌드 노드는 하나의 운영 K3s에 배치하고, 고객 앱은 AWS·GCP·온프레미스의 독립 K3s에서 실행합니다. DB는 모든 K3s 밖의 별도 VM 영역입니다.
 
 ## 읽는 기준과 검증 기록
@@ -196,7 +198,7 @@ source commit과 manifest commit은 서로 다른 판본입니다. CI가 source/
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, Apple SD Gothic Neo, sans-serif","fontSize":"18px","lineColor":"#64748b","primaryTextColor":"#172033","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"linear","defaultRenderer":"elk","nodeSpacing":28,"rankSpacing":42,"htmlLabels":true,"wrappingWidth":340,"padding":16}}}%%
 flowchart TB
  S[("앱 소스 commit<br/>source SHA · target ID")]
- B[("검증 bundle<br/>images.tar · jasmin.yaml · verdict")]
+ B[("검증 bundle<br/>images.tar · railshot.yaml · verdict")]
  R[("GHCR digest + 게시 artifact<br/>images.json · manifest · handoff receipt")]
  M[("manifest 검토본<br/>workload · Application · receipt")]
  G[("검토한 config Git commit<br/>manifest revision 고정")]
