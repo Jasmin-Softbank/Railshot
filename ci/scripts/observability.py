@@ -26,6 +26,7 @@ ERRORS = {
     'STEP_OUTPUT_INVALID': 'The step did not return a valid result contract.',
     'SDK_CONFIG_INVALID': 'SDK version or authentication configuration is unsupported or incomplete.',
     'SDK_POLICY_DENIED': 'SDK access was rejected by the platform boundary.',
+    'SDK_SANDBOX_UNAVAILABLE': 'The runner sandbox cannot enforce the required access boundary; repair its configuration before retrying.',
     'SDK_RESUME_UNSUPPORTED': 'Native conversation resume is not supported by this adapter.',
     'SDK_OUTCOME_UNKNOWN': 'The model operation outcome is unknown; do not automatically invoke it again.',
     'SDK_EXECUTION_FAILED': 'The SDK reported an unsuccessful model operation.',

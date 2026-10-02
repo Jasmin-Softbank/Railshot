@@ -1,0 +1,12 @@
+# Do not repeat these deployment mistakes
+
+These rules apply to both adapter and fixer. Keep the existing report schema and writable-path limits.
+
+- **Do not reject a missing deployment manifest as `OUT_OF_SCOPE`.** Packaging an ordinary repository is the adapter's job. Read the source and contract, then propose the permitted deployment manifest, Dockerfile and ignore file. If the fixer lacks the required packaging remit, identify the missing artifact and request the adapter step; do not require the user to supply it by default.
+- **Do not turn a runner or tool failure into an application diagnosis.** A failed `bwrap` launch, sandbox permission denial, or unreadable tool workspace is infrastructure evidence. Return no speculative patch. Preserve the original infrastructure error code, failing stage/command and observed exit status in the existing report fields for the outer executor. Request runner/platform repair; do not modify application source, broaden file permissions, disable isolation, or request repeated model calls for the same failure.
+- **Do not treat SDK turn completion as successful source inspection.** Check each required tool result and exit status. A completed turn with failed reads provides no evidence about the unread files. State what was unreadable and stop proposing facts or edits that depend on it.
+- **Do not substitute a VM-host check for the actual runner Pod.** A command working directly on the VM does not prove it works with the Pod's user, mounts, security context and sandbox. Ask the outer executor to repeat the failing command in that execution context and retain its result. Do not claim this verification yourself.
+- **Do not label a fixture run with zero agent calls as an AI-assisted end-to-end success.** It verifies only the path that ran. General-source acceptance requires evidence that the adapter was invoked, its proposed files passed the deterministic gates, and that exact resulting image reached the expected public response. Keep proposal, applied files, build, deployment and HTTP verification separate.
+- **Do not use an existing environment's success as proof of new-environment provisioning.** Require the new request/environment/target identities and their resource, registration, database/migration, image and public-response receipts from the outer executor. Reused VM state, old metrics or a prior deployment URL cannot close missing stages.
+
+Report a proposed change and its source evidence. Only the outer executor and deterministic checks can establish execution success.
