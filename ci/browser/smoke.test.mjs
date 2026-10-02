@@ -125,3 +125,50 @@ test('public dashboard submits three source types, distinguishes publication fro
     await page.screenshot({ path: output, fullPage: true });
   }
 });
+
+test('deployment monitor binds metrics, restores progress, and distinguishes stale, collection and HTTP failure', { timeout: 45000 }, async (t) => {
+  let state = 'ready', age = 0, http = 1, broken = false;
+  const record = { id: 'monitor-demo', app: 'demo-app', target_id: 'demo-aws', status: 'running', stage: 'cd',
+    source_commit: 'a'.repeat(40), source_digest: 'b'.repeat(64), ci: { run_id: '123', state: 'published', images: { app: `ghcr.io/example/app@sha256:${'c'.repeat(64)}` }, steps: [{ key: 'release', status: 'completed', conclusion: 'success' }] },
+    cd: { state: 'progressing', revision: 'd'.repeat(40), deployed: false }, public_http: { state: 'not_run', verified_at: null, url: null } };
+  const { page, origin, errors, requests } = await start(t, { product: {
+    targets: () => [], profiles: () => [],
+    getDeployment: () => {
+      if (broken) throw new Error('private backend details');
+      return { ...record, observation: { deployment_id: record.id, app: record.app, target_id: record.target_id, checked_at: new Date().toISOString(), stale_after_seconds: 90,
+        metrics: Object.fromEntries(Object.entries({ pods: 2, cpu_percent: 12.5, memory_percent: 30, http }).map(([name, value]) => [name, { state, value: state === 'ready' ? value : null, observed_at: new Date(Date.now() - age).toISOString() }])) } };
+    },
+  } });
+  await page.addInitScript(() => localStorage.setItem('railshot.lastExecution', JSON.stringify({ kind: 'deployments', id: 'monitor-demo' })));
+  const monitor = async () => { await page.locator('[data-view="monitor"]').click(); };
+  const refresh = async () => {
+    await page.locator('[data-view="deploy"]').click();
+    await page.locator('#stop-polling').click(); await page.locator('#refresh-run').click();
+    await monitor();
+  };
+  await page.goto(origin); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '2개');
+  await monitor();
+  assert.match(await page.locator('#monitor-binding').innerText(), /CI run: 123/);
+  assert.match(await page.locator('#monitor-binding').innerText(), /sha256:cccc/);
+  assert.equal(await page.locator('#monitor-application-link').isVisible(), false);
+  const output = process.env.CI_OUTPUT_DIR;
+  if (output) { await mkdir(output, { recursive: true }); await page.screenshot({ path: join(output, 'monitor-running.png'), fullPage: true }); }
+  record.status = 'succeeded'; record.stage = 'complete'; record.cd.deployed = true; record.cd.state = 'deployed';
+  record.public_http = { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://app.example.test/health', site_url: 'https://app.example.test/' };
+  await page.reload(); await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료'); await monitor();
+  assert.equal(await page.locator('#monitor-application-link').getAttribute('href'), 'https://app.example.test/');
+  if (output) await page.screenshot({ path: join(output, 'monitor-success.png'), fullPage: true });
+  age = 100000; await refresh(); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '오래된 값');
+  age = 0; state = 'collection_failed'; await refresh(); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '수집 실패');
+  state = 'ready'; http = 0; await refresh(); await page.waitForFunction(() => document.querySelector('#metric-http').textContent === '검사 실패');
+  assert.equal(await page.locator('#metric-pods').innerText(), '2개');
+  broken = true; await refresh(); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '수집 연결 실패');
+  assert.match(await page.locator('#monitor-state').innerText(), /상태 조회 실패/);
+  if (output) await page.screenshot({ path: join(output, 'monitor-unavailable.png'), fullPage: true });
+  broken = false; record.status = 'failed'; record.stage = 'cd'; record.error = { message: '앱 적용 실패' }; record.public_http.state = 'not_run';
+  await page.reload(); await page.waitForFunction(() => document.querySelector('#run-state').textContent === '실행 실패'); await monitor();
+  assert.equal(await page.locator('#monitor-application-link').isVisible(), false);
+  if (output) await page.screenshot({ path: join(output, 'monitor-failed.png'), fullPage: true });
+  assert.equal(requests.some((request) => request.method === 'POST'), false, 'resume and observation never redeploy');
+  assert.deepEqual(errors, []);
+});
