@@ -242,8 +242,14 @@ class AdapterTests(unittest.TestCase):
         import transport
         process = MagicMock(pid=12345)
         process.poll.return_value = None
+        session_id = 'fixture-owned-0123456789abcdef0'
+        def launch(*args, **kwargs):
+            kwargs['stdout'].write(('\nStarting session with SessionId: ' + session_id + '\n').encode())
+            kwargs['stdout'].flush()
+            return process
         with patch.object(transport.shutil, 'which', side_effect=lambda name: '/trusted/' + name), \
-                patch.object(transport.subprocess, 'Popen', return_value=process) as start, \
+                patch.object(transport.subprocess, 'Popen', side_effect=launch) as start, \
+                patch.object(transport.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps({'SessionId': session_id}).encode())) as cleanup, \
                 patch.object(transport.socket, 'create_connection'), patch.object(transport.os, 'killpg') as stop:
             with self.assertRaises(RuntimeError):
                 with transport.forwarded_port('ssm:ap-northeast-2:i-0123456789abcdef0', transport.time.monotonic() + 30) as port:
@@ -252,6 +258,8 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual([args.args for args in stop.call_args_list],
                          [(12345, transport.signal.SIGTERM), (12345, transport.signal.SIGKILL)])
         self.assertEqual(start.call_args.kwargs['env']['AWS_PAGER'], '')
+        self.assertEqual(cleanup.call_args.args[0][1:3], ['ssm', 'terminate-session'])
+        self.assertEqual(cleanup.call_args.args[0][6], session_id)
 
     def test_terraform_descriptors_only_convert_bound_cloud_references(self):
         ssh = self.request['inventory']['control_plane'][0]['ssh']
