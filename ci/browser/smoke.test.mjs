@@ -144,7 +144,9 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   const monitor = async () => { await page.locator('[data-view="monitor"]').click(); };
   const refresh = async () => {
     await page.locator('[data-view="deploy"]').click();
-    await page.locator('#stop-polling').click(); await page.locator('#refresh-run').click();
+    await page.locator('#stop-polling').click();
+    assert.match(await page.locator('#observation-status').textContent(), /조회 중지 · 마지막 조회/);
+    await page.locator('#refresh-run').click();
     await monitor();
   };
   await page.goto(origin); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '2개');
@@ -166,6 +168,11 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   assert.equal(await page.locator('#metric-pods').innerText(), '2개');
   broken = true; await refresh(); await page.waitForFunction(() => document.querySelector('#metric-pods').textContent === '수집 연결 실패');
   assert.match(await page.locator('#monitor-state').innerText(), /상태 조회 실패/);
+  assert.match(await page.locator('#observation-status').innerText(), /재시도 중/);
+  await page.locator('[data-view="deploy"]').click();
+  await page.locator('#stop-polling').click();
+  assert.match(await page.locator('#observation-status').textContent(), /조회 중지/);
+  await monitor();
   if (output) await page.screenshot({ path: join(output, 'monitor-unavailable.png'), fullPage: true });
   broken = false; record.status = 'failed'; record.stage = 'cd'; record.error = { message: '앱 적용 실패' }; record.public_http.state = 'not_run';
   await page.reload(); await page.waitForFunction(() => document.querySelector('#run-state').textContent === '실행 실패'); await monitor();
