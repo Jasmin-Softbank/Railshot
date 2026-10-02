@@ -40,12 +40,15 @@ def bootstrap(config, output):
                'resource_id': descriptor['resource_id'], 'role': 'shared_observer', 'collection_state': 'no_targets'}
     durable_write(output, json.dumps(receipt).encode())
     with observer_ssh(config, request, ansible) as prefix:
+        directory = shlex.quote(config['observer_directory'])
+        native([*prefix, 'if test ! -e ' + directory + ' && command -v docker >/dev/null; then '
+                'containers=$(sudo docker ps -aq --filter label=com.docker.compose.project=railshot-observer) || exit 1; '
+                'test -z "$containers"; fi'])
         payload = {'config': config, 'files': {name: base64.b64encode((HERE / name).read_bytes()).decode()
                                                for name in ('render.py', 'compose.yaml')}}
         # PyYAML is not used by the renderer. Credentials/password are created only on the observer.
         result = json.loads(native([*prefix, 'python3 -c ' + shlex.quote(PREPARE)], document=payload))
         require(result == {'owner': config['owner'] + ':' + config['lifecycle'], 'prepared': True})
-        directory = shlex.quote(config['observer_directory'])
         command = ('sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq && '
                    'sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io docker-compose-v2 && '
                    'sudo systemctl enable --now docker && cd ' + directory +
@@ -54,6 +57,17 @@ def bootstrap(config, output):
         observed = native([*prefix, 'cd ' + directory + ' && sudo docker compose ps --format json'])
         containers = [json.loads(line) for line in observed.splitlines() if line.strip()]
         require({item['Service'] for item in containers if item['State'] == 'running'} == {'prometheus', 'blackbox', 'grafana'})
+        probe = '''import json,time,urllib.request
+for attempt in range(20):
+    try:
+        assert urllib.request.urlopen(PROMETHEUS,timeout=3).status==200
+        assert json.load(urllib.request.urlopen('http://127.0.0.1:3000/api/health',timeout=3))['database']=='ok'
+        break
+    except Exception:
+        if attempt==19: raise
+        time.sleep(0.5)
+'''.replace('PROMETHEUS', repr(config['prometheus_url'] + '/-/ready'))
+        native([*prefix, 'python3 -c ' + shlex.quote(probe)])
     receipt['status'] = 'succeeded'
     durable_write(output, json.dumps(receipt).encode())
     return receipt
