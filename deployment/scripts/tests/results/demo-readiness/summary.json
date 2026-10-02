@@ -1,0 +1,122 @@
+{
+  "recorded_at": "2026-10-02T22:41:58.268049+09:00",
+  "repository": "Jasmin-Softbank/Railshot",
+  "branch": "feature/deployment-runtime-seungmin",
+  "feature_head": "5f893ff2cf991561698524fe0d76cabcd2c07323",
+  "reviewed_integration": "94808d26e36f84bc8e65f7b7e3d3bb085634e334",
+  "deployed_platform_source": "18bed3025870b315ab9d43c3dd9945ac4b56576e",
+  "deployment_revision": "d480f062cb655f4ff8180da7be9a175b980d45c3",
+  "platform_run": "https://github.com/Jasmin-Softbank/Railshot/actions/runs/37011150579",
+  "core_contract_equals_integration": true,
+  "integration_merged_into_feature": false,
+  "tests": {
+    "feature_runtime": {
+      "pass": 58,
+      "fail": 0,
+      "skip": 1
+    },
+    "feature_cilium": {
+      "pass": 13,
+      "fail": 0,
+      "skip": 0
+    },
+    "integration_runtime": {
+      "pass": 68,
+      "fail": 0,
+      "skip": 1
+    },
+    "integration_ansible": {
+      "pass": 61,
+      "fail": 0,
+      "skip": 4
+    },
+    "integration_gitops": {
+      "pass": 26,
+      "fail": 0,
+      "skip": 0
+    },
+    "integration_api_runtime_boundaries": {
+      "pass": 66,
+      "fail": 0,
+      "skip": 0
+    }
+  },
+  "counts": {
+    "pass": 292,
+    "fail": 0,
+    "skip": 6
+  },
+  "shell": {
+    "feature": 20,
+    "integration": 19,
+    "fail": 0
+  },
+  "local_linux": {
+    "node": "railshot-runtime-test",
+    "node_status": "Ready",
+    "cilium_status": "healthy",
+    "workload_status": "Running/Ready",
+    "forwarded_http": 200,
+    "body": "Railshot Runtime OK",
+    "fresh_install_or_cleanup_this_turn": false
+  },
+  "cloud": {
+    "gcp": {
+      "cli_installed": true,
+      "sdk_version": "587.0.0",
+      "active_account_present": true,
+      "project": "railshot-poc-20261001",
+      "project_status": "ACTIVE",
+      "node": "railshot-gcp-poc",
+      "zone": "asia-northeast3-a",
+      "instance_status": "RUNNING",
+      "current_existing_public_http": 200,
+      "own_deploy_verify": "NOT_RUN",
+      "remote_k3s_cilium_current": "NOT_RUN"
+    },
+    "aws": {
+      "previous_profile": "for-study",
+      "current_profile_found": false,
+      "current_existing_public_http": 200,
+      "own_deploy_verify": "NOT_RUN",
+      "remote_instance_k3s_cilium_current": "NOT_RUN"
+    }
+  },
+  "live_product": {
+    "available_options": [
+      "cloud-aws"
+    ],
+    "unavailable_options": [
+      "onprem-openstack",
+      "onprem-proxmox"
+    ],
+    "gcp_ui_option_present": false,
+    "target_id": "k3s-aws",
+    "application": "fixture-npm-js",
+    "runtime_observation": "unknown"
+  },
+  "not_executed": [
+    "fresh cloud Runtime install/verify/cleanup/redeploy",
+    "cloud resource/firewall/IAM changes",
+    "real Dashboard POST/browser deploy E2E",
+    "native Argo CRD validation",
+    "native Ansible/Vault database checks",
+    "full destructive disposable Linux acceptance rerun"
+  ],
+  "source_changed": false,
+  "other_ownership_files_modified": false,
+  "commit_created": false,
+  "push_performed": false,
+  "merge_performed": false,
+  "intermediate_checked_integrations": [
+    "18bed3025870b315ab9d43c3dd9945ac4b56576e",
+    "58c80735fffab60a40f25e919641f0db5272bc75"
+  ],
+  "pending_platform_run": {
+    "url": "https://github.com/Jasmin-Softbank/Railshot/actions/runs/37014365786",
+    "source": "94808d26e36f84bc8e65f7b7e3d3bb085634e334",
+    "observed_status": "in_progress",
+    "verified": false
+  },
+  "latest_options_path": "/api/v1/options"
+}

@@ -1,0 +1,9 @@
+test_handoff_preserves_publisher_bytes_and_producer_identity (test_publication.PublicationTest.test_handoff_preserves_publisher_bytes_and_producer_identity) ... ok
+test_operator_target_allowlist_and_legacy_single_target_fail_closed (test_publication.PublicationTest.test_operator_target_allowlist_and_legacy_single_target_fail_closed) ... ok
+test_registered_application_binding_selects_private_pull_namespace (test_publication.PublicationTest.test_registered_application_binding_selects_private_pull_namespace) ... ok
+test_registry_access_is_digest_bound_isolated_and_fail_closed (test_publication.PublicationTest.test_registry_access_is_digest_bound_isolated_and_fail_closed) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.008s
+
+OK

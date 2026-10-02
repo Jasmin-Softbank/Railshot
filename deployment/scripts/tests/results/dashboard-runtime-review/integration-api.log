@@ -1,0 +1,280 @@
+TAP version 13
+# Subtest: CD adapter validates output and terminates the whole process group on abort or timeout
+ok 1 - CD adapter validates output and terminates the whole process group on abort or timeout
+  ---
+  duration_ms: 1579.408833
+  type: 'test'
+  ...
+# Subtest: ZIP 검사 후 앱을 Git 트리에 등록하고 Actions 실행 ID를 반환한다
+ok 2 - ZIP 검사 후 앱을 Git 트리에 등록하고 Actions 실행 ID를 반환한다
+  ---
+  duration_ms: 15.223334
+  type: 'test'
+  ...
+# Subtest: 재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에서 제외한다
+ok 3 - 재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에서 제외한다
+  ---
+  duration_ms: 3.882125
+  type: 'test'
+  ...
+# Subtest: 소스가 같아도 커밋 없이 Actions를 다시 실행한다
+ok 4 - 소스가 같아도 커밋 없이 Actions를 다시 실행한다
+  ---
+  duration_ms: 0.873417
+  type: 'test'
+  ...
+# Subtest: ZIP 경로 이동과 비밀키 파일을 거부한다
+ok 5 - ZIP 경로 이동과 비밀키 파일을 거부한다
+  ---
+  duration_ms: 2.019416
+  type: 'test'
+  ...
+# Subtest: 공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 파일 목록으로 변환한다
+ok 6 - 공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 파일 목록으로 변환한다
+  ---
+  duration_ms: 5.839875
+  type: 'test'
+  ...
+# Subtest: GitHub 입력은 공개 저장소 기본 URL로만 제한한다
+ok 7 - GitHub 입력은 공개 저장소 기본 URL로만 제한한다
+  ---
+  duration_ms: 0.325666
+  type: 'test'
+  ...
+# Subtest: 소스 이름에서 앱 이름을 만들고 잘못된 이름은 거부한다
+ok 8 - 소스 이름에서 앱 이름을 만들고 잘못된 이름은 거부한다
+  ---
+  duration_ms: 1.42125
+  type: 'test'
+  ...
+# Subtest: HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사용한다
+ok 9 - HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사용한다
+  ---
+  duration_ms: 71.579292
+  type: 'test'
+  ...
+# Subtest: 실제 producer artifact ID와 해시를 확인한 경우에만 이미지 게시로 표시한다
+ok 10 - 실제 producer artifact ID와 해시를 확인한 경우에만 이미지 게시로 표시한다
+  ---
+  duration_ms: 12.131209
+  type: 'test'
+  ...
+# Subtest: private registry 검증과 pull Secret 참조가 있는 v2 인계를 읽는다
+ok 11 - private registry 검증과 pull Secret 참조가 있는 v2 인계를 읽는다
+  ---
+  duration_ms: 2.688208
+  type: 'test'
+  ...
+# Subtest: 구버전·registry 계약 불일치·추가 credential 필드는 게시 확인을 차단한다
+ok 12 - 구버전·registry 계약 불일치·추가 credential 필드는 게시 확인을 차단한다
+  ---
+  duration_ms: 54.051708
+  type: 'test'
+  ...
+# Subtest: 실패 job 재시도는 현재 attempt 별칭 대신 실제 이전 release producer를 읽는다
+ok 13 - 실패 job 재시도는 현재 attempt 별칭 대신 실제 이전 release producer를 읽는다
+  ---
+  duration_ms: 1.253375
+  type: 'test'
+  ...
+# Subtest: 재시도에 복제된 loop job의 조회 attempt를 artifact 생산 attempt로 표시하지 않는다
+ok 14 - 재시도에 복제된 loop job의 조회 attempt를 artifact 생산 attempt로 표시하지 않는다
+  ---
+  duration_ms: 1.2725
+  type: 'test'
+  ...
+# Subtest: 최신 release가 실패하거나 건너뛰면 옛 성공 artifact를 사용하지 않는다
+ok 15 - 최신 release가 실패하거나 건너뛰면 옛 성공 artifact를 사용하지 않는다
+  ---
+  duration_ms: 0.789917
+  type: 'test'
+  ...
+# Subtest: artifact 만료·중복·누락과 source/target/attempt/파일 변조는 게시 확인을 차단한다
+ok 16 - artifact 만료·중복·누락과 source/target/attempt/파일 변조는 게시 확인을 차단한다
+  ---
+  duration_ms: 6.565
+  type: 'test'
+  ...
+# Subtest: CI와 다른 앱 이름과 임의 target은 소스 등록 전에 거부한다
+ok 17 - CI와 다른 앱 이름과 임의 target은 소스 등록 전에 거부한다
+  ---
+  duration_ms: 0.453375
+  type: 'test'
+  ...
+# Subtest: MCP 소스 경로는 심볼릭 링크를 통해 허용 범위 밖으로 나갈 수 없다
+ok 18 - MCP 소스 경로는 심볼릭 링크를 통해 허용 범위 밖으로 나갈 수 없다
+  ---
+  duration_ms: 6.554625
+  type: 'test'
+  ...
+# Subtest: CLI의 폴더 입력은 API가 받는 ZIP으로 만들어진다
+ok 19 - CLI의 폴더 입력은 API가 받는 ZIP으로 만들어진다
+  ---
+  duration_ms: 12.0705
+  type: 'test'
+  ...
+# Subtest: HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까지 연결한다
+ok 20 - HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까지 연결한다
+  ---
+  duration_ms: 277.786
+  type: 'test'
+  ...
+# Subtest: registered profile → saved plan → descriptor snapshot → native validation → guest/runtime receipts
+ok 21 - registered profile → saved plan → descriptor snapshot → native validation → guest/runtime receipts
+  ---
+  duration_ms: 161.447167
+  type: 'test'
+  ...
+# Subtest: unsupported database/multinode requests are saved as blocked plans without cloud calls
+ok 22 - unsupported database/multinode requests are saved as blocked plans without cloud calls
+  ---
+  duration_ms: 33.810292
+  type: 'test'
+  ...
+# Subtest: client paths/credentials, unknown profiles and extra intent fields never reach the executor
+ok 23 - client paths/credentials, unknown profiles and extra intent fields never reach the executor
+  ---
+  duration_ms: 8.616042
+  type: 'test'
+  ...
+# Subtest: policy revocation, expired plans and changed snapshots reject before apply
+ok 24 - policy revocation, expired plans and changed snapshots reject before apply
+  ---
+  duration_ms: 48.181625
+  type: 'test'
+  ...
+# Subtest: a superseding native plan or previously attempted apply is rejected before admission
+ok 25 - a superseding native plan or previously attempted apply is rejected before admission
+  ---
+  duration_ms: 61.276
+  type: 'test'
+  ...
+# Subtest: public creation cannot authorize destruction or modification of existing resources
+ok 26 - public creation cannot authorize destruction or modification of existing resources
+  ---
+  duration_ms: 56.865166
+  type: 'test'
+  ...
+# Subtest: uncertain apply is retained as unknown and runtime dispatch never starts
+ok 27 - uncertain apply is retained as unknown and runtime dispatch never starts
+  ---
+  duration_ms: 61.106583
+  type: 'test'
+  ...
+# Subtest: runtime readiness requires the exact environment request and target identity
+ok 28 - runtime readiness requires the exact environment request and target identity
+  ---
+  duration_ms: 176.361
+  type: 'test'
+  ...
+# Subtest: snapshot and intent are durable before one dispatch; replay returns the same completed deployment
+ok 29 - snapshot and intent are durable before one dispatch; replay returns the same completed deployment
+  ---
+  duration_ms: 147.668583
+  type: 'test'
+  ...
+# Subtest: concurrent identical keys dispatch once; another intent is refused while active
+ok 30 - concurrent identical keys dispatch once; another intent is refused while active
+  ---
+  duration_ms: 156.285084
+  type: 'test'
+  ...
+# Subtest: CD progress persists revision and HTTP stage before completion while observer failure stays separate
+ok 31 - CD progress persists revision and HTTP stage before completion while observer failure stays separate
+  ---
+  duration_ms: 172.822709
+  type: 'test'
+  ...
+# Subtest: GitHub URL replay keeps the first pinned source without fetching current HEAD
+ok 32 - GitHub URL replay keeps the first pinned source without fetching current HEAD
+  ---
+  duration_ms: 115.548375
+  type: 'test'
+  ...
+# Subtest: lost dispatch response stays unknown, survives restart, occupies admission and never replays
+ok 33 - lost dispatch response stays unknown, survives restart, occupies admission and never replays
+  ---
+  duration_ms: 83.110417
+  type: 'test'
+  ...
+# Subtest: unfinished durable intent is recovered as unknown; malformed or insecure storage fails closed
+ok 34 - unfinished durable intent is recovered as unknown; malformed or insecure storage fails closed
+  ---
+  duration_ms: 50.5425
+  type: 'test'
+  ...
+# Subtest: snapshot quota bounds admission before any dispatch
+ok 35 - snapshot quota bounds admission before any dispatch
+  ---
+  duration_ms: 19.816333
+  type: 'test'
+  ...
+# Subtest: CI publication alone and mismatched publication never report application success
+ok 36 - CI publication alone and mismatched publication never report application success
+  ---
+  duration_ms: 140.993292
+  type: 'test'
+  ...
+# Subtest: environment plans are private, consumed once and share deployment admission
+ok 37 - environment plans are private, consumed once and share deployment admission
+  ---
+  duration_ms: 67.15825
+  type: 'test'
+  ...
+# Subtest: deployment polling preserves normalized CI steps while running and after publication
+ok 38 - deployment polling preserves normalized CI steps while running and after publication
+  ---
+  duration_ms: 148.018292
+  type: 'test'
+  ...
+# Subtest: v1 HTTP contract has accepted/error headers, strict fields, preserved legacy and no foreign reads
+ok 39 - v1 HTTP contract has accepted/error headers, strict fields, preserved legacy and no foreign reads
+  ---
+  duration_ms: 104.653542
+  type: 'test'
+  ...
+# Subtest: unconfigured server lists empty capabilities without creating state
+ok 40 - unconfigured server lists empty capabilities without creating state
+  ---
+  duration_ms: 4.09575
+  type: 'test'
+  ...
+# Subtest: health stays live but not ready when private product state fails initialization
+ok 41 - health stays live but not ready when private product state fails initialization
+  ---
+  duration_ms: 2.437833
+  type: 'test'
+  ...
+# Subtest: intent write failure prevents external effects and fails subsequent writes closed
+ok 42 - intent write failure prevents external effects and fails subsequent writes closed
+  ---
+  duration_ms: 28.724375
+  type: 'test'
+  ...
+# Subtest: JSON singleton keys including nested escaped duplicates are rejected before adapter calls
+ok 43 - JSON singleton keys including nested escaped duplicates are rejected before adapter calls
+  ---
+  duration_ms: 20.31125
+  type: 'test'
+  ...
+# Subtest: running intent becomes unknown after restart without dispatch or CD replay
+ok 44 - running intent becomes unknown after restart without dispatch or CD replay
+  ---
+  duration_ms: 86.316083
+  type: 'test'
+  ...
+# Subtest: build POST preserves string run IDs and plan/environment HTTP use 201 then 202
+ok 45 - build POST preserves string run IDs and plan/environment HTTP use 201 then 202
+  ---
+  duration_ms: 113.657708
+  type: 'test'
+  ...
+1..45
+# tests 45
+# suites 0
+# pass 45
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1672.991
