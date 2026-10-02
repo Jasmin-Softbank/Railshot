@@ -99,7 +99,7 @@ def installed(rows):
         # Ansible builtin task imports and all runtime copy sources must actually be packaged.
         for script in ['guest.yml', 'runtime.yml', 'database.yml', 'application-database.yml']:
             run('ansible-playbook', '-i', 'localhost,', str(ROOT / 'infrastructure/ansible' / script), '--syntax-check')
-        for relative in ['ci/scripts/schemas/jasmin.schema.json', 'contracts/ansible-request.schema.json',
+        for relative in ['ci/scripts/schemas/railshot.schema.json', 'contracts/ansible-request.schema.json',
                          'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/group_vars/all.yml',
                          'infrastructure/ansible/tasks/guest-checks.yml',
                          'deployment/scripts/common.sh', 'deployment/bootstrap/preflight.sh', 'deployment/bootstrap/install-k3s.sh',

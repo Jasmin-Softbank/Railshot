@@ -15,13 +15,13 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'ci/scripts'))
-from gate.bundle import contract, require, REPO, ID, TRUST
+from gate.bundle import contract, require, spec_name, REPO, ID, TRUST
 from execution import pod_security, container_security
 from publication import validate_registry
 import yaml
 from jsonschema import ValidationError
 
-FILES = ('images.json', 'jasmin.yaml', 'verdict.json', 'manifest.json')
+FILES = ('images.json', 'railshot.yaml', 'verdict.json', 'manifest.json')
 CA_PATH = '/etc/railshot/db/ca.crt'
 MIGRATION_ANNOTATIONS = {'argocd.argoproj.io/sync-wave': '-1',
                          'argocd.argoproj.io/compare-options': 'IgnoreExtraneous'}
@@ -64,8 +64,10 @@ def http_path(value):
 def read_artifact(directory, target_id):
     directory = Path(directory)
     require(directory.is_dir() and not directory.is_symlink(), 'regular artifact directory required')
+    spec_file = spec_name(path.name for path in directory.iterdir())
+    files = ('images.json', spec_file, 'verdict.json', 'manifest.json')
     raw = {}
-    for name in (*FILES, 'handoff.json'):
+    for name in (*files, 'handoff.json'):
         path = directory / name
         require(path.is_file() and not path.is_symlink() and path.stat().st_size < 2_000_000,
                 'small regular artifact file required: ' + name)
@@ -76,19 +78,19 @@ def read_artifact(directory, target_id):
                 ('run_id', 'producer_attempt', 'bundle_artifact_id')), 'positive producer identifiers required')
     require(receipt.get('target_id') == target_id, 'artifact target mismatch')
     require(re.fullmatch(r'[0-9a-f]{40}', receipt.get('source_commit', '')), 'source commit required')
-    for name in FILES:
+    for name in files:
         require(receipt.get('files', {}).get(name) == hashlib.sha256(raw[name]).hexdigest(),
                 'published receipt hash mismatch: ' + name)
     validate_registry(receipt.get('registry'), receipt['files']['images.json'])
-    verdict = contract(raw['jasmin.yaml'], raw['verdict.json'])
+    verdict = contract(raw[spec_file], raw['verdict.json'])
     manifest = json.loads(raw['manifest.json'])
     require(manifest.get('version') == 1 and manifest.get('trust') == TRUST, 'bundle manifest contract mismatch')
     require(manifest.get('source_sha256') == verdict['source_sha256'], 'source digest mismatch')
-    for name in ('jasmin.yaml', 'verdict.json'):
+    for name in (spec_file, 'verdict.json'):
         require(manifest.get('files', {}).get(name) == hashlib.sha256(raw[name]).hexdigest(), 'bundle hash mismatch')
     require({k: v.get('id') for k, v in manifest.get('images', {}).items()} == verdict['image_ids'],
             'manifest gate image IDs differ')
-    spec, images = yaml.safe_load(raw['jasmin.yaml']), json.loads(raw['images.json'])
+    spec, images = yaml.safe_load(raw[spec_file]), json.loads(raw['images.json'])
     require(receipt.get('app') == spec['app'], 'artifact application mismatch')
     require(set(images) == {s['name'] for s in spec['services']}, 'published service mismatch')
     require(all(isinstance(v, str) and re.fullmatch(rf'{REPO}@{ID}', v) for v in images.values()),

@@ -46,7 +46,7 @@ class RunnerTest(unittest.TestCase):
                 run_agent.apply_files(ws, [{'path':'Dockerfile','content':'ok'},
                     {'path':'escape/Dockerfile','content':'bad'}], allow, deny)
             self.assertFalse((ws/'Dockerfile').exists())
-            self.assertEqual(run_agent.apply_files(ws, [{'path':'.jasmin/test','content':'x'}], allow, deny), ['.jasmin/test'])
+            self.assertEqual(run_agent.apply_files(ws, [{'path':'.railshot/test','content':'x'}], allow, deny), ['.railshot/test'])
 
     def test_sdk_contract(self):
         import openai_codex

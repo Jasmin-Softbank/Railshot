@@ -13,10 +13,10 @@ Node 22 이상에서 `npm ci --ignore-scripts`, `npm start`를 실행한다. 이
 | `GITHUB_TOKEN` | 업로드용 apps repository의 Git tree/commit/ref 및 Actions 호출 권한. 응답에 포함하지 않음 |
 | `GITHUB_OWNER`, `GITHUB_REPO` | 기본 `Jasmin-Softbank`, `railshot-apps`; 통합 platform source repo와 별도 |
 | `GITHUB_REF`, `GITHUB_WORKFLOW` | 기본 `main`, `railshot-deploy.yml` |
-| `JASMIN_TENANT` | 소문자·숫자 1–20자. 기본 `demo` |
+| `RAILSHOT_TENANT` | 소문자·숫자 1–20자. 기본 `demo` |
 | `RAILSHOT_TARGET_ID` | 필수 운영자 target ID. CI 저장소의 같은 이름 변수와 일치해야 함 |
-| `JASMIN_API_URL` | CLI/MCP의 API 주소. 기본 `http://127.0.0.1:4173` |
-| `JASMIN_SOURCE_ROOT` | MCP local source의 허용 root |
+| `RAILSHOT_API_URL` | CLI/MCP의 API 주소. 기본 `http://127.0.0.1:4173` |
+| `RAILSHOT_SOURCE_ROOT` | MCP local source의 허용 root |
 
 `npm run cli -- deploy <폴더 또는 ZIP 또는 공개 GitHub URL> --app my-app --target aws-demo`, `npm run cli -- status <run_id>`가 같은 HTTP API를 사용한다. target 생략 시 API의 운영자 설정을 사용한다. 임의 target은 거부한다. 이 제출 명령은 실제 설정이 있을 때 GitHub에 소스를 등록하고 CI를 실행하므로 로컬 검증 과정에서는 실행하지 않는다.
 
@@ -34,10 +34,10 @@ MCP는 `npm run mcp`로 stdio transport를 사용한다. 기존 deploy/status �
 | `RAILSHOT_ALLOWED_ORIGINS` | 정확한 HTTPS origin의 쉼표 목록. 로컬 개발용 HTTP localhost도 허용. 컨테이너 모드에서 생략하면 Origin이 있는 요청 거부 |
 | `RAILSHOT_API_TOKEN_FILE` | 권장: 읽기 전용 Secret 파일. 32–4096자의 공백 없는 ASCII 토큰. API 시작 시 읽고 CLI/MCP는 요청마다 읽음 |
 | `RAILSHOT_API_TOKEN` | Secret 환경변수 대안. `_FILE`과 동시에 설정하면 시작/요청 실패 |
-| `JASMIN_API_URL` | MCP/CLI가 접근하는 내부 API URL. Compose에서는 `http://api:4173`처럼 실제 Service 이름 사용 |
-| `JASMIN_SOURCE_ROOT` | MCP 컨테이너 안에 읽기 전용으로 mount한 소스 디렉터리. 호스트 경로가 자동 전달되지는 않음 |
+| `RAILSHOT_API_URL` | MCP/CLI가 접근하는 내부 API URL. Compose에서는 `http://api:4173`처럼 실제 Service 이름 사용 |
+| `RAILSHOT_SOURCE_ROOT` | MCP 컨테이너 안에 읽기 전용으로 mount한 소스 디렉터리. 호스트 경로가 자동 전달되지는 않음 |
 
-비로컬 bind 또는 비로컬 Host를 허용하면 명시한 Host 목록과 API 토큰이 없을 때 시작을 거부한다. `/api/*`는 해당 토큰을 `Authorization: Bearer ...`로 요구하며 CLI/MCP가 이를 전달한다. `x-jasmin-request: deploy`는 계속 필요한 교차 사이트 요청 방어 헤더이며 인증을 대신하지 않는다. Host/Origin은 프록시의 `X-Forwarded-*`를 신뢰하지 않고 실제 요청 헤더로 검사한다. CORS endpoint나 브라우저 토큰 배포는 추가하지 않았다.
+비로컬 bind 또는 비로컬 Host를 허용하면 명시한 Host 목록과 API 토큰이 없을 때 시작을 거부한다. `/api/*`는 해당 토큰을 `Authorization: Bearer ...`로 요구하며 CLI/MCP가 이를 전달한다. `x-railshot-request: deploy`는 계속 필요한 교차 사이트 요청 방어 헤더이며 인증을 대신하지 않는다. Host/Origin은 프록시의 `X-Forwarded-*`를 신뢰하지 않고 실제 요청 헤더로 검사한다. CORS endpoint나 브라우저 토큰 배포는 추가하지 않았다.
 
 `/healthz`는 Host/Origin 검사 후 Bearer 없이 조회한다. 비로컬 모드에서는 `ok`와 `configured`만 반환하며, `configured: true`도 GitHub 권한·CI worker·배포 대상의 실시간 준비 상태를 보장하지 않는다. 이미지의 자체 healthcheck에는 `127.0.0.1`을 Host 목록에 포함해야 한다. Kubernetes HTTP probe도 허용된 Host를 명시한다. 토큰을 교체하면 API를 재시작하고 클라이언트의 파일도 교체한다.
 
@@ -54,3 +54,5 @@ MCP 이미지는 `docker run --rm -i ... railshot-mcp` 또는 Compose의 `run --
 - `published`는 이미지 게시 및 CD 자료 생성이다. 앱 적용, Argo 상태 관측, 외부 HTTP와 URL은 이 API가 수행하지 않는다. `url`은 null이다.
 
 [API 계약](docs/interface.md), [소스 형식](docs/source-formats.md), [CI→CD 경계](../../docs/api/ci-publication.md)를 함께 참고한다.
+
+Legacy `JASMIN_TENANT`, `JASMIN_API_URL`, and `JASMIN_SOURCE_ROOT` remain fallback aliases; `RAILSHOT_*` values take precedence. The server accepts `x-jasmin-request` for older clients. CLI/MCP send both request headers with the same value for existing servers. Historical `jasmin.yaml` artifacts keep their original hashes. See [naming compatibility](../../docs/api/naming-compatibility.md).

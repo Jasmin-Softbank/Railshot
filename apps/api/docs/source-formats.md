@@ -4,13 +4,13 @@
 
 판단 시점: 2026-10-01. **현재 기능**은 입력을 받아 기존 워크플로로 보낼 수 있다는 뜻이다. 모든 앱의 실제 AWS 배포 성공을 뜻하지 않는다. 실배포에는 앱이 Linux/amd64 컨테이너로 빌드되고, 비루트 사용자로 실행되며, HTTP 포트와 2xx/3xx 건강 확인 경로를 제공해야 한다. 실제 Actions·클라우드 연동은 별도 검증이 필요하다.
 
-판단 근거: 이 PoC의 `src/server.js`·`src/github.js`, `railshot-apps/.github/workflows/railshot-deploy.yml`, `Jasmin`의 `origin/feature/poc-cloud-jihwan` 브랜치에 있는 `platform/contract/stack-contract.md`, `platform/contract/catalog.yaml`, `platform/poc/intake.py`, `platform/agents/adapter/INSTRUCTION.md`, `platform/gate/gate.py`. 워크플로는 소스를 검사·수정한 뒤 Dockerfile로 이미지를 빌드한다. 빌드가 끝난 이미지 URI를 직접 받아 배포하는 경로는 없다.
+판단 근거: 이 저장소의 `apps/api/src/server.js`·`apps/api/src/github.js`, `ci/workflows/railshot-deploy.yml`, `ci/scripts/contract/stack-contract.md`·`catalog.yaml`, `ci/scripts/poc/intake.py`, `ci/scripts/agents/adapter/INSTRUCTION.md`, `ci/scripts/gate/gate.py`. 워크플로는 소스를 검사·수정한 뒤 Dockerfile로 이미지를 빌드한다. 빌드가 끝난 이미지 URI를 직접 받아 배포하는 경로는 없다.
 
 | 입력 형식 | 판단 | 현재 조건 또는 필요한 작업 |
 |---|---|---|
 | ZIP 안의 웹 앱 소스 | **현재 기능으로 배포 가능** | 대시보드·CLI·MCP에서 수집 가능. 압축 해제 후 100 MB/2,000파일 제한과 컨테이너·HTTP 계약을 통과해야 한다. |
 | 로컬 폴더의 웹 앱 소스 | **현재 기능으로 배포 가능** | 대시보드는 폴더 파일을 직접 업로드한다. CLI·MCP는 내부에서 ZIP으로 전송한다. 이후 경로는 ZIP과 같다. |
-| Python/Node.js 웹 앱 소스 | **현재 기능으로 배포 가능** | 허용된 Python/Node 베이스 이미지가 있다. 기존 Dockerfile·`.jasmin/jasmin.yaml`이 적합하거나 adapter가 생성하고 gate를 통과해야 한다. 언어만으로 성공이 보장되지는 않는다. |
+| Python/Node.js 웹 앱 소스 | **현재 기능으로 배포 가능** | 허용된 Python/Node 베이스 이미지가 있다. 기존 Dockerfile·`.railshot/railshot.yaml` (legacy: `.jasmin/jasmin.yaml`)이 적합하거나 adapter가 생성하고 gate를 통과해야 한다. 언어만으로 성공이 보장되지는 않는다. |
 | 정적 HTML/CSS/JS | **현재 기능으로 배포 가능** | `nginx-unprivileged` 등 허용 이미지로 HTTP 서빙하는 Dockerfile과 spec을 만들 수 있어야 한다. |
 | Go/Rust 웹 서버 소스 | **현재 기능으로 배포 가능** | Go/Rust 빌드 이미지와 distroless 최종 이미지가 허용된다. 단, 실제 앱에 맞는 Dockerfile·HTTP 동작 검증이 필요하며 자동 어댑터의 성공은 미검증이다. |
 | `.tar.gz` 안의 소스 트리 | **추가 구현 시 배포 가능** | 현재 업로드 API는 ZIP/폴더와 공개 GitHub URL을 받는다. tar 파서, 경로 탈출·심볼릭 링크·용량 검사 후 공통 파일 목록으로 변환하면 기존 워크플로를 사용할 수 있다. |
@@ -20,7 +20,7 @@
 | Linux/amd64 단일 실행 파일 | **추가 구현 시 배포 가능** | 단독 파일 입력과 최소 Dockerfile/spec 생성을 추가한다. 실행 파일이 비루트·읽기 전용 파일 시스템·HTTP 계약을 만족해야 한다. |
 | Maven/Gradle Java 소스 | **배포 가능성 있으나 난이도가 요구됨** | 현재 허용 목록은 JRE만 포함하고 JDK 빌드 이미지가 없다. 빌드 이미지/규칙, 잠금·재현성, 캐시, 게이트 검증을 추가해야 한다. |
 | `.war` 파일 | **배포 가능성 있으나 난이도가 요구됨** | Servlet 컨테이너 이미지·설정이 현재 허용 목록에 없고, 비루트 실행·HTTP 건강 확인까지 설계해야 한다. |
-| Docker Compose 프로젝트 | **배포 가능성 있으나 난이도가 요구됨** | Compose 파일을 그대로 실행하지 않는다. 서비스별 Dockerfile과 Jasmin spec으로 변환하고, 볼륨·네트워크·DB 의존성을 계약 범위에 맞춰야 한다. |
+| Docker Compose 프로젝트 | **배포 가능성 있으나 난이도가 요구됨** | Compose 파일을 그대로 실행하지 않는다. 서비스별 Dockerfile과 Railshot spec으로 변환하고, 볼륨·네트워크·DB 의존성을 계약 범위에 맞춰야 한다. |
 | 기존 Docker/OCI 이미지 URI | **배포 가능성 있으나 난이도가 요구됨** | 현재 Actions는 소스를 받아 `docker buildx build`를 실행한다. 이미지 직접 배포에는 digest 고정, 레지스트리 인증, 이미지 검사, build/loop 우회 경로, GitOps 렌더링 변경이 필요하다. |
 | `docker save`/OCI 이미지 tarball | **배포 가능성 있으나 난이도가 요구됨** | 소스용 `.tar.gz`와 다르다. 이미지 import→검사→레지스트리 push 경로가 필요하고 현재 100 MB 업로드 제한과도 맞지 않을 수 있다. |
 | APK/IPA/Windows·macOS 데스크톱 실행 파일 | **현 해커톤 아키텍처로 배포 불가능** | 모바일/데스크톱 배포 대상이 아니다. 현 플랫폼은 Linux/amd64 HTTP 컨테이너를 k3s에 배포한다. |

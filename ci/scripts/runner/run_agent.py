@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one Jasmin agent role through an agent API (Claude Agent SDK or Codex SDK).
+"""Run one Railshot agent role through an agent API (Claude Agent SDK or Codex SDK).
 
 usage:
   run_agent.py ROLE --provider claude|codex --workspace DIR --run DIR --task FILE
@@ -592,7 +592,7 @@ def execute(a):
 
 def self_test():
     allow, protect = writable_rules("contract/paths.yaml")
-    ok = ["Dockerfile", "api.Dockerfile", "backend/Dockerfile", ".dockerignore", ".jasmin/jasmin.yaml"]
+    ok = ["Dockerfile", "api.Dockerfile", "backend/Dockerfile", ".dockerignore", ".railshot/railshot.yaml"]
     bad = ["../x", "/etc/passwd", "app.py", ".github/workflows/x.yml", "tests/Dockerfile", "AGENTS.md", "~/x", ""]
     assert all(path_ok(p, allow, protect) for p in ok), [p for p in ok if not path_ok(p, allow, protect)]
     assert not any(path_ok(p, allow, protect) for p in bad), [p for p in bad if path_ok(p, allow, protect)]

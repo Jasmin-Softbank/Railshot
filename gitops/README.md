@@ -6,7 +6,7 @@
 python gitops/handoff.py /private/published /private/target.json /private/handoff-review
 ```
 
-입력은 신뢰된 GitHub CI artifact 채널에서 받은 `images.json`, `jasmin.yaml`, `verdict.json`, `manifest.json`, `handoff.json`입니다. `handoff.json`은 **version 2**여야 하며 run/producer attempt/bundle artifact ID와 `registry` 접근 검증 결과를 출력 receipt에 유지합니다. registry 결과의 `images_sha256`은 `images.json` 해시와 같아야 합니다. v1은 private pull 계약을 표현하지 못하므로 거부합니다. 게시 artifact 자체의 ID는 receipt 본문에 없으며 API가 GitHub 응답에서 별도로 검증합니다. 이 CLI는 GitHub 조회를 수행하지 않으므로 신뢰된 게시 채널에서 확인한 파일만 전달해야 합니다. 파일 해시는 무결성 검사이며 서명이 아닙니다. 임의 업로드 artifact를 신뢰하지 않습니다. 원래 이미지 tar는 이 선언 생성 단계에서 재빌드하거나 실행하지 않습니다.
+입력은 신뢰된 GitHub CI artifact 채널에서 받은 `images.json`, `railshot.yaml`, `verdict.json`, `manifest.json`, `handoff.json`입니다. `handoff.json`은 **version 2**여야 하며 run/producer attempt/bundle artifact ID와 `registry` 접근 검증 결과를 출력 receipt에 유지합니다. registry 결과의 `images_sha256`은 `images.json` 해시와 같아야 합니다. v1은 private pull 계약을 표현하지 못하므로 거부합니다. 게시 artifact 자체의 ID는 receipt 본문에 없으며 API가 GitHub 응답에서 별도로 검증합니다. 이 CLI는 GitHub 조회를 수행하지 않으므로 신뢰된 게시 채널에서 확인한 파일만 전달해야 합니다. 파일 해시는 무결성 검사이며 서명이 아닙니다. 임의 업로드 artifact를 신뢰하지 않습니다. 원래 이미지 tar는 이 선언 생성 단계에서 재빌드하거나 실행하지 않습니다.
 
 target JSON은 운영자가 제공합니다. 필수 필드는 `id`, `namespace`, `argocd_namespace`, 제한된 AppProject `project`, `architecture: amd64`, `repo_url`, Kubernetes API `cluster_server`, config repo `path`, 그 경로를 검토한 Git commit SHA `revision`, 할당한 `node_port`, 실제 라우팅 원본 `ingress_cidrs`, CPU(m)/memory(Mi) requests·limits `resources`입니다. 예시는 `test_handoff.py`의 target을 참고하세요. CI S/M/L을 운영 리소스 값으로 임의 변환하지 않습니다.
 

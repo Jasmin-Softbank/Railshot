@@ -18,7 +18,7 @@ API_NATIVE_FILES = {
     'gitops/edge.py', 'gitops/service_name.py',
     'ci/scripts/execution.py', 'ci/scripts/observability.py', 'ci/scripts/process.py',
     'ci/scripts/publication.py', 'ci/scripts/storage.py', 'ci/scripts/gate/bundle.py',
-    'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/jasmin.schema.json',
+    'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/railshot.schema.json',
     'ci/requirements-dev.txt', 'ci/requirements-test.txt',
     'infrastructure/ansible/run.py', 'infrastructure/ansible/transport.py',
     'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/guest.yml',

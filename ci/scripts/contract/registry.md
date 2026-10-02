@@ -5,7 +5,7 @@
 ## 권한과 식별
 
 - 비신뢰 source와 모델 출력은 registry prefix·인증 방식·visibility를 정하지 못한다. 게시 자격은 보호된 release 환경에만 둔다.
-- `bundle.py export`는 source digest·spec/verdict hash·이미지 ID를 검사하고 `jasmin.yaml`, `verdict.json`, `images.tar`, `manifest.json`을 생성한다. 부분 gate, source 변경, image tag 변경은 게시할 수 없다.
+- `bundle.py export`는 source digest·spec/verdict hash·이미지 ID를 검사하고 `railshot.yaml`, `verdict.json`, `images.tar`, `manifest.json`을 생성한다. 부분 gate, source 변경, image tag 변경은 게시할 수 없다.
 - `publish`는 bundle을 재검증하고 같은 이미지를 게시하며 `images.json`에 확인된 원격 digest를 남긴다. 태그명만으로 이미지 동일성을 판단하지 않는다. 게시 중 결과가 불확실하면 journal로 조정하기 전 재시도하지 않는다.
 - GitHub Actions 게시자는 `GITHUB_TOKEN`과 `packages: write`를 사용한다. 사용자 CI에 registry push 자격을 전달하지 않는다. 임시 Docker 인증 설정은 작업 종료 시 제거한다.
 - 기본 private workflow는 별도 `read:packages` pull 자격과 대상 namespace·Secret 참조를 요구한다. 게시 후 임시 pull 인증 설정으로 각 digest의 manifest를 조회하고 v2 `handoff.json`에 `authenticated_manifest_read`와 Secret 참조만 남긴다. 명시적 public 모드는 이미 public인 package의 각 digest를 별도 빈 인증 설정으로 조회한다. visibility 입력이 package를 공개로 바꾸지는 않는다.

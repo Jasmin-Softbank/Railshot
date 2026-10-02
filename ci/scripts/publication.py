@@ -8,7 +8,11 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'gate'))
+from bundle import spec_name
 
 
 DNS_LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
@@ -127,7 +131,8 @@ def prepare(bundle, images, output, env):
                'bundle_artifact_id': int(env['BUNDLE_ARTIFACT_ID'])}
     if any(receipt[key] < 1 for key in ('run_id', 'producer_attempt', 'bundle_artifact_id')):
         raise ValueError('positive producer identifiers required')
-    files = {'images.json': images, **{name: bundle / name for name in ('jasmin.yaml', 'verdict.json', 'manifest.json')}}
+    spec = spec_name(path.name for path in bundle.iterdir())
+    files = {'images.json': images, **{name: bundle / name for name in (spec, 'verdict.json', 'manifest.json')}}
     if any(path.is_symlink() or not path.is_file() for path in files.values()):
         raise ValueError('publication inputs must be regular files')
     contents = {name: path.read_bytes() for name, path in files.items()}

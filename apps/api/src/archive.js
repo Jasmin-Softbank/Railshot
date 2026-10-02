@@ -96,7 +96,7 @@ export async function inspectArchive(bytes, { stripRoot = false } = {}) {
     && files.every((file) => file.path.length > top.length + 1);
   if (stripRoot && !commonRoot) throw new Error('GitHub 소스의 최상위 폴더를 확인할 수 없습니다.');
   const hasWrapper = commonRoot
-    && files.some((file) => ['package.json', 'Dockerfile', '.jasmin/jasmin.yaml'].includes(file.path.slice(top.length + 1)));
+    && files.some((file) => ['package.json', 'Dockerfile', '.railshot/railshot.yaml', '.jasmin/jasmin.yaml'].includes(file.path.slice(top.length + 1)));
   const normalized = files.map((file) => ({ ...file, path: stripRoot || hasWrapper ? file.path.slice(top.length + 1) : file.path }));
   return validateFiles(normalized);
 }

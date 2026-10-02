@@ -11,7 +11,7 @@ loop는 baseline 검사, 허용된 AI 수정, 재검사를 수행하고 bundle a
 `published-N` ZIP은 **release producer attempt N**의 결과입니다. 아래 다섯 파일을 ZIP 최상위에 포함하며, 동명의 stable alias는 만들지 않습니다.
 
 - `images.json`: service 이름 → registry `@sha256:` digest
-- `jasmin.yaml`: gate가 검사한 앱 spec bytes
+- `railshot.yaml` (legacy: `jasmin.yaml`): gate가 검사한 앱 spec bytes
 - `verdict.json`: full gate 판정·source digest·local image IDs
 - `manifest.json`: 원래 tested bundle manifest와 image archive hash. 게시 ZIP에는 `images.tar`를 포함하지 않음
 - `handoff.json`: version 2, status published, source_commit, target_id, tenant, app, run_id, producer_attempt, bundle_artifact_id, 위 네 파일의 SHA256와 registry 접근 계약

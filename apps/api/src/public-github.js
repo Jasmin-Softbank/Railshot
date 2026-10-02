@@ -1,7 +1,7 @@
 import { archiveLimits, inspectArchive } from './archive.js';
 import { ServiceError } from './github.js';
 
-const headers = { accept: 'application/vnd.github+json', 'user-agent': 'jasmin-entrypoints-poc' };
+const headers = { accept: 'application/vnd.github+json', 'user-agent': 'railshot-api' };
 
 function parseRepositoryUrl(input) {
   let url;

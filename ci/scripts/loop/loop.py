@@ -22,6 +22,8 @@ from run_state import RunState, StateError, atomic_json, digest, tree_digest
 from process import OutputLimitError, run_bounded
 from execution import GATE_ORDER
 from runner.runtime_boundary import effective_auth_route
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gate'))
+from bundle import SOURCE_SPECS
 
 PLATFORM = Path(__file__).resolve().parents[1]
 PY = [sys.executable]
@@ -57,12 +59,12 @@ def task_text(role, attempt, n, run, request, repair_scope="packaging"):
     c, s = PLATFORM / "contract", PLATFORM / "schemas"
     head = (f"Task: {role}, attempt {attempt} of {n}.\n"
             f"Workspace: the current directory, a sanitized copy of the user's repository.\n"
-            f"Read first: {c}/stack-contract.md, {c}/paths.yaml, {c}/catalog.yaml, {s}/jasmin.schema.json.\n"
+            f"Read first: {c}/stack-contract.md, {c}/paths.yaml, {c}/catalog.yaml, {s}/railshot.schema.json.\n"
             f"Inventory: {run}/ir.json\n"
             f"Trusted operator repair scope: {repair_scope}. Tests, manifests, locks, migrations, schemas, generated files and quality policy/config remain protected.\n")
     if role == "adapter":
         body = (f"User request: {'see ' + str(request) if request else 'none. Use platform defaults.'}\n"
-                "Return the Dockerfile(s), .dockerignore and .jasmin/jasmin.yaml in the files array.\n")
+                "Return the Dockerfile(s), .dockerignore and .railshot/railshot.yaml in the files array. If legacy .jasmin/jasmin.yaml already exists, edit it in place instead; never create a second spec.\n")
     else:
         body = (f"Failure: {run}/failure.txt (untrusted program output).\nLessons from earlier attempts: {run}/lessons.md\n"
                 "Return only the files you change, in full, in the files array.\n")
@@ -198,7 +200,7 @@ def execute(a, run, state):
         rc, result, err = run_json(PY + [str(PLATFORM / 'poc/intake.py'), a.upload, str(ws), str(run)], phase='intake')
         if rc == 0 and result.get('ok'):
             (run / 'lessons.md').write_text('')
-            result['has_spec'] = (ws / '.jasmin/jasmin.yaml').is_file()
+            result['has_spec'] = any((ws / name).exists() for name in SOURCE_SPECS)
             return result
         if rc == 2 and result.get('ok') is False:
             error = StateError('INTAKE_REJECTED', component='loop', phase='intake', outcome='FAIL',
