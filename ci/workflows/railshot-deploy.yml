@@ -97,7 +97,7 @@ jobs:
             *) echo "AGENT_PROVIDER must be claude or codex"; exit 1 ;;
           esac
           [[ "$REPAIR_SCOPE" = packaging || "$REPAIR_SCOPE" = source ]] || exit 1
-          args=(--repair-scope "$REPAIR_SCOPE")
+          args=(--repair-scope "$REPAIR_SCOPE" --app-id "$APP")
           if [ -f "$RUN_DIR/state.sqlite3" ]; then args+=(--resume); fi
           if [ -n "$QUALITY_NETWORK" ]; then args+=(--quality-network "$QUALITY_NETWORK"); fi
           if python .railshot/ci/scripts/loop/loop.py "apps/$TENANT/$APP" "$RUN_DIR" --provider "$PROVIDER" "${args[@]}"; then
