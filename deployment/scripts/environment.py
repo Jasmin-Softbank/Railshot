@@ -300,7 +300,8 @@ def github_variable(repository, name, document=None, *, create=False):
     token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
     argo.require(token, 'operator GitHub token required')
     path = '/repos/' + repository + '/actions/variables' + ('' if create else '/' + name)
-    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
+               'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}
     request = Request('https://api.github.com' + path, headers=headers,
                       data=bridge.encoded(document) if document is not None else None,
                       method='POST' if create else 'PATCH' if document is not None else 'GET')
