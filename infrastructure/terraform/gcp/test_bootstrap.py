@@ -110,6 +110,30 @@ class BootstrapRenderTests(unittest.TestCase):
         policy = evaluate("{iap = local.iap_ssh, runtime = local.runtime_limit}")
         self.assertEqual(policy, {"iap": None, "runtime": None})
 
+    def test_management_api_accepts_only_bounded_ipv4_hosts(self):
+        sources = [(MODULE / 'control-api.tf', 'k3s_control_source_cidrs'),
+                   (MODULE.parent / 'control' / 'external-api.tf', 'external_k3s_api_cidrs')]
+        cases = [([], True), (['192.0.2.1/32'], True), (['0.0.0.0/0'], False),
+                 (['192.0.2.0/24'], False), (['2001:db8::1/128'], False),
+                 (['invalid/32'], False), ([f'192.0.2.{n}/32' for n in range(1, 22)], False)]
+        for source, variable in sources:
+            with tempfile.TemporaryDirectory(prefix='railshot-api-cidrs-') as directory:
+                work = Path(directory)
+                # Evaluate the real variable validation without cloud resources or state.
+                (work / 'main.tf').write_text(source.read_text().split('\nresource ', 1)[0])
+                fixture = work / 'fixture.tfvars.json'
+                for cidrs, valid in cases:
+                    with self.subTest(variable=variable, cidrs=cidrs):
+                        fixture.write_text(json.dumps({variable: cidrs}))
+                        result = subprocess.run(
+                            ['terraform', 'console', '-no-color', '-var-file=' + str(fixture)],
+                            input=f'jsonencode(var.{variable})\n', cwd=work, text=True, capture_output=True,
+                        )
+                        accepted = result.returncode == 0 and 'Error:' not in result.stderr
+                        self.assertEqual(accepted, valid, result.stderr)
+                        if accepted:
+                            self.assertEqual(set(json.loads(json.loads(result.stdout))), set(cidrs))
+
     def test_registry_oauth_scope_is_explicit_and_read_only(self):
         self.assertEqual(evaluate("local.node_oauth_scopes"), [])
         self.assertEqual(evaluate("local.node_oauth_scopes", overrides={"enable_gcp_registry_pull": True}),
