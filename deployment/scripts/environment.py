@@ -4,6 +4,7 @@ import argparse
 import base64
 from contextlib import contextmanager
 import copy
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import ipaddress
@@ -69,6 +70,11 @@ def load(registry_file, target_id, config_file, binding_file=None):
                  and not set(settings) - {'state_dir', 'source_repository', 'pull_secret_file', 'edge_config_file', 'target_security_group_id', 'expires_at'},
                  'registration settings differ')
     argo.require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', settings['source_repository']), 'source repository required')
+    if settings.get('edge_config_file'):
+        expiry = settings.get('expires_at')
+        argo.require(isinstance(expiry, str) and expiry.endswith('Z')
+                     and datetime.fromisoformat(expiry.replace('Z', '+00:00')) > datetime.now(timezone.utc),
+                     'future UTC edge expiry required before registration')
     registered = copy.deepcopy(cd['targets'][target_id]); target = registered['target']
     argo.require(set(registered) == {'target', 'app', 'tenant', 'public_http'} and target['id'] == target_id,
                  'one registered application required')

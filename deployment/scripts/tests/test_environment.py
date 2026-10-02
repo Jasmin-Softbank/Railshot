@@ -153,6 +153,14 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(result['status'], 'unknown')
         self.assertEqual(self.runtime.applications, 0)
 
+    def test_missing_edge_expiry_blocks_before_registration_claim_or_remote_calls(self):
+        self.config['registration'].update(edge_config_file='/private/edge.json', expires_at=None)
+        self.write('config.json', self.config)
+        with self.assertRaisesRegex(Exception, 'future UTC edge expiry'):
+            self.run_registration()
+        self.assertFalse(self.shared.exists())
+        self.assertEqual(self.runtime.applications, 0)
+
     def test_db_address_derived_only_from_private_binding(self):
         target = self.config['cd']['targets'][self.target]['target']
         target['database'] = {'runtime_secret': 'runtime-db', 'migration_secret': 'migration-db', 'ca_secret': 'database-ca'}
