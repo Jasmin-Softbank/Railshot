@@ -17,6 +17,26 @@ TARGET_ID = r'[a-z][a-z0-9-]{0,62}'
 
 def validate_target(env):
     """Workflow targets come only from the operator allowlist, never app input."""
+    bindings = json.loads(env.get('CONFIGURED_BINDINGS') or '{}')
+    if not isinstance(bindings, dict):
+        raise ValueError('operator target bindings must be an object')
+    for target, binding in bindings.items():
+        if (not re.fullmatch(TARGET_ID, target) or not isinstance(binding, dict)
+                or set(binding) != {'app', 'tenant', 'image_pull_secret'}
+                or not isinstance(binding['app'], str)
+                or not re.fullmatch(r'[a-z][a-z0-9-]{1,28}[a-z0-9]', binding['app'])
+                or not isinstance(binding['tenant'], str)
+                or not re.fullmatch(r'[a-z0-9]{1,20}', binding['tenant'])
+                or not isinstance(binding['image_pull_secret'], dict)
+                or set(binding['image_pull_secret']) != {'namespace', 'name'}
+                or not all(isinstance(v, str) and re.fullmatch(DNS_LABEL, v)
+                           for v in binding['image_pull_secret'].values())):
+            raise ValueError('invalid operator target binding')
+    binding = bindings.get(env.get('TARGET_ID'))
+    if binding is not None:
+        if any(env.get(k.upper()) != binding[k] for k in ('app', 'tenant')):
+            raise ValueError('application differs from registered target binding')
+        return binding
     raw = env.get('CONFIGURED_TARGETS', '')
     targets = json.loads(raw) if raw else [env.get('CONFIGURED_TARGET', '')]
     if not isinstance(targets, list) or not targets or not all(
@@ -46,6 +66,11 @@ def validate_registry(registry, images_sha256):
 
 
 def verify_registry(images_bytes, env):
+    if env.get('CONFIGURED_BINDINGS'):
+        binding = validate_target(env)
+        if binding:
+            env = {**env, 'PULL_SECRET_NAMESPACE': binding['image_pull_secret']['namespace'],
+                   'PULL_SECRET_NAME': binding['image_pull_secret']['name']}
     images = json.loads(images_bytes)
     prefix = env.get('REGISTRY_PREFIX', '')
     if not re.fullmatch(r'ghcr\.io/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*', prefix):
