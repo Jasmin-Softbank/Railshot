@@ -30,7 +30,25 @@ variable "enable_product_executor" {
   default     = false
   description = "Operator opt-in for the reviewed product executor. Bootstrap must verify the fixed Cilium metadata deny policy before applying this setting."
 }
+variable "product_metadata_hop_limit" {
+  type        = number
+  default     = 2
+  description = "Verified control-node pod return path. Use 3 only for an extra Cilium routing hop; the metadata deny policy remains required."
+  validation {
+    condition     = contains([2, 3], var.product_metadata_hop_limit)
+    error_message = "Use only the verified two- or three-hop control path."
+  }
+}
 variable "vpc_id" { type = string }
+variable "registered_runtime_instance_ids" {
+  type        = set(string)
+  default     = []
+  description = "Existing runtime instances explicitly handed to app registration. Do not retag their ownership to grant access."
+  validation {
+    condition     = length(var.registered_runtime_instance_ids) <= 20 && alltrue([for id in var.registered_runtime_instance_ids : can(regex("^i-[0-9a-f]{17}$", id))])
+    error_message = "Use at most 20 exact existing instance IDs."
+  }
+}
 variable "subnet_id" {
   type        = string
   description = "Exact existing operations-node subnet; do not select a new default subnet."
@@ -176,6 +194,23 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.control.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
+resource "aws_iam_role_policy" "registered_runtimes" {
+  count = var.enable_product_executor && length(var.registered_runtime_instance_ids) > 0 ? 1 : 0
+  role  = aws_iam_role.control.id
+  name  = "railshot-registered-runtimes"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "ssm:StartSession"
+      Resource = [for id in var.registered_runtime_instance_ids : "arn:aws:ec2:${var.region}:${var.account_id}:instance/${id}"]
+      Condition = {
+        StringEquals = { "aws:RequestedRegion" = var.region }
+        BoolIfExists = { "ssm:SessionDocumentAccessCheck" = "true" }
+      }
+    }]
+  })
+}
 resource "aws_iam_role_policy" "codex_auth" {
   role = aws_iam_role.control.id
   name = "read-single-operator-auth"
@@ -239,7 +274,7 @@ resource "aws_instance" "control" {
   credit_specification { cpu_credits = "standard" }
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = var.enable_product_executor ? 2 : 1
+    http_put_response_hop_limit = var.enable_product_executor ? var.product_metadata_hop_limit : 1
   }
   root_block_device {
     volume_type           = "gp3"

@@ -546,7 +546,9 @@ class BootstrapTests(unittest.TestCase):
         def native(command, **_):
             calls.append(command)
             if 'pods' in command: return json.dumps({'items': [{'id': 'sandbox', 'state': 'SANDBOX_READY', 'metadata': {'uid': 'pod-uid'}}]}).encode()
-            if 'inspectp' in command: return json.dumps(sandbox).encode()
+            if 'inspectp' in command:
+                self.assertEqual(command, ['k3s', 'crictl', 'inspectp', '-o', 'json', 'sandbox'])
+                return json.dumps(sandbox).encode()
             return b'{"responded":false}'
         monitor = types.SimpleNamespace(pid=99999999, poll=lambda: None, wait=lambda **_: 0)
         with patch.object(bootstrap, 'native', side_effect=native), patch.object(bootstrap.subprocess, 'Popen', return_value=monitor), \

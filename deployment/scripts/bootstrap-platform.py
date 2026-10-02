@@ -446,7 +446,7 @@ def denied_metadata(cilium, endpoint, pod):
     sandboxes = json.loads(native(['k3s', 'crictl', 'pods', '-o', 'json']))['items']
     matches = [s for s in sandboxes if s.get('state') == 'SANDBOX_READY' and s.get('metadata', {}).get('uid') == pod['metadata']['uid']]
     require(len(matches) == 1, 'METADATA_SANDBOX_NOT_READY')
-    sandbox = json.loads(native(['k3s', 'crictl', 'inspectp', matches[0]['id'], '-o', 'json']))
+    sandbox = json.loads(native(['k3s', 'crictl', 'inspectp', '-o', 'json', matches[0]['id']]))
     pid = sandbox.get('info', {}).get('pid')
     require(type(pid) is int and pid > 1 and sandbox['status']['metadata']['uid'] == pod['metadata']['uid'] and
             sandbox['status'].get('state') == 'SANDBOX_READY' and sandbox['status']['network']['ip'] == pod['status']['podIP'], 'METADATA_SANDBOX_DIFFERS')

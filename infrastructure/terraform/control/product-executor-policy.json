@@ -313,7 +313,7 @@
         "StringLike": {
           "ssm:resourceTag/Target": "?*"
         },
-        "Bool": {
+        "BoolIfExists": {
           "ssm:SessionDocumentAccessCheck": "true"
         }
       }
