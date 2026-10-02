@@ -54,7 +54,38 @@ kubectl --context "$OPS_CONTEXT" apply -f /private/build-runner.json
 
 Job은 정확한 build 노드에만 배치되며 다른 노드로 fallback하지 않습니다. 전용 ServiceAccount는 build namespace의 Pod 조회와 지정된 Node 한 개 조회만 허용합니다. Secret 조회·배포 변경 권한은 없습니다. runner는 인증된 API 응답으로 자기 Pod의 UID·권한·마운트와 Node의 역할·taint를 확인합니다. K3s 자격 디렉터리와 관리자 kubeconfig는 마운트하지 않습니다. 이 metadata token도 고객 코드 컨테이너에는 전달하지 않습니다.
 
-Job의 제한은 runner에 적용됩니다. 호스트 Docker가 실행하는 BuildKit/Q/L3는 기존 Docker 제한을 사용하므로 Kubernetes quota에 자동 합산되지 않습니다. 한 워커에서 runner 하나만 실행하도록 호스트 lock을 잡습니다. 이 설계는 운영 Pod와 빌드의 노드를 나누지만, privileged BuildKit과 운영 cluster의 control plane 공유에 따른 위험까지 제거하지는 않습니다. 다음 job에는 새로운 등록 token·Job 이름을 사용합니다. 자동 재등록 controller는 추가하지 않았습니다.
+Job의 제한은 runner에 적용됩니다. 호스트 Docker가 실행하는 BuildKit/Q/L3는 기존 Docker 제한을 사용하므로 Kubernetes quota에 자동 합산되지 않습니다. 한 워커에서 runner 하나만 실행하도록 호스트 lock을 잡습니다. 이 설계는 운영 Pod와 빌드의 노드를 나누지만, privileged BuildKit과 운영 cluster의 control plane 공유에 따른 위험까지 제거하지는 않습니다. 다음 job에는 새로운 등록 token·Job 이름을 사용합니다. 연속 제품 요청에는 아래의 작은 CronJob controller가 이를 보충합니다.
+
+### 연속 요청을 위한 runner 보충
+
+[replenish.py](replenish.py)는 기존 API 이미지의 Python 표준 라이브러리만 사용합니다. [CronJob](../../../deployment/manifests/build-controller.yaml)은 platform 노드에서 매분 실행하며 `concurrencyPolicy: Forbid`, 재시도 0, 55초 deadline을 갖습니다. HTTP는 요청당 최대 5초·전체 45초로 제한합니다. 별도 daemon, 이미지, DB, controller용 PVC는 필요 없습니다.
+
+운영자는 `railshot-system`의 `railshot-runner-controller-github` Secret `token` 키에 해당 앱 저장소의 Actions 조회·runner 등록 권한을 가진 자격을 준비합니다. 이 자격은 controller Pod에만 마운트합니다. `railshot-build`의 `railshot-build-runner-registration` Secret도 운영자가 미리 만들며 `token` 키의 최초 값은 빈 문자열이어도 됩니다. controller는 이 이름의 Secret만 조회·수정할 수 있고 Secret 생성·목록 조회 권한은 없습니다. 앱 저장소의 세부 권한은 GitHub 공식 [job 조회](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run)와 [registration token 발급](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-a-repository) 계약을 따릅니다. 등록 token은 runner에만 전달되고 장기 GitHub 자격은 전달하지 않습니다.
+
+```sh
+python3 deployment/scripts/render-platform.py /private/images.json \
+  --build-controller \
+  --runner-url https://github.com/Jasmin-Softbank/railshot-apps \
+  --build-node railshot-build-worker-aws-01 > /private/build-controller.json
+kubectl --context "$OPS_CONTEXT" apply -f /private/build-controller.json
+```
+
+이 모드는 검토한 `api`와 `ci-runner` GHCR digest를 요구합니다. 기존 `render_build_runner`가 만든 Job을 ConfigMap에 보관하고 SHA-256·저장소·노드·이미지·권한을 검증합니다. 실제 생성 시 바뀌는 값은 고유 Job/runner 이름뿐이며, runner ServiceAccount와 기존의 좁은 Pod/Node 조회 권한은 그대로 사용합니다. controller ServiceAccount에는 build namespace의 Job get/list/create와 등록 Secret 한 개의 get/update/patch만 부여합니다. 기본 platform Argo Application과 별도로 설치합니다.
+
+각 tick은 다음 순서로 동작합니다.
+
+1. 기존 runner Job을 모두 조회합니다. terminal condition이 없는 Job이 하나라도 있으면 등록 token 발급과 새 Job 생성을 하지 않습니다.
+2. 이전 생성 intent를 관측한 Job의 terminal condition으로 정리합니다. 연속 세 Job이 `Failed`가 되면 자동 보충을 차단합니다. GitHub workflow의 테스트 실패와 Kubernetes runner Job 실패는 다릅니다.
+3. 고정된 앱 저장소의 최근 queued/in_progress run을 최대 20개씩 조회하고, `railshot-ci`를 요구하는 queued job이 있을 때만 짧은 등록 token을 발급합니다. 지원 label은 self-hosted/Linux/X64/railshot-ci입니다.
+4. 등록 Secret의 `railshot.io/runner-controller` annotation에 pending Job 이름과 실패 수를 먼저 저장하고 token을 함께 갱신합니다. `resourceVersion` 경합이 있으면 Job을 생성하지 않습니다. 이후 검토한 Job을 정확히 한 번 생성합니다.
+
+Job 생성 응답이 유실되면 같은 tick에서 재시도하지 않습니다. 다음 tick에서 저장한 이름을 조회하여 실행 중이면 기다립니다. pending 이름을 찾을 수 없으면 `unknown`을 보존하고 추가 생성을 중단합니다. Job TTL 삭제 뒤에도 실패 수는 Secret annotation에 남습니다. 재개가 필요할 때는 운영자가 CronJob을 suspend하고 기존 Job·Pod·GitHub runner 등록을 확인한 뒤 원인을 고쳐야 합니다. 안전한 재개가 확인된 경우에만 해당 annotation을 제거하고 suspend를 해제합니다. 이 절차는 실행 중인 runner를 자동 삭제하지 않습니다.
+
+로컬 테스트는 실제 loopback HTTP 요청으로 연속 두 queued 요청, 실행 중 Job, 생성 응답 유실, Secret 충돌, 세 연속 실패, template/registry/권한 거부를 확인합니다. 운영 GitHub 등록·Kubernetes 설치·고객 빌드의 실제 성공은 별도 E2E 검증이 필요합니다.
+
+```sh
+python3 -m unittest discover -s ci/scripts/runner -p test_replenish.py -v
+```
 
 ## 기존 독립 VM의 Compose 실행
 

@@ -280,6 +280,9 @@ test('실제 producer artifact ID와 해시를 확인한 경우에만 이미지 
   assert.equal(result.publication.artifact_id, 200);
   assert.equal(result.publication.producer_attempt, 1);
   assert.equal(result.publication.version, 2);
+  const trustedFiles = await service.publishedFiles(result.publication);
+  assert.equal(trustedFiles.length, 5);
+  await assert.rejects(service.publishedFiles({ ...result.publication, artifact_id: 201 }), /게시 참조/);
   assert.equal(result.publication.registry.verification, 'anonymous_manifest_read');
   assert.equal(result.publication.registry.image_pull_secret, null);
   assert.equal(result.target_id, 'aws-demo');
@@ -451,7 +454,7 @@ test('HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까�
     throw new Error(`Unexpected GitHub request: ${method} ${path}`);
   };
   const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fetchImpl);
-  const server = createAppServer({ service, sourceLoader: async () => { throw new Error('ZIP upload must not fetch a source'); } });
+  const server = createAppServer({ service, stateDirectory: join(root, 'product'), sourceLoader: async () => { throw new Error('ZIP upload must not fetch a source'); } });
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -511,6 +514,7 @@ with patch.object(publication, 'verify_registry', side_effect=verified_registry)
     assert.equal(result.url, null); // Image publication does not claim a deployed application URL.
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    await (await server.productReady)?.close();
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -1,6 +1,6 @@
 # CI → Argo CD 인계
 
-`handoff.py`는 검증된 CI 게시 결과로 검토용 선언을 만들고, `argo.py`는 운영자가 등록한 Argo CD에서 그 선언의 sync와 결과를 확인합니다. 팀원 runtime bootstrap으로 준비한 AWS/GCP single-node K3s를 재사용하며, 클러스터 설치나 CI runner 등록을 수행하지 않습니다. 사용자 소스 저장소와 Argo가 읽는 배포 선언 저장소는 별개입니다. Argo Application은 config 저장소의 앱별 경로를 읽으므로 고객마다 원본 소스 저장소를 새로 등록할 필요는 없습니다.
+`handoff.py`는 검증된 CI 게시 결과로 검토용 선언을 만들고, `argo.py`는 운영자가 등록한 Argo CD에서 그 선언의 sync와 결과를 확인합니다. `bridge.py`는 이 두 구현을 제품 백엔드에서 호출하는 비공개 실행 진입점입니다. 팀원 runtime bootstrap으로 준비한 AWS/GCP single-node K3s를 재사용하며, 클러스터 설치나 CI runner 등록을 수행하지 않습니다. 사용자 소스 저장소와 Argo가 읽는 배포 선언 저장소는 별개입니다. Argo Application은 config 저장소의 앱별 경로를 읽으므로 고객마다 원본 소스 저장소를 새로 등록할 필요는 없습니다.
 
 ```sh
 python gitops/handoff.py /private/published /private/target.json /private/handoff-review
@@ -42,12 +42,89 @@ Project 생성은 선언 출력만 수행합니다. 이미 운영 중인 Project
 
 `sync`/`verify`는 live AppProject가 제한된 repo·runtime server·namespace와 Deployment/Service/NetworkPolicy만 허용하는지 먼저 확인합니다. config checkout의 origin 및 `SHA:path/workload.json`을 receipt와 비교하고, 해당 Git 디렉터리에 다른 파일이 있으면 차단합니다. `sync`는 검토한 Application을 server-side apply한 뒤 같은 SHA의 네이티브 Argo operation을 요청합니다. 이미 같은 revision의 operation이 있으면 새 요청을 보내지 않고 관측합니다. `verify`는 읽기 전용입니다. 여러 앱 중 일부만 완료되면 앱별 결과와 `incomplete`를 반환합니다.
 
-`rendered_for_review`와 `deployed: false`는 검토용 선언 생성 상태입니다. Argo CLI의 `deployed: true`는 live Application의 소유자·source·target이 일치하고 관측 revision이 고정 SHA이며, operation `Succeeded`, `Synced`, `Healthy`, 예상 리소스 및 이미지 목록이 모두 확인된 상태입니다. Argo 3에서 개별 resource health가 생략되는 경우 aggregate Application health를 사용합니다. 이는 외부 접속 완료와 구분해 `public_verified: false`, `url: null`로 반환합니다. 대상 노드의 실제 Pod imageID·Ready와 외부 DNS/TLS/HTTP는 별도 E2E에서 확인해야 합니다. `imagePullPolicy: Always`도 캐시된 layers는 재사용할 수 있습니다. API의 CD 결과 소비와 다중 노드·Patroni는 담당자 계약에 맞춰 연결합니다.
+`rendered_for_review`와 `deployed: false`는 검토용 선언 생성 상태입니다. Argo CLI의 `deployed: true`는 live Application의 소유자·source·target이 일치하고 관측 revision이 고정 SHA이며, operation `Succeeded`, `Synced`, `Healthy`, 예상 리소스 및 이미지 목록이 모두 확인된 상태입니다. Argo 3에서 개별 resource health가 생략되는 경우 aggregate Application health를 사용합니다. 이는 외부 접속 완료와 구분해 `public_verified: false`, `url: null`로 반환합니다. 대상 노드의 실제 Pod imageID·Ready는 별도 E2E에서 확인해야 합니다. `imagePullPolicy: Always`도 캐시된 layers는 재사용할 수 있습니다. 제품 bridge는 이 Argo 관측 뒤 아래 HTTPS 검사를 수행합니다. 다중 노드·Patroni는 담당자 계약이 필요합니다.
+
+## 제품 백엔드 실행 연결
+
+`apps/api/src/cd.js`의 `createCdAdapter({configPath, loadPublished})`는 비동기 `deployPublished` 함수를 반환합니다. `loadPublished`는 GitHub의 run/attempt/artifact ID와 source/target/tenant를 재검증해 원본 게시 파일 5개를 가져오는 서버 함수입니다. 클라이언트가 올린 파일이나 URL을 이 입력으로 사용하지 않습니다. Python 실행 환경에는 기존 CI와 같은 PyYAML/jsonschema가 필요하며, 서버의 `RAILSHOT_CD_CONFIG`는 아래 비공개 설정 파일을 가리킵니다.
+
+```json
+{
+  "version": 1,
+  "state_dir": "/private/railshot/cd-jobs",
+  "repository": "/private/railshot/config-checkout",
+  "branch": "deployments",
+  "context": "railshot-control",
+  "targets": {
+    "k3s-aws": {
+      "app": "demo",
+      "tenant": "team",
+      "target": {
+        "id": "k3s-aws",
+        "namespace": "tenant-demo",
+        "argocd_namespace": "argocd",
+        "project": "railshot",
+        "architecture": "amd64",
+        "repo_url": "https://github.com/example/config.git",
+        "cluster_server": "https://192.0.2.1:6443",
+        "path": "targets/k3s-aws/demo",
+        "node_port": 30080,
+        "ingress_cidrs": ["10.20.0.0/24"],
+        "resources": {
+          "requests": {"cpu": "100m", "memory": "128Mi"},
+          "limits": {"cpu": "500m", "memory": "256Mi"}
+        }
+      },
+      "public_http": {
+        "url": "https://demo.example.com/health",
+        "expected_json": {"status": "ready"}
+      }
+    }
+  }
+}
+```
+
+설정 파일은 실행 사용자 소유 0600, 상태 디렉터리는 0700이어야 합니다. `target`은 위 기존 handoff 계약을 그대로 사용하며 `revision`은 bridge가 생성한 Git commit으로 채웁니다. Private registry는 기존 `image_pull_secret` 참조도 target에 등록합니다. 전용 config checkout은 지정 branch에서 깨끗하고 원격과 일치해야 합니다. Git push 자격, 커밋 작성자, kubeconfig, 제한된 AppProject, namespace/pull Secret, Argo cluster 등록 및 공개 edge 경로는 운영자가 미리 준비합니다. 이 경로는 등록된 app/tenant 한 쌍의 namespace·NodePort·공개 URL을 갱신합니다. 다른 앱의 자동 namespace/NodePort/edge 할당은 지원하지 않습니다.
+
+고정 명령 `python3 gitops/bridge.py --config /private/railshot/cd.json`에 다음 필드만 stdin JSON으로 전달합니다: `action: apply|observe`, `deployment_id`, `target_id`, 서버 시작 때 읽은 설정의 `config_sha256`, 재검증한 `publication`, 그리고 `files` 객체의 파일명별 base64 원본 5개. 설정이 바뀌면 실행 전에 차단하므로 진행 중인 배포가 새 환경으로 향하지 않습니다. 설정 변경 적용은 서버를 다시 시작해 새 요청에서 수행합니다. 앱·대상·원본 해시를 대조한 뒤 기존 `handoff.render`로 선언을 만들고, Git commit/push 및 원격 SHA 재조회, 기존 Argo 소유권·revision·image 검증, 마지막으로 등록된 HTTPS health 경로를 검사합니다. HTTP 200과 기대 JSON의 정확한 일치를 모두 요구하고 리다이렉트·환경 프록시를 사용하지 않습니다. 응답 본문과 native stderr는 제품 결과에 포함하지 않습니다. 이 HTTP 검사는 등록된 경로의 응답 증거이며 실제 Pod imageID 관측을 대신하지 않습니다.
+
+stdout은 `{cd: {state, revision, deployed}, public_http: {state, verified_at, url}}`이며 오류 시 안전한 `error: {code, retryable, outcome_unknown}`를 추가합니다. 공개 검증 완료는 `public_http.state: succeeded`로 나타냅니다. bridge는 push 전에 의도를 영속 저장하고 같은 deployment ID의 재호출에서는 읽기 전용 관측만 수행합니다. 결과가 불명확하면 `unknown`을 반환하며 push/sync를 자동 재전송하지 않습니다. Node adapter는 최초 `apply` 뒤 `observe`만 제한 시간 내 polling합니다. 취소·시간 초과 시 Python과 native Git/kubectl을 포함한 프로세스 그룹을 종료하고 `unknown`을 반환합니다. 이미 원격에 접수된 작업이 취소됐다는 뜻은 아닙니다. 같은 ID에 다른 publication/설정을 보내면 충돌로 거부합니다.
 
 ```sh
 python -m unittest discover -s gitops -p 'test_*.py'
 ```
 
-테스트는 native kubectl 경계를 모의 실행하고 임시 로컬 Git에서 고정 SHA 검증을 수행합니다. 실제 Argo 설치·cluster 등록·sync·외부 배포를 증명하지 않습니다.
+테스트는 native kubectl 경계를 모의 실행하고 임시 로컬 bare Git에서 commit/push·고정 SHA·불명확 결과의 재실행 차단을 검사합니다. 별도 localhost HTTP 서버에서 기대 본문과 redirect 거부를 확인합니다. 실제 Argo 설치·cluster 등록·sync·공개 HTTPS 배포를 증명하지 않습니다.
 
-공식 형식: [Argo declarative setup](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/), [kubectl sync operation](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/), [Argo 3 resource health 변경](https://argo-cd.readthedocs.io/en/stable/operator-manual/upgrading/2.14-3.0/#health-status-in-the-application-cr), [Kubernetes private registry Secret](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/).
+## 짧은 Argo 고객 토큰 갱신
+
+`credentials.py`는 기존 고객 ServiceAccount의 6시간 토큰을 2시간마다 갱신하는 일회성 명령입니다. 새 관리자 자격이나 장기 ServiceAccount Secret을 만들지 않습니다. 운영자가 고객별 기존 SA 이름·UID, 등록 namespace, server, CA SHA-256, audience를 확인한 비밀 없는 정책을 준비합니다. 예시는 다음과 같으며 값은 실제 등록에서 읽어야 합니다.
+
+```json
+{"version":1,"targets":[{
+  "secret":"railshot-k3s-aws","target_id":"k3s-aws",
+  "server":"https://192.0.2.1:6443","project":"railshot-apps",
+  "namespaces":["tenant-demo"],
+  "service_account":{"namespace":"tenant-demo","name":"railshot-argocd","uid":"12345678-1234-1234-1234-123456789012"},
+  "ca_sha256":"REPLACE_WITH_OBSERVED_CA_SHA256",
+  "audiences":["https://kubernetes.default.svc.cluster.local","k3s"]
+}]}
+```
+
+먼저 각 고객 클러스터에 [credentials-customer.yaml](credentials-customer.yaml)의 제한된 Role/RoleBinding을 적용합니다. 기존 `tenant-demo/railshot-argocd`에 **자기 이름의 `serviceaccounts/token` create만** 추가하며 기존 배포 Role을 덮어쓰지 않습니다. 실제 자기 SA의 발급 허용과 다른 SA·namespace의 발급 거부를 확인합니다. 이 권한은 현재 토큰이 유효한 동안 계속 재갱신할 수 있으므로, 6시간은 각 토큰의 요청 TTL이지 운영 종료 기한이 아닙니다.
+
+```sh
+python3 gitops/credentials.py render --policy /private/credentials-policy.json \
+  --image "${RAILSHOT_API_IMAGE:?Set the published immutable API image}" > /private/credentials.json
+kubectl --context railshot-control apply -f /private/credentials.json
+# 첫 실행을 기다리지 않고 확인; 같은 CronJob의 다른 실행과 겹치지 않게 한다.
+kubectl --context railshot-control -n argocd create job --from=cronjob/railshot-credentials railshot-credentials-initial
+```
+
+선언은 기존 API 이미지의 `/app/gitops/credentials.py`, `argocd/ghcr-pull`, 플랫폼 노드를 사용합니다. 운영 SA는 정책에 등록된 Argo Secret 이름만 `get/patch`할 수 있습니다. 코드와 자격을 ConfigMap에 넣지 않으며 정책만 읽기 전용으로 마운트합니다. CronJob은 동시 실행을 금지하고, 5분 실행 제한과 재시도 0을 사용합니다. 직접 실행은 `python3 gitops/credentials.py renew --policy ...`이며 kubectl의 현재 운영 context 또는 Pod의 projected SA를 사용합니다.
+
+현재 Secret의 소유권·등록 범위·CA·SA를 확인한 뒤 TokenRequest를 보냅니다. 새 토큰을 원래 CA로 검증한 고객 API에서 SelfSubjectReview의 이름·UID와 각 등록 namespace의 Pod 조회 권한까지 확인한 경우에만 `data.config`의 bearer token을 교체합니다. JSON Patch의 `resourceVersion` test가 동시 변경을 막습니다. 발급·검증 실패 시 기존 값을 보존하고, patch 결과가 불명확하면 읽기 한 번으로 확인하여 `renewed/unchanged/unknown`을 구분합니다. 토큰과 native 오류 원문을 로그에 쓰지 않습니다.
+
+연속 장애로 기존 토큰까지 만료되면 이 경로는 스스로 복구할 수 없습니다. 운영자가 독립 SSM/IAP 경로에서 기존 고객 SA의 짧은 토큰을 다시 발급해 같은 등록 Secret에 넣고 첫 실행을 검증해야 합니다. 운영 종료 시 CronJob을 `suspend: true`로 전환하고, 진행 중인 갱신 Job이 끝났는지 확인한 뒤 각 고객의 `railshot-argocd-renewal` **RoleBinding을 제거**하여 자기 갱신 권한을 회수합니다. 기존 배포 SA·Role과 고객 앱은 제거하지 않습니다. 이미 발급된 토큰은 자체 만료 시각까지 유효합니다.
+
+공식 형식: [Argo declarative setup](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/), [kubectl sync operation](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/), [Argo 3 resource health 변경](https://argo-cd.readthedocs.io/en/stable/operator-manual/upgrading/2.14-3.0/#health-status-in-the-application-cr), [Kubernetes private registry Secret](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/), [TokenRequest](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#tokenrequest-api), [SelfSubjectReview](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#api-access-to-authentication-information-for-a-client).

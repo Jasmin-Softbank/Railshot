@@ -25,8 +25,10 @@ export function apiAccessConfig(env = process.env) {
   const allowedHosts = new Set((env.RAILSHOT_ALLOWED_HOSTS ?? 'localhost,127.0.0.1').split(',').map((host) => host.trim().toLowerCase()));
   if ([...allowedHosts].some((host) => !hostname.test(host))) throw new Error('RAILSHOT_ALLOWED_HOSTS requires exact hostnames without ports');
   const remote = bindHost !== '127.0.0.1' || [...allowedHosts].some((host) => !localHosts.has(host));
+  if (env.RAILSHOT_PUBLIC_DEMO !== undefined && !['0', '1'].includes(env.RAILSHOT_PUBLIC_DEMO)) throw new Error('RAILSHOT_PUBLIC_DEMO must be 0 or 1');
+  const publicDemo = env.RAILSHOT_PUBLIC_DEMO === '1';
   const token = readApiToken(env);
-  if (remote && (!env.RAILSHOT_ALLOWED_HOSTS || !token)) {
+  if (remote && (!env.RAILSHOT_ALLOWED_HOSTS || (!publicDemo && !token))) {
     throw new Error('Nonlocal API access requires RAILSHOT_ALLOWED_HOSTS and an API token');
   }
   // Preserve local development origins. Container mode accepts no browser Origin unless explicitly configured.
@@ -41,7 +43,10 @@ export function apiAccessConfig(env = process.env) {
       }
     }
   }
-  return { bindHost, allowedHosts, allowedOrigins, token, remote };
+  if (publicDemo && (!env.RAILSHOT_ALLOWED_HOSTS || !allowedOrigins?.size)) {
+    throw new Error('Public demo requires explicit RAILSHOT_ALLOWED_HOSTS and RAILSHOT_ALLOWED_ORIGINS');
+  }
+  return { bindHost, allowedHosts, allowedOrigins, token, remote, publicDemo };
 }
 
 export function allowsHost(host, access) {

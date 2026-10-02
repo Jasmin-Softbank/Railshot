@@ -31,11 +31,18 @@ function http(server, path, headers = {}, method = 'GET') {
 
 async function serving(access, check) {
   const calls = [];
-  const server = createAppServer({ access, service: {
+  const service = {
     targetId: 'private-target',
     status: async (id) => { calls.push(['status', id]); return { run_id: Number(id), state: 'queued' }; },
     deploy: async (input) => { calls.push(['deploy', input.app]); return { run_id: 123, state: 'queued' }; },
-  }, sourceLoader: async () => ({ files: [{ path: 'index.js', content: Buffer.from('example') }] }) });
+  };
+  // Isolate access checks from worker polling/storage; product.test.js verifies real run binding.
+  const product = {
+    createBuild: async (input, loadSource) => service.deploy(input.files ? input : { ...input, ...await loadSource(input.repository_url) }),
+    legacyStatus: service.status,
+  };
+  const server = createAppServer({ access, service, product,
+    sourceLoader: async () => ({ files: [{ path: 'index.js', content: Buffer.from('example') }] }) });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try { await check(server, calls); }
   finally { await new Promise((resolve) => server.close(resolve)); }
@@ -56,9 +63,12 @@ test('HTTP enforces exact Host, Origin and Bearer before accessing deployment se
     const auth = { authorization: `Bearer ${token}` };
     assert.equal((await http(server, '/api/runs/123', { host: 'attacker.test', 'x-forwarded-host': 'console.example.test', ...auth })).status, 403);
     assert.equal((await http(server, '/api/runs/123', { host: 'console.example.test', origin: 'https://attacker.test', ...auth })).status, 403);
-    assert.equal((await http(server, '/api/runs/123', { host: 'railshot-api', 'x-jasmin-request': 'deploy' })).status, 401);
+    const unauthorized = await http(server, '/api/runs/123', { host: 'railshot-api', 'x-jasmin-request': 'deploy' });
+    assert.equal(unauthorized.status, 401);
+    assert.equal(unauthorized.headers['www-authenticate'], 'Bearer');
     assert.equal((await http(server, '/api/runs/123', { host: 'railshot-api', authorization: `Bearer ${token}wrong` })).status, 401);
     assert.equal((await http(server, '/api/deploy', { host: 'railshot-api', 'x-jasmin-request': 'deploy' }, 'POST')).status, 401);
+    assert.equal((await http(server, 'http://[invalid', { host: 'railshot-api', ...auth })).status, 400);
     assert.equal(calls.length, 0);
     const health = await http(server, '/healthz', { host: 'railshot-api' });
     assert.equal(health.status, 200);
