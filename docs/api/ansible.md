@@ -64,13 +64,15 @@ DB HA 요청은 승인 profile·배치·TLS/Vault 참조를 확인한 뒤 접수
 
 제품 HTTP의 `request_id`는 매 요청 서버가 생성하는 추적 ID입니다. 내부 Ansible의 `request_id`는 작업 조회·중복 방지에 사용하는 영속 ID이므로 제품의 guest/runtime 기록에서는 `ansible_job_id`로 구분합니다. 제품 `Idempotency-Key`도 별개입니다. 응답이 유실되거나 결과가 unknown이면 새 작업 ID로 무조건 재실행하지 않습니다.
 
-현재 제품 환경 실행은 **등록된 AWS/GCP 단일 amd64 runtime과 `database.mode=none`**을 지원합니다. 제품 API는 저장한 plan의 만료·정책·snapshot·digest·apply 이력을 확인하고 계획을 한 환경에 한 번만 연결합니다. 순서는 **계획 확인 → Terraform apply → Provider descriptor 고정 → 환경별 등록 snapshot → native 입력 검사 → guest/runtime 실행 → 결과 저장**입니다.
+현재 제품 환경 실행 코드에는 **등록된 AWS/GCP 단일 amd64 runtime, 선택적 `database.mode=patroni`, 배포 대상 등록**이 연결되어 있습니다. `database.mode=none`은 DB 단계를 생략하고, `standalone`은 `STANDALONE_DATABASE_UNSUPPORTED`로 차단합니다. Patroni는 운영자가 등록한 DB profile의 역할·배치와 요청이 일치해야 하며, DB 노드 2개 이상·홀수 DCS voter 3개 이상·별도 proxy 1개 이상을 요구합니다. 제품 API는 저장한 plan의 만료·정책·snapshot·digest·apply 이력을 확인하고 계획을 한 환경에 한 번만 연결합니다. 순서는 **계획 확인 → Terraform apply → Provider descriptor 고정 → 환경별 등록 snapshot → native 입력 검사 → guest/runtime 실행 → 선택적 DB 구성 → 설정된 배포 대상 등록 → 결과 저장**입니다.
 
-[environments.js](../../apps/api/src/environments.js)는 Provider 결과와 운영자 SSH 참조로 비공개 `descriptor.json`·`targets.json`을 생성합니다. 이 snapshot을 사용해 기존 `run.py --validate-only`, `guest.check`, `runtime.install`을 순서대로 실행하고 각 결과의 요청 ID·target·operation·준비 상태를 확인합니다. 기존 상시 HTTP 실행기의 시작 시 target registry를 갱신하거나 재시작하지 않으므로 C-1의 수동 등록 운영과 구분합니다. 브라우저는 SSH 키·운영자 Bearer·파일 경로를 받지 않습니다.
+[environments.js](../../apps/api/src/environments.js)는 Provider 결과와 운영자 SSH 참조로 비공개 `<target_id>.json` descriptor와 `targets.json`을 생성합니다. 이 snapshot을 사용해 기존 `run.py --validate-only`, `guest.check`, `runtime.install`을 순서대로 실행하고 각 결과의 요청 ID·target·operation·준비 상태를 확인합니다. 기존 상시 HTTP 실행기의 target registry를 변경하거나 실행기를 재시작하지 않으므로 C-1의 수동 등록 운영과 구분합니다. 브라우저는 SSH 키·운영자 Bearer·파일 경로를 받지 않습니다.
 
-환경의 runtime 준비와 제품 CI/CD 대상 등록도 구분합니다. 새 `runtime_target_id`가 생겨도 `deployment_supported=false`, `DEPLOYMENT_TARGET_NOT_REGISTERED`를 유지합니다. 운영자가 해당 환경의 CI·CD·Git·공개 URL 설정을 연결하고 검증해야 제품 배포 대상으로 제공할 수 있습니다.
+Patroni를 선택하면 [cluster.py](../../infrastructure/ansible/cluster.py)에 환경별 DB registry·cluster spec을 전달합니다. 제품은 반환된 `database_ready`, 작업 ID, 비공개 binding 파일 경로와 digest를 확인한 뒤에만 `database.status=succeeded`를 저장합니다. 이 경로는 아래 내부 HTTP의 운영자 등록 HA profile을 호출하는 방식과 구분하며, 두 경로 모두 기존 DB 플레이북을 사용합니다.
 
-제품 환경 계획의 DB mode `standalone`·`patroni`는 `DATABASE_EXECUTION_NOT_CONNECTED`로 실행을 차단합니다. 이는 B-1 이후 **내부 HTTP의 승인 profile 기반 `database.configure` HA 실행이 구현되어 있다는 사실과 별개**입니다. DB 역할·배치·TLS/Vault 매핑과 별도 DB 검증은 아래 계약을 따르며 이 제품 연결 때문에 기존 HA 계약을 501로 되돌리지 않습니다. 로컬·모의 시험은 실제 VM·DB·클라우드 준비 완료의 증거가 아닙니다.
+환경의 runtime 준비와 제품 CI/CD 대상 등록도 구분합니다. runtime profile에 배포 설정이 있으면 [environment.py register](../../deployment/scripts/environment.py)를 호출하며, 필요한 DB binding을 전달하고 등록 성공을 확인한 뒤에만 `binding.status=succeeded`, `deployment_supported=true`가 됩니다. [product.js](../../apps/api/src/product.js)는 완료된 환경·plan·target·앱의 연결을 확인해 이 대상을 CI/CD에 사용합니다. 배포 설정이 없으면 runtime 또는 DB 준비가 성공해도 `deployment_supported=false`, `DEPLOYMENT_TARGET_NOT_REGISTERED`를 유지합니다. 이 자동 등록은 서버의 사전 설정 범위에서 수행되며 임의 자격·경로를 브라우저 입력으로 받지 않습니다.
+
+**운영 인수 상태와 구현 범위는 별개입니다.** 2026-10-02 운영 확인에서 공개 `GET /api/v1/profiles` 목록은 `items: []`로, 새 환경·DB profile은 아직 활성화되지 않았습니다. 기존 등록 대상의 업로드→CI→CD→공개 HTTPS 성공은 새 VM 생성이나 runtime 1대와 DB용 3대를 포함한 실제 4VM 경로의 검증 결과가 아닙니다. 해당 4VM 생성·Patroni 준비·binding·앱 연결은 별도 운영 검증이 남아 있으며, 로컬 HTTP·모의 실행 시험으로 완료를 주장하지 않습니다. DB 역할·배치·TLS/Vault 매핑과 내부 HTTP의 승인 profile 기반 `database.configure` 계약은 아래를 따릅니다.
 
 책임 경계는 [CI 백엔드 설계](ci-backend-design.md), 이름·응답 규칙은 [REST 컨벤션](conventions.md), 저장소 작업 지침은 [AGENT.md](../../AGENT.md)를 따릅니다. 성공·오류 외형의 기준 구현은 [화균 님 OpenStack schema](../../infrastructure/providers/openstack/src/control_plane/api/schemas.py)입니다.
 

@@ -72,15 +72,15 @@ CD 등록 설정은 작업에서 읽은 bytes의 SHA-256으로 고정한다. 같
 }
 ```
 
-제품 API는 profile·역할·SSH 참조·서버 정책을 검사한 뒤 기존 Terraform plan을 호출한다. 이 과정은 Provider 조회와 saved plan 파일 작성을 포함하지만 VM apply는 하지 않는다. 계획에는 정규화 입력, `policy_revision`, 15분 만료 시각, `steps`, `plan_sha256`, `executable`, `blockers`를 저장한다. 알려지지 않은 비용은 null이다. multi-node와 DB mode `standalone`·`patroni`는 실행 가능한 것으로 표시하지 않고 blockers를 반환한다.
+제품 API는 profile·역할·SSH 참조·서버 정책을 검사한 뒤 기존 Terraform plan을 호출한다. 이 과정은 Provider 조회와 saved plan 파일 작성을 포함하지만 VM apply는 하지 않는다. 계획에는 정규화 입력, `policy_revision`, 15분 만료 시각, `steps`, `plan_sha256`, `executable`, `blockers`를 저장한다. 알려지지 않은 비용은 null이다. multi-node runtime과 DB mode `standalone`은 blockers를 반환한다. `patroni`는 등록된 DB profile의 역할·배치와 일치하는 계획만 실행 대상으로 인정한다.
 
 환경 접수는 `{ "plan_id": "plan001" }`와 idempotency key만 받는다. 저장한 입력·profile snapshot·정책·만료·saved plan digest와 apply 이력을 재검사하고 계획을 한 환경에 한 번만 연결한다. 나중 계획이 같은 target의 saved plan을 바꾸었으면 기존 계획은 차단한다. 다른 입력을 함께 보내 저장 계획을 우회하는 경로는 없다.
 
-Terraform 결과의 `node_descriptor`를 환경별 비공개 파일로 고정하고, 운영자 SSH 참조와 결합한 `targets.json` snapshot을 새로 만든다. 동일 snapshot에서 native `run.py --validate-only`, `guest.check`, `runtime.install`을 순서대로 호출한다. 기존 상시 Ansible HTTP 서버의 시작 시 registry를 변경하거나 재시작하지 않는다. 매 단계 전 snapshot을 확인하고 결과의 요청 ID·target·operation·준비 상태가 일치해야 다음 단계로 진행한다. SSH host key는 운영자가 신뢰된 방법으로 확인한 known_hosts에 있어야 한다.
+Terraform 결과의 `node_descriptor`를 환경별 비공개 파일로 고정하고, 운영자 SSH 참조와 결합한 `targets.json` snapshot을 새로 만든다. 동일 snapshot에서 native `run.py --validate-only`, `guest.check`, `runtime.install`을 순서대로 호출한다. 기존 상시 Ansible HTTP 서버의 시작 시 registry를 변경하거나 재시작하지 않는다. 매 단계 전 snapshot을 확인하고 결과의 요청 ID·target·operation·준비 상태가 일치해야 다음 단계로 진행한다. SSH host key는 운영자가 검증한 known_hosts를 사용하거나, profile의 `enroll_ssh`가 켜진 경우 기존 Provider의 신뢰된 등록 경로로 환경별 known_hosts를 만든다. 호스트키 검증을 우회하지 않는다.
 
-새 VM의 `runtime_target_id`는 그 환경의 식별자다. 기존 제품 target ID로 위장하거나 자동 CI/CD 등록하지 않는다. 따라서 runtime 준비 후에도 `deployment_supported=false`, `DEPLOYMENT_TARGET_NOT_REGISTERED`가 남는다. 운영자가 CI 허용 target, CD의 cluster·namespace·application·Git·공개 URL을 연결하고 검증해야 제품 배포 대상으로 제공할 수 있다.
+새 VM의 `runtime_target_id`는 그 환경의 식별자다. runtime profile에 운영자가 준비한 배포 설정이 있으면 기존 `environment.py register`로 CI 허용 target과 CD의 cluster·namespace·application·Git·공개 URL을 등록하고 검증한다. 필요한 DB binding과 등록 결과까지 확인해야 `deployment_supported=true`가 된다. 배포 설정이 없으면 runtime 준비 후에도 `deployment_supported=false`, `DEPLOYMENT_TARGET_NOT_REGISTERED`를 유지한다.
 
-Slack 회의의 CSP·온프렘별 배치 수 전달 요구는 [10/1 기록](../meetings/2026-10-01.md)의 2:49:49–2:51:07과 [Ansible 계약](ansible.md)에 정리되어 있다. AWS 3개·온프렘 2개는 변수 전달 예시이며 고정 기본값이 아니다. 내부 Ansible HTTP는 승인 HA profile의 `nodes/placements`를 팀의 `db_nodes/etcd_nodes/proxy_nodes`와 TLS/Vault 참조에 연결한다. **이 DB 연결과 제품 환경 API의 `DATABASE_EXECUTION_NOT_CONNECTED`는 서로 다른 경계다.** DB VM·설치·복제 검증은 담당 채팅에서 진행하며 제품 환경의 DB 지원으로 확대해 설명하지 않는다.
+Slack 회의의 CSP·온프렘별 배치 수 전달 요구는 [10/1 기록](../meetings/2026-10-01.md)의 2:49:49–2:51:07과 [Ansible 계약](ansible.md)에 정리되어 있다. AWS 3개·온프렘 2개는 변수 전달 예시이며 고정 기본값이 아니다. 내부 Ansible HTTP는 승인 HA profile의 `nodes/placements`를 팀의 `db_nodes/etcd_nodes/proxy_nodes`와 TLS/Vault 참조에 연결한다. 제품 환경 API는 별도의 환경별 registry·cluster spec을 `cluster.py`에 전달하고 검증된 DB binding을 받는 경로를 구현했다. 두 경로 모두 팀 DB 플레이북을 사용하지만 입력 등록 방식은 구분한다. 현재 코드 연결과 실제 신규 VM·DB 설치·복제·앱 연결 검증의 완료 여부는 [Ansible 계약](ansible.md)의 운영 인수 상태로 구분한다.
 
 ## 5. 공개 workspace와 배치 조건
 
