@@ -1,0 +1,74 @@
+{
+  "source_base_commit": "d557045e2a72660be727ff38fc44506627c063e0",
+  "integration_observed_commit": "61d4f98191994cb32c8cc157f4b276d702371825",
+  "unit_tests": {
+    "pass": 95,
+    "fail": 0,
+    "skip": 0
+  },
+  "syntax": {
+    "shell": 20,
+    "python": 32,
+    "deployment_yaml": 5,
+    "runtime_workflow_yaml": 1,
+    "input_fixtures": 4
+  },
+  "linux_observation": {
+    "vm": "railshot-runtime-test",
+    "os": "Ubuntu 24.04.4",
+    "architecture": "arm64",
+    "k3s_version": "v1.34.11+k3s1",
+    "cilium_version": "1.20.2",
+    "preflight_elapsed_seconds": 0.667,
+    "negative_health_http": 404,
+    "negative_health_exit_code": 1,
+    "resource_identity_unchanged": true,
+    "mutations": false
+  },
+  "resource_identity": [
+    {
+      "kind": "Deployment",
+      "name": "railshot-workload",
+      "uid": "19e4500f-50f4-4663-8bfc-c8490f269eb7",
+      "generation": 1
+    },
+    {
+      "kind": "Service",
+      "name": "railshot-workload",
+      "uid": "a3b18e32-d493-4d58-8de0-124cc8911854",
+      "generation": null
+    },
+    {
+      "kind": "Pod",
+      "name": "railshot-workload-56b77967cd-jld8v",
+      "uid": "0837e7c2-f69c-4fa2-a6a0-dce30e547ca9",
+      "generation": 1
+    }
+  ],
+  "aws_observation": {
+    "kind": "existing_public_url_only",
+    "url": "https://fixture-npm-js-8461c33ac524.railshot.io/health",
+    "http_status": 200,
+    "body": {
+      "status": "ready"
+    },
+    "new_runtime_deploy": "not_run",
+    "node_inspection": "not_run"
+  },
+  "gcp_evidence": {
+    "source": "user_reported_existing_smoke",
+    "os": "Ubuntu 24.04 x86_64",
+    "namespace": "tenant-demo",
+    "workload": "fixture-npm-js",
+    "node_port": 30080,
+    "node_local_path": "/health",
+    "http_status": 200,
+    "body": {
+      "status": "ready"
+    },
+    "external_endpoint": "http://34.47.68.21:30080/health",
+    "external_status": "reported_timeout",
+    "classification": "provider_exposure_unverified",
+    "new_remote_commands": "not_run"
+  }
+}

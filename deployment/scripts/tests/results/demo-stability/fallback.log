@@ -1,0 +1,25 @@
+NAME                         STATUS   ROLES           AGE   VERSION
+lima-railshot-runtime-test   Ready    control-plane   16h   v1.34.11+k3s1
+NAMESPACE       NAME                                 READY   STATUS    RESTARTS     AGE
+kube-system     cilium-envoy-9gz9p                   1/1     Running   3 (9h ago)   16h
+kube-system     cilium-operator-7dcb85f7-dwnpq       1/1     Running   4 (9h ago)   16h
+kube-system     cilium-sd26k                         1/1     Running   3 (9h ago)   16h
+kube-system     coredns-fddcf74bb-9sh2b              1/1     Running   3 (9h ago)   16h
+railshot-demo   railshot-workload-56b77967cd-jld8v   1/1     Running   3 (9h ago)   16h
+NAME     DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   NODE SELECTOR            AGE
+cilium   1         1         1       1            1           kubernetes.io/os=linux   16h
+NAME                READY   UP-TO-DATE   AVAILABLE   AGE
+railshot-workload   1/1     1            1           16h
+NAME                TYPE       CLUSTER-IP   EXTERNAL-IP   PORT(S)        AGE   SELECTOR
+railshot-workload   NodePort   10.43.9.70   <none>        80:30080/TCP   16h   railshot.io/app=railshot-workload
+HTTP/1.1 200 OK
+Server: nginx/1.28.0
+Date: Fri, 02 Oct 2026 14:59:39 GMT
+Content-Type: text/html
+Content-Length: 20
+Last-Modified: Thu, 01 Oct 2026 22:23:21 GMT
+Connection: keep-alive
+ETag: "6abedd59-14"
+Accept-Ranges: bytes
+
+Railshot Runtime OK
