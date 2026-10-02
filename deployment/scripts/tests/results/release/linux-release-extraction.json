@@ -1,0 +1,1 @@
+{"status": "passed", "platform": "linux/arm64", "archive_sha256": "9951caad0711cba40608eb2dabc27122723d028a4233c0d09c8a03d378b806ac", "manifest_sha256": "0772caa341314645645a42e0f41c39936d1ee535679bd38761fde263d6a7a0c3", "scope": "Actual Release asset extraction and bundle verification inside Ubuntu arm64 VM; no GitHub upload/download"}

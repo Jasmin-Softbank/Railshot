@@ -1,0 +1,17 @@
+[
+  {
+    "port": 30080,
+    "http_status": 200,
+    "body": "Jasmin Deployment PoC OK"
+  },
+  {
+    "port": 30081,
+    "http_status": 200,
+    "body": "Jasmin Deployment PoC OK"
+  },
+  {
+    "port": 30082,
+    "http_status": 200,
+    "body": "Railshot Runtime OK"
+  }
+]

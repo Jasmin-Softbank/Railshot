@@ -1,0 +1,29 @@
+{
+  "normal_preflight_mean_seconds": 0.803,
+  "normal_preflight_samples": [
+    0.81,
+    0.763,
+    0.905,
+    0.733
+  ],
+  "sample_count": 4,
+  "runtime_timeout_seconds": 600,
+  "scenario_seconds": {
+    "01-online-clean": 302.554,
+    "02-online-with-bundle": 21.005,
+    "03-registry-fallback": 28.645,
+    "04-no-bundle": 0.452,
+    "05-offline-clean": 77.532,
+    "06-corrupt-bundle": 0.295,
+    "07-wrong-checksum": 0.06,
+    "08-missing-image": 0.687,
+    "09-offline-repeat": 23.112,
+    "10-offline-cleanup-redeploy": 26.029,
+    "11-offline-update": 27.824,
+    "12-network-restored": 33.17,
+    "13-cloudflare-unavailable": 12.804,
+    "14-preflight-timeout": 2.585,
+    "15-architecture-mismatch": 0.06,
+    "16-no-duplicate-import": 31.608
+  }
+}

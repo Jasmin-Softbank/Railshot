@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "results": {
+    "deploy": "PASS",
+    "verify": "PASS",
+    "cleanup": "PASS"
+  },
+  "scope": "Actual target code, Linux offline deploy/verify/full cleanup; no claim of public URL"
+}

@@ -1,0 +1,13 @@
+[BUNDLE] download upstream-k3s-sha256.txt
+[BUNDLE] download k3s-arm64
+[BUNDLE] download k3s-airgap-images-arm64.tar.zst
+[BUNDLE] download install-k3s.sh
+[BUNDLE] download cilium-linux-arm64.tar.gz
+[BUNDLE] download cilium-upstream.sha256
+[BUNDLE] download cilium-chart.tgz
+[BUNDLE] resolve/export quay.io/cilium/cilium@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01
+[BUNDLE] resolve/export quay.io/cilium/operator-generic@sha256:64d8798350e8569b8e7622563fed6e44dce2625f311e4651b774816516c744fc
+[BUNDLE] resolve/export quay.io/cilium/cilium-envoy@sha256:af7382699576b9e65e9184efa52eeca0b58aea70ad6e511bf260c91d9f740463
+[BUNDLE] resolve/export docker.io/curlimages/curl:8.12.1
+[BUNDLE] resolve/export docker.io/library/nginx:1.28.0-alpine
+[BUNDLE] resolve/export docker.io/library/nginx:1.28.1-alpine

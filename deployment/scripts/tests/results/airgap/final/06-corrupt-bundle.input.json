@@ -1,0 +1,27 @@
+{
+  "schema_version": "0.2",
+  "provider": "aws",
+  "environment_id": "railshot-airgap-test",
+  "node": {
+    "host": "localhost",
+    "ssh_user": "ubuntu"
+  },
+  "workload": {
+    "image": "nginx:1.28.0-alpine",
+    "namespace": "railshot-airgap-test",
+    "replicas": 1,
+    "container_port": 80,
+    "health_path": "/",
+    "sample_content": true
+  },
+  "exposure": {
+    "type": "nodeport",
+    "node_port": 30080
+  },
+  "runtime": {
+    "timeout_seconds": 180,
+    "bundle_path": "/tmp/railshot-invalid-bundles-f1djur_n/06-corrupt-bundle",
+    "preflight_timeout_seconds": 5,
+    "mode": "offline"
+  }
+}
