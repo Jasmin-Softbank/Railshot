@@ -106,6 +106,69 @@ class DNSTest(unittest.TestCase):
         self.assertEqual(self.ensure(request)['type'], 'CNAME')
         self.assertEqual([c[0] for c in self.calls].count('POST'), 1)
 
+    def test_tunnel_cname_uses_proxy_and_auto_ttl_and_reconciles_read_only(self):
+        request = {**self.request, 'type': 'CNAME', 'proxied': True,
+                   'content': '11111111-2222-4333-8444-555555555555.cfargotunnel.com'}
+        receipt = self.ensure(request)
+        self.assertTrue(receipt['proxied'])
+        self.assertEqual(receipt['status'], 'verified')
+        self.assertEqual(self.calls[1][2], {
+            'name': request['hostname'], 'type': 'CNAME', 'content': request['content'],
+            'comment': 'railshot:app-123', 'proxied': True, 'ttl': 1})
+        self.ensure(request)
+        self.assertEqual([c[0] for c in self.calls], ['GET', 'POST', 'GET', 'GET'])
+
+    def test_tunnel_readback_requires_proxy_and_auto_ttl(self):
+        request = {**self.request, 'type': 'CNAME', 'proxied': True,
+                   'content': '11111111-2222-4333-8444-555555555555.cfargotunnel.com'}
+        for changes in ({'proxied': False, 'ttl': 1}, {'proxied': True, 'ttl': 300}):
+            with self.subTest(changes=changes):
+                self.records = [self.record(request, **changes)]
+                self.assert_error('DNS_RECORD_CONFLICT', request)
+        self.records = [self.record(request, proxied=True, ttl=1)]
+        self.assertEqual(self.ensure(request)['status'], 'verified')
+        self.assertFalse(any(c[0] == 'POST' for c in self.calls))
+
+    def test_proxy_validation_rejects_other_targets_types_and_certificate_requests(self):
+        request = {**self.request, 'type': 'CNAME', 'proxied': True,
+                   'content': '11111111-2222-4333-8444-555555555555.cfargotunnel.com'}
+        invalid = [{'content': target} for target in (
+            'edge.example.net', 'not-a-uuid.cfargotunnel.com',
+            '11111111222243338444555555555555.cfargotunnel.com',
+            '11111111-2222-4333-8444-555555555555.cfargotunnel.com.evil.com',
+            '11111111-2222-4333-8444-555555555555.cfargotunnel.com.',
+            'https://11111111-2222-4333-8444-555555555555.cfargotunnel.com')]
+        invalid += [{'type': 'A', 'content': '192.0.2.4'},
+                    {'purpose': 'certificate', 'application_hostname': self.request['hostname'],
+                     'hostname': '_acme-challenge.demo.example.com'}]
+        invalid += [{'proxied': value} for value in (1, 0, 'true', 'false', None, [], {})]
+        for change in invalid:
+            with self.subTest(change=change):
+                self.assert_error('DNS_PROXY_INVALID', {**request, **change})
+        self.mock_transport.assert_not_called()
+
+    def test_explicit_false_preserves_dns_only_ttl(self):
+        request = {**self.request, 'proxied': False}
+        self.assertFalse(self.ensure(request)['proxied'])
+        self.assertEqual(self.calls[1][2]['proxied'], False)
+        self.assertEqual(self.calls[1][2]['ttl'], 300)
+
+    def test_preexisting_legacy_request_binding_does_not_gain_false_field(self):
+        expected = {**self.request, 'purpose': 'application', 'application_hostname': self.request['hostname']}
+        config = dns.config_at(self.config_path)
+        self.assertEqual(dns.request_at(config, self.request), expected)
+        # This is the exact intent shape written before proxied was supported.
+        with dns.locked(config) as root:
+            key = dns.digest({'zone_id': config['zone_id'], 'hostname': self.request['hostname']})
+            path = root / (key + '.json')
+            dns.save(path, {'version': 1, 'phase': 'creating', 'request': expected,
+                            'config_sha256': config['_sha256']})
+        self.records = [self.record()]
+        receipt = self.ensure()
+        self.assertNotIn('proxied', receipt)
+        self.assertEqual(json.loads(path.read_bytes())['request'], expected)
+        self.assertEqual([c[0] for c in self.calls], ['GET'])
+
     def test_post_success_without_matching_readback_does_not_verify(self):
         def mutate_then_change(config, method, **kwargs):
             result = self.transport(config, method, **kwargs)

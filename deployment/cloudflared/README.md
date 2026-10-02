@@ -22,6 +22,8 @@ writer는 단일 writer 잠금 아래 registry의 OpenStack VM과 기존 Kuberne
 
 성공 결과의 `phase`는 `tunnel_configured`이고 `https_verified`는 항상 `false`다. `dns`에는 해당 터널의 CNAME과 `proxied: true`를 반환한다. 호출자가 기존 DNS writer에 이를 전달하고 앱 배포 후 외부 HTTPS 응답을 확인해야 한다. connector Ready만으로 backend나 공개 URL 성공을 기록하지 않는다. 잠금 충돌·변경 전 검증 실패는 `blocked`, 변경 시도 이후 불확실한 실패는 `unknown`으로 반환한다.
 
+제품의 OpenStack environment는 `ingress.edge_config_file`에 기존 Octavia worker의 전용 SSH 설정, `ingress.tunnel_config_file`에 위 connector 설정, `ingress.dns_config_file`에 기존 Cloudflare DNS writer 설정을 연결한다. 세 파일 경로가 모두 설정돼야 자동 배포 선택지가 열린다. `application_routes.py`는 검증한 publication에서 나온 앱 식별자·hostname·NodePort·health 경로를 사용해 Octavia → Tunnel → DNS 순서로 연결하고, 이어서 기존 CD 경로가 앱을 배포하고 외부 HTTPS를 검증한다. Tunnel CNAME만 `proxied: true`와 자동 TTL을 사용하며 기존 AWS/GCP 레코드는 DNS-only 설정을 유지한다.
+
 ## 입력과 실행 경계
 
 - 대상 namespace와 **locally managed** 터널 UUID가 있어야 한다. 같은 namespace의 기존 Secret에는 해당 터널의 `credentials.json` 한 키가 필요하다. 원격 관리 터널 token은 이 입력 형식이 아니다. account 관리용 `cert.pem`, API token 또는 비밀번호를 Pod에 넣지 않는다.

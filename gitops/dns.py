@@ -101,12 +101,19 @@ def config_at(path):
 def request_at(config, value):
     required = {'application_id', 'hostname', 'type', 'content'}
     require(isinstance(value, dict) and required <= set(value) <= required | {
-        'purpose', 'application_hostname'}, 'DNS_REQUEST_INVALID')
+        'purpose', 'application_hostname', 'proxied'}, 'DNS_REQUEST_INVALID')
     row = dict(value)
     row.setdefault('purpose', 'application')
     require(isinstance(row['application_id'], str) and re.fullmatch(IDENTIFIER, row['application_id']) and
             row['purpose'] in ('application', 'certificate') and row['type'] in ('A', 'CNAME'),
             'DNS_REQUEST_INVALID')
+    require(type(row.get('proxied', False)) is bool, 'DNS_PROXY_INVALID')
+    if row.get('proxied', False):
+        require(row['purpose'] == 'application' and row['type'] == 'CNAME' and
+                isinstance(row['content'], str) and re.fullmatch(
+                    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.cfargotunnel\.com',
+                    row['content']), 'DNS_PROXY_INVALID')
+    # Keep absent proxied absent: existing durable request bindings predate this option.
     app_host = row.get('application_hostname', row['hostname'])
     child = LABEL + r'\.' + re.escape(config['base_domain'])
     require(isinstance(app_host, str) and re.fullmatch(child, app_host) and len(app_host) <= 253,
@@ -217,9 +224,11 @@ def owned_record(records, request):
         return None
     require(len(records) == 1, 'DNS_RECORD_CONFLICT')
     record = records[0]
+    proxied = request.get('proxied', False)
     require(record.get('comment') == 'railshot:' + request['application_id'], 'DNS_RECORD_FOREIGN_OWNER')
     require(record.get('type') == request['type'] and record.get('content') == request['content'] and
-            record.get('proxied') is False and type(record.get('ttl')) is int and record['ttl'] == 300,
+            record.get('proxied') is proxied and type(record.get('ttl')) is int and
+            record['ttl'] == (1 if proxied else 300),
             'DNS_RECORD_CONFLICT')
     require(isinstance(record.get('id'), str) and re.fullmatch(r'[0-9a-f]{32}', record['id']),
             'DNS_RECORD_RESPONSE_INVALID')
@@ -261,8 +270,10 @@ def ensure(config_path, request):
                           'config_sha256': config['_sha256'], 'intent_at': now()}
                 save(path, intent)  # Commit before POST; a crash at either side is read-only on resume.
                 mutation_pending = True
+                proxied = request.get('proxied', False)
                 payload = {'name': request['hostname'], 'type': request['type'], 'content': request['content'],
-                           'comment': 'railshot:' + request['application_id'], 'proxied': False, 'ttl': 300}
+                           'comment': 'railshot:' + request['application_id'],
+                           'proxied': proxied, 'ttl': 1 if proxied else 300}
                 try:
                     transport(config, 'POST', body=payload)
                 except DNSError:

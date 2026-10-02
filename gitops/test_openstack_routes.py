@@ -49,13 +49,28 @@ class OpenStackRoutesTest(unittest.TestCase):
                     with self.subTest(change=change), self.assertRaises(ValueError):
                         routes.ensure(path, {**request, **change})
                 self.assertEqual(run.call_count, 1)
+                for status in ('blocked', 'unknown'):
+                    run.return_value = subprocess.CompletedProcess([], 1, json.dumps({
+                        'status': status, 'https_verified': False, 'reason': 'private-worker-diagnostic'}), '')
+                    with self.subTest(status=status), self.assertRaises(routes.RouteError) as raised:
+                        routes.ensure(path, request)
+                    self.assertEqual(raised.exception.unknown, status == 'unknown')
+                    self.assertNotIn('private-worker', str(raised.exception))
+                for stdout in ('private-non-json-output', json.dumps({'status': 'blocked', 'reason': 'invalid'})):
+                    run.return_value = subprocess.CompletedProcess([], 1, stdout, '')
+                    with self.assertRaises(routes.RouteError) as raised:
+                        routes.ensure(path, request)
+                    self.assertTrue(raised.exception.unknown)
+                run.return_value = subprocess.CompletedProcess([], 0, json.dumps(receipt), '')
                 run.return_value.stdout = json.dumps({key: value for key, value in receipt.items()
                                                      if key != 'network_rule_id'})
-                with self.assertRaisesRegex(ValueError, 'NETWORK_READBACK_DIFFERS'):
+                with self.assertRaises(routes.RouteError) as raised:
                     routes.ensure(path, request)
+                self.assertTrue(raised.exception.unknown)
                 run.return_value.stdout = json.dumps({**receipt, 'hostname': 'wrong.railshot.io'})
-                with self.assertRaisesRegex(ValueError, 'READBACK_DIFFERS'):
+                with self.assertRaises(routes.RouteError) as raised:
                     routes.ensure(path, request)
+                self.assertTrue(raised.exception.unknown)
                 run.reset_mock()
                 run.side_effect = subprocess.TimeoutExpired('ssh', 600)
                 with self.assertRaisesRegex(ValueError, 'OUTCOME_UNKNOWN'):

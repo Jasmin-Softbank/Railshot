@@ -148,6 +148,10 @@ class PlatformTests(unittest.TestCase):
         self.assertNotIn('RAILSHOT_TARGET_IDS', environment)
         self.assertEqual(environment['TMPDIR'], '/var/lib/railshot/tmp')
         self.assertEqual(environment['TF_PLUGIN_CACHE_DIR'], '/var/lib/railshot/provider-cache')
+        for name in ('GOOGLE_APPLICATION_CREDENTIALS', 'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE'):
+            credential = next(value for value in container['env'] if value['name'] == name)
+            self.assertEqual(credential['valueFrom']['configMapKeyRef'],
+                             {'name': 'railshot-environments', 'key': 'google_credentials_file', 'optional': True})
         profiles = next(value for value in container['env'] if value['name'] == 'RAILSHOT_PROFILES_FILE')
         self.assertEqual(profiles['valueFrom']['configMapKeyRef'],
                          {'name': 'railshot-environments', 'key': 'profiles_file', 'optional': True})

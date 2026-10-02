@@ -16,6 +16,13 @@ COMMAND = 'sudo -n /usr/bin/python3 /opt/railshot/octavia/openstack_route_worker
 PRIVATE = tuple(ipaddress.ip_network(value) for value in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 
 
+class RouteError(ValueError):
+    def __init__(self, *, unknown):
+        self.unknown = unknown
+        self.code = 'OPENSTACK_ROUTE_OUTCOME_UNKNOWN' if unknown else 'OPENSTACK_ROUTE_BLOCKED'
+        super().__init__(self.code)
+
+
 def ssh_prefix(connection):
     require(isinstance(connection, dict) and set(connection) == {
         'host', 'port', 'user', 'identity_file', 'known_hosts_file', 'host_key_alias'},
@@ -55,21 +62,32 @@ def ensure(config_path, request):
         result = subprocess.run(command, input=json.dumps(request), capture_output=True, text=True,
                                 shell=False, timeout=600)
     except (OSError, subprocess.TimeoutExpired):
-        raise ValueError('OPENSTACK_ROUTE_OUTCOME_UNKNOWN') from None
-    require(result.returncode == 0 and len(result.stdout) <= 65536, 'OPENSTACK_ROUTE_OUTCOME_UNKNOWN')
+        raise RouteError(unknown=True) from None
+    if len(result.stdout) > 65536:
+        raise RouteError(unknown=True)
     try:
         receipt = json.loads(result.stdout)
     except (TypeError, ValueError):
-        raise ValueError('OPENSTACK_ROUTE_OUTCOME_UNKNOWN') from None
-    require(isinstance(receipt, dict) and receipt.get('status') == 'configured'
+        raise RouteError(unknown=True) from None
+    if (result.returncode == 1 and isinstance(receipt, dict)
+            and set(receipt) == {'status', 'https_verified', 'reason'}
+            and receipt['status'] in ('blocked', 'unknown') and receipt['https_verified'] is False
+            and isinstance(receipt['reason'], str) and receipt['reason']):
+        # Preserve the worker's state without forwarding its diagnostic text.
+        raise RouteError(unknown=receipt['status'] == 'unknown')
+    if result.returncode != 0:
+        raise RouteError(unknown=True)
+    if not (isinstance(receipt, dict) and receipt.get('status') == 'configured'
             and receipt.get('https_verified') is False
             and all(receipt.get(key) == value for key, value in request.items())
-            and isinstance(receipt.get('resources'), dict), 'OPENSTACK_ROUTE_READBACK_DIFFERS')
-    require(set(receipt['resources']) == {'pool', 'member', 'monitor', 'policy', 'rule'}
+            and isinstance(receipt.get('resources'), dict)):
+        raise RouteError(unknown=True)
+    if not (set(receipt['resources']) == {'pool', 'member', 'monitor', 'policy', 'rule'}
             and all(isinstance(value, str) and re.fullmatch(
                 r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', value)
-                    for value in receipt['resources'].values()), 'OPENSTACK_ROUTE_READBACK_DIFFERS')
-    require(isinstance(receipt.get('network_rule_id'), str) and re.fullmatch(
-        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', receipt['network_rule_id']),
-        'OPENSTACK_NETWORK_READBACK_DIFFERS')
+                    for value in receipt['resources'].values())):
+        raise RouteError(unknown=True)
+    if not (isinstance(receipt.get('network_rule_id'), str) and re.fullmatch(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', receipt['network_rule_id'])):
+        raise RouteError(unknown=True)
     return receipt

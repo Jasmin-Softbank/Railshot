@@ -79,6 +79,21 @@ test('environment CI identity must match the live client before registration can
   assert.equal(f.calls.length, 0);
 });
 
+test('OpenStack automatic delivery requires the edge, Tunnel and DNS operator configurations', async (t) => {
+  const f = await fixture(t);
+  const complete = { edge_config_file: '/private/openstack-edge.json',
+    dns_config_file: '/private/dns.json', tunnel_config_file: '/private/tunnel.json' };
+  for (const missing of [null, ...Object.keys(complete)]) {
+    const ingress = { ...complete };
+    if (missing) delete ingress[missing];
+    f.config.environments['runtime-openstack'].ingress = ingress;
+    await writeFile(f.configPath, JSON.stringify(f.config));
+    const adapter = await createApplicationAdapter(f.options);
+    assert.equal(adapter.targets['runtime-openstack'].automaticDelivery, missing === null);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
 test('registration rejects invalid or changed identities before execution and never accepts foreign readback', async (t) => {
   const f = await fixture(t);
   for (const [environment, app] of [['missing', 'calculator'], ['__proto__', 'calculator'], ['runtime-aws', '../escape']])

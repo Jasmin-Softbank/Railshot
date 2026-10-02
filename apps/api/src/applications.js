@@ -25,8 +25,9 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
         || !TENANT_NAME.test(value.tenant || '')) throw fail('APPLICATION_CONFIGURATION_INVALID', 503);
     if (!ciIdentity || value.tenant !== ciIdentity.tenant || value.source_repository !== ciIdentity.sourceRepository)
       throw fail('APPLICATION_CI_CONFIGURATION_MISMATCH', 503);
-    const automaticDelivery = ['aws', 'gcp'].includes(value.provider)
-      && ['edge_config_file', 'dns_config_file'].every((key) => isAbsolute(value.ingress?.[key] || ''));
+    const routeFiles = ['edge_config_file', 'dns_config_file',
+      ...(value.provider === 'openstack' ? ['tunnel_config_file'] : [])];
+    const automaticDelivery = routeFiles.every((key) => isAbsolute(value.ingress?.[key] || ''));
     return [id, Object.freeze({ provider: value.provider, tenant: value.tenant, deploymentScope: 'environment', automaticDelivery })];
   }));
   function describe(environmentId, app) {
