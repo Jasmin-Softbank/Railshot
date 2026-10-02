@@ -3401,6 +3401,7 @@
           "provider": {
             "enum": [
               "aws",
+              "gcp",
               "openstack",
               "proxmox"
             ]
@@ -3451,6 +3452,7 @@
               "provider": {
                 "enum": [
                   "aws",
+                  "gcp",
                   "openstack",
                   "proxmox"
                 ]
@@ -3475,7 +3477,10 @@
                     "const": "cloud"
                   },
                   "provider": {
-                    "const": "aws"
+                    "enum": [
+                      "aws",
+                      "gcp"
+                    ]
                   }
                 }
               },
@@ -3514,6 +3519,7 @@
               "provider": {
                 "enum": [
                   "aws",
+                  "gcp",
                   "openstack",
                   "proxmox"
                 ]
@@ -3538,7 +3544,10 @@
                     "const": "cloud"
                   },
                   "provider": {
-                    "const": "aws"
+                    "enum": [
+                      "aws",
+                      "gcp"
+                    ]
                   }
                 }
               },
@@ -3584,6 +3593,7 @@
               "provider": {
                 "enum": [
                   "aws",
+                  "gcp",
                   "openstack",
                   "proxmox"
                 ]
@@ -3609,7 +3619,10 @@
                     "const": "cloud"
                   },
                   "provider": {
-                    "const": "aws"
+                    "enum": [
+                      "aws",
+                      "gcp"
+                    ]
                   }
                 }
               },
@@ -3666,6 +3679,8 @@
             "type": "string",
             "enum": [
               "",
+              "aws",
+              "gcp",
               "openstack",
               "proxmox"
             ]
@@ -3701,6 +3716,8 @@
             "type": "string",
             "enum": [
               "",
+              "aws",
+              "gcp",
               "openstack",
               "proxmox"
             ]

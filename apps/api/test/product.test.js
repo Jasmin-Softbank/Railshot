@@ -568,12 +568,13 @@ test('original UI environment selection is resolved server-side and never falls 
     service: { targetId: 'demo', deploy: async (value) => { submitted.push(value); return { run_id: '123', source_commit: publication.source_commit }; },
       status: async () => ({ run_id: 123, state: 'published', publication }) } });
   const options = await (await fetch(`${base}/api/v1/options`)).json();
-  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['openstack', false], ['proxmox', false]]);
+  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['gcp', false], ['openstack', false], ['proxmox', false]]);
   const selection = () => { const value = form(); value.delete('app'); value.delete('target_id'); value.set('environment', 'cloud'); value.set('provider', 'aws'); value.set('source_name', 'different-source'); return value; };
   for (const [mutate, status] of [
     [(value) => { value.set('environment', 'onprem'); value.set('provider', 'openstack'); }, 409],
     [(value) => { value.set('environment', 'onprem'); value.set('provider', 'proxmox'); }, 409],
-    [(value) => value.set('provider', 'gcp'), 422],
+    [(value) => value.set('provider', 'gcp'), 409],
+    [(value) => { value.set('environment', 'onprem'); value.set('provider', 'gcp'); }, 422],
     [(value) => value.set('target_id', 'foreign'), 422],
     [(value) => value.set('app', 'foreign-app'), 422],
     [(value) => value.set('plan_id', 'foreign-plan'), 422],

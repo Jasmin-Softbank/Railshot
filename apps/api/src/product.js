@@ -42,7 +42,7 @@ export async function createProductService({ service, directory, target, deployP
   const cdAvailable = Boolean(deployPublished && (!deployPublished.targets || cdTarget));
   if (targetId && !TARGET_ID.test(targetId)) { await store.close(); throw invalid('등록된 대상 ID가 잘못되었습니다.'); }
   function deploymentOptions() {
-    return [['cloud', 'aws', '클라우드 · RailShot AWS'], ['onprem', 'openstack', '온프레미스 · OpenStack'], ['onprem', 'proxmox', '온프레미스 · Proxmox']].map(([environment, provider, label]) => {
+    return [['cloud', 'aws', '클라우드 · AWS'], ['cloud', 'gcp', '클라우드 · Google Cloud'], ['onprem', 'openstack', '온프레미스 · OpenStack'], ['onprem', 'proxmox', '온프레미스 · Proxmox']].map(([environment, provider, label]) => {
       const available = Boolean(service && cdAvailable && targetId && target?.provider === provider);
       return { id: `${environment}-${provider}`, environment, provider, label, available,
         message: available ? `소스 검사부터 앱 배포와 URL 확인까지 진행합니다.${cdTarget?.applicationName ? ` 등록된 앱 ${cdTarget.applicationName}의 소스를 갱신합니다.` : ''}`

@@ -66,7 +66,7 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
   if (selecting) {
     const environment = form.get('environment'), provider = form.get('provider');
     if (form.has('app') || form.has('target_id') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
-    if (!(environment === 'cloud' && provider === 'aws' || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
+    if (!(environment === 'cloud' && ['aws', 'gcp'].includes(provider) || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
     const source_name = form.has('source_name') ? form.get('source_name') : undefined;
     if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
     selected = { deployment_selection: { environment, provider }, source_name };
