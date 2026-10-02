@@ -2,7 +2,9 @@
 
 ## 원본 보존
 
-대상은 `integration/team-assembly-20261002@88d501b0659d7bfe2e3907fc0d701efc2feba655`, 원본은 `feat/openstack-client-bootstrap@4608f9512c6e3b10b7c42dded2882e72d4d60b70`이다. 원본 commit을 merge 이력으로 포함한다. feature가 추가한 38개 파일은 바이트와 Git mode를 그대로 유지하며 원본 브랜치에 push하지 않는다. README 충돌은 integration 내용을 유지하고 feature의 고객 설치기 안내를 추가해 해결했다.
+최초 기준은 `integration/team-assembly-20261002@88d501b0659d7bfe2e3907fc0d701efc2feba655`, 원본은 `feat/openstack-client-bootstrap@4608f9512c6e3b10b7c42dded2882e72d4d60b70`이다. 원본 commit을 merge 이력으로 포함한다. feature가 추가한 38개 파일은 바이트와 Git mode를 그대로 유지하며 원본 브랜치에 push하지 않는다. README 충돌은 integration 내용을 유지하고 feature의 고객 설치기 안내를 추가해 해결했다.
+
+후속 integration `18bed30`(대시보드 PR #33)도 merge로 포함했다.
 
 ## integration 조정
 
@@ -39,14 +41,31 @@ python3 -m unittest discover -s ci/scripts -p test_ci_scope.py -v
 
 이는 기존 서비스 상태 점검이다. 이번 merge를 운영 환경에 배포하거나 고객 OpenStack 설치에 성공했다는 증거가 아니다.
 
-## 고객 연결에 필요한 서버 조건
+## AWS 경로의 실제 확인
 
-feature의 [등록 규격](../api/enrollment-contract.md)과 [작업 규격](../api/job-contract.md)을 그대로 따른다.
+Route53 public zone `Z01500273BKOZ113O8L34`의 `railshot.io`와 AWS 시험 앱 A alias는 `railshot-apps-1982466775.ap-northeast-2.elb.amazonaws.com`을 가리킨다. 공개 권한 DNS도 AWS nameserver 4개로 확인했다.
 
-1. 등록 서버는 정확히 `POST /v1/enrollments`, HTTP 200, 6개 응답 필드를 제공해야 한다. 일회용 키의 고객·만료·소비 상태와 같은 request ID/공개키의 응답 복구를 영속 관리해야 한다.
-2. 고객 `jasmin0`는 `/32` 또는 `/128` 호스트 경로만 받는다. 기존 AWS VPC, Pod/Service CIDR, GCP 연결 경로와 겹치지 않는 터널 주소를 선택해야 한다. 기존 `wg-railshot` 연결을 고객 설치기로 덮어쓰지 않는다.
-3. `probe_url`은 터널 IP의 HTTPS 주소여야 한다. 해당 IP SAN과 고객이 신뢰하는 CA가 필요하다. 인증서 검증을 끄거나 public hostname probe로 대체할 수 없다.
-4. 고객 endpoint의 실제 출발지와 서버 UDP 포트를 정한 뒤 해당 출발지만 보안그룹에 추가해야 한다. 현재 GCP 전용 규칙으로 고객 연결이 된다고 간주하지 않는다.
-5. 조회 송신기는 터널 인터페이스·출발지 바인딩, 고정 SSH 명령, 별도로 확인한 host key, 제한된 작업 키를 사용한다. OpenStack 인증정보는 고객 노드에만 둔다.
+| 단계 | 플랫폼 | AWS 시험 앱 |
+|---|---|---|
+| 호스트 | `railshot.io` | `fixture-npm-js-8461c33ac524.railshot.io` |
+| ALB HTTPS 443 규칙 | priority 400 | priority 100 |
+| 대상 | `172.31.0.172:31080` | `172.31.13.147:30080` |
+| Target health | healthy | healthy |
+| 공개 HTTPS | `/healthz`: 200, TLS 검증 성공 | `/health`: 200, `{"status":"ready"}`, TLS 검증 성공 |
 
-등록 서버 구현·배치와 고객별 peer/인증서/작업 키가 준비되기 전에는 초기 설치 E2E를 완료로 표시할 수 없다. 기존 제품 API Pod에 root, hostNetwork, NET_ADMIN 또는 고객 OpenStack 비밀정보를 추가해 이 호스트 계약을 우회하지 않는다.
+플랫폼 HTTP 80은 HTTPS 443으로 301 redirect한다. Route53 alias, ALB host rule, private target health와 실제 HTTP 응답을 각각 확인했다. AWS 대상 경로에는 기존 GCP WireGuard hop이 들어가지 않는다.
+
+control 호스트에서는 별도 0700 임시 디렉터리와 Python 3.12 venv로 원본 설치기·agent 테스트 93개 및 하위 사례 6개를 다시 실행해 통과했다. 네트워크/클라우드 동작은 모의이며 실제 등록·OpenStack 인증을 실행한 것은 아니다. SSM ID: `f73838ed-5c48-4e12-b9ff-0f0c43077fc3`. 테스트 후 venv와 소스를 제거한다.
+
+## 네트워크 전환 방향
+
+2026-10-02 사용자 지시: WireGuard는 폐기 수순이며, `Route53 → ALB → AWS 클러스터` 경로 확인 후 `Cloudflare → {AWS ALB | GCP L7 LB | On-prem L7 LB}`로 이관한다. 위 AWS 경로를 현재 확인했다. Cloudflare 전환 자체는 이 PR에서 수행하지 않았다.
+
+- WireGuard 기반 등록 서버와 신규 고객 peer를 이번 PR에서 만들지 않는다. feature 원본과 테스트는 그대로 보존한다.
+- 원본 `client_setup.main.initialize`는 등록 및 WireGuard 연결을 먼저 요구하고 `apps/agent/sender.py`는 WireGuard 경로로 SSH를 보낸다. 따라서 DNS/L7 진입점 변경만으로 원본 설치기·작업 채널까지 전환됐다고 볼 수 없다.
+- 후속 integration 연결부에서 고객 노드의 HTTPS 작업 수신/응답, 노드 인증, 재시도·중복 처리 계약을 별도로 정해야 한다. 고객의 로컬 OpenStack 자격증명과 제한된 작업 규격은 보존한다. 현재 구현된 것으로 표시하지 않는다.
+- 기존 GCP 앱의 private target `10.66.0.2`는 아직 `wg-railshot`을 사용한다. GCP 자체 L7 LB 경로와 관리 통신 대체 경로를 검증한 뒤 해당 의존성을 제거한다. 이번 AWS 경로 확인만으로 기존 GCP 터널을 즉시 제거하지 않는다.
+
+## 보존한 원본의 현재 제약
+
+feature의 [등록 규격](../api/enrollment-contract.md)과 [작업 규격](../api/job-contract.md)은 원본 그대로다. 그 문서의 WireGuard 등록 서버 조건은 기존 구현을 설명하며, 위 신규 전환 방향의 구축 요구가 아니다. 원본의 고객 초기 설치 E2E는 미검증으로 유지한다. 기존 제품 API Pod의 root/hostNetwork/NET_ADMIN 권한을 늘리거나 고객 OpenStack 비밀정보를 서버로 옮기지 않았다.
