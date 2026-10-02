@@ -57,6 +57,7 @@ class NodeReporterTest(unittest.TestCase):
         for text in ("RAILSHOT_TESTS=999\n", self.framed("<broken>"), self.framed("<testsuites/>"),
                      self.framed('<testsuites><testcase name="one"/></testsuites>') * 2):
             self.assertEqual(0, quality.test_count(text, "javascript", "junit"))
+            self.assertFalse(quality.zero_node_report(text))
 
     def test_existing_json_and_java_paths_remain_compatible(self):
         for name in ("jest", "vitest"):
@@ -87,6 +88,7 @@ class NodeReporterTest(unittest.TestCase):
                                         cwd=self.root, capture_output=True, text=True, timeout=20)
                 self.assertEqual(exit_code, result.returncode, result.stderr)
                 self.assertEqual(count, quality.test_count(result.stdout, "javascript", "junit"))
+                self.assertEqual(name == "empty", quality.zero_node_report(result.stdout))
                 if name == "fail":
                     self.assertIn("ERR_ASSERTION", result.stdout)
 

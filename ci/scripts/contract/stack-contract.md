@@ -12,7 +12,7 @@ This file describes the current CI workload admission contract. Agents propose c
 
 New specs use `apiVersion: railshot/v0`. Existing `.jasmin/jasmin.yaml` and `jasmin/v0` remain readable and may be repaired in place. A workspace must contain exactly one spec. New bundles use `railshot.yaml`; readers also verify historical `jasmin.yaml` bundles without rewriting their bytes or hashes.
 
-By default only these packaging files are writable. A trusted operator may enable bounded source repair for observed Q checker failures; `paths.yaml` remains the exact authority and tests, manifests, locks, migrations, policy and generated files stay protected. Agents do not produce Kubernetes manifests, Terraform values, DNS records or certificates; those belong to separate target owners.
+Direct CLI calls default to packaging-only repair; the customer workflow selects source repair unless the operator explicitly selects packaging. Trusted source scope permits source fixes, meaningful new tests and additive package test/dependency setup for observed application/configuration failures. Existing tests, checker policy, dependency versions, migrations and generated files remain protected; only the native isolated package manager can generate locks. `paths.yaml` and the runner's content checks are the exact authority. Agents do not produce Kubernetes manifests, Terraform values, DNS records or certificates; those belong to separate target owners.
 
 ## 2. Container rules
 
@@ -59,7 +59,7 @@ A complete gate verdict binds source/spec and tested image identities. The trust
 
 ## 6. Forbidden changes
 
-- Editing, renaming or deleting tests, CI configuration, lockfiles, dependency manifests, policies, this contract, or agent instruction files (`paths.yaml`).
+- Editing, renaming or deleting existing tests, CI configuration, policies, this contract, or agent instruction files. New behavioral tests and additive package setup require trusted source scope; lockfiles are produced only by the isolated native resolver, never by the model. Existing real test scripts and dependency versions cannot change.
 - Weakening a check: `|| true`, `exit 0` in commands, skipped tests, `--no-verify`, `.trivyignore`, lower scan severity, a health path that stays green while the app is down.
-- Changing application source code without trusted source-repair scope and an observed eligible Q failure. Scope cannot be granted by uploaded code or the model.
+- Changing application source code without trusted source-repair scope. Scope cannot be granted by uploaded code or the model. Each proposal must plan all gates before the runner writes files; complete deterministic gates decide release eligibility.
 - Fetching and executing remote scripts during the build (`curl … | sh`).

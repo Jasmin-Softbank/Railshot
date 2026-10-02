@@ -1,0 +1,136 @@
+import base64
+import copy
+import json
+import unittest
+from unittest.mock import patch
+
+import argo
+import logs
+import test_argo as fixtures
+
+
+class LogsTest(unittest.TestCase):
+    def setUp(self):
+        self.fixture = fixtures.ArgoTest()
+        self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
+        self.review = self.fixture.review
+        root = self.fixture.root
+        directory = root / 'deployment-1'; directory.mkdir(mode=0o700)
+        self.fixture.save_review(self.review, directory / 'review'); (directory / 'review').chmod(0o700)
+        self.config = {'state_dir': str(root), 'context': 'control', 'targets': {'k3s-aws': {
+            'app': 'demo', 'tenant': 'team', 'target': {'id': 'k3s-aws', 'namespace': 'tenant-demo',
+                'argocd_namespace': 'argocd', 'project': 'railshot', 'repo_url': 'https://github.com/example/config.git',
+                'path': 'targets/k3s-aws/demo', 'cluster_server': 'https://192.0.2.1:6443'}}}}
+        self.value = {'deployment_id': 'deployment-1', 'target_id': 'k3s-aws', 'app': 'demo',
+                      'source_commit': 'd' * 40, 'run_id': '1', 'revision': 'e' * 40}
+        self.live = self.fixture.healthy()
+        self.deployment = copy.deepcopy(self.review['workload']['items'][0])
+        self.deployment['metadata'].update(uid='deployment-uid', generation=1)
+        template = self.deployment['spec']['template']
+        self.rs = {'kind': 'ReplicaSet', 'metadata': {'name': 'demo-rs', 'namespace': 'tenant-demo', 'uid': 'rs-uid',
+            'ownerReferences': [{'kind': 'Deployment', 'uid': 'deployment-uid', 'controller': True}]},
+            'spec': {'template': copy.deepcopy(template)}}
+        self.pod = copy.deepcopy(template)
+        self.pod.update(kind='Pod', status={'containerStatuses': [{'name': 'web', 'imageID': 'containerd://sha256:' + 'c' * 64}]})
+        self.pod['metadata'].update(name='demo-rs-pod', namespace='tenant-demo', uid='pod-uid',
+            ownerReferences=[{'kind': 'ReplicaSet', 'uid': 'rs-uid', 'controller': True}])
+        self.calls = []
+        data = {'name': 'k3s-aws', 'server': 'https://192.0.2.1:6443', 'project': 'railshot',
+                'namespaces': 'tenant-demo', 'clusterResources': 'false',
+                'config': json.dumps({'bearerToken': 'synthetic-sensitive-token', 'tlsClientConfig': {
+                    'insecure': False, 'caData': base64.b64encode(b'CA').decode()}})}
+        self.secret = {'kind': 'Secret', 'metadata': {'name': 'railshot-k3s-aws', 'namespace': 'argocd',
+                        'labels': logs.credentials.LABELS},
+                       'data': {key: base64.b64encode(value.encode()).decode() for key, value in data.items()}}
+
+    def control(self, context, namespace, *args):
+        self.assertEqual(context, 'control'); self.assertEqual(namespace, 'argocd')
+        self.calls.append(args)
+        self.assertEqual(args[0], 'get')
+        return self.secret if args[1] == 'secret' else self.live
+
+    def customer(self, server, ca, token, path):
+        self.assertEqual((server, ca, token), ('https://192.0.2.1:6443', b'CA', 'synthetic-sensitive-token'))
+        self.calls.append(path)
+        if '/deployments/' in path:
+            return self.deployment
+        if '/replicasets?' in path:
+            return {'kind': 'ReplicaSetList', 'items': [self.rs]}
+        if '/pods?' in path:
+            return {'kind': 'PodList', 'items': [self.pod]}
+        self.assertTrue(path.endswith('/pods/demo-rs-pod'))
+        return self.pod
+
+    def execute(self, tail=None):
+        with patch('argo.kubectl', side_effect=self.control), patch('credentials.customer', side_effect=self.customer), \
+                patch('logs.tail', side_effect=tail, return_value='2026-10-03T00:00:00Z listening on 8080\n') as read:
+            self.last_read = read
+            output = logs.execute(self.config, self.value)
+        return output, read
+
+    def test_only_exact_review_and_owned_current_pod_can_supply_bounded_logs(self):
+        output, read = self.execute()
+        self.assertEqual(output['state'], 'ready')
+        self.assertEqual(output['entries'][0]['pod'], 'demo-rs-pod')
+        path = read.call_args.args[1]
+        self.assertIn('/namespaces/tenant-demo/pods/demo-rs-pod/log?', path)
+        self.assertIn('tailLines=100', path); self.assertIn('follow=false', path); self.assertIn('limitBytes=10922', path)
+        self.assertNotIn('synthetic-sensitive', json.dumps(output))
+        self.assertTrue(all(not isinstance(call, tuple) or call[0] == 'get' for call in self.calls))
+        for key, value in [('app', 'foreign'), ('revision', 'f' * 40), ('run_id', '2'), ('source_commit', 'c' * 40),
+                           ('deployment_id', '../foreign')]:
+            changed = {**self.value, key: value}
+            with self.subTest(key=key), patch('argo.kubectl') as kube, self.assertRaises((ValueError, FileNotFoundError)):
+                logs.execute(self.config, changed)
+            kube.assert_not_called()
+        self.live['spec']['source']['targetRevision'] = 'a' * 40
+        with self.assertRaises(ValueError):
+            self.execute()
+        self.last_read.assert_not_called()
+
+    def test_foreign_pod_owner_or_image_is_never_read_and_rollout_race_discards_output(self):
+        self.rs['metadata']['ownerReferences'][0]['uid'] = 'foreign'
+        output, read = self.execute()
+        self.assertEqual(output['entries'], []); read.assert_not_called()
+        self.rs['metadata']['ownerReferences'][0]['uid'] = 'deployment-uid'
+        self.pod['status']['containerStatuses'][0]['imageID'] = 'sha256:' + 'b' * 64
+        with self.assertRaisesRegex(ValueError, 'digest differs'):
+            self.execute()
+        self.last_read.assert_not_called()
+        self.pod['status']['containerStatuses'][0]['imageID'] = 'sha256:' + 'c' * 64
+        def replaced(*_args):
+            self.live['status']['sync']['revision'] = 'f' * 40
+            return 'must not escape after another deployment\n'
+        output, read = self.execute(tail=replaced)
+        self.assertEqual(output['state'], 'unavailable'); self.assertEqual(output['entries'], [])
+
+    def test_redacts_credentials_and_tls_transport_rejects_redirect_and_oversize(self):
+        raw = ('normal application output\npassword="hello world" DB_PASSWORD=shh\nAuthorization: Bearer bearer-secret\n'
+               'postgresql://user:db-secret@db/app\n{"api_key":"key-secret"}\n'
+               '-----BEGIN RSA PRIVATE KEY-----\nprivate-data\n-----END RSA PRIVATE KEY-----\n'
+               'github_pat_abcdef12345678901234567890\n')
+        value = logs.redact(raw)
+        self.assertIn('normal application output', value)
+        for secret in ('hello world', 'shh', 'bearer-secret', 'db-secret', 'key-secret', 'private-data', 'github_pat_'):
+            self.assertNotIn(secret, value)
+        class Response:
+            status, body = 200, raw.encode()
+            def __enter__(self): return self
+            def __exit__(self, *_args): pass
+            def read(self, maximum): return self.body[:maximum]
+        response = Response()
+        with patch('logs.ssl.create_default_context') as tls, patch('logs.request.build_opener') as factory:
+            factory.return_value.open.return_value = response
+            text = logs.tail(('https://registered.example:6443', b'CA', 'private-bearer'), '/fixed/log?tailLines=100')
+            self.assertEqual(text, value)
+            tls.assert_called_once_with(cadata='CA')
+            self.assertTrue(any(isinstance(h, logs.credentials.NoRedirect) for h in factory.call_args.args))
+            self.assertIsNone(logs.credentials.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://other'))
+            response.status = 302
+            with self.assertRaises(ValueError): logs.tail(('https://registered.example', b'CA', 'private-bearer'), '/fixed')
+            response.status, response.body = 200, b'a' * (logs.LIMIT + 1)
+            with self.assertRaises(ValueError): logs.tail(('https://registered.example', b'CA', 'private-bearer'), '/fixed')
+
+
+if __name__ == '__main__':
+    unittest.main()

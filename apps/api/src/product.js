@@ -15,6 +15,19 @@ const unavailable = () => new ProductError(409, 'CAPABILITY_UNAVAILABLE', '이 �
 const active = (record) => ['queued', 'running', 'unknown'].includes(record.status);
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const operationError = (code = 'UPSTREAM_FAILURE', unknown = true) => ({ code, request_id: randomUUID(), message: unknown ? '외부 실행 결과를 확인할 수 없습니다. 자동으로 재실행하지 않습니다.' : '실행이 완료되지 않았습니다.', retryable: false, outcome_unknown: unknown });
+function ciObservation(build, previous = {}) {
+  return { ...previous, run_id: build.id, state: build.status, steps: build.steps ?? [],
+    message: build.message || null, diagnostics: build.diagnostics || null, diagnostics_checked_at: new Date().toISOString(),
+    images: build.publication?.images || {}, publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null,
+    producer_attempt: build.publication?.producer_attempt || null };
+}
+function ciFailure(build) {
+  const diagnostic = build.diagnostics?.state === 'ready' ? build.diagnostics : null;
+  const unknown = diagnostic?.outcome === 'UNKNOWN';
+  return { status: unknown ? 'unknown' : diagnostic?.outcome === 'BLOCKED' ? 'blocked' : 'failed',
+    error: { ...operationError(diagnostic?.code || (build.status === 'publication_unverified' ? 'PUBLICATION_UNVERIFIED' : 'CI_FAILED'), unknown),
+      message: [diagnostic?.message || build.message || 'CI 실행이 완료되지 않았습니다.', diagnostic?.guidance].filter(Boolean).join(' ') } };
+}
 export function idempotencyKey(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) throw invalid('유효한 Idempotency-Key가 필요합니다.');
   return value;
@@ -27,7 +40,7 @@ function checkFree(state) {
   if (Object.values(state.operations).some(active)) throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
 }
 
-export async function createProductService({ service, directory, target, deployPublished, environmentAdapter, observeMetrics = createMetricsObserver(), pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, deployPublished, environmentAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const store = await createProductStore(directory);
   const abort = new AbortController();
   function checkCapacity(state, sourceBytes = 0) {
@@ -191,7 +204,7 @@ export async function createProductService({ service, directory, target, deployP
     if (observed.publication && (String(observed.publication.run_id) !== runId || observed.publication.target_id !== binding.target_id || observed.publication.app !== binding.app || binding.source_commit && observed.publication.source_commit !== binding.source_commit)) {
       throw new ProductError(502, 'UPSTREAM_FAILURE', '게시 결과와 접수 기록이 일치하지 않습니다.');
     }
-    const { run_id, state: status, status: workflowStatus, conclusion, message, ...rest } = observed;
+    const { run_id, state: status, status: workflowStatus, conclusion, ...rest } = observed;
     return { ...rest, id: runId, app: binding.app, target_id: binding.target_id, source_commit: binding.source_commit,
       status, workflow: { status: workflowStatus, conclusion }, url: null };
   }
@@ -200,7 +213,7 @@ export async function createProductService({ service, directory, target, deployP
       for (;;) {
         if (abort.signal.aborted) return;
         const build = await readBuild(runId);
-        const ci = { run_id: runId, state: build.status, steps: build.steps ?? [], images: build.publication?.images || {}, publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null, producer_attempt: build.publication?.producer_attempt || null };
+        const ci = ciObservation(build);
         await update(record.id, { ci });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
@@ -216,7 +229,7 @@ export async function createProductService({ service, directory, target, deployP
           return;
         }
         if (['failed', 'publication_unverified'].includes(build.status)) {
-          await update(record.id, { status: 'failed', error: operationError('CI_FAILED', false) }); return;
+          await update(record.id, ciFailure(build)); return;
         }
         await pause(pollInterval, undefined, { signal: abort.signal, ref: false });
       }
@@ -283,8 +296,37 @@ export async function createProductService({ service, directory, target, deployP
       return publicRecord(reserved.record);
     },
     async getDeployment(id, sessionId = null) {
-      const record = publicRecord(find('deployments', id, sessionId));
+      let record = publicRecord(find('deployments', id, sessionId));
+      // Older completed records can acquire diagnostics without replaying CI or CD.
+      if (record.stage === 'ci' && ['failed', 'blocked'].includes(record.status) && record.ci?.run_id && record.ci.diagnostics?.state !== 'ready'
+          && (!record.ci.diagnostics_checked_at || Date.now() - Date.parse(record.ci.diagnostics_checked_at) > 30000)) {
+        try {
+          const build = await readBuild(record.ci.run_id, sessionId);
+          if (['failed', 'publication_unverified'].includes(build.status)) {
+            await update(id, { ci: ciObservation(build, record.ci), ...ciFailure(build) });
+            record = publicRecord(find('deployments', id, sessionId));
+          }
+        } catch { /* Keep the recorded failure when read-only diagnostics are unavailable. */ }
+      }
       return { ...record, observation: await observeMetrics(record) };
+    },
+    async getDeploymentLogs(id, sessionId = null) {
+      const record = publicRecord(find('deployments', id, sessionId));
+      const empty = (state) => ({ deployment_id: id, target_id: record.target_id, app: record.app,
+        state, checked_at: new Date().toISOString(), entries: [] });
+      if (!record.cd?.deployed) return empty('not_deployed');
+      // A shared target can be reused even when its image/revision does not change.
+      // Only the most recently admitted CD operation may expose its runtime logs.
+      const current = () => Object.values(store.read().operations).reverse().find((row) => row.kind === 'deployments'
+        && row.target_id === record.target_id && row.app === record.app && row.cd?.state !== 'not_started')?.id === id;
+      if (!current()) return empty('superseded');
+      const observer = record.environment_id ? environmentAdapter?.observeLogs : observeLogs;
+      if (!observer) return empty('not_configured');
+      try {
+        const logs = await (record.environment_id ? observer(record.environment_id, record) : observer(record));
+        return current() ? logs : empty('superseded');
+      }
+      catch { return empty('unavailable'); }
     },
     profiles() { return environmentAdapter?.profiles() || []; },
     async createPlan(input, sessionId = null) {

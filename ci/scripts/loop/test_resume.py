@@ -179,6 +179,62 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual(ev['attempts'][1]['role'], 'adapter')
         self.assertEqual(ev['attempts'][1]['repair_scope'], 'packaging')
 
+    def test_every_gate_prefix_failure_reruns_complete_order_after_source_proposal(self):
+        for layer, failure_class in (('L0', 'F5'), ('L1', 'F5'), ('Q', 'QUALITY'),
+                                     ('L2', 'F3'), ('L4', 'F6'), ('L3', 'F7')):
+            with self.subTest(layer=layer):
+                self.run = self.root / ('run-' + layer)
+                observed = []
+                def gate_result(ws, run, attempt, layers, **options):
+                    observed.append((attempt, layers, options['repair_scope']))
+                    verdict = ({'ok': False, 'status': 'FAIL', 'layers': [{'layer': layer, 'ok': False}],
+                                'failure': {'layer': layer, 'class': failure_class, 'signature': layer,
+                                            'source_repair_eligible': layer == 'Q'}} if attempt == 0 else
+                               {'ok': True, 'release_eligible': True, 'status': 'PASS'})
+                    (run / f'gate-{attempt}').mkdir()
+                    (run / f'gate-{attempt}/verdict.json').write_text(json.dumps(verdict))
+                    return verdict
+                receipt = {'output': {'status': 'proposed'}, 'written': ['app.py'],
+                           'meta': {'sdk_status': 'completed'}}
+                with patch.object(loop, 'gate', side_effect=gate_result), self.agent_result(receipt), redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.cli(False, '--repair-scope', 'source'), 0)
+                self.assertEqual(observed, [(0, ','.join(loop.GATE_ORDER), 'source'),
+                                            (1, ','.join(loop.GATE_ORDER), 'source')])
+                with patch.object(loop, 'gate', side_effect=AssertionError('gate replayed')), \
+                        patch.object(loop, 'agent', side_effect=AssertionError('agent replayed')), redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.cli(True, '--repair-scope', 'source'), 0)
+
+    def test_safe_rejected_proposal_replans_once_after_resume_then_runs_all_gates(self):
+        failed = {'ok': False, 'status': 'FAIL', 'failure': {'class': 'F5', 'layer': 'L1', 'signature': 'missing-spec'}}
+        error = StateError('SDK_PATCH_REJECTED', component='runner', phase='patch', outcome='FAIL', side_effect='none').as_dict()
+        rejected = {'output': {'status': 'proposed'}, 'written': [], 'error': error,
+                    'meta': {'sdk_status': 'completed', 'status': 'failed'},
+                    'proposal_rejection': {'safe_to_replan': True, 'reason': 'PATH_SCOPE', 'guidance': 'Use writable paths.'}}
+        original_step = RunState.step
+        def crash(state, name, function, **kwargs):
+            result = original_step(state, name, function, **kwargs)
+            if name == 'replan:1':
+                raise KeyboardInterrupt('after durable rejected proposal')
+            return result
+        with self.gate_result(failed), self.agent_result(rejected, rc=1), patch.object(RunState, 'step', crash):
+            with self.assertRaises(KeyboardInterrupt):
+                self.cli()
+        self.assertIn('PATH_SCOPE', (self.run / 'failure.txt').read_text())
+        self.assertEqual('original\n', (self.run / 'work/app.py').read_text())
+        def corrected(*args):
+            self.assertEqual(('fixer', 2), (args[0], args[4]))
+            (self.run / 'work/Dockerfile').write_text('FROM scratch\n')
+            return 0, {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
+                       'meta': {'sdk_status': 'completed', 'status': 'completed'}}
+        with self.agent_result(side_effect=corrected) as agent, self.gate_result({'ok': True, 'release_eligible': True, 'status': 'PASS'}) as gate, redirect_stdout(io.StringIO()):
+            self.assertEqual(self.cli(True), 0)
+            self.assertEqual(1, agent.call_count)
+            self.assertEqual((2, ','.join(loop.GATE_ORDER)), gate.call_args.args[2:4])
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(2, evidence['agent_attempts'])
+        self.assertEqual([], evidence['attempts'][1]['written'])
+        self.assertTrue(evidence['passed'])
+
     def test_binding_tracks_gate_and_schema_but_not_test_files(self):
         from types import SimpleNamespace
         fixture = self.root / 'platform'

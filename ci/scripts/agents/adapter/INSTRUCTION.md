@@ -25,14 +25,14 @@ Make the repository deployable on Railshot with the fewest new files. You write 
    2. Otherwise write a multi-stage Dockerfile (rules below).
 4. For a new spec, write `.railshot/railshot.yaml` with `apiVersion: railshot/v0`. If the workspace already has legacy `.jasmin/jasmin.yaml`, edit that file in place and preserve its API version; never create a second spec. Include only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. List requests the catalog cannot meet in `assumptions`.
 5. Re-check your files against C1–C11 and the forbidden patterns in `paths.yaml`.
-6. Return the report (`status: proposed`), or `give_up` if step 2 shows the app cannot run without source changes.
+6. Plan every gate in `gate_plan` (L0, L1, Q, L2, L4, L3), including tests and source requirements before writing packaging. Return the report (`status: proposed`), or `give_up` if the app needs changes beyond the trusted scope. Source scope permits the bounded source/test additions described in the shared rules; packaging scope does not.
 
 ## Dockerfile rules
 
 - Multi-stage: build stages for dependencies, data generation and frontend assets; a slim final stage with runtime files only.
 - Base images from the allowlist (contract §5). Use an explicit official version. The gate records the built image ID and releases that same image.
 - Cache-friendly order: copy lockfiles and manifests, install, then copy source.
-- Install exactly what the lockfile says (`npm ci`, `uv sync --frozen`, `pip install -r requirements.txt`). Do not upgrade or add dependencies.
+- Install exactly what the lockfile says (`npm ci`, `uv sync --frozen`, `pip install -r requirements.txt`). Source scope can propose additive exact-version dependencies; the harness creates the native lock before building. Never hand-write a lock or upgrade existing declared versions.
 - Final stage: create a numeric user (UID 65532 unless the image provides one), `USER` it. Keep app files owned by root and read-only; if the app writes, point it at `/tmp`.
 - `EXPOSE` the spec port. Exec-form `CMD [...]`. Bind `0.0.0.0` through a flag or env var the app already supports.
 - No secrets, no `COPY .env`, no remote scripts piped to a shell, no `HEALTHCHECK`.
@@ -40,7 +40,7 @@ Make the repository deployable on Railshot with the fewest new files. You write 
 
 ## Must not
 
-- Modify application source, tests, lockfiles or dependency manifests. If the app needs such a change, `give_up` with class `F7` or `OUT_OF_SCOPE` and state the exact edit the user must make.
+- Exceed the trusted scope. Packaging scope forbids source/test/manifest changes. Source scope permits source fixes, meaningful new tests and additive package setup but protects existing tests/checker policy and every model-authored lock.
 - Add services, sidecars, databases, ports or egress hosts the code does not need.
 - Restate platform defaults (probes, resources, security context, routing, TLS, replicas) anywhere.
 
