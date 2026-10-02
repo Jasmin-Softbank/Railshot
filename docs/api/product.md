@@ -6,7 +6,7 @@
 
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
-| 화면 선택 | `GET /api/v1/deployment-options` | 원래 UI의 클라우드(AWS)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. 서버에 명시한 provider와 CI/CD 연결이 일치할 때만 available이다. |
+| 화면 선택 | `GET /api/v1/options` | 원래 UI의 클라우드(AWS)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. 서버에 명시한 provider와 CI/CD 연결이 일치할 때만 available이다. |
 | 대상 | `GET /api/v1/targets` | 서버의 한 등록 대상. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
 | 빌드 | `POST /api/v1/builds`, `GET /api/v1/builds/{id}` | ZIP·폴더·공개 GitHub를 기존 CI로 제출한다. ID는 GitHub run ID 문자열이며 등록한 run만 조회한다. `published`는 검증한 이미지 게시다. |
 | 배포 | `POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | CI 게시 결과를 검증한 후 CD 어댑터를 한 번 호출한다. 같은 source/target의 고정 revision 배포 및 기대 공개 HTTP 검증까지 확인해야 succeeded와 최상위 url을 반환한다. |

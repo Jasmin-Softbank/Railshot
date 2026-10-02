@@ -142,7 +142,7 @@ async function request(path, options = {}, controller = new AbortController()) {
 
 async function checkConnection() {
   try {
-    const { data } = await request('/api/v1/deployment-options');
+    const { data } = await request('/api/v1/options');
     if (!Array.isArray(data.items)) throw new Error('인프라 연결 상태를 확인하지 못했습니다.');
     deploymentOptions = data.items;
     connectionError = null;

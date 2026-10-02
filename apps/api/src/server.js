@@ -192,7 +192,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
         if (versioned) {
-          if (url.pathname === '/api/v1/deployment-options') {
+          if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
           }

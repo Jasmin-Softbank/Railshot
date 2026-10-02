@@ -809,7 +809,7 @@
         }
       }
     },
-    "/api/v1/deployment-options": {
+    "/api/v1/options": {
       "get": {
         "operationId": "listDeploymentOptions",
         "summary": "Resolve original cloud and on-premise UI choices against operator configuration",

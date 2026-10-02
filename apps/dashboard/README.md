@@ -6,7 +6,7 @@
 
 - UI 기준은 `006ad34`의 소스 → 클라우드/온프레미스 → 선택 내용 확인 → 배포 시작이다.
   기존 카드·OpenStack/Proxmox 선택·콘솔 탭을 유지한다. 화면은
-  `/api/v1/deployment-options`에서 준비 상태를 읽고 소스와 environment/provider만
+  `/api/v1/options`에서 준비 상태를 읽고 소스와 environment/provider만
   deployments API에 보낸다. 대상 ID·앱 이름 결정과 실행 가능 여부 검사는 서버가 수행한다.
   미연결 provider는 명확히 차단하며 다른 대상에 배포하지 않는다.
 - 202의 `Location`과 자원 ID를 확인한 뒤 15초마다 상태를 조회한다. 이미지 게시와
