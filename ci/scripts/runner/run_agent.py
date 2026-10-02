@@ -406,7 +406,7 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
                 developer_instructions=system, model=cfg.get("model"),
             )
             emit("session.started", session_id=thread.id, thread_id=thread.id)
-            turn = thread.turn(task, output_schema=strict_variant(schema))
+            turn = thread.turn(task, effort=cfg["reasoning_effort"], output_schema=strict_variant(schema))
             emit("turn.started", turn_id=turn.id)
             result = collect_codex_turn(turn)
             status = getattr(result.status, "value", result.status)
@@ -423,6 +423,7 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
                 raise OperationError("SDK_OUTPUT_INVALID", component="runner", phase="output",
                                      outcome="FAIL", side_effect="completed", cause=exc) from exc
             meta = {"runtime": "openai-codex", "version": "0.159.3", "auth_mode": mode, "requested_model": cfg.get("model"),
+                    "requested_reasoning_effort": cfg["reasoning_effort"],
                     "permission_profile": "railshot_read",
                     "session_id": thread.id, "thread_id": thread.id, "turn_id": result.id, "status": status,
                     "conversation_resume": "unsupported",

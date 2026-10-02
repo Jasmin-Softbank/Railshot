@@ -6,6 +6,14 @@ terraform {
   }
 }
 variable "region" { default = "ap-northeast-2" }
+variable "name" {
+  type    = string
+  default = "railshot-ci-poc"
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,62}$", var.name))
+    error_message = "Use a lowercase resource and target name."
+  }
+}
 variable "account_id" {
   type = string
   validation {
@@ -53,7 +61,7 @@ provider "aws" {
   allowed_account_ids = [var.account_id]
   default_tags { tags = { Project = "railshot", Component = "private-ci", ManagedBy = "terraform" } }
 }
-locals { name = "railshot-ci-poc" }
+locals { name = var.name }
 data "aws_vpc" "default" { default = true }
 data "aws_subnets" "default" {
   filter {
