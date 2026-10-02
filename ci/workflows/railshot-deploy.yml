@@ -4,7 +4,7 @@
 # No cluster resources, application URL or deployment success are produced here.
 # AGENT_AUTH_MODE is explicit: subscription (dedicated admin Codex home) or api-key.
 # PLATFORM_REF pins trusted platform code. Uploads cannot choose the registry or visibility.
-# Private GHCR stays blocked until the target pull-credential contract is implemented.
+# Private GHCR requires a dedicated pull credential and operator-selected target Secret reference.
 # Public mode verifies every digest anonymously; it does not change package visibility.
 # RAILSHOT_RUN_ROOT is persistent and outside checkout/temp on the leased private CI worker.
 # Retrying the same workflow run resumes that run ID; uncertain calls are not replayed.
@@ -134,6 +134,9 @@ jobs:
     env:
       REGISTRY_PREFIX: ${{ vars.REGISTRY_PREFIX }}
       REGISTRY_VISIBILITY: ${{ vars.REGISTRY_VISIBILITY || 'private' }}
+      GHCR_PULL_USERNAME: ${{ vars.GHCR_PULL_USERNAME }}
+      PULL_SECRET_NAMESPACE: ${{ vars.RAILSHOT_PULL_NAMESPACE }}
+      PULL_SECRET_NAME: ${{ vars.RAILSHOT_PULL_SECRET }}
     outputs:
       published_id: ${{ steps.published.outputs.artifact-id }}
       bundle_id: ${{ needs.loop.outputs.bundle_id }}
@@ -141,6 +144,7 @@ jobs:
       - name: Validate trusted platform bindings
         env:
           PLATFORM_REF: ${{ vars.PLATFORM_REF }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
         run: |
           [[ "$PLATFORM_REF" =~ ^[a-f0-9]{40}$ ]] || exit 1
           # Only the administrator's GHCR namespace is supported.
@@ -148,7 +152,10 @@ jobs:
           [[ ${#REGISTRY_PREFIX} -le 220 ]] || exit 1
           case "${REGISTRY_VISIBILITY:-private}" in
             public) ;;
-            private) echo "BLOCKED: target pull authorization is not connected; private GHCR release cannot publish" >&2; exit 1 ;;
+            private)
+              [[ -n "$GHCR_PULL_USERNAME" && -n "$GHCR_PULL_TOKEN" && -n "$PULL_SECRET_NAMESPACE" && -n "$PULL_SECRET_NAME" ]] || {
+                echo "BLOCKED: private release requires dedicated pull credentials and a target Secret reference" >&2; exit 1;
+              } ;;
             *) echo "BLOCKED: REGISTRY_VISIBILITY must be private or explicitly public" >&2; exit 1 ;;
           esac
       - name: Set registry credential path
@@ -200,31 +207,10 @@ jobs:
           python -c 'import os,yaml; s=yaml.safe_load(open("release-bundle/jasmin.yaml")); assert s["app"]==os.environ["APP"], "APP/spec.app mismatch"'
           python .railshot/ci/scripts/gate/bundle.py publish release-bundle \
             "$REGISTRY_PREFIX/${TENANT}-${APP}" "${SOURCE_COMMIT::12}" --output images.json
-      - name: Require anonymous access to published digests
-        run: |
-          set -euo pipefail
-          anonymous_config=$(mktemp -d "$RUNNER_TEMP/railshot-anonymous.XXXXXX")
-          trap 'rm -rf -- "$anonymous_config"' EXIT
-          # An explicit credential-free entry prevents Docker's default native-store discovery.
-          printf '%s\n' '{"auths":{"ghcr.io":{}}}' > "$anonymous_config/config.json"
-          python3 - <<'PY' > "$anonymous_config/images"
-          import json, os, re
-          images = json.load(open('images.json'))
-          assert isinstance(images, dict) and images, 'published digest evidence required'
-          for ref in images.values():
-              assert isinstance(ref, str) and ref.startswith(os.environ['REGISTRY_PREFIX'] + '/') and re.fullmatch(r'ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}', ref), 'bound GHCR digest required'
-              print(ref)
-          PY
-          while IFS= read -r digest; do
-            # manifest inspect queries the registry, with no login config or credential helper.
-            DOCKER_AUTH_CONFIG= DOCKER_CONFIG="$anonymous_config" docker manifest inspect "$digest" > /dev/null || {
-              echo "BLOCKED: published digest is not anonymously readable; published handoff is blocked" >&2
-              exit 1
-            }
-          done < "$anonymous_config/images"
       - name: Bind publication to the source and target
         env:
           BUNDLE_ARTIFACT_ID: ${{ needs.loop.outputs.bundle_id }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
         run: python .railshot/ci/scripts/publication.py release-bundle images.json published
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: published
