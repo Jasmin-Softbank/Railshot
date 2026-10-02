@@ -1,6 +1,7 @@
 """Local HTTP journeys with fake Ansible receipts; no cloud or SSH calls."""
 from http.client import HTTPConnection
 import copy
+import fcntl
 import json
 from pathlib import Path
 import sys
@@ -149,6 +150,55 @@ class APIJourney(unittest.TestCase):
         finally:
             restarted.close()
 
+    def test_aws_resource_aliases_share_active_locks_and_legacy_unknown_admission(self):
+        config = json.loads((self.root / 'targets.json').read_text())
+        descriptor = json.loads((self.root / 'descriptor.json').read_text())
+        arn = descriptor['resource_id']
+        self.assertTrue(arn.startswith('arn:aws:ec2:'))
+        descriptor.update(target_id='raw-alias', execution_driver='aws-cli', resource_id=arn.rsplit('/', 1)[1])
+        self.write('raw-alias.json', json.dumps(descriptor))
+        config['targets']['raw-alias'] = {**config['targets']['demo-aws'],
+            'descriptor_file': str(self.root / 'raw-alias.json')}
+        self.write('targets.json', json.dumps(config))
+        jobs = api.Jobs(self.root / 'targets.json', self.root / 'state', executor=self.executor)
+        self.addCleanup(jobs.close)
+        first_body = {'request_id': 'old-arn-request', 'target_id': 'demo-aws', 'operation': 'runtime.install'}
+        next_body = {**first_body, 'request_id': 'new-raw-request', 'target_id': 'raw-alias'}
+        first, second = jobs.prepare(first_body), jobs.prepare(next_body)
+        shared = set(api.ansible.lock_keys(first)) & set(api.ansible.lock_keys(second))
+        self.assertIn('transport:' + descriptor['transport_ref'], shared)
+        self.assertIn('resource:' + descriptor['resource_id'], shared)
+        calls = []
+        def dispatch():
+            calls.append(True)
+            return api.ansible.base_result(second)
+        # An actual flock from either spelling prevents another native operation.
+        lock = jobs.state_dir / (api.hashlib.sha256(('resource:' + descriptor['resource_id']).encode()).hexdigest() + '.lock')
+        with lock.open('w') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = api.ansible.run_locked(second, api.ansible.base_result(second),
+                api.ansible.lock_keys(second), dispatch, state_dir=jobs.state_dir)
+            self.assertEqual(result['error']['code'], 'TARGET_BUSY')
+        # Persist the exact legacy key spelling; new aliases must still see unresolved effects.
+        legacy_keys = ['target:demo-aws', 'resource:' + arn]
+        unknown = api.ansible.fail(api.ansible.base_result(first), 'failed', 'EXECUTION_TIMEOUT', 'fixture', unknown=True)
+        digest = api.hashlib.sha256(api.encoded(first)).hexdigest()
+        native_path = jobs.state_dir / (api.hashlib.sha256(first_body['request_id'].encode()).hexdigest() + '.json')
+        native_path.write_text(json.dumps({'request_sha256': digest, 'result': unknown, 'lock_keys': legacy_keys}))
+        native_path.chmod(0o600)
+        result = api.ansible.run_locked(second, api.ansible.base_result(second),
+            api.ansible.lock_keys(second), dispatch, state_dir=jobs.state_dir)
+        self.assertEqual(result['error']['code'], 'PREVIOUS_OUTCOME_UNKNOWN')
+        record = {**first_body, 'request_sha256': digest, 'status': 'unknown', 'created_at': time.time(),
+                  'updated_at': time.time(), 'result': None, 'error': None, 'lock_keys': legacy_keys}
+        for has_keys in (True, False):
+            if not has_keys: record.pop('lock_keys')
+            jobs.save(record)
+            with self.assertRaises(api.APIError) as failure: jobs.submit(next_body)
+            self.assertEqual(failure.exception.code, 'TARGET_RECONCILE_REQUIRED')
+        self.assertEqual(calls, [])
+        self.assertEqual(self.calls, [])
+
     def register_openstack(self):
         config = json.loads((self.root / 'targets.json').read_text())
         examples = json.loads((api.ansible.ROOT / 'examples/ansible/api-targets.json').read_text())
@@ -212,12 +262,12 @@ class APIJourney(unittest.TestCase):
             status, plan, _ = self.request(server, 'POST', '/v1/ansible/validate', body)
             self.assertEqual(status, 200)
             self.assertFalse(plan['execution_supported'])
-            self.assertEqual(plan['blockers'], [{'code': 'DATABASE_PLAYBOOK_UNAVAILABLE'}])
-            self.assertEqual(set(plan['inventory']['all']['children']), {'database', 'dcs'})
+            self.assertEqual(plan['blockers'], [{'code': 'DATABASE_STANDALONE_UNSUPPORTED'}])
+            self.assertEqual(set(plan['inventory']['all']['children']), {'database', 'dcs', 'proxy'})
             self.assertEqual(plan['inventory']['all']['children']['dcs']['hosts'], {})
             self.assertEqual(plan['variables']['railshot_database']['port'], 5432)
             rejected = self.request(server, 'POST', '/v1/ansible/jobs', body)
-            self.assertEqual(rejected[:2], (501, {'error': {'code': 'DATABASE_PLAYBOOK_UNAVAILABLE'}}))
+            self.assertEqual(rejected[:2], (501, {'error': {'code': 'DATABASE_STANDALONE_UNSUPPORTED'}}))
             for edit in ('count', 'purpose', 'duplicate', 'missing', 'standalone-dcs'):
                 bad = copy.deepcopy(body)
                 if edit == 'count': bad['parameters']['placements'][0]['database_nodes'] = 3
@@ -270,6 +320,9 @@ class APIJourney(unittest.TestCase):
             self.assertIn(completed['status'], schemas['Job']['properties']['status']['enum'])
             self.assertEqual(set(completed['result']), set(schemas['JobResult']['required']))
             for key, rule in schemas['JobResult']['properties'].items():
+                if key not in completed['result']:
+                    self.assertNotIn(key, schemas['JobResult']['required'])
+                    continue
                 if rule['type'] == 'boolean':
                     self.assertIs(type(completed['result'][key]), bool)
                 if 'enum' in rule:
@@ -295,7 +348,7 @@ class APIJourney(unittest.TestCase):
         finally:
             self.release.set(); server.shutdown(); server.server_close(); thread.join(2)
 
-    def test_real_cli_subprocess_blocks_bad_key_permissions_before_cloud_calls(self):
+    def test_shared_executor_blocks_bad_key_permissions_before_cloud_calls(self):
         jobs = api.Jobs(self.root / 'targets.json', self.root / 'state', executor=self.executor)
         try:
             request = jobs.prepare({'request_id': 'bad-key-001', 'target_id': 'demo-aws', 'operation': 'runtime.install'})

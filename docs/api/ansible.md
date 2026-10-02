@@ -1,8 +1,8 @@
 # Ansible 실행 인터페이스
 
-버전 1.1 · 2026-10-02 · 팀 통합 기준
+버전 1.2 · 2026-10-02 · 팀 통합 기준
 
-> 상위 API가 확정한 자원과 작업별 입력을 Ansible inventory·변수로 변환하는 인터페이스입니다. VM 생성, guest 준비 확인, 런타임 설치, 앱 배포의 책임을 구분합니다. DB는 K3s 밖의 별도 VM에 두는 기본안을 사용하며, 이번 구현은 DB 담당자에게 전달할 배치 입력을 검증하는 범위입니다.
+> 상위 API가 확정한 자원과 작업별 입력을 Ansible inventory·변수로 변환하는 인터페이스입니다. VM 생성, guest 준비 확인, 런타임 설치, 앱 배포의 책임을 구분합니다. DB는 K3s 밖의 별도 HA 클러스터이며, 승인된 profile에 한해 팀의 PostgreSQL·Patroni·etcd·HAProxy 플레이북을 실행합니다. 단일 DB 설치는 계속 차단합니다.
 
 ## A. Directory Architecture
 
@@ -13,7 +13,8 @@ contracts/
 infrastructure/ansible/
 ├── api.py                          # 인증, 등록 자원 해석, 작업 접수·조회
 ├── inputs.py                       # 작업별 입력 검사, inventory·변수 요약
-├── run.py                          # Provider 결과 변환, 실행·중복 방지
+├── run.py                          # Provider 결과 변환, 공통 잠금·실행·중복 방지
+├── database.py / database.yml       # 승인된 HA profile과 팀 DB 플레이북 연결
 ├── transport.py                    # AWS SSM / GCP IAP 관리 접속
 ├── guest.yml                       # 정빈 님 공통 guest 검사
 └── runtime.yml                     # 승민 님 K3s·Cilium 설치 코드 호출
@@ -24,9 +25,9 @@ examples/ansible/                    # 자격증명이 없는 입력 예제
 |---|---|---|
 | 상위 API·MCP | 유저 권한 확인, 대상·작업 선택, 생성→조회→설치 순서 조율 | 유저가 임의 IP·명령·키 경로를 지정하지 않도록 합니다. |
 | OpenStack Controller / CSP 코드 | VM 생성·상태 조회, 프로젝트·자원 정보 반환 | OpenStack 생성의 `202 accepted`를 guest 준비 완료로 해석하지 않습니다. |
-| Ansible 연결부 | 등록 target 조회, 입력 변환, 실행 상태와 준비 확인 결과 반환 | 새 큐·AWX 서버를 추가하지 않고 기존 worker·CLI를 사용합니다. |
+| Ansible 연결부 | 등록 target 조회, 입력 변환, 실행 상태와 준비 확인 결과 반환 | 기존 단일 worker가 CLI와 같은 실행 함수를 호출합니다. |
 | 정빈 님 guest / 승민 님 runtime | OS 선행조건 확인 / 단일 노드 K3s·Cilium 설치 | 원본 설치 로직을 재작성하지 않습니다. |
-| 화균 님 DB 구현 | PostgreSQL·Patroni 설치 정책과 플레이북 | 선택형 하이브리드 HA 플레이북을 통합했으나 이 API 실행에는 미연결입니다. 기본 단일 PostgreSQL VM 설치도 지원하지 않아 차단을 유지합니다. |
+| 화균 님 DB 구현 | PostgreSQL·Patroni 설치 정책과 플레이북 | 등록된 profile의 HA 배치만 `playbooks/site.yml`로 실행합니다. 단일 PostgreSQL VM 설치는 지원하지 않습니다. |
 | Argo CD 경로 | 준비된 실행 클러스터에 앱 선언 적용 | `runtime.install`에서 앱을 배포하지 않습니다. |
 
 ```mermaid
@@ -38,9 +39,11 @@ flowchart LR
     J --> G["guest.yml<br>VM 준비 확인"]
     G --> K["runtime.yml<br>K3s·Cilium 설치"]
     K --> S["준비 확인 기록 검증<br>작업 상태 저장"]
+    J --> D["database.yml<br>승인된 팀 HA 구성·검증"]
+    D --> S
 ```
 
-DB 요청은 검증·요약까지 지원합니다. `jobs`에 DB 설치를 요청하면 `501 DATABASE_PLAYBOOK_UNAVAILABLE`을 반환하며 작업을 만들지 않습니다.
+DB HA 요청은 승인 profile·배치·TLS/Vault 참조를 확인한 뒤 접수합니다. standalone, 부족한 HA topology, profile 없는 요청은 `501`로 차단하며 작업을 만들지 않습니다.
 
 ## B. Request / Response Contract
 
@@ -67,9 +70,9 @@ DB 요청은 검증·요약까지 지원합니다. `jobs`에 DB 설치를 요청
 |---|---|---|
 | `guest.check` | 생략 또는 `{}` | runtime·database 용도 VM 모두 공통 guest 검사 가능 |
 | `runtime.install` | 선택적 `wait_timeout_seconds`: 정수 30–600, 생략 시 300초 | 기존 K3s·Cilium 스크립트의 `WAIT_TIMEOUT`으로 전달 |
-| `database.configure` | 필수 `mode`, `nodes`, `placements` | DB 담당자 전달용 배치 매핑만 검증. 설치 미지원 |
+| `database.configure` | 필수 `mode`, `nodes`, `placements`; 실행에는 `profile_id` 필요 | 승인된 Patroni HA profile을 실행. standalone은 차단 |
 
-`command`, `playbook`, `extra_vars`, SSH 키·파일 경로, 클라우드 자격증명은 HTTP 입력에 없습니다. 작업 전체 제한 시간은 운영자 target 설정의 `timeout_seconds`이며 기본 1200초, 허용 범위는 30–1800초입니다. `wait_timeout_seconds`는 그 안에서 사용하는 개별 준비 상태 대기 값으로, 전체 제한 시간을 늘리지 않습니다.
+`command`, `playbook`, `extra_vars`, SSH 키·파일 경로, 클라우드 자격증명은 HTTP 입력에 없습니다. runtime 작업 제한 시간은 운영자 target 설정의 `timeout_seconds`(기본 1200초), DB는 승인 profile의 `timeout_seconds`입니다. 모두 30–1800초 범위입니다. `wait_timeout_seconds`는 그 안에서 사용하는 개별 준비 상태 대기 값으로, 전체 제한 시간을 늘리지 않습니다.
 
 런타임 요청 예시입니다.
 
@@ -136,6 +139,8 @@ OpenStack 생성 응답의 `resource_id/status: accepted`는 사용할 수 없�
 
 이 객체는 `version: 1`, `targets` 맵의 `demo-openstack` 항목으로 저장합니다. VM ID·프로젝트·주소·경로는 설명용이며 실제 값으로 교체해야 합니다. SSH 포트는 OpenStack에서 생략 시 22번입니다. DB VM은 다른 자원 ID·IP를 등록하고 `purpose: database`를 사용합니다. 이 값은 운영자의 용도 지정이며 VM에 K3s가 없는지 탐지하는 기능은 아닙니다.
 
+AWS 운영자가 CLI로 직접 생성·조회한 자원은 `execution_driver: "aws-cli"`를 명시할 수 있습니다. AWS에만 허용하며 기존 resource/region/SSM 일치 검사를 적용합니다. Terraform 실행기의 target/provenance 검사는 변경하지 않습니다.
+
 ### C-3. 실제 Ansible 매핑
 
 | 입력·설정 | inventory / extra-vars | 읽는 구현 |
@@ -156,10 +161,10 @@ OpenStack 생성 응답의 `resource_id/status: accepted`는 사용할 수 없�
 ### D-1. 실행 순서
 
 1. 호출자 인증과 입력 형식을 확인합니다.
-2. 등록 target에서 Provider 결과와 접속 설정을 읽고 내부 CLI 요청을 만듭니다.
-3. `validate`는 요약을 반환하고 끝납니다. DB 작업 접수는 설치 미지원 오류로 끝납니다.
+2. 등록 target에서 Provider 결과와 접속 설정을 읽고 실행 요청을 만듭니다. DB는 profile에 승인된 모든 노드와 TLS/Vault/SSH 참조의 내용 해시도 바인딩합니다.
+3. `validate`는 비밀을 제거한 요약을 반환하고 끝납니다. DB HA 최소 배치나 profile이 없으면 차단 사유를 반환합니다.
 4. 실행 작업은 입력 해시와 `queued` 상태를 저장한 뒤 `202`를 반환합니다.
-5. 기존 단일 worker가 CLI를 실행합니다. 사설 SSH 또는 SSM/IAP 위 SSH로 guest를 검사하고, `runtime.install`이면 팀 runtime을 설치합니다.
+5. 단일 worker가 CLI와 공유하는 제한 시간·잠금·내구 기록 함수를 실행합니다. runtime은 guest/runtime 플레이북, DB는 팀 `playbooks/site.yml`을 고정 wrapper로 실행합니다. 별도 CLI subprocess를 중첩하지 않습니다.
 6. 요청·노드·단계·nonce가 일치하는 준비 확인 기록을 검사하고 결과를 저장합니다. 호출자는 `Location` 경로를 조회합니다.
 
 접수와 완료를 분리하고 상태 자원의 위치와 조회 간격을 반환하는 [비동기 요청·응답 패턴](https://learn.microsoft.com/en-us/azure/architecture/patterns/async-request-reply)을 적용했습니다. 상태 조회 자체가 `200`이어도 본문의 `status`가 실패일 수 있습니다.
@@ -167,15 +172,15 @@ OpenStack 생성 응답의 `resource_id/status: accepted`는 사용할 수 없�
 | 상태 | 의미 |
 |---|---|
 | `queued`, `running` | 접수·실행 중 |
-| `succeeded` | 해당 guest/runtime 단계의 준비 확인 기록 검증 완료 |
+| `succeeded` | 해당 guest/runtime/database 단계의 준비 확인 기록 검증 완료 |
 | `failed`, `blocked` | 실패 또는 실행 전제 미충족 |
 | `unknown` | 실행 후 결과를 확정할 수 없어 운영자 확인 필요 |
 
-`application_ready`와 `public_http_verified`는 항상 false입니다. K3s 설치 성공을 앱·DB·공개 HTTPS 성공으로 바꾸어 표시하지 않습니다. guest는 Ubuntu·systemd·CPU 2개 이상·RAM 1800MiB 이상·swap 비활성·root 여유 10GiB·NIC 주소·초기화 완료를 확인합니다.
+`database.configure` 결과에는 `database_ready`를 추가하며 native playbook 종료 코드 0과 요청·전체 target 목록·nonce가 같은 receipt를 모두 확인한 경우에만 true입니다. DB의 `guest_ready`는 팀 HA preflight를 통과했다는 의미이고 runtime용 CPU/RAM 검사를 대신하지 않습니다. DB 작업에서 `runtime_ready`는 false입니다. `application_ready`와 `public_http_verified`는 항상 false입니다. K3s 설치 성공을 앱·DB·공개 HTTPS 성공으로 바꾸어 표시하지 않습니다. guest는 Ubuntu·systemd·CPU 2개 이상·RAM 1800MiB 이상·swap 비활성·root 여유 10GiB·NIC 주소·초기화 완료를 확인합니다.
 
 ### D-2. 중복 요청과 오류
 
-동일한 요청 ID와 동일한 서버 측 확장 입력이면 기존 작업·결과를 반환합니다. `parameters`, Provider 결과, 접속 설정, 제한 시간으로 만든 내부 요청이 달라지면 `409 REQUEST_ID_CONFLICT`입니다. 한 번에 한 작업을 접수하며 다른 작업이 실행 중이면 `409 EXECUTOR_BUSY`입니다. 무제한 대기열이나 자동 재시도는 없습니다.
+동일한 요청 ID와 동일한 서버 측 확장 입력이면 기존 작업·결과를 반환합니다. `parameters`, Provider 결과, 접속 설정, 제한 시간으로 만든 내부 요청이 달라지면 `409 REQUEST_ID_CONFLICT`입니다. 한 번에 한 작업을 접수하며 다른 작업이 실행 중이면 `409 EXECUTOR_BUSY`입니다. 모든 선택 target와 physical resource를 정렬 잠그며 runtime 작업과도 같은 잠금을 사용합니다. 검증된 SSM/IAP 참조와 AWS ARN/인스턴스 ID를 정규화하므로 등록 별칭으로 잠금을 우회할 수 없습니다. 이전 ARN 형식의 unknown 기록에도 같은 정규화를 적용하고 physical identity가 없는 과거 unknown 기록은 보수적으로 새 실행을 차단합니다. 재시작 후 결과가 없거나 unknown인 작업과 자원이 하나라도 겹치면 새 ID도 차단합니다. 무제한 대기열이나 자동 재시도는 없습니다.
 
 | HTTP / 코드 | 처리 방법 |
 |---|---|
@@ -185,31 +190,38 @@ OpenStack 생성 응답의 `resource_id/status: accepted`는 사용할 수 없�
 | `404 TARGET_NOT_REGISTERED` | 승인된 target을 등록한 뒤 호출합니다. |
 | `409 REQUEST_ID_CONFLICT` | 같은 ID로 입력을 바꾸지 않습니다. |
 | `409 TARGET_RECONCILE_REQUIRED` | 이전 미확정 작업의 실제 결과와 준비 확인 기록을 확인합니다. |
-| `501 DATABASE_PLAYBOOK_UNAVAILABLE` | DB 담당 플레이북 연결 전에는 설치를 요청하지 않습니다. |
+| `501 DATABASE_STANDALONE_UNSUPPORTED` | 단일 DB 설치기는 연결되어 있지 않습니다. |
+| `501 DATABASE_HA_TOPOLOGY_REQUIRED` / `DATABASE_PROFILE_REQUIRED` | HA 최소 배치와 승인 profile이 필요합니다. |
+| `400 DATABASE_PROFILE_NOT_REGISTERED` / `DATABASE_PROFILE_MISMATCH` | 승인된 profile ID와 정확한 역할·배치를 사용합니다. |
+| `503 DATABASE_PROFILE_INVALID` | 운영자가 비공개 profile·TLS·Vault 참조를 점검합니다. |
 | `503 TARGET_CONFIGURATION_INVALID` | 등록 파일·자원/프로젝트·관리 주소와 OpenStack ACTIVE 상태를 확인합니다. 자동 재시도를 지시하는 응답이 아닙니다. |
 
-HTTP 오류는 `{"error":{"code":"INVALID_JOB_REQUEST"}}` 형식입니다. 접수된 작업의 `error`는 `code`, `outcome_unknown`을 가지며 원문 예외·비밀·SSH 파일 경로는 반환하지 않습니다. API가 중단되면 기록과 일치하는 CLI 완료 결과가 있을 때만 복구하고, 없으면 `unknown`으로 남깁니다. 시간 초과가 원격 설치 중단을 보장하지 않습니다.
+HTTP 오류는 `{"error":{"code":"INVALID_JOB_REQUEST"}}` 형식입니다. 접수된 작업의 `error`는 `code`, `outcome_unknown`을 가지며 원문 예외·비밀·SSH 파일 경로는 반환하지 않습니다. API가 중단되면 기록과 일치하는 native 완료 결과가 있을 때만 복구하고, 없으면 `unknown`으로 남깁니다. 시간 초과가 원격 설치 중단을 보장하지 않습니다.
 
-## E. Database 기본안 — K3s 밖의 별도 VM
+## E. Database 실행 계약 — K3s 밖의 별도 HA 클러스터
 
 ### E-1. 구성과 접속
 
-기본안은 **PostgreSQL 전용 VM 1대, DB 노드 1개, DCS 0개**입니다. K3s를 재설치하거나 앱을 정리할 때 DB 수명주기가 함께 바뀌지 않도록 분리합니다. Kubernetes에서 DB를 운영할 수 없다는 뜻은 아닙니다. 현재 단일 노드 K3s 구성에서는 저장장치·백업·복구까지 추가로 설계해야 하므로 별도 VM을 선택합니다. 단일 DB VM도 단일 장애 지점이며 HA를 제공하지 않습니다.
+정본은 DB 담당 브랜치의 [README](https://github.com/Jasmin-Softbank/Railshot/blob/feature/multicloud-db-hwagyun/README.md)입니다. 준비된 별도 VM에 **PostgreSQL·Patroni·etcd·HAProxy로 구성한 단일 HA 클러스터**를 설치하며 여러 거점에 배치할 수 있습니다. 거점마다 독립된 standby cluster를 만드는 구조가 아닙니다. DB VM은 K3s control-plane이나 worker에 가입하지 않고, `database.configure`는 K3s를 설치하지 않습니다. 앱 K3s와 DB 클러스터의 설치·재생성 수명주기를 분리합니다.
+
+앞서 제안한 PostgreSQL 전용 VM 1대·DCS 0개 구성은 단순화 논의를 위한 이전 제안입니다. 팀의 현재 HA 구현이나 운영 기본값을 대체하지 않으며 standalone 실행은 계속 차단됩니다. 아래 3 VM 예시는 DB/DCS 역할을 겸해 연결부를 검증하기 위한 최소 배치입니다. 실제 운영 개수·장애 도메인·proxy 이중화는 별도로 결정합니다.
 
 ```mermaid
 flowchart LR
-    A["유저 앱 Pod<br>실행 K3s"] -->|"사설 경로 · TCP 5432"| D["DB 전용 VM<br>PostgreSQL · systemd"]
+    A["유저 앱 Pod<br>실행 K3s"] -->|"사설 경로 · TCP 5432"| P["별도 DB 클러스터<br>HAProxy"]
+    P --> D["PostgreSQL · Patroni<br>DB VM 2대 이상"]
+    D --- E["etcd DCS<br>홀수 3개 이상"]
     S["앱 namespace Secret<br>DB 접속 자격"] -.-> A
     D --> V["영속 데이터 볼륨<br>VM 재생성과 분리"]
     D -.->|"담당 구현에서 구성"| B["별도 백업 저장소<br>복구 시험 필요"]
-    O["Ansible 실행기"] -.->|"사설 SSH · guest 검사"| D
+    O["Ansible 실행기"] -.->|"사설 SSH · 팀 HA playbook"| D
 ```
 
-위 그림은 배치 설계입니다. PostgreSQL 설치·볼륨·백업·Secret·방화벽을 이번 연결부가 생성한 것은 아닙니다.
+위 그림은 연결 구조입니다. 이번 API는 승인 profile로 팀 HA 설치 playbook을 실행합니다. VM·볼륨·사설 네트워크 준비와 앱 Secret·접속 정책 구성은 별도 선행 작업입니다.
 
 | 항목 | 기본 설계 |
 |---|---|
-| DB 서버 | 별도 VM에 PostgreSQL을 서비스로 설치. K3s control-plane·worker로 등록하지 않음 |
+| DB 서버 | 별도 VM의 PostgreSQL·Patroni·etcd·HAProxy. K3s 설치·노드 가입 없음 |
 | 데이터 | 데이터 볼륨과 백업의 보존·복구 정책을 DB 담당 구현에서 확정 |
 | DB 통신 | 앱에서 DB의 사설 주소로 TCP 5432. 공인 EIP·ALB를 DB 접속 주소로 사용하지 않음 |
 | 환경 간 접속 | VPC/LAN 또는 기존 WireGuard 사설 경로의 route·복귀 경로 필요. Ansible이 터널을 새로 생성하지 않음 |
@@ -222,9 +234,9 @@ PostgreSQL의 [listen 주소·기본 5432 포트](https://www.postgresql.org/doc
 
 현재 [CD 인계 경로](../../gitops/README.md)도 DB·앱 Secret 주입·외부 egress를 지원 범위에서 제외하며, 생성하는 NetworkPolicy는 egress를 차단합니다. 이미지 pull Secret 참조 지원과 DB 자격 주입은 다른 기능입니다. 따라서 위 앱 접속 구조는 기본 설계이며 기존 자동 배포만으로 DB 자격과 TCP 5432 접속 정책까지 적용되지 않습니다. DB 사용 앱을 연결할 때 해당 계약을 담당자와 함께 확장해야 합니다.
 
-### E-2. 담당자에게 전달할 입력
+### E-2. 입력 검증과 이전 standalone 예시
 
-[DB 검증 요청 예제](../../examples/ansible/database-validate.json)를 `POST /v1/ansible/validate`에 보냅니다.
+[DB 검증 요청 예제](../../examples/ansible/database-validate.json)는 이전 standalone 제안의 **차단 응답 확인용**입니다. 실제 HA 실행 입력은 E-3을 사용합니다.
 
 ```json
 {
@@ -244,16 +256,52 @@ PostgreSQL의 [listen 주소·기본 5432 포트](https://www.postgresql.org/doc
 
 | 입력 | 매핑·검사 |
 |---|---|
-| `mode` | 기본안은 `standalone`. `patroni`는 배치 의견 전달만 허용하며 HA 적합성을 판정하지 않습니다. |
+| `mode` | `standalone`은 설계·매핑 검증만, `patroni`는 승인 HA profile 실행을 지원합니다. |
 | `nodes[].target_id` | 모두 `purpose: database`로 등록한 별도 VM. 요청의 대표 target도 목록에 포함해야 합니다. |
-| `nodes[].roles` | `database`, `dcs` 역할. 같은 역할·VM·관리 IP 중복을 거부합니다. |
-| `placements[]` | 실제 등록 정보의 provider/site별 역할 수와 `database_nodes`, `dcs_voters`가 일치해야 합니다. |
-| `inventory` | `database`, `dcs` 그룹의 안전한 호스트 요약. SSH 접속 설정이 포함된 실행 inventory는 아닙니다. |
-| `variables.railshot_database` | `mode`, `port: 5432`, `placements`. DB 담당자에게 전달할 통합 매핑이며 통합된 HA 플레이북의 변수로 아직 연결하지 않았습니다. |
+| `nodes[].roles` | `database`, `dcs`, `proxy`. 역할·VM·관리 IP 중복을 거부하고 DB와 proxy를 같은 VM에 둘 수 없습니다. |
+| `placements[]` | 실제 provider/site별 역할 수와 `database_nodes`, `dcs_voters`, 선택적 `proxy_nodes`(생략 0)가 일치해야 합니다. |
+| `inventory` | `database`, `dcs`, `proxy`의 비밀 없는 요약. 실행기는 이를 팀의 `db_nodes`, `etcd_nodes`, `proxy_nodes`로 매핑합니다. |
+| `variables.railshot_database` | `mode`, `port: 5432`, `placements`의 공개 요약. 실제 cluster·TLS·비밀번호 변수는 운영자 profile에서만 구성합니다. |
 
-standalone은 DB 1개·DCS 0개를 검사합니다. Patroni 모드에서는 역할·배치 일치만 검사하며 복제·quorum·장애 도메인·장애 전환 가능 여부를 검증하지 않습니다. 회의의 AWS 3개·온프렘 2개 예시는 배치를 변수로 전달하려는 설명으로 해석하며 기본 노드 수로 고정하지 않습니다.
+standalone은 DB 1개·DCS/proxy 0개를 검사합니다. Patroni 실행에는 DB 2대 이상·홀수 etcd 3대 이상·proxy 1대 이상을 요구합니다. 입력 검증만으로 실제 복제·장애 도메인·장애 전환을 입증하지 않습니다. 회의의 AWS 3개·온프렘 2개 예시는 배치를 변수로 전달하려는 설명으로 해석하며 기본 노드 수로 고정하지 않습니다.
 
-검증 결과가 유효해도 DB는 `execution_supported: false`, `blockers: [{"code":"DATABASE_PLAYBOOK_UNAVAILABLE"}]`입니다. 통합된 [HA 입력 규격](deployment-inputs.md)은 DB 2대 이상·etcd 홀수 3대 이상·proxy 1대 이상과 별도 TLS·Ansible Vault 입력을 요구하며, 위 기본 단일 PostgreSQL VM 요청을 실행하지 못합니다. 단일 DB 설치 지원과 운영자 비밀 참조·데이터 경로·백업·준비 상태 계약을 담당자와 맞춘 뒤 실제 변수 이름에 연결해야 합니다. 이 문서 수정으로 API·Schema·실행 차단 동작을 바꾸지는 않습니다.
+위 standalone 예시는 `DATABASE_STANDALONE_UNSUPPORTED`로 차단됩니다. [HA 입력 규격](deployment-inputs.md)을 만족하는 승인 profile만 `execution_supported: true`로 표시합니다. 이는 파일 참조와 입력의 일치 확인이며 실제 설치 결과가 아닙니다.
+
+### E-3. 승인된 HA profile
+
+등록 파일에 `"database_profiles": {"ha-demo": "/secure/railshot/ha-demo.json"}`을 추가합니다. 이 값은 운영자만 설정하며 HTTP는 `parameters.profile_id: "ha-demo"`만 지정합니다. profile 파일은 매번 읽고 내용 변경을 요청 해시에 반영합니다.
+
+HTTP `parameters`의 최소 검증 배치 예시입니다. 운영 기본 VM 수를 고정하지 않습니다. 각 target는 별도의 실제 VM이어야 하며 모두 `purpose: database`로 등록합니다.
+
+```json
+{
+  "profile_id": "ha-demo", "mode": "patroni",
+  "nodes": [
+    {"target_id": "db1", "roles": ["database", "dcs"]},
+    {"target_id": "db2", "roles": ["database", "dcs"]},
+    {"target_id": "db3", "roles": ["dcs", "proxy"]}
+  ],
+  "placements": [{"provider": "aws", "site": "ap-northeast-2", "database_nodes": 2, "dcs_voters": 3, "proxy_nodes": 1}]
+}
+```
+
+profile의 필수 필드는 `parameters`(위에서 profile_id만 제외), `cluster_name`, `client_cidrs`(승인 RFC1918 CIDR 목록), `certificates`, `vault_file`, `vault_password_file`, `timeout_seconds`입니다. HTTP topology와 profile topology가 정확히 일치해야 합니다. 역할·노드 목록 순서만 달라도 같은 배치로 비교합니다.
+
+`certificates`는 target_id별 실제 인증서/개인키 절대경로 맵입니다. Jinja 경로 템플릿이나 임의 Ansible 변수는 받지 않습니다. 역할을 겸하면 필요한 키의 합집합을 제공합니다.
+
+| 역할 | 필수 certificate 참조 키 |
+|---|---|
+| dcs | `etcd_ca_src`, `etcd_cert_src`, `etcd_key_src` |
+| database | `etcd_ca_src`, `patroni_etcd_cert_src`, `patroni_etcd_key_src`, `patroni_api_ca_src`, `patroni_api_cert_src`, `patroni_api_key_src`, `postgres_tls_ca_src`, `postgres_tls_cert_src`, `postgres_tls_key_src` |
+| proxy | `patroni_api_ca_src` |
+
+profile·인증서·키·Vault·Vault password·SSH 참조는 모두 실행기 소유 0600 파일로 준비합니다. Vault는 Ansible Vault 암호화 파일이며 복호화 결과는 `vault_postgres_password`, `vault_replication_password`, `vault_patroni_api_password` 세 문자열(각 16자 이상)만 허용합니다. 키·비밀번호·파일 경로는 HTTP 요약이나 작업 결과에 포함하지 않습니다. 인증서 SAN/CA·유효기간과 실제 연결은 운영자가 준비하고 팀 native TLS 검사로 확인합니다.
+
+선택적으로 profile에 `backup_enabled: true`, `pgbackrest_repo_path: "/mnt/pgbackrest"`, `retention_full: 1`을 함께 지정하면 팀 백업 역할을 실행합니다. 볼륨 준비·mount는 별도 선행 작업이고 이 API가 새 디스크를 만들거나 포맷하지 않습니다. 기본은 backup 비활성입니다. 복원은 별도 승인된 격리 대상에서 팀 `playbooks/restore.yml`로 검증하며 이 API에 임의 restore/playbook 입력을 추가하지 않습니다.
+
+접수 시 profile·TLS·Vault·SSH 파일 내용 해시를 요청에 묶습니다. 실행 직전 다시 대조하고 비공개 임시 사본으로 실행하므로 접수 후 파일이 바뀌면 `DATABASE_PROFILE_CHANGED`로 차단합니다. timeout·Ansible 실패·receipt 부재는 원격 변경 여부를 확인할 수 없는 `unknown`입니다. native 상태를 대조한 운영자만 격리된 후속 검증/복구를 결정하며 자동 재실행하지 않습니다.
+
+etcd는 Patroni가 사용하는 v3 JSON gateway를 명시적으로 활성화합니다. gRPC `etcdctl endpoint health`와 별도로 mTLS HTTP `/v3/cluster/member/list`의 성공 응답과 전체 member 이름을 확인합니다. 초기화된 etcd의 설정 차이는 기존 유지보수 guard가 차단하므로, 운영자 검토와 스냅샷 후 member별 재시작·quorum 확인이 필요합니다. unknown 이후 수동 재개가 승인되면 원본 기록을 보존하고 모든 기존 worker·터널의 종료 및 실제 상태 대조 증거를 남긴 뒤 별도 검증 state 디렉터리와 새 요청 ID를 사용합니다. 이는 자동 재시도나 기존 실패 기록의 삭제 기능이 아닙니다.
 
 ## F. Integration / Verification
 
@@ -263,23 +311,23 @@ standalone은 DB 1개·DCS 0개를 검사합니다. Patroni 모드에서는 역�
 
 | 원문 위치 | 확인한 요구 | 반영 |
 |---|---|---|
-| 2:45:09 이후 | DB/Patroni 설치와 Kubernetes 배치 논의 | DB를 별도 VM으로 설명하고 현재 설치 미지원 명시 |
+| 2:45:09 이후 | DB/Patroni 설치와 Kubernetes 배치 논의 | DB를 별도 VM으로 설명하고 standalone 미지원과 승인 HA 실행 구분 |
 | 2:49:49–2:50:07 | Web/MCP 요청이 Ansible을 호출하고 변수 전달 필요 | 작업별 HTTP 입력→검증→inventory·extra-vars 매핑 |
 | 2:50:14–2:51:07 | Provider별 배치·개수를 전달할 명세 요청 | nodes의 역할과 provider/site별 placements를 대조 |
 | 2:53:19–2:53:42 | DB 담당 범위 확인 | 담당 플레이북을 새로 대신 구현하지 않고 연결 경계 보존 |
-| 이번 추가 지시 | DB는 기본 구성부터, 클러스터 밖 배치 검토 | PostgreSQL 전용 VM 1대의 설계·제약 정리 |
+| 최신 사용자 지시와 DB 담당 README | DB는 K3s와 별도 클러스터이며 원본 HA 구현이 기준 | 단일 Patroni HA 클러스터의 다중 거점 배치·K3s 설치 없음·검증용 개수와 운영 배치 구분 |
 
-현재 상위 API의 자동 자원 등록·배포 전체 오케스트레이션까지 연결된 것은 아닙니다. 이번 변경은 승인된 자원을 Ansible 입력으로 변환하는 연결부, 내부 HTTP 계약, 기존 runtime 실행, DB 배치 검증을 대상으로 합니다.
+현재 상위 API의 자동 자원 등록·배포 전체 오케스트레이션까지 연결된 것은 아닙니다. 이번 변경은 승인된 자원을 Ansible 입력으로 변환하는 연결부, 내부 HTTP 계약, 기존 runtime 실행과 승인 DB HA 실행을 대상으로 합니다.
 
 ### F-2. 브랜치·시험·병합
 
-작업 브랜치는 `feature/ansible-integration-contract`, 기준은 `integration/team-assembly-20261002`입니다. 별도 worktree에서 작업하며 팀원 구현과 개인 작업 공간의 미커밋 변경을 보존합니다. PR로 검토한 뒤 integration에 merge commit으로 반영하고, squash·rebase·force push는 사용하지 않습니다.
+최초 계약 브랜치는 `feature/ansible-integration-contract`, HA 실행 연결은 `feature/database-execution-20261002`, 기준은 `integration/team-assembly-20261002`입니다. 별도 worktree에서 작업하며 팀원 구현과 개인 작업 공간의 미커밋 변경을 보존합니다. PR로 검토한 뒤 integration에 merge commit으로 반영하고, squash·rebase·force push는 사용하지 않습니다.
 
 ```bash
 python3 -m unittest discover -s infrastructure/ansible -p 'test_*.py'
 ```
 
-검사는 OpenStack 상세 응답의 ID·프로젝트·관리 주소, 잘못된 변수 거부, HTTP 검증/접수/조회, 변수의 실제 CLI 전달, 중복 방지, DB 배치 수·용도 분리·실행 차단을 다룹니다. HTTP 시험은 localhost 서버를 실제로 띄우며 원격 Ansible 실행만 모의 처리합니다. Ansible inventory parser와 `guest.yml`, `runtime.yml` syntax-check도 별도로 확인합니다.
+검사는 OpenStack 상세 응답의 ID·프로젝트·관리 주소, 잘못된 변수 거부, HTTP 검증/접수/조회, 변수의 공유 실행 함수 전달, 중복 방지, DB 배치·profile 일치·용도 분리·모든 physical target 잠금·unknown 결과 차단을 다룹니다. 실제 로컬 Vault 암복호화와 자식 프로세스 timeout 정리, 선행 Ansible 실패 시 receipt 차단도 검사합니다. HTTP 시험은 localhost 서버를 실제로 띄우며 원격 Ansible 실행만 모의 처리합니다. Ansible inventory parser와 `guest.yml`, `runtime.yml` syntax-check도 별도로 확인합니다.
 
 이 검사는 실제 OpenStack/CSP VM 설치나 DB 서비스 가동의 증거가 아닙니다. 실제 대상에서는 사설 경로·SSH 호스트키·guest 상태·패키지 접근·runtime 준비를 확인해야 하고, DB 플레이북 연결 후에는 앱에서 인증된 DB 연결과 백업 복구를 별도로 검증해야 합니다.
 
@@ -297,7 +345,7 @@ python3 infrastructure/ansible/api.py \
 
 POST는 `application/json`, 1–8192바이트의 Content-Length 본문을 사용합니다. query string·후행 `/`·CORS·동적 등록·취소·삭제는 지원하지 않습니다. HTTP 상세 헤더·오류는 OpenAPI를 기준으로 합니다.
 
-기존 직접 CLI는 [내부 요청 Schema](../../contracts/ansible-request.schema.json)와 [runtime 예제](../../examples/ansible/runtime-single-node.json)를 유지합니다. `--validate-only`는 입력 검사만 수행합니다. 기존 `patroni.install` CLI도 담당 플레이북 실행 연결 전까지 계속 차단하며 새 HTTP의 `database.configure`와 혼용하지 않습니다.
+기존 직접 CLI는 [내부 요청 Schema](../../contracts/ansible-request.schema.json)와 [runtime 예제](../../examples/ansible/runtime-single-node.json)를 유지합니다. `--validate-only`는 입력 검사만 수행합니다. 기존 `patroni.install` CLI는 계속 차단합니다. 승인 profile을 사용하는 HA 실행은 HTTP `database.configure`로만 접수합니다.
 
 ```bash
 python3 infrastructure/ansible/run.py \
@@ -305,3 +353,5 @@ python3 infrastructure/ansible/run.py \
 ```
 
 OpenStack은 실행기에서 사설 주소까지 직접 route 또는 WireGuard 경로로 SSH에 도달해야 합니다. AWS SSM·GCP IAP도 게스트의 SSH를 운반하는 관리 터널이며 SSH를 제거하는 방식이 아닙니다. `StrictHostKeyChecking=yes`를 유지하고 임의 ProxyCommand·ProxyJump·agent 전달은 차단합니다. 키 내용·클라우드 토큰을 Ansible 변수로 전달하지 않습니다.
+
+일반 SIGTERM/SIGINT 종료는 새 접수를 닫고 현재 worker의 자체 제한 시간과 Ansible·SSM/IAP 정리까지 기다립니다. 서비스 관리자나 컨테이너의 종료 유예 시간은 `timeout_seconds`에 터널별 정리 여유(최대 5초씩)를 더한 값 이상으로 설정해야 합니다. SIGKILL·호스트 장애 시 자식 프로세스 정리는 보장하지 않습니다. 남은 intent는 재시작 시 `unknown`으로 처리하고 운영자가 실제 노드 상태를 대조하기 전 자동 재실행하지 않습니다.
