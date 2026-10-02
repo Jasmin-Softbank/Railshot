@@ -26,6 +26,7 @@ import run as ansible
 import argo
 import bridge
 import credentials
+from handoff import application_name
 from storage import durable_write
 from publication import validate_target
 
@@ -263,6 +264,38 @@ def install_renewal(cd, renewal):
     argo.require(renewal['secret'] in control('get', 'role', 'railshot-credentials', '-o', 'json')['rules'][0]['resourceNames'], 'renewal role readback differs')
 
 
+def grant_control_objects(cd, registered, target_id):
+    """Append snapshot-derived names to one bootstrap-owned Role, under the registration lock."""
+    namespace, name = 'argocd', 'railshot-product-registrations'
+    expected = {('argoproj.io', 'appprojects'): registered['target']['project'],
+                ('argoproj.io', 'applications'): application_name(target_id, registered['target']['namespace'], registered['app']),
+                ('', 'secrets'): 'railshot-' + target_id}
+    role = argo.kubectl(cd['context'], namespace, 'get', 'role', name, '-o', 'json')
+    rules = role.get('rules') or []
+    seen = set()
+    for rule in rules:
+        argo.require(set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
+                     and len(rule['apiGroups']) == len(rule['resources']) == 1
+                     and rule['verbs'] == ['get', 'patch'] and rule['resourceNames']
+                     and all(label(value) for value in rule['resourceNames']), 'registration Role must contain exact names only')
+        key = (rule['apiGroups'][0], rule['resources'][0])
+        argo.require(key in expected and key not in seen, 'registration Role kind differs')
+        seen.add(key)
+    original = copy.deepcopy(rules)
+    for (group, resource), resource_name in expected.items():
+        rule = next((r for r in rules if r['apiGroups'] == [group] and r['resources'] == [resource]), None)
+        if rule is None:
+            rule = {'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch'], 'resourceNames': []}
+            rules.append(rule)
+        if resource_name not in rule['resourceNames']:
+            rule['resourceNames'].append(resource_name)
+    if rules != original:
+        role['rules'] = rules
+        argo.kubectl(cd['context'], namespace, 'replace', '-f', '-', '-o', 'json', document=role)
+    observed = argo.kubectl(cd['context'], namespace, 'get', 'role', name, '-o', 'json')
+    argo.require(observed.get('rules') == rules, 'registration Role readback differs')
+
+
 def github_variable(repository, name, document=None, *, create=False):
     token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
     argo.require(token, 'operator GitHub token required')
@@ -344,6 +377,9 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                 record['steps'].append(stage)
             save(record_path, record)
         try:
+            checkpoint('permissions')
+            grant_control_objects(cd, registered, target_id)
+            complete('permissions')
             checkpoint('edge')
             if settings.get('edge_config_file'):
                 edge_request = {'target_id': target_id, 'tenant': registered['tenant'], 'app': registered['app'],

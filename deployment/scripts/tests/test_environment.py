@@ -69,6 +69,9 @@ class RegistrationTest(unittest.TestCase):
         self.write('pull.json', {'auths': {'ghcr.io': {'auth': base64.b64encode(b'reader:synthetic-secret').decode()}}})
         self.write('registry.json', self.registry); self.write('config.json', self.config)
         self.runtime, self.control = Kube(), Kube()
+        self.control.objects['argocd', 'role', 'railshot-product-registrations'] = {
+            'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role',
+            'metadata': {'name': 'railshot-product-registrations', 'namespace': 'argocd', 'resourceVersion': '1'}, 'rules': []}
         self.control.objects['argocd', 'cronjob', 'railshot-credentials'] = {'spec': {'jobTemplate': {'spec': {'template': {'spec': {
             'serviceAccountName': 'railshot-credentials', 'containers': [{'command': ['python3', '/app/gitops/credentials.py', 'renew']}]}}}}}}
         old = {'secret': 'railshot-old-target', 'target_id': 'old-target', 'server': 'https://10.0.0.2:6443', 'project': 'old-project',
@@ -107,7 +110,7 @@ class RegistrationTest(unittest.TestCase):
         result = self.run_registration()
         self.assertEqual(result['status'], 'succeeded', result)
         self.assertTrue(result['deployment_supported'])
-        self.assertEqual(result['steps'], ['edge', 'namespace', 'argo', 'credentials', 'ci'])
+        self.assertEqual(result['steps'], ['permissions', 'edge', 'namespace', 'argo', 'credentials', 'ci'])
         config = env.bridge.read_config(self.home / 'cd.json')
         self.assertEqual(config['targets'][self.target]['target']['cluster_server'], 'https://10.77.0.10:6443')
         self.assertEqual((self.home / 'cd.json').stat().st_mode & 0o777, 0o600)
@@ -120,6 +123,10 @@ class RegistrationTest(unittest.TestCase):
         count = (self.runtime.applications, self.control.applications)
         self.assertEqual(self.run_registration(), result)
         self.assertEqual(count, (self.runtime.applications, self.control.applications))
+        rules = self.control.objects['argocd', 'role', 'railshot-product-registrations']['rules']
+        self.assertEqual(next(r['resourceNames'] for r in rules if r['resources'] == ['secrets']), ['railshot-' + self.target])
+        self.assertEqual(next(r['resourceNames'] for r in rules if r['resources'] == ['applications']),
+                         [env.application_name(self.target, 'app-new', 'new-app')])
         self.config['cd']['targets'][self.target]['app'] = 'other-app'
         self.config['cd']['targets'][self.target]['target']['path'] = 'gitops/applications/other-app/' + self.target
         self.write('config.json', self.config)
@@ -145,6 +152,15 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(result['status'], 'unknown')
         self.assertEqual(self.runtime.applications, 0)
         self.assertIsNone(self.variable)
+
+    def test_broad_bootstrap_role_blocks_before_resource_creation(self):
+        self.control.objects['argocd', 'role', 'railshot-product-registrations']['rules'] = [
+            {'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get', 'patch'], 'resourceNames': []}]
+        result = self.run_registration()
+        self.assertEqual(result['status'], 'unknown')
+        self.assertEqual(result['stage'], 'permissions')
+        self.assertEqual(self.runtime.applications, 0)
+        self.assertEqual(self.control.applications, 0)
 
     def test_existing_nodeport_is_not_overwritten(self):
         self.runtime.objects['old-ns', 'service', 'old-app'] = {'metadata': {'namespace': 'old-ns', 'name': 'old-app'},
