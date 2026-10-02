@@ -20,6 +20,10 @@ docs/meetings/raw/
 .ruff_cache/
 *.egg-info/
 .DS_Store
+# Local observability instructions and rendered target configuration.
+/observability/AGENTS.md
+/observability/.local/
+/.token-usage/
 dist/
 *.sqlite
 *.sqlite-*

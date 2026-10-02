@@ -50,6 +50,22 @@ jobs:
           with open('docs/api/ansible.openapi.json') as stream:
               validate(json.load(stream))
           PY
+      - name: Observability config and real loopback probes
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, yaml
+          destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'observer-tools'
+          destination.mkdir()
+          services = yaml.safe_load(pathlib.Path('observability/compose.yaml').read_text())['services']
+          for service, binary in [('prometheus', 'promtool'), ('blackbox', 'blackbox_exporter')]:
+              container = subprocess.check_output(['docker', 'create', services[service]['image']], text=True).strip()
+              try:
+                  subprocess.run(['docker', 'cp', f'{container}:/bin/{binary}', str(destination / binary)], check=True)
+              finally:
+                  subprocess.run(['docker', 'rm', '-f', container], check=True)
+          PY
+          PROMTOOL="$RUNNER_TEMP/observer-tools/promtool" BLACKBOX="$RUNNER_TEMP/observer-tools/blackbox_exporter" \
+            python -m unittest discover -s observability -p 'test_*.py' -v
 
   openstack:
     name: OpenStack contracts
