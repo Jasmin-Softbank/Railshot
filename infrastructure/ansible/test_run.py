@@ -1,5 +1,6 @@
 """Offline boundary tests: fake receipts are local test fixtures, not deployment evidence."""
 import copy
+import configparser
 import fcntl
 import hashlib
 import importlib.util
@@ -11,6 +12,8 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
+
+import yaml
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -287,6 +290,31 @@ class AdapterTests(unittest.TestCase):
             self.assertNotIn(old, playbook)
         self.assertIn('InternalIP', playbook)
         self.assertIn('nodeInfo.architecture', playbook)
+
+
+class CIBootTests(unittest.TestCase):
+    def test_policy_and_docker_restarts_rerun_real_probes_after_builder_setup(self):
+        tasks = yaml.safe_load((HERE / 'ci.yml').read_text())[0]['tasks']
+        unit = next(task['ansible.builtin.copy']['content'] for task in tasks
+                    if task.get('ansible.builtin.copy', {}).get('dest') ==
+                    '/etc/systemd/system/railshot-ci-verify.service')
+        config = configparser.ConfigParser(interpolation=None)
+        config.read_string(unit)
+        services = {'docker.service', 'railshot-ci-network.service'}
+        for key in ('Requires', 'After', 'PartOf'):
+            self.assertTrue(services <= set(config['Unit'][key].split()), key)
+        self.assertIn('network-online.target', config['Unit']['After'].split())
+        self.assertEqual(config['Service']['ExecStart'], '/usr/local/sbin/test-ci-network')
+        self.assertEqual(config['Service']['TimeoutStartSec'], '600')
+        self.assertIn('railshot-ci-network.service', config['Install']['WantedBy'].split())
+        self.assertNotIn('ConditionPathExists', config['Unit'])
+        builder = next(i for i, task in enumerate(tasks)
+                       if task['name'].startswith('Prepare the dedicated bounded BuildKit'))
+        start = next(i for i, task in enumerate(tasks)
+                     if task.get('ansible.builtin.systemd_service', {}).get('name') == 'railshot-ci-verify')
+        self.assertGreater(start, builder)
+        self.assertEqual(tasks[start]['ansible.builtin.systemd_service']['state'], 'restarted')
+        self.assertTrue(tasks[start]['ansible.builtin.systemd_service']['enabled'])
 
 
 if __name__ == '__main__':

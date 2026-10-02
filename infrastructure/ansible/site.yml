@@ -1,5 +1,5 @@
 ---
-- name: Prepare a single-node k3s demo cluster
+- name: Prepare a fresh single-node k3s and Cilium demo cluster
   hosts: k3s_server
   become: true
   gather_facts: true
@@ -13,9 +13,28 @@
       cluster_cidr: "{{ k3s_cluster_cidr }}"
       service_cidr: "{{ k3s_service_cidr }}"
       cluster_dns: "{{ k3s_cluster_dns }}"
+      cni: cilium
+      cilium_version: "{{ cilium_version }}"
+      cilium_cli_version: "{{ cilium_cli_version }}"
   pre_tasks:
     - name: Reuse the JB guest scope checks
       ansible.builtin.import_tasks: tasks/guest-checks.yml
+
+    - name: Validate the shared single-node Cilium profile
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.architecture == 'x86_64'
+          - ansible_facts.kernel is version('5.10', '>=')
+          - ansible_facts.memtotal_mb >= 3500
+          - k3s_version == 'v1.34.11+k3s1'
+          - cilium_version == '1.20.2'
+          - cilium_cli_version == 'v0.20.1'
+          - k3s_cluster_cidr == '10.42.0.0/16'
+          - k3s_service_cidr == '10.43.0.0/16'
+          - k3s_cluster_dns == '10.43.0.10'
+        fail_msg: >-
+          This Cilium profile requires amd64, kernel >= 5.10, 4 GB RAM and the
+          pinned runtime versions/CIDRs. It does not migrate existing Flannel clusters.
 
     - name: Inspect existing installation paths
       ansible.builtin.stat:
@@ -26,11 +45,13 @@
         - /var/lib/rancher/k3s
         - /usr/local/bin/k3s
         - /etc/systemd/system/k3s.service
+        - /etc/rancher/k3s/config.yaml.d
       register: k3s_existing
 
     - name: Refuse to overwrite an installation not owned by this project
       ansible.builtin.assert:
         that:
+          - not k3s_existing.results[5].stat.exists
           - >-
             k3s_existing.results[0].stat.exists or
             not (k3s_existing.results[1].stat.exists or
@@ -49,13 +70,15 @@
       ansible.builtin.assert:
         that:
           - (k3s_previous.content | b64decode | from_json) == k3s_identity
-        fail_msg: Version, node name or CIDRs changed. Create a fresh VM or plan an explicit cluster migration.
+        fail_msg: >-
+          Cluster identity/CNI differs (including the previous Flannel starter).
+          Use a fresh VM. This playbook never performs an in-place CNI migration.
       when: k3s_existing.results[0].stat.exists
 
   tasks:
     - name: Install host prerequisites
       ansible.builtin.apt:
-        name: [ca-certificates, iptables, iproute2, conntrack, socat, kmod]
+        name: [ca-certificates, iptables, iproute2, conntrack, socat, kmod, curl, tar]
         state: present
         update_cache: true
         cache_valid_time: 3600
@@ -154,6 +177,39 @@
       delay: 5
       changed_when: false
 
+    - name: Prepare the shared Cilium asset directories
+      ansible.builtin.file:
+        path: "/var/lib/railshot/standalone-cilium/{{ item }}"
+        state: directory
+        mode: '0700'
+      loop: [scripts, cilium, airgap]
+
+    - name: Reuse the team Cilium installer rather than maintain a second implementation
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../deployment/{{ item }}"
+        dest: "/var/lib/railshot/standalone-cilium/{{ item }}"
+        mode: '0700'
+      loop: [scripts/common.sh, cilium/install.sh, airgap/versions.json]
+
+    - name: Install Cilium before waiting for Node Ready or CoreDNS
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/flock
+          - --nonblock
+          - /run/railshot-deployment.lock
+          - /bin/bash
+          - /var/lib/railshot/standalone-cilium/cilium/install.sh
+      environment:
+        K3S_VERSION: "{{ k3s_version }}"
+        CILIUM_VERSION: "{{ cilium_version }}"
+        CILIUM_CLI_VERSION: "{{ cilium_cli_version }}"
+        WAIT_TIMEOUT: 300s
+        RAILSHOT_OFFLINE: 'false'
+        RAILSHOT_BUNDLE: ''
+        RAILSHOT_BUNDLE_SHA256: ''
+      changed_when: true
+      no_log: true
+
     - name: Wait for node networking to become ready
       ansible.builtin.command:
         argv: [/usr/local/bin/k3s, kubectl, wait, "node/{{ k3s_node_name }}", --for=condition=Ready, --timeout=180s]
@@ -199,7 +255,7 @@
       ansible.builtin.debug:
         msg:
           - "Kubeconfig: {{ k3s_artifacts_dir }}/kubeconfig.yaml (cluster admin; keep private)"
-          - "Node is Ready; CoreDNS rollout passed."
+          - "Cilium status passed; Node is Ready; CoreDNS rollout passed."
           - "Smoke enabled: {{ smoke_test_enabled }}; controller HTTP verification: {{ smoke_test_from_controller }}"
           - "{{ ('Candidate demo URL: http://' ~ smoke_public_host ~ ':' ~ (smoke_node_port | string) ~ ' (routing/firewall required)') if smoke_test_enabled | bool else 'Smoke workload skipped; no application URL verified.' }}"
 

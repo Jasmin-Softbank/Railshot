@@ -1,19 +1,19 @@
 # 통합 Ansible 진입점
 
-통합 호출 계약은 [Ansible 실행 인터페이스](../../docs/api/ansible.md)를 기준으로 합니다. `api.py`가 승인된 AWS/GCP/OpenStack 자원을 작업별 입력과 결합하고, `run.py`가 JB guest 검사 후 승민 K3s/Cilium runtime을 실행합니다. 아래 원본 standalone `site.yml`의 Flannel 설치를 함께 실행하지 않습니다. DB는 K3s 밖의 별도 VM을 기본으로 하며, 현재 HTTP는 배치 검증만 지원하고 담당 HA 플레이북을 이 API에 연결하지 않아 설치를 차단합니다.
+통합 호출 계약은 [Ansible 실행 인터페이스](../../docs/api/ansible.md)를 기준으로 합니다. `api.py`가 승인된 AWS/GCP/OpenStack 자원을 작업별 입력과 결합하고, `run.py`가 JB guest 검사 후 승민 K3s/Cilium runtime을 실행합니다. 직접 SSH inventory로 실행하는 `site.yml`도 Cilium을 사용하지만, 두 경로는 소유권과 K3s 설치 방식이 다르므로 **같은 노드에서 혼용하지 않습니다**. DB는 K3s 밖의 별도 VM을 기본으로 하며, 현재 HTTP는 배치 검증만 지원하고 담당 HA 플레이북을 이 API에 연결하지 않아 설치를 차단합니다.
 
 ```bash
 python3 run.py --request ../../examples/ansible/runtime-single-node.json --validate-only
 python3 -m unittest discover -s . -p 'test_*.py' -v
 ```
 
-아래는 조립한 JB 원본 starter의 사용·검증 기록이다. 통합 경로의 현재 설치 결과나 기본 실행 지시로 읽지 않는다.
+아래는 직접 실행용 starter 안내다. 기존 AWS Flannel 서버를 제자리에서 Cilium으로 바꾸는 절차가 아니다. 이전 검증 기록과 이번 코드 변경의 검증을 구분한다.
 
 ---
 
-# Minimal k3s Ansible starter
+# Minimal k3s + Cilium Ansible starter
 
-해커톤용 단일 노드 Kubernetes 설치 구성입니다. 새 Ubuntu 서버 1대에 k3s를 설치하고,
+해커톤용 단일 노드 Kubernetes 설치 구성입니다. 새 Ubuntu 서버 1대에 k3s와 Cilium을 설치하고,
 선택적으로 샘플 웹앱의 NodePort HTTP 응답과 클러스터 내부 DNS 통신을 검사합니다.
 챗봇 구현, Terraform, Argo CD, GPU/LLM 서빙은 포함하지 않습니다.
 
@@ -24,8 +24,9 @@ flowchart TD
     A["Linux / WSL 실행기<br/>ansible-playbook site.yml"] --> B["SSH + sudo<br/>대상 Ubuntu VM"]
     B --> C["OS · 자원 · swap · 기존 설치 검사"]
     C --> D["커널 네트워크 설정<br/>k3s 바이너리와 systemd 설치"]
-    D --> E["Kubernetes API / Node Ready"]
-    E --> F["CoreDNS 준비"]
+    D --> E["Kubernetes API 준비"]
+    E --> CNI["팀 공통 Cilium 설치<br/>Flannel 비활성 · kube-proxy 유지"]
+    CNI --> F["Cilium · Node Ready · CoreDNS 확인"]
     F --> G{"smoke_test_enabled"}
     G -->|true| H["Nginx 배포<br/>NodePort HTTP + Pod DNS/HTTP 검사"]
     G -->|false| I["관리자 kubeconfig 내보내기"]
@@ -43,14 +44,18 @@ flowchart TD
 
 ## 범위와 전제
 
-- 대상: 새 Ubuntu 22.04/24.04 Linux VM, systemd, amd64 또는 arm64.
-- 최소 2 vCPU, RAM 2 GB, 여유 디스크 10 GB. 챗봇 앱에는 4 GB 이상 권장.
+- 대상: 새 Ubuntu 22.04/24.04 Linux VM, systemd, amd64, 커널 5.10 이상과 eBPF 지원.
+- 최소 2 vCPU, RAM 4 GB, 여유 디스크 10 GB. ARM64는 현재 통합 프로파일 범위 밖입니다.
 - SSH 접속, Python 3, sudo 권한, swap 비활성화 필요.
 - 실행기: Linux 또는 WSL의 Ansible Core 2.15 이상. Windows 네이티브 실행은 미지원.
-- k3s 버전은 `group_vars/all.yml`에 고정. 버전 변경을 자동 업그레이드로 처리하지 않습니다.
-- Flannel, CoreDNS, SQLite, local-path storage 사용. Traefik, ServiceLB, metrics-server 제외.
-- Cilium, HA, HTTPS, 외부 DNS, 클라우드 LB/CSI, 자동 방화벽 수정은 미포함.
-- local-path PVC는 해당 노드 디스크에 종속됩니다. 노드 삭제 시 데이터 보존/HA를 보장하지 않습니다.
+- k3s `v1.34.11+k3s1`, Cilium `1.20.2`, Cilium CLI `v0.20.1`을 통합 runtime과 맞춰 고정합니다.
+  버전 변경을 자동 업그레이드/다운그레이드로 처리하지 않습니다.
+- Flannel과 K3s 내장 NetworkPolicy를 끄고 Cilium이 CNI/NetworkPolicy를 담당합니다.
+  kube-proxy는 유지하고 VXLAN/cluster-pool IPAM을 사용합니다. Hubble은 끕니다.
+- CoreDNS, SQLite 사용. Traefik, ServiceLB, metrics-server, local-path storage는 제외합니다.
+- HA, HTTPS, 외부 DNS, 클라우드 LB/CSI, 자동 방화벽 수정은 미포함입니다.
+- Pod/Service CIDR은 팀 공유 Cilium 설치기와 일치하도록 고정합니다. 사용자 정의 CIDR은 거부합니다.
+- `deployment/cilium/install.sh`, `deployment/scripts/common.sh`, `deployment/airgap/versions.json`을 그대로 재사용하므로 **저장소 전체를 clone**합니다. 이 직접 실행 경로는 온라인 설치만 지원합니다.
 
 ## 실행
 
@@ -85,6 +90,7 @@ Git에 올리거나 대시보드 로그에 출력하지 마세요. 장기 운영
 export KUBECONFIG="$HOME/.kube/hackathon-k3s/kubeconfig.yaml"
 kubectl get nodes
 kubectl get pods -A
+kubectl -n kube-system get pods -l k8s-app=cilium
 curl http://YOUR_NODE_IP:30080/
 ```
 
@@ -108,18 +114,20 @@ kubectl -n k3s-smoke port-forward service/web 8080:80
 | CIDR | Pod `10.42.0.0/16`, Service `10.43.0.0/16`이 LAN/VPC/VPN과 겹치지 않아야 함 |
 
 UFW/보안그룹/NAT는 자동 변경하지 않습니다. 호스트 방화벽은 Pod/Service 트래픽도 허용해야 합니다.
-6443이나 Flannel 포트를 인터넷 전체에 노출하지 마세요. 이 구성은 단일 노드이므로
+6443이나 Cilium 터널 포트를 인터넷 전체에 노출하지 마세요. 이 구성은 단일 노드이므로
 다중 노드용 VXLAN 포트 개방은 필요 없습니다. NAT 뒤 서버의 DNS 레코드만 등록해도 공개되는 것은 아닙니다.
 
-기본 검증은 Node Ready, CoreDNS rollout, 샘플 앱 rollout, **노드 내부에서 NodePort HTTP 확인**,
+기본 검증은 Cilium status, Node Ready, CoreDNS rollout, 샘플 앱 rollout, **노드 내부에서 NodePort HTTP 확인**,
 **임시 Pod에서 서비스 DNS 이름으로 HTTP 확인**입니다. 인터넷에서 접속 가능한지는 별도입니다.
 실행기에서도 접근 가능하면 `-e smoke_test_from_controller=true`로 HTTP 검증을 추가하세요.
 
 ## 재실행과 실패 대응
 
-- 설정이 같으면 서비스는 불필요하게 재시작하지 않습니다. DNS 검사 Pod만 매번 다시 만듭니다.
+- 설정이 같으면 K3s는 불필요하게 재시작하지 않습니다. 공통 Cilium 설치기는 재실행 시 Helm release를
+  재조정하므로 Ansible changed가 발생할 수 있습니다. DNS 검사 Pod도 매번 다시 만듭니다.
 - `ansible-starter.json` 소유권 표시가 없는 기존 k3s는 덮어쓰지 않습니다.
-- 버전, 노드 이름, Pod/Service CIDR 변경은 거부합니다. 해당 변경은 새 VM 또는 별도 이전 절차로 처리하세요.
+- 버전, 노드 이름, Pod/Service CIDR, CNI/Cilium 버전 변경은 거부합니다. **과거 Flannel ownership
+  marker도 Cilium identity와 다르므로 변경 전에 차단**합니다. 새 VM 또는 별도 이전 절차가 필요합니다.
 - TLS SAN 변경은 재시작을 유발합니다. 이때 단일 노드 서비스 중단이 발생할 수 있습니다.
 - 실패 시 자동 삭제/롤백하지 않습니다. 네트워크/이미지 다운로드 등 원인 수정 후 재실행하세요.
 - `--check`는 지원하지 않습니다. `--syntax-check`와 아래 오프라인 테스트를 사용하세요.
@@ -132,6 +140,7 @@ UFW/보안그룹/NAT는 자동 변경하지 않습니다. 호스트 방화벽은
 sudo journalctl -u k3s -n 100 --no-pager
 sudo k3s kubectl get pods -A -o wide
 sudo k3s kubectl get events -A --sort-by=.lastTimestamp
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/lib/railshot-deployment/cilium status
 ```
 
 샘플 앱 제거는 `kubectl delete namespace k3s-smoke`입니다. 재생성을 막으려면 이후 실행에
@@ -143,17 +152,31 @@ sudo k3s kubectl get events -A --sort-by=.lastTimestamp
 Terraform/API의 서버 주소를 inventory에 넣고, GoCD 또는 다른 Linux 실행기에서 `site.yml`을 호출합니다.
 종료 코드 0을 성공으로 취급하고 로그를 수집하되, SSH 키와 kubeconfig는 비밀정보로 취급합니다.
 같은 클러스터를 동시에 변경하지 않도록 파이프라인에서 잠금을 걸어야 합니다.
-환경 생성 작업과 앱 배포 작업은 분리하세요. Cilium을 채택하면 새 클러스터에서 Flannel을 끄고
-Cilium 설치 단계를 별도 설계해야 하며, 실행 중인 이 클러스터에 단순 추가 설치하면 안 됩니다.
+환경 생성 작업과 앱 배포 작업은 분리하세요. Cilium은 API 준비 후, Node Ready를 기다리기 전에
+설치됩니다. `site.yml`와 통합 `runtime.install` 중 하나만 선택하세요. 이전 Flannel 서버에서
+marker를 수정해 검사를 우회하거나 Cilium을 단순 추가 설치하면 안 됩니다.
+
+## 기존 AWS Flannel 서버
+
+기존 서버는 이번 코드 수정으로 바뀌지 않습니다. 해당 서버의 CNI 전환/삭제/재설치를 자동 수행하지
+않습니다. 가장 단순한 검증 경로는 새 Ubuntu VM에 위 playbook을 실행하는 것입니다. 기존 서버를
+반드시 재사용해야 한다면 앱/PVC/설정 백업과 중단 허용을 확인한 뒤 별도의 재설치 계획이 필요합니다.
 
 ## 검증
 
 ```bash
 ansible-playbook -i inventory/hosts.example.yml site.yml --syntax-check
 ansible-playbook -i localhost, tests/render.yml
+python3 -m unittest discover -s . -p 'test_*.py' -v
 ```
 
-2026-10-01 검증 결과:
+CI는 standalone `site.yml` 구문과 오프라인 템플릿을 실제 Ansible로 검사합니다.
+`test_cilium.py`는 전달 자산의 실제 경로, 공통 스크립트 로딩, 이미지 정책·버전, 설치 순서와 소유권 경계를 검사합니다.
+2026-10-02 [AWS 실자원 인수 검증](../../docs/integration/observability-acceptance-20261002.md)에서
+새 Cilium standalone 설치·동일 설정 재실행·identity 변경 거부와 관측 Namespace ingress 허용/차단을 확인했습니다.
+이 결과를 통합 HTTP runtime 요청이나 온프레미스/ARM64 검증으로 확대하지 않습니다.
+
+2026-10-01 **이전 Flannel 버전** 검증 결과 (Cilium 설치 성공 증거가 아님):
 
 | 검증 | 결과 |
 | --- | --- |
@@ -170,4 +193,5 @@ ansible-playbook -i localhost, tests/render.yml
 접근 가능성을 의미하지 않습니다. 팀 환경에서 재실행·재부팅 검증을 추가한 뒤 데모에 사용하세요.
 
 참고: [k3s 설정](https://docs.k3s.io/installation/configuration),
-[k3s 요구사항](https://docs.k3s.io/installation/requirements).
+[k3s 요구사항](https://docs.k3s.io/installation/requirements),
+[Cilium on K3s](https://docs.cilium.io/en/stable/installation/k3s/).
