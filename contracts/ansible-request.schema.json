@@ -275,6 +275,20 @@
       "type": "integer",
       "minimum": 30,
       "maximum": 1800
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wait_timeout_seconds"
+      ],
+      "properties": {
+        "wait_timeout_seconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 600
+        }
+      }
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -301,6 +315,23 @@
         "not": {
           "required": [
             "patroni"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "runtime.install"
+          }
+        }
+      },
+      "then": {},
+      "else": {
+        "not": {
+          "required": [
+            "runtime"
           ]
         }
       }

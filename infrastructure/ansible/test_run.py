@@ -46,6 +46,27 @@ class AdapterTests(unittest.TestCase):
             'stage': stage, stage + '_ready': True}))
         return 0
 
+    def test_openstack_uses_get_result_project_and_one_approved_private_address(self):
+        server = json.loads((ROOT / 'examples/ansible/openstack-server.json').read_text())
+        profile = {'request_id': 'os-001', 'operation': 'runtime.install', 'target_id': 'demo-openstack',
+                   'resource_id': server['id'], 'project_id': server['project_id'], 'management_network': 'management',
+                   'placement': 'onprem-a', 'architecture': 'amd64', 'initialization': 'cloud-init',
+                   'ssh': {k: v for k, v in self.request['inventory']['control_plane'][0]['ssh'].items() if k != 'port'}}
+        converted = adapter.from_openstack(server, **profile)
+        node = converted['inventory']['control_plane'][0]
+        self.assertEqual(node['ssh']['port'], 22)
+        self.assertEqual(node['private_ipv4'], '192.168.50.10')
+        invalid = [{'id': 'another-resource'}, {'project_id': 'another-project'}, {'status': 'BUILD'},
+                   {'addresses': []}, {'addresses': server['addresses'] * 2},
+                   {'addresses': [{'network': 'public', 'address': '192.168.50.10', 'version': 4}]},
+                   {'addresses': [{'network': 'management', 'address': '8.8.8.8', 'version': 4}]},
+                   {'addresses': [{'network': 'management', 'address': '192.168.50.10', 'version': True}]}]
+        for fields in invalid:
+            with self.subTest(fields=fields), self.assertRaises(adapter.ContractError):
+                adapter.from_openstack({**server, **fields}, **profile)
+        with self.assertRaises(adapter.ContractError):
+            adapter.from_openstack({'resource_id': server['id'], 'status': 'accepted'}, **profile)
+
     def test_local_receipts_only_admit_matching_completed_stages(self):
         with patch.object(adapter.shutil, 'which', return_value='/trusted/ansible-playbook'):
             result = adapter.run(self.request, runner=self.runner)

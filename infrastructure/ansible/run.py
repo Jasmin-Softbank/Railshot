@@ -65,7 +65,7 @@ def check_schema(value, rule, path='$'):
             raise ContractError(f'{path}: invalid format')
     if kind == 'integer' and not rule.get('minimum', -MAX_BYTES) <= value <= rule.get('maximum', MAX_BYTES):
         raise ContractError(f'{path}: outside allowed range')
-    # The schema's single conditional separates Patroni from guest/runtime inputs.
+    # Operation-specific inputs use the checked-in if/then/else subset.
     for conditional in rule.get('allOf', []):
         expected = conditional['if']['properties']['operation']['const']
         branch = conditional['then'] if value.get('operation') == expected else conditional['else']
@@ -73,6 +73,9 @@ def check_schema(value, rule, path='$'):
             raise ContractError(f'{path}: missing operation input')
         if 'not' in branch and set(branch['not']['required']).issubset(value):
             raise ContractError(f'{path}: unexpected operation input')
+        for key, child in branch.get('properties', {}).items():
+            if key in value:
+                check_schema(value[key], child, f'{path}.{key}')
 
 
 def validate(request):
@@ -183,6 +186,18 @@ def build_inventory(request, forwarded=None):
                                  'k3s_workers': {'hosts': {}}}}}
 
 
+def playbook_variables(request):
+    """Map the public contract to the variables the existing team playbooks consume."""
+    node = request['inventory']['control_plane'][0]
+    return {'railshot_request_id': request['request_id'], 'railshot_target_id': request['target']['id'],
+            'railshot_resource_id': node['resource_id'],
+            'railshot_expected_arch': request['target']['architecture'],
+            'railshot_initialization': request['target']['initialization'],
+            'railshot_node_ip': node['private_ipv4'], 'k3s_api_host': node['private_ipv4'],
+            'k3s_node_name': node['id'], 'k3s_version': 'v1.34.11+k3s1',
+            'railshot_wait_timeout_seconds': request.get('runtime', {}).get('wait_timeout_seconds', 300)}
+
+
 def child_env():
     # Do not inherit arbitrary Ansible plugins, extra config, SSH agent or cloud credentials.
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR') if key in os.environ}
@@ -257,13 +272,8 @@ def _run(request, *, validate_only=False, runner=execute):
             result['stage'] = stage
             nonce = secrets.token_hex(16)
             receipt_path = work / f'{stage}-receipt.json'
-            extra = {'railshot_request_id': request['request_id'], 'railshot_target_id': request['target']['id'],
-                     'railshot_nonce': nonce, 'railshot_receipt_path': str(receipt_path),
-                     'railshot_resource_id': node['resource_id'],
-                     'railshot_expected_arch': request['target']['architecture'],
-                     'railshot_initialization': request['target']['initialization'],
-                     'railshot_node_ip': node['private_ipv4'], 'k3s_api_host': node['private_ipv4'],
-                     'k3s_node_name': node['id'], 'k3s_version': 'v1.34.11+k3s1'}
+            extra = {**playbook_variables(request), 'railshot_nonce': nonce,
+                     'railshot_receipt_path': str(receipt_path)}
             extra_path = work / f'{stage}-vars.json'
             extra_path.write_text(json.dumps(extra)); extra_path.chmod(0o600)
             argv = [executable, '-i', str(inventory), str(PLAYBOOKS[stage]), '--extra-vars', '@' + str(extra_path)]
@@ -370,6 +380,33 @@ def from_descriptor(descriptor, *, request_id, operation, ssh, timeout_seconds=1
         return validate(request)
     except (KeyError, TypeError) as exc:
         raise ContractError('Incomplete node descriptor or SSH reference') from exc
+
+
+def from_openstack(server, *, request_id, operation, target_id, resource_id, project_id,
+                   management_network, placement, architecture, initialization, ssh, timeout_seconds=1200):
+    """Consume the Controller's GET ServerResponse, never its create/202 receipt.
+
+    The trusted caller obtains this response with the intended project credential.
+    Matching fields is not an independent ownership lookup or an SSH readiness check.
+    """
+    if (not all(isinstance(v, str) and v.strip() for v in (resource_id, project_id, management_network))
+            or not isinstance(server, dict) or server.get('id') != resource_id
+            or server.get('project_id') != project_id or server.get('status') != 'ACTIVE'):
+        raise ContractError('OpenStack server ID, project or ACTIVE state does not match')
+    addresses = server.get('addresses')
+    if not isinstance(addresses, list):
+        raise ContractError('OpenStack ServerResponse addresses required')
+    matches = [row.get('address') for row in addresses if isinstance(row, dict)
+               and row.get('network') == management_network and type(row.get('version')) is int
+               and row['version'] == 4]
+    if len(matches) != 1:
+        raise ContractError('Exactly one IPv4 address on the approved management network is required')
+    return validate({'schema_version': '1.0', 'request_id': request_id, 'operation': operation,
+                     'target': {'id': target_id, 'provider': 'openstack', 'placement': placement,
+                                'os': 'linux', 'architecture': architecture, 'initialization': initialization},
+                     'inventory': {'control_plane': [{'id': target_id, 'resource_id': resource_id,
+                                   'private_ipv4': matches[0], 'ssh': {**ssh, 'port': ssh.get('port', 22)}}], 'workers': []},
+                     'timeout_seconds': timeout_seconds})
 
 
 def unique_pairs(pairs):
