@@ -25,3 +25,5 @@ docs/meetings/raw/
 /observability/AGENTS.md
 /observability/.local/
 /.token-usage/
+/infrastructure/ansible/inventory/hosts.yml
+/infrastructure/ansible/artifacts/
