@@ -116,7 +116,7 @@ def main():
     subprocess.run(["git", "init", "-q"], cwd=work, check=True)
     # The imported baseline is every sanitized file, including user-ignored source.
     subprocess.run(["git", "add", "-f", "-A"], cwd=work, check=True)
-    subprocess.run(["git", "-c", "user.name=jasmin", "-c", "user.email=jasmin@localhost",
+    subprocess.run(["git", "-c", "user.name=railshot", "-c", "user.email=railshot@localhost",
                     "commit", "-qm", "import"], cwd=work, check=True)
     ir = inventory(work, [f for f in files if (work / f).is_file()], total)
     ir["removed_agent_files"] = sorted(set(removed))

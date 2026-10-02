@@ -135,7 +135,7 @@ def prepare_vm_access(cli, config, state_dir, on_resource=lambda resource: None,
         existing = cli.run(['security','group','list'])
         if any(r.get('Name',r.get('name'))==group_name for r in existing):
             raise ProviderError('existing_security_group')
-        group = cli.run(['security','group','create','--description','Jasmin managed SSH access',group_name])
+        group = cli.run(['security','group','create','--description','Railshot managed SSH access',group_name])
         group_id = _id(group)
         on_resource({'type':'security_group','id':group_id,'name':group_name})
         rule = cli.run(['security','group','rule','create','--ingress','--ethertype','IPv4' if source.version==4 else 'IPv6','--protocol','tcp','--dst-port','22','--remote-ip',str(source),group_id])

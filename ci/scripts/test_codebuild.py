@@ -26,11 +26,11 @@ class CodeBuildTests(unittest.TestCase):
                        'role_arn': 'arn:aws:iam::123456789012:role/railshot-test-release'}
         self.job_id = str(uuid.uuid4()); self.job = self.root / self.job_id; self.job.mkdir()
         image = 'sha256:' + 'b' * 64; ref = 'railshot-gate/demo-web:test'
-        spec = b'apiVersion: jasmin/v0\napp: demo\nservices:\n- name: web\n  build: {dockerfile: Dockerfile}\n  port: 3000\n  route: /\n'
+        spec = b'apiVersion: railshot/v0\napp: demo\nservices:\n- name: web\n  build: {dockerfile: Dockerfile}\n  port: 3000\n  route: /\n'
         verdict = {'ok': True, 'release_eligible': True, 'status': 'PASS', 'source_sha256': 'c' * 64,
                    'layers': [{'layer': x, 'ok': True} for x in codebuild.bundle.LAYERS],
                    'images': {'web': ref}, 'image_ids': {'web': image}}
-        for name, body in {'jasmin.yaml': spec, 'verdict.json': json.dumps(verdict).encode(), 'images.tar': b'not a live image'}.items():
+        for name, body in {'railshot.yaml': spec, 'verdict.json': json.dumps(verdict).encode(), 'images.tar': b'not a live image'}.items():
             (self.source / name).write_bytes(body)
         manifest = {'version': 1, 'trust': codebuild.bundle.TRUST, 'source_sha256': 'c' * 64,
                     'images': {'web': {'local_ref': ref, 'id': image}},
@@ -102,18 +102,32 @@ class CodeBuildTests(unittest.TestCase):
         self.assertEqual(caught.exception.outcome, 'UNKNOWN')
 
     def test_archive_path_duplicate_and_symlink_are_rejected(self):
-        for names in (['../manifest.json','images.tar','jasmin.yaml','verdict.json'],
-                      ['manifest.json','manifest.json','images.tar','jasmin.yaml']):
+        for names in (['../manifest.json','images.tar','railshot.yaml','verdict.json'],
+                      ['manifest.json','manifest.json','images.tar','railshot.yaml']):
             archive = self.root / (str(uuid.uuid4()) + '.zip')
             with zipfile.ZipFile(archive, 'w') as output:
                 for name in names: output.writestr(name, b'fixture')
             with self.assertRaises(ValueError): publisher.unpack(archive, self.root / str(uuid.uuid4()))
         archive = self.root / 'symlink.zip'
         with zipfile.ZipFile(archive, 'w') as output:
-            for name in ('manifest.json','images.tar','jasmin.yaml','verdict.json'):
+            for name in ('manifest.json','images.tar','railshot.yaml','verdict.json'):
                 info = zipfile.ZipInfo(name); info.external_attr = (stat.S_IFLNK | 0o777) << 16
                 output.writestr(info, '/private/credential')
         with self.assertRaises(ValueError): publisher.unpack(archive, self.root / 'links')
+
+    def test_historical_bundle_dispatch_and_unpack_preserve_filename_and_hash(self):
+        (self.source / 'railshot.yaml').rename(self.source / 'jasmin.yaml')
+        manifest = json.loads((self.source / 'manifest.json').read_bytes())
+        manifest['files']['jasmin.yaml'] = manifest['files'].pop('railshot.yaml')
+        (self.source / 'manifest.json').write_text(json.dumps(manifest))
+        approved = codebuild.bundle.file_hash(self.source / 'manifest.json')
+        with patch.object(codebuild, 'preflight'), patch.object(codebuild, 'aws', return_value={'build': {'id': self.build_id}}):
+            codebuild.start(self.config, self.source, self.job, self.job_id, approved)
+        destination = self.root / 'unpacked'
+        publisher.unpack(self.job / 'bundle.zip', destination)
+        self.assertEqual(codebuild.bundle.verify(destination), manifest)
+        self.assertEqual(codebuild.bundle.file_hash(destination / 'manifest.json'), approved)
+        self.assertEqual((destination / 'jasmin.yaml').read_bytes(), (self.source / 'jasmin.yaml').read_bytes())
 
     def test_project_drift_is_blocked_before_upload(self):
         project = {'sourceVersion': self.config['platform_ref'], 'serviceRole': self.config['role_arn'],

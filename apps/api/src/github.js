@@ -12,7 +12,7 @@ export class ServiceError extends Error {
 export function createDeploymentService(config, fetchImpl = fetch) {
   const { token, owner = 'Jasmin-Softbank', repo = 'railshot-apps', ref = 'main', tenant = 'demo', workflow = 'railshot-deploy.yml', targetId } = config;
   if (!token) throw new Error('GITHUB_TOKEN을 설정하세요.');
-  if (typeof tenant !== 'string' || !TENANT_NAME.test(tenant)) throw new Error('JASMIN_TENANT가 잘못되었습니다.');
+  if (typeof tenant !== 'string' || !TENANT_NAME.test(tenant)) throw new Error('RAILSHOT_TENANT가 잘못되었습니다.');
   if (typeof targetId !== 'string' || !TARGET_ID.test(targetId)) throw new Error('RAILSHOT_TARGET_ID에 운영자가 준비할 대상 ID를 설정하세요.');
   if (config.targetIds !== undefined && !Array.isArray(config.targetIds)) throw new Error('등록된 CI target 목록이 잘못되었습니다.');
   const targetIds = new Set(config.targetIds || [targetId]);

@@ -8,7 +8,7 @@ import { readApiToken } from './access.js';
 import { cookieToken, SESSION_COOKIE } from './sessions.js';
 
 const skipped = new Set(['.git', 'node_modules', '.DS_Store', '__MACOSX']);
-const defaultUrl = process.env.JASMIN_API_URL || 'http://127.0.0.1:4173';
+const defaultUrl = process.env.RAILSHOT_API_URL || process.env.JASMIN_API_URL || 'http://127.0.0.1:4173';
 
 function authorization() {
   const token = readApiToken();
@@ -51,7 +51,7 @@ export function inferredAppName(source) {
 
 async function sendDeploy(form, baseUrl) {
   const response = await sessionFetch(new URL('/api/deploy', baseUrl), {
-    method: 'POST', headers: { 'x-jasmin-request': 'deploy', ...authorization() }, body: form, redirect: 'error',
+    method: 'POST', headers: { 'x-railshot-request': 'deploy', 'x-jasmin-request': 'deploy', ...authorization() }, body: form, redirect: 'error',
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `API ${response.status}`);

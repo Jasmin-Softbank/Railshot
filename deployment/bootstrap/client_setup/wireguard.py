@@ -38,7 +38,7 @@ def _write_private(path, text):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if path.parent.stat().st_uid != os.geteuid() or path.parent.stat().st_mode & 0o022:
         raise RuntimeError('설정 디렉터리는 실행 계정 소유이며 다른 사용자가 쓸 수 없어야 합니다.')
-    fd, temporary = tempfile.mkstemp(prefix='.jasmin-', dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.railshot-', dir=path.parent)
     try:
         with os.fdopen(fd, 'w') as stream:
             os.fchmod(stream.fileno(), 0o600)

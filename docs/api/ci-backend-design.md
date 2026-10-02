@@ -39,7 +39,7 @@
 
 배포·환경은 `Idempotency-Key`가 필수다. 공유 workspace의 자원 종류별로 같은 키·같은 입력이면 같은 자원을 반환하고, 입력이 달라지면 409다. queued/running은 202, 완료·실패·차단·unknown은 200과 기존 자원·Location을 반환한다. 빌드 생성에는 이 멱등 계약이 없으므로 응답 유실 시 자동 재접수하지 않는다.
 
-`/healthz`는 프로세스와 CI 설정 여부를 보여 주며 클라우드·CD·SSH 준비를 보증하지 않는다. 기존 `POST /api/deploy`, `GET /api/runs/{run_id}`는 응답 필드와 `x-jasmin-request: deploy` 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·실행 한도·run binding을 공유하므로 이 workspace가 접수하지 않은 외부 run을 조회하지 않는다. legacy deploy의 의미는 CI 제출이다.
+`/healthz`는 프로세스와 CI 설정 여부를 보여 주며 클라우드·CD·SSH 준비를 보증하지 않는다. 기존 `POST /api/deploy`, `GET /api/runs/{run_id}`는 응답 필드와 `x-railshot-request: deploy` (legacy: `x-jasmin-request: deploy`) 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·실행 한도·run binding을 공유하므로 이 workspace가 접수하지 않은 외부 run을 조회하지 않는다. legacy deploy의 의미는 CI 제출이다.
 
 ## 3. 영속 기록과 성공 조건
 

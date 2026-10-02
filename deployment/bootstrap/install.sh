@@ -2,8 +2,8 @@
 set +x
 set -euo pipefail
 # 등록 키를 의존성 설치 하위 프로세스에 전달하지 않습니다.
-ENROLLMENT_TOKEN="${JASMIN_ENROLLMENT_TOKEN:-}"
-unset JASMIN_ENROLLMENT_TOKEN
+ENROLLMENT_TOKEN="${RAILSHOT_ENROLLMENT_TOKEN:-${JASMIN_ENROLLMENT_TOKEN:-}}"
+unset RAILSHOT_ENROLLMENT_TOKEN JASMIN_ENROLLMENT_TOKEN
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_RUN=false
 INSTALL_DEPS=false
@@ -47,6 +47,6 @@ PY
 fi
 if [[ -x "${SCRIPT_DIR}/.venv/bin/python" ]]; then PYTHON="${SCRIPT_DIR}/.venv/bin/python"; fi
 export PYTHONPATH="${SCRIPT_DIR}"
-if [[ -n "$ENROLLMENT_TOKEN" ]]; then export JASMIN_ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN"; fi
+if [[ -n "$ENROLLMENT_TOKEN" ]]; then export RAILSHOT_ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN"; fi
 unset ENROLLMENT_TOKEN
 exec "$PYTHON" -m client_setup.main "$@"

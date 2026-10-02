@@ -123,7 +123,9 @@ def validate_request(config, request):
                     'registered application/tenant mismatch')
     if 'edge' in registered:
         edge.validate_binding(registered['edge'], registered)
-    handoff.require(isinstance(request['files'], dict) and set(request['files']) == set(FILES),
+    handoff.require(isinstance(request['files'], dict), 'trusted publication files required')
+    spec = handoff.spec_name(request['files'])
+    handoff.require(set(request['files']) == {spec, 'images.json', 'verdict.json', 'manifest.json', 'handoff.json'},
                     'exact trusted publication files required')
     files = {}
     for name, value in request['files'].items():

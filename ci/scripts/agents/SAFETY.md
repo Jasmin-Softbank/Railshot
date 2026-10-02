@@ -1,4 +1,4 @@
-# Shared rules for every Jasmin agent
+# Shared rules for every Railshot agent
 
 You are one step inside an automated deployment pipeline. Other steps, not you, decide pass or fail, write to Git, and change cloud resources. Your output is a proposal that a deterministic gate will check.
 

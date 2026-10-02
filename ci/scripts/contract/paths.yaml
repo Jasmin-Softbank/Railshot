@@ -8,7 +8,8 @@ writable:
   - "**/Dockerfile"
   - .dockerignore
   - "**/.dockerignore"
-  - .jasmin/**
+  - .railshot/**
+  - .jasmin/**  # Existing uploaded specifications remain repairable; new specs use .railshot.
 
 # Never edit, rename or delete. Listed separately so the gate can give a precise error.
 protected:
@@ -36,7 +37,7 @@ protected:
   - .cursorrules
 
 # Additive only when a trusted operator selects --repair-scope source.
-# Uploaded .jasmin specifications cannot grant this scope.
+# Uploaded workload specifications cannot grant this scope.
 source_writable:
   - "**/*.py"
   - "**/*.js"

@@ -15,7 +15,7 @@ import gate
 
 class SemanticsTest(unittest.TestCase):
     def setUp(self):
-        self.spec = {"apiVersion": "jasmin/v0", "app": "memo", "services": [
+        self.spec = {"apiVersion": "railshot/v0", "app": "memo", "services": [
             {"name": "api", "build": {"dockerfile": "Dockerfile"}, "port": 8000, "route": "/"}]}
 
     def test_unsupported_autoscaling_and_invalid_static_inputs_are_rejected(self):
@@ -51,8 +51,8 @@ class SemanticsTest(unittest.TestCase):
             mutation(self.spec)
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                (root / ".jasmin").mkdir()
-                (root / ".jasmin/jasmin.yaml").write_text(yaml.safe_dump(self.spec))
+                (root / ".railshot").mkdir()
+                (root / ".railshot/railshot.yaml").write_text(yaml.safe_dump(self.spec))
                 (root / ".dockerignore").write_text(".git\n.env*\n")
                 with patch.object(gate, "check_dockerfile", return_value=[]), self.assertRaises(gate.OperationError) as caught:
                     gate.l1(root)
@@ -62,8 +62,8 @@ class SemanticsTest(unittest.TestCase):
     def test_static_l1_works_without_deployment_renderer(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".jasmin").mkdir()
-            (root / ".jasmin/jasmin.yaml").write_text(yaml.safe_dump(self.spec))
+            (root / ".railshot").mkdir()
+            (root / ".railshot/railshot.yaml").write_text(yaml.safe_dump(self.spec))
             (root / ".dockerignore").write_text(".git\n.env*\n")
             before = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
             with patch.object(gate, "check_dockerfile", return_value=[]):
@@ -71,6 +71,21 @@ class SemanticsTest(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertEqual(spec, self.spec)
             self.assertEqual(before, sorted(str(p.relative_to(root)) for p in root.rglob("*")))
+
+    def test_legacy_spec_remains_valid_and_duplicate_spec_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '.jasmin').mkdir()
+            legacy = {**self.spec, 'apiVersion': 'jasmin/v0'}
+            (root / '.jasmin/jasmin.yaml').write_text(yaml.safe_dump(legacy))
+            (root / '.dockerignore').write_text('.git\n.env*\n')
+            with patch.object(gate, 'check_dockerfile', return_value=[]):
+                self.assertEqual(gate.l1(root), ([], legacy))
+                (root / '.railshot').mkdir()
+                (root / '.railshot/railshot.yaml').write_text(yaml.safe_dump(self.spec))
+                errors, spec = gate.l1(root)
+            self.assertIsNone(spec)
+            self.assertIn('exactly one', errors[0])
 
 
 if __name__ == "__main__":

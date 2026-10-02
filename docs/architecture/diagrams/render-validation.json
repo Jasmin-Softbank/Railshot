@@ -42,15 +42,18 @@
     },
     {
       "name": "data-flow",
-      "source_sha256": "e664e81aeec4e03bb49b32911bd1d58732365e9f098ab40b48924fd90e06fa89",
-      "svg_sha256": "d3dbf4f9b7b246f6ac41fda0662cf5fb1cb66b3bc388cc61ddaaada7eec6f163",
-      "png_sha256": "a92603204c10a9894b27d99738d3e4d7ed3b6dc97254b2aebaab1984e8605647",
-      "svg_viewbox": "4 4 758.9817504882812 1863.131103515625",
+      "source_sha256": "76d88f7a04f63c4311fb1fc2f605f42b57885e093d3c06145738dcb25889e790",
+      "svg_sha256": "e322e9887434c610b09668b37802091a973e2cba04de65c4c19d0e1443ca4d09",
+      "png_sha256": "5cc73e6865a6551554c1dd55b47e61eba0eb563dfb0ec0f2012f36b4edc9f633",
+      "svg_viewbox": "4 4 758.9817504882812 1863.5306396484375",
       "png_width": 1518,
       "png_height": 3728,
       "body_source_match": true,
       "syntax_render": "passed",
-      "visual_review": "Labels, containment, edge targets and clipping inspected in rendered PNG; no overlap or clipping observed after revision."
+      "visual_review": "Railshot bundle filename, all labels, edge targets and clipping inspected in regenerated PNG. No overlap or clipping observed; historical implementation basis is unchanged.",
+      "naming_review_date": "2026-10-03",
+      "naming_source_basis": "9f809d8",
+      "render_command": "mmdc 11.12.0 -i data-flow.mmd -o data-flow.{svg,png} -s 2; Chrome headless; source init block owns theme/layout"
     },
     {
       "name": "user-flow",

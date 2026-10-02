@@ -70,6 +70,19 @@
       Existing foreign data or mixed member state requires explicit recovery/member replacement.
       This role never wipes or adds members automatically.
 
+- name: Read installed service description for naming compatibility
+  ansible.builtin.slurp:
+    src: /etc/systemd/system/etcd.service
+  register: etcd_installed_service
+  when: etcd_member_state.stat.exists
+
+- name: Preserve only the legacy display label on initialized members
+  ansible.builtin.set_fact:
+    etcd_legacy_service_description: >-
+      {{ etcd_member_state.stat.exists and
+         'Description=Jasmin managed etcd' in
+         (etcd_installed_service.content | default('') | b64decode).splitlines() }}
+
 - name: Detect existing configuration changes without writing
   ansible.builtin.template:
     src: '{{ item.src }}'

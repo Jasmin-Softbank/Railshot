@@ -124,6 +124,16 @@ def test_etcd_topology_and_mutual_tls(tmp_path):
         assert config[key]["key-file"] == "/etc/etcd/tls/server.key"
 
 
+@pytest.mark.parametrize('legacy,label', [(False, 'Railshot'), (True, 'Jasmin')])
+def test_etcd_service_display_preserves_existing_description(tmp_path, legacy, label):
+    result, output = render(tmp_path, 'etcd', 'etcd.service.j2', {'etcd_legacy_service_description': legacy})
+    assert result.returncode == 0, result.stdout + result.stderr
+    service = output.read_text()
+    assert f'Description={label} managed etcd\n' in service
+    assert 'ExecStart=/usr/bin/etcd --config-file=/etc/etcd/jasmin.yml\n' in service
+    assert 'ReadWritePaths=/var/lib/etcd/jasmin\n' in service
+
+
 @pytest.mark.parametrize('status,payload,ready', [
     (404, '404 page not found\n', False),
     (200, {'members': []}, False),

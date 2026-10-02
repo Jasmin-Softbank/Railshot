@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Jasmin workload spec v0 (.jasmin/jasmin.yaml)",
+  "title": "Railshot workload spec v0 (.railshot/railshot.yaml)",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,7 +10,7 @@
   ],
   "properties": {
     "apiVersion": {
-      "const": "jasmin/v0"
+      "enum": ["railshot/v0", "jasmin/v0"]
     },
     "app": {
       "type": "string",

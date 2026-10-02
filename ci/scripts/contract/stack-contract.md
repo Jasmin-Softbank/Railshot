@@ -1,4 +1,4 @@
-# Jasmin Stack Contract v0
+# Railshot Stack Contract v0
 
 This file describes the current CI workload admission contract. Agents propose changes and deterministic gates decide CI success. It does not select or install a customer runtime, ingress, database operator or CD controller.
 
@@ -8,7 +8,9 @@ This file describes the current CI workload admission contract. Agents propose c
 |---|---|
 | `Dockerfile`, `<service>.Dockerfile` | Container build for a service |
 | `.dockerignore` | Keeps secrets, VCS data and build junk out of the context |
-| `.jasmin/jasmin.yaml` | Workload spec (`schemas/jasmin.schema.json`) |
+| `.railshot/railshot.yaml` | Workload spec (`schemas/railshot.schema.json`) |
+
+New specs use `apiVersion: railshot/v0`. Existing `.jasmin/jasmin.yaml` and `jasmin/v0` remain readable and may be repaired in place. A workspace must contain exactly one spec. New bundles use `railshot.yaml`; readers also verify historical `jasmin.yaml` bundles without rewriting their bytes or hashes.
 
 By default only these packaging files are writable. A trusted operator may enable bounded source repair for observed Q checker failures; `paths.yaml` remains the exact authority and tests, manifests, locks, migrations, policy and generated files stay protected. Agents do not produce Kubernetes manifests, Terraform values, DNS records or certificates; those belong to separate target owners.
 
@@ -19,7 +21,7 @@ By default only these packaging files are writable. A trusted operator may enabl
 | C1 | Builds with `docker buildx build --platform linux/amd64` from the declared context. | L2 build |
 | C2 | Base images come from the allowlist in §5. The final stage is a slim, distroless or unprivileged variant. L2 records built image IDs for scan, runtime and artifact release; automatic rewriting of FROM tags to digests is not implemented. | L1 static / L2 evidence |
 | C3 | The final stage sets `USER` to a numeric non-root UID of 10000 or higher (default 65532). | L1, L4 |
-| C4 | The process listens on `0.0.0.0` and on the port declared in `jasmin.yaml` (1024–65535). | L3 readiness |
+| C4 | The process listens on `0.0.0.0` and on the port declared in `railshot.yaml` (1024–65535). | L3 readiness |
 | C5 | The declared health path answers HTTP 2xx or 3xx within 60 s of start, without auth and without side effects. The platform probe decides; a Dockerfile `HEALTHCHECK` is rejected by L1. | L3 readiness |
 | C6 | No secrets in the image, build args or context: no `.env*`, keys, tokens or credential files. `.dockerignore` excludes `.git`, `.env*`, `node_modules`, caches and build outputs. | L0, L4 |
 | C7 | No CRITICAL vulnerability that has a fixed version. Fix it by moving to a newer base image or package version; ignore files are forbidden. | L4 conformance |
