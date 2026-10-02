@@ -88,7 +88,8 @@ python3 observability/render.py observability/.local/target.json observability/.
 | `argocd_metrics` | 기본 null. 필요할 때 기존 Argo controller 메트릭의 사설/VPN IPv4:port |
 
 1. k3s 노드가 한 대인지, Cilium 등 NetworkPolicy 구현이 동작하는지 확인합니다.
-2. **적용 전** AWS SG 또는 호스트 방화벽에서 두 NodePort를 관측 VM 송신 주소에만 허용합니다.
+2. **적용 전** AWS/GCP/OpenStack 방화벽과 필요한 호스트 방화벽에서 두 NodePort 및
+   노드 exporter의 native TCP 9100 접근을 관측 VM 송신 주소 `/32`로 제한합니다.
    NodePort는 여러 노드 인터페이스에서 열릴 수 있으므로 퍼블릭 서브넷을 안전 경계로 보지 않습니다.
    VPN 내부에서도 관측 송신 주소만 허용합니다. 규칙을 이 모듈이 자동 변경하지 않습니다.
 3. 관리 kubeconfig를 가진 실행기에서 생성된 `cluster.json`을 적용합니다. 관측 VM에 관리자
@@ -133,11 +134,15 @@ cat observability/.local/aws-demo/secrets/grafana_password
 
 - Grafana 3000, Prometheus 9090은 관측 VM loopback에만 바인딩합니다. Blackbox 9115는
   Docker 내부에서만 접근합니다. Blackbox는 대상 URL을 받아 요청할 수 있으므로 공개 금지입니다.
-- Exporter NodePort는 SG/호스트 방화벽과 `observer-only` NetworkPolicy로 제한합니다.
+- Exporter NodePort와 native TCP 9100은 SG/호스트 방화벽에서 관측 송신 주소로 제한합니다.
+  `observer-only` NetworkPolicy는 cluster-metrics Pod를 보호하지만 hostNetwork node-metrics의
+  접근 제한을 대신하지 않습니다. 9100 접근 범위를 검증하기 전에 exporter를 적용하지 않습니다.
   CNI/NAT 처리에 따라 관측 주소가 달라질 수 있습니다. 수집 실패를 해결하기 위해 `/0`을 열지 않습니다.
 - kube-state-metrics는 nodes/pods/deployments의 list/watch만 가능합니다. Secret 읽기와 쓰기 권한은 없습니다.
-- node-exporter는 비특권/non-root이며 hostNetwork/hostPID를 사용하지 않습니다. CPU/memory/filesystem만
-  켭니다. 호스트 `/proc`, `/sys`, `/`를 읽기 전용 마운트하므로 신뢰된 운영자용 설치입니다.
+- node-exporter는 비특권/non-root이며 hostPID를 사용하지 않습니다. CPU/memory/filesystem/netdev를
+  켜고, 노드 네트워크 네임스페이스의 실제 인터페이스를 읽도록 hostNetwork를 사용합니다.
+  9100 listener는 등록된 노드 사설 IP에만 바인딩합니다. Pod 네임스페이스의 트래픽을 노드 값으로
+  표시하지 않습니다. 호스트 `/proc`, `/sys`, `/`를 읽기 전용 마운트하므로 신뢰된 운영자용 설치입니다.
   Pod Security restricted 정책은 hostPath를 거부할 수 있습니다. 별도 검토 없이 정책을 낮추지 않습니다.
 - 출력 루트와 secrets 디렉터리는 Linux에서 0700입니다. secret 파일은 컨테이너의 비루트 UID가
   읽을 수 있도록 0444이며 0700 부모가 호스트 접근을 제한합니다. Windows ACL 보호를 보장하지 않으므로
@@ -154,10 +159,12 @@ cat observability/.local/aws-demo/secrets/grafana_password
 | HTTP | `probe_success`가 정확한 URL에 대해 1. 잘못된 health 경로는 0 |
 | 실패 구분 | 테스트 exporter를 중단하면 수집 실패/데이터 없음. 앱 정상으로 유지하지 않음 |
 | 배포 장애 | 전용 샘플의 잘못된 이미지에서 대기 사유/replica 부족 표시. 운영 앱 장애 주입 금지 |
-| 접근 제한 | 관측 VM은 두 NodePort 접근 가능, 허용하지 않은 호스트는 접근 불가 |
+| 접근 제한 | 관측 VM은 두 NodePort 접근 가능. 허용하지 않은 호스트는 두 NodePort와 native 9100 접근 불가 |
 
-수집 성공(`up`)과 검사 성공(`probe_success`)을 각각 확인합니다. 첫 CPU rate 계산은 최소 두 번
-수집이 필요합니다. Pod 재시작 증가량은 exporter가 놓친 짧은 Pod 수명을 완전히 복원하지 못합니다.
+수집 성공(`up`)과 검사 성공(`probe_success`)을 각각 확인합니다. 첫 CPU 및 네트워크 rate 계산은 최소 두 번
+수집이 필요합니다. 제품 API의 네트워크 수신·송신은 loopback을 제외한 노드 인터페이스의
+최근 2분 평균 bytes/s 합계이며 가상 인터페이스도 포함합니다. Pod 재시작 증가량은 exporter가
+놓친 짧은 Pod 수명을 완전히 복원하지 못합니다.
 플랫폼 API는 기본 localhost 바인딩이며, 명시적 Host·token 설정을 갖춘 비로컬 모드도 지원합니다.
 이 관측 구성은 API `/healthz`를 자동 공개하거나 수집하지 않습니다.
 승인된 접근 경로가 생기면 `probe_urls`에 추가하되 설정 유무와 실제 CI 실행 가능 여부를 구분합니다.

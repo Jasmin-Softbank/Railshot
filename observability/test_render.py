@@ -77,7 +77,12 @@ class ConfigurationTests(unittest.TestCase):
             if obj['kind'] not in ('Deployment', 'DaemonSet'):
                 continue
             pod = obj['spec']['template']['spec']
-            self.assertFalse(pod.get('hostNetwork', False))
+            self.assertEqual(pod.get('hostNetwork', False), obj['kind'] == 'DaemonSet')
+            if obj['kind'] == 'DaemonSet':
+                self.assertEqual(pod['dnsPolicy'], 'ClusterFirstWithHostNet')
+                args = pod['containers'][0]['args']
+                self.assertIn('--collector.netdev', args)
+                self.assertIn(f"--web.listen-address={self.config['node_ip']}:9100", args)
             self.assertFalse(pod.get('hostPID', False))
             for container in pod['containers']:
                 self.assertFalse(container['securityContext']['allowPrivilegeEscalation'])

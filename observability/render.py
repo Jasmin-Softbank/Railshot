@@ -96,8 +96,9 @@ def cluster(config):
            'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
            'readinessProbe': {'httpGet': {'path': '/readyz', 'port': 8081}, 'periodSeconds': 10}}
     node = {'name': 'metrics', 'image': 'quay.io/prometheus/node-exporter:v1.12.1',
-            'args': ['--path.procfs=/host/proc', '--path.sysfs=/host/sys', '--path.rootfs=/host/root',
-                     '--collector.disable-defaults', '--collector.cpu', '--collector.meminfo', '--collector.filesystem',
+            'args': [f"--web.listen-address={config['node_ip']}:9100",
+                     '--path.procfs=/host/proc', '--path.sysfs=/host/sys', '--path.rootfs=/host/root',
+                     '--collector.disable-defaults', '--collector.cpu', '--collector.meminfo', '--collector.filesystem', '--collector.netdev',
                      '--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/(docker|containerd|kubelet|rancher))($|/)'],
             'ports': [{'containerPort': 9100}], 'securityContext': security,
             'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
@@ -118,6 +119,9 @@ def cluster(config):
         if kind == 'Deployment':
             pod['serviceAccountName'] = 'cluster-metrics'
         else:
+            # netdev reads this network namespace; a Pod namespace would report the exporter itself.
+            # The operator must restrict native 9100 as well as the NodePort before applying.
+            pod.update(hostNetwork=True, dnsPolicy='ClusterFirstWithHostNet')
             pod['automountServiceAccountToken'] = False
             pod['volumes'] = [{'name': n, 'hostPath': {'path': p, 'type': 'Directory'}}
                               for n, p in [('proc', '/proc'), ('sys', '/sys'), ('root', '/')]]
