@@ -57,3 +57,5 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 컨테이너로 옮길 때에는 profile에 저장한 절대 경로가 컨테이너 안에서도 같은 파일을 가리키도록 mount하고, 환경·Terraform·API 상태에는 필요한 쓰기 권한을 제공한다. 자격은 런타임의 비공개 파일·환경으로 공급하며 이미지나 HTTP 입력·응답에 포함하지 않는다. 원격 API를 활성화하려면 단일 실행자와 billing ledger의 권위를 먼저 인수해야 한다. 로컬 `billing.sqlite3`를 복제하고 양쪽 실행자를 동시에 가동하는 방식은 지원하지 않는다. 현재 문서 검증 상태는 `not_deployed`이며 VM 실행·DB readiness·대상 등록·migration·공개 앱 HTTP 검증의 live 완료 여부는 각각 실행 기록으로 확인해야 한다.
 
 기존 `POST /api/deploy`와 `GET /api/runs/{run_id}`는 응답 필드와 `x-jasmin-request: deploy` 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·admission·run binding을 공유하므로 이 workspace에서 접수하지 않은 과거 또는 외부 run ID는 조회하지 않는다. v1 배포와 달리 legacy deploy는 CI 제출이다.
+
+현재 운영 메트릭, 수집 시각과 실패 상태는 [제품 관측 계약](observations.md)을 따른다.

@@ -3,6 +3,7 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { createProductStore } from './product-store.js';
 import { APP_NAME, TARGET_ID } from './contract.js';
 import { validateFiles } from './archive.js';
+import { createMetricsObserver } from './metrics.js';
 
 export class ProductError extends Error {
   constructor(status, code, message, { outcomeUnknown = false, retryable = false } = {}) {
@@ -19,14 +20,14 @@ export function idempotencyKey(value) {
   return value;
 }
 function publicRecord(record) {
-  const { fingerprint, key, source, source_digest, source_bytes, legacy, ...visible } = record;
+  const { fingerprint, key, source, source_bytes, legacy, ...visible } = record;
   return structuredClone(visible);
 }
 function checkFree(state) {
   if (Object.values(state.operations).some(active)) throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
 }
 
-export async function createProductService({ service, directory, target, deployPublished, environmentAdapter, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, deployPublished, environmentAdapter, observeMetrics = createMetricsObserver(), pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const store = await createProductStore(directory);
   const abort = new AbortController();
   function checkCapacity(state, sourceBytes = 0) {
@@ -137,17 +138,18 @@ export async function createProductService({ service, directory, target, deployP
       for (;;) {
         if (abort.signal.aborted) return;
         const build = await readBuild(runId);
-        const ci = { run_id: runId, state: build.status, steps: build.steps ?? [], publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null, producer_attempt: build.publication?.producer_attempt || null };
+        const ci = { run_id: runId, state: build.status, steps: build.steps ?? [], images: build.publication?.images || {}, publication_artifact_id: build.publication?.artifact_id ? String(build.publication.artifact_id) : null, producer_attempt: build.publication?.producer_attempt || null };
         await update(record.id, { ci });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
           await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
           const deploy = record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
           const result = await deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
-            sourceCommit: build.source_commit, publication: build.publication, signal: abort.signal });
+            sourceCommit: build.source_commit, publication: build.publication, signal: abort.signal,
+            onProgress: (progress) => update(record.id, { stage: progress.cd?.deployed ? 'http' : 'cd', cd: progress.cd, public_http: progress.public_http }) });
           const succeeded = result.cd?.deployed === true && typeof result.cd.revision === 'string' && result.cd.revision.length > 0 && result.public_http?.state === 'succeeded' && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
           const status = succeeded ? 'succeeded' : result.error?.outcome_unknown ? 'unknown' : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
-          await update(record.id, { status, stage: succeeded ? 'complete' : 'cd', cd: result.cd, public_http: result.public_http,
+          await update(record.id, { status, stage: succeeded ? 'complete' : result.cd?.deployed ? 'http' : 'cd', cd: result.cd, public_http: result.public_http,
             url: succeeded ? result.public_http.url : null, error: succeeded ? null : operationError(result.error?.code || 'CD_UNVERIFIED', status === 'unknown') });
           return;
         }
@@ -198,7 +200,10 @@ export async function createProductService({ service, directory, target, deployP
       });
       return publicRecord(reserved.record);
     },
-    getDeployment(id) { return publicRecord(find('deployments', id)); },
+    async getDeployment(id) {
+      const record = publicRecord(find('deployments', id));
+      return { ...record, observation: await observeMetrics(record) };
+    },
     profiles() { return environmentAdapter?.profiles() || []; },
     async createPlan(input) {
       if (!environmentAdapter) throw unavailable();

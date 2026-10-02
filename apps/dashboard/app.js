@@ -48,6 +48,8 @@ try { current = JSON.parse(localStorage.getItem('railshot.lastExecution')); } ca
 if (!current || !/^(builds|deployments)$/.test(current.kind) || !/^[a-zA-Z0-9._-]{1,128}$/.test(current.id || '')) current = null;
 let timer;
 let pollController;
+let lastReadAt = null;
+let observationError = false;
 const requests = new Set();
 
 function invalidateReview() {
@@ -291,6 +293,7 @@ function safeLink(selector, value, enabled, github = false) {
 function renderRun() {
   document.querySelector('#run-panel').hidden = false;
   const label = labels[current.status] || '실행 상태 확인 중';
+  document.querySelector('#run-freshness').textContent = lastReadAt ? `마지막 상태 조회: ${new Date(lastReadAt).toLocaleString()}${observationError ? ' · 조회 실패, 마지막 기록입니다.' : ''}` : '서버 상태 조회 전';
   document.querySelector('#run-meta').textContent = `${current.app || '앱'} · ${current.id} · ${current.target_id || ''}`;
   document.querySelector('#run-state').textContent = label;
   document.querySelector('#run-message').textContent = current.error?.message || current.message || (activeRun()
@@ -303,14 +306,28 @@ function renderRun() {
     item.textContent = `${({ loop: '앱 검사 및 수정', release: '검증 이미지 게시' })[step.key] || step.key}: ${step.conclusion || step.status}`;
     return item;
   }));
-  for (const [name, value] of [['앱 적용', current.cd?.state], ['공개 URL', current.public_http?.state]]) {
+  if (current.environment) {
+    const item = document.createElement('li'); item.textContent = `환경 준비: ${current.environment.stage || ''} · ${current.environment.status}`;
+    document.querySelector('#run-steps').prepend(item);
+  }
+  for (const [name, value] of [['DB migration', current.cd?.migration?.state], ['앱 적용', current.cd?.state], ['공개 URL', current.public_http?.state]]) {
     if (value) { const item = document.createElement('li'); item.textContent = `${name}: ${value}`; document.querySelector('#run-steps').append(item); }
   }
   safeLink('#actions-link', current.actions_url || current.ci?.actions_url, true, true);
-  safeLink('#application-link', current.url || current.public_http?.url, current.kind === 'deployments' && current.status === 'succeeded' && Boolean(current.public_http?.verified_at));
+  const canOpen = current.kind === 'deployments' && current.status === 'succeeded' && current.public_http?.state === 'succeeded' && Boolean(current.public_http?.verified_at);
+  for (const selector of ['#application-link', '#monitor-application-link']) safeLink(selector, current.public_http?.site_url || current.url || current.public_http?.url, canOpen);
+  const binding = [`앱 / 대상: ${current.app || '—'} / ${current.target_id || '—'}`, `배포: ${current.id}`,
+    `현재 단계: ${current.stage || 'ci'}`, `CI run: ${current.ci?.run_id || (current.kind === 'builds' ? current.id : '대기')}`,
+    `소스 commit: ${current.source_commit || '대기'}`, `입력 SHA-256: ${current.source_digest || '미제공'}`,
+    `이미지: ${Object.values(current.ci?.images || current.publication?.images || {}).join(', ') || '게시 대기'}`,
+    `배포 revision: ${current.cd?.revision || '대기'}`].join('\n');
+  document.querySelector('#run-binding').textContent = binding;
+  document.querySelector('#monitor-binding').textContent = binding;
+  document.querySelector('#monitor-steps').replaceChildren(...[...document.querySelector('#run-steps').children].map((item) => item.cloneNode(true)));
   document.querySelector('#history-summary').textContent = `${current.app || '앱'} · ${current.id}`;
   document.querySelector('#history-detail').textContent = label;
-  document.querySelector('#monitor-state').textContent = label;
+  document.querySelector('#monitor-state').textContent = observationError ? `${label} · 상태 조회 실패` : label;
+  renderMetrics();
   renderConsole();
 }
 
@@ -348,7 +365,7 @@ deployButton.addEventListener('click', async () => {
     const id = data.resource_id || data.id;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(id) || location !== `/api/v1/${draft.kind}/${encodeURIComponent(id)}`) throw new Error('실행 조회 주소를 확인하지 못했습니다.');
     current = { ...data, id, kind: draft.kind, app: draft.app, target_id: draft.targetId, status: data.status === 'accepted' ? 'queued' : data.status };
-    remember(); renderRun();
+    lastReadAt = null; observationError = false; remember(); renderRun();
     reviewed = null;
     document.querySelector('#run-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     refreshRun();
@@ -378,13 +395,14 @@ async function refreshRun() {
     const { data } = await request(`/api/v1/${current.kind}/${encodeURIComponent(current.id)}`, {}, controller);
     if (pollController !== controller) return;
     if (data.id !== current.id || (current.target_id && data.target_id !== current.target_id)) throw new Error('실행 또는 대상이 요청과 일치하지 않습니다.');
-    current = { ...current, ...data }; remember(); renderRun();
-    if (!terminal.has(current.status)) timer = setTimeout(refreshRun, 15000);
+    current = { ...current, ...data }; lastReadAt = Date.now(); observationError = false; remember(); renderRun();
+    if (!terminal.has(current.status) || current.kind === 'deployments') timer = setTimeout(refreshRun, 15000);
     else stopPolling();
   } catch (cause) {
     if (pollController !== controller) return;
-    stopPolling();
-    document.querySelector('#run-message').textContent = `${cause.name === 'AbortError' ? '상태 조회 시간이 초과되었습니다.' : cause.message} 상태 다시 조회를 누르세요.`;
+    stopPolling(); observationError = true; renderRun();
+    timer = setTimeout(refreshRun, 15000);
+    document.querySelector('#run-message').textContent = `${cause.name === 'AbortError' ? '상태 조회 시간이 초과되었습니다.' : cause.message} 15초 후 다시 조회합니다.`;
   }
 }
 document.querySelector('#stop-polling').addEventListener('click', () => { stopPolling(); document.querySelector('#run-message').textContent = '상태 조회를 중지했습니다. 서버의 실행은 계속됩니다.'; });
@@ -393,11 +411,33 @@ window.addEventListener('pagehide', () => { stopPolling(); for (const controller
 let consoleTab = 'work';
 function renderConsole() {
   const data = !current ? '실행을 시작하면 확인된 상태가 여기에 표시됩니다.'
-    : consoleTab === 'app' ? (current.public_http || '앱 로그 스트리밍은 제공하지 않습니다. 공개 HTTP 확인 결과가 여기에 표시됩니다.')
-    : consoleTab === 'environment' ? { target_id: current.target_id, cd: current.cd || null, public_http: current.public_http || null }
+    : consoleTab === 'app' ? { description: '배포 시점의 HTTP 검증 기록입니다. 현재 HTTP 상태는 위 probe를 확인하세요.', ...(current.public_http || {}) }
+    : consoleTab === 'environment' ? { target_id: current.target_id, environment: current.environment || null, cd: current.cd || null, observation: current.observation || null }
     : { status: current.status, stage: current.stage || 'ci', steps: current.steps || current.ci?.steps || [], error: current.error || null };
   document.querySelector('#console-output').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
+const metricLabels = { not_configured: '연결 전', unsupported: '대상 미지원', unavailable: '수집 연결 실패', collection_failed: '수집 실패', no_data: '데이터 없음', stale: '오래된 값' };
+function renderMetrics() {
+  const observation = current?.observation;
+  const bound = observation && observation.deployment_id === current.id && observation.target_id === current.target_id && observation.app === current.app;
+  for (const name of ['pods', 'cpu_percent', 'memory_percent', 'http']) {
+    const metric = bound ? observation.metrics?.[name] : null;
+    let state = observationError ? 'unavailable' : metric?.state || (current?.kind === 'builds' ? 'unsupported' : 'not_configured');
+    const time = Date.parse(metric?.observed_at);
+    if (state === 'ready' && (!Number.isFinite(time) || Date.now() - time > Math.min(observation.stale_after_seconds || 90, 90) * 1000 || time > Date.now() + 5000)) state = 'stale';
+    const field = document.querySelector(`#metric-${name}`);
+    field.dataset.state = state === 'ready' && name === 'http' && metric.value === 0 ? 'collection_failed' : state;
+    field.textContent = state !== 'ready' ? metricLabels[state] || '확인 불가'
+      : name === 'http' ? (metric.value === 1 ? '2xx 응답' : '검사 실패')
+      : name === 'pods' ? `${metric.value}개` : `${Number(metric.value).toFixed(1)}%`;
+    document.querySelector(`#metric-${name}-time`).textContent = Number.isFinite(time) ? `수집 ${new Date(time).toLocaleString()}` : '수집 시각 없음';
+  }
+  document.querySelector('#observation-status').textContent = observationError ? '관측 조회 실패 · 재시도 중'
+    : bound ? `조회 ${new Date(observation.checked_at).toLocaleTimeString()}` : '관측 연결 대기';
+}
+// Even after polling is stopped, expire old samples on screen.
+const freshnessTimer = setInterval(renderMetrics, 15000);
+window.addEventListener('pagehide', () => clearInterval(freshnessTimer));
 document.querySelectorAll('[data-console]').forEach((button) => button.addEventListener('click', () => {
   consoleTab = button.dataset.console;
   document.querySelectorAll('[data-console]').forEach((tab) => tab.setAttribute('aria-selected', String(tab === button)));
