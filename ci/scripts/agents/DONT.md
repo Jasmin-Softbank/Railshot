@@ -11,3 +11,14 @@ These rules apply to both adapter and fixer. Keep the existing report schema and
 - **Do not use an existing environment's success as proof of new-environment provisioning.** Require the new request/environment/target identities and their resource, registration, database/migration, image and public-response receipts from the outer executor. Reused VM state, old metrics or a prior deployment URL cannot close missing stages.
 
 Report a proposed change and its source evidence. Only the outer executor and deterministic checks can establish execution success.
+
+## Source repair syntax checked before any write
+
+These are platform validator constraints, not hints. Check them before returning a proposal.
+
+- A new `test` script must be exactly `node --test` (optionally followed by `.js`, `.mjs` or `.cjs` test paths), `vitest`, `vitest run`, either Vitest form with `--environment node` or `--environment jsdom`, or `jest`. No shell wrapper, test filter or extra Node flag such as `--experimental-strip-types` is supported. Do not change an existing real script.
+- For TypeScript with existing Vite, a `.test.mjs` can use Vite's `createServer` and `server.ssrLoadModule('/src/module.ts')` to test real modules while keeping `node --test`. Close the Vite server after the tests. Do not add a dependency if the installed toolchain already handles it.
+- New JavaScript tests must load application code through a literal relative `import`/`require`, `import(new URL('../src/module.mjs', import.meta.url))`, or Vite `server.ssrLoadModule('/src/module.ts')` (relative paths also work). An external package import alone does not count as application coverage.
+- Use `assert.strictEqual`, `assert.deepStrictEqual`, `assert.equal`, `assert.ok`, `assert.throws`, `assert.rejects`, or `expect(...)`. Named imports of these assertion functions from `node:assert/strict` are supported; aliases are not. The assertion must check an actual application result, not constants.
+- A missing `typecheck` script may be `tsc --noEmit` or `tsc -b`. Preserve the existing compiler/checker configuration and existing dependency versions; new public dependency versions must be exact.
+- Return at most eight files and 20,000 UTF-8 bytes. Existing tests, including tests from earlier applied attempts, are immutable. Passing this structural check is not test execution: every gate still runs.

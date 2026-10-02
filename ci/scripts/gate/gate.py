@@ -252,7 +252,7 @@ def validate_semantics(spec):
             raise ValueError("PORT and database role bindings are platform-owned; use DATABASE_URL secret for an external DB")
 
 
-def l1(ws):
+def l1(ws, *, app_id=None):
     import jsonschema
     try:
         spec_path = source_spec(ws)
@@ -265,6 +265,8 @@ def l1(ws):
         raise OperationError("GATE_CHECK_FAILED", component="gate", phase="L1", outcome="FAIL", cause=exc) from exc
     allow = yaml.safe_load((PLATFORM / "contract/catalog.yaml").read_text())["base_images"]
     errs = [e for s in spec["services"] for e in check_dockerfile(ws, s, allow)]
+    if app_id is not None and spec["app"] != app_id:
+        errs.insert(0, f"APP/spec.app mismatch: trusted app identity is {app_id}; set spec.app to this exact value")
     errs.extend(dockerignore_errors(ws / ".dockerignore"))
     try:
         validate_semantics(spec)
@@ -706,12 +708,14 @@ def finish_verdict(verdict, run, run_id, attempt_id, *, persist=True):
     return verdict
 
 
-def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None):
+def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None):
     observation_id = os.environ.get("RAILSHOT_RUN_ID") or str(uuid.uuid4())
     attempt_id = os.environ.get("RAILSHOT_ATTEMPT_ID")
     invalid = validate_layers(layers)
     if repair_scope not in {"packaging", "source"}:
         invalid = "INVALID_REPAIR_SCOPE"
+    if app_id is not None and (not isinstance(app_id, str) or not re.fullmatch(r'[a-z][a-z0-9-]{1,28}[a-z0-9]', app_id)):
+        invalid = "INVALID_APP_ID"
     inside_source = run.resolve() == ws.resolve() or ws.resolve() in run.resolve().parents
     if inside_source:
         invalid = "INVALID_RUN_PATH: gate artifacts must be outside the source workspace"
@@ -749,7 +753,7 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
                 errs, changed = l0(ws, paths, repair_scope=repair_scope, native_locks=native_locks)
                 result = {"layer": layer, "ok": not errs, "changed": changed, "errors": errs}
             elif layer == "L1":
-                errs, spec = l1(ws)
+                errs, spec = l1(ws, app_id=app_id)
                 if spec and selected_root is not None:
                     chosen = (ws / selected_root).resolve()
                     if not chosen.is_relative_to(ws.resolve()) or any(
@@ -840,7 +844,7 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
     status = ("PASS" if ok else "INCOMPLETE" if checks_ok else "UNKNOWN" if any(r["outcome"] == "UNKNOWN" for r in results)
               else "BLOCKED" if any(r["outcome"] == "BLOCKED" for r in results) else "FAIL")
     verdict = {"ok": ok, "release_eligible": ok, "checks_ok": checks_ok, "status": status, "layers": results, "failure": failure,
-               "source_sha256": after, "images": images, "image_ids": image_ids, "repair_scope": repair_scope, "selected_root": selected_root}
+               "source_sha256": after, "images": images, "image_ids": image_ids, "repair_scope": repair_scope, "selected_root": selected_root, "app_id": app_id}
     return finish_verdict(verdict, run, observation_id, attempt_id)
 
 
@@ -851,6 +855,7 @@ def main():
     ap.add_argument("--layers", default=",".join(ORDER))
     ap.add_argument("--quality-network", help="trusted CI network profile for Q/L2/L3; requires locally verified railshot-quality worker, never supplied by upload")
     ap.add_argument("--selected-root", help="trusted selected project path within the uploaded workspace")
+    ap.add_argument("--app-id", help="trusted operator app identity, never inferred from uploaded source")
     ap.add_argument("--repair-scope", choices=["packaging", "source"], default="packaging", help="trusted operator patch scope; uploaded specs cannot grant it")
     ap.add_argument("--native-locks", type=Path, help="trusted native-resolution receipt outside the source workspace")
     ap.add_argument("--self-test", action="store_true")
@@ -861,7 +866,7 @@ def main():
     if a.native_locks and a.native_locks.resolve().is_relative_to(ws):
         ap.error("native lock receipt must be outside the source workspace")
     v = run_gate(ws, Path(a.run).resolve(), a.layers.split(","), quality_network=a.quality_network,
-                 repair_scope=a.repair_scope, selected_root=a.selected_root,
+                 repair_scope=a.repair_scope, selected_root=a.selected_root, app_id=a.app_id,
                  native_locks=json.loads(a.native_locks.read_text()) if a.native_locks else None)
     print(json.dumps({"ok": v["ok"], "failure": v["failure"] and {k: v["failure"][k] for k in ("layer", "class", "signature")},
                       "status": v["status"], "error": v["error"], "event": v["event"],

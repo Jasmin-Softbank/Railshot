@@ -96,7 +96,9 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(meta['requested_reasoning_effort'], 'xhigh')
             self.assertEqual(meta['session_id'], 'thread-test')
             self.assertEqual(meta['turn_id'], 'turn-test')
-            self.assertEqual([event for event, _ in observed], ['sandbox.checked', 'session.starting', 'session.started', 'turn.started', 'session.finished'])
+            self.assertEqual([event for event, _ in observed if event != 'turn.progress'],
+                             ['sandbox.checked', 'session.starting', 'session.started', 'turn.started', 'session.finished'])
+            self.assertTrue(any(event == 'turn.progress' for event, _ in observed))
 
     def test_claude_sdk_offline_contract_and_read_guards(self):
         import claude_agent_sdk
@@ -612,6 +614,58 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(route['mode'], 'subscription')
         self.assertEqual(route['credential_home'], '/offline/account')
         self.assertNotIn('synthetic-never-log', json.dumps(route))
+
+
+class SDKProgressTest(unittest.TestCase):
+    def test_native_stream_progress_is_bounded_typed_and_content_free(self):
+        from openai_codex.models import Notification, ThreadTokenUsageUpdatedNotification
+        from openai_codex.generated.v2_all import ReasoningTextDeltaNotification
+        def stream():
+            for index in range(40):
+                yield Notification('item/reasoning/textDelta', ReasoningTextDeltaNotification.model_validate({
+                    'threadId': 'thread-test', 'turnId': 'turn-test', 'itemId': 'reasoning-test',
+                    'contentIndex': 0, 'delta': 'sentinel-private-reasoning'}))
+            tokens = {'inputTokens': 100, 'cachedInputTokens': 40, 'outputTokens': 20,
+                      'reasoningOutputTokens': 10, 'totalTokens': 120}
+            yield Notification('thread/tokenUsage/updated', ThreadTokenUsageUpdatedNotification.model_validate({
+                'threadId': 'thread-test', 'turnId': 'turn-test', 'tokenUsage': {'total': tokens, 'last': tokens}}))
+            yield Notification('item/reasoning/textDelta', ReasoningTextDeltaNotification.model_validate({
+                'threadId': 'other-thread', 'turnId': 'other-turn', 'itemId': 'other-item',
+                'contentIndex': 0, 'delta': 'sentinel-private-unrelated'}))
+            yield from native_turn(command=('sentinel-private-command-output', 0),
+                                   response='sentinel-private-response').stream()
+        with tempfile.TemporaryDirectory() as directory, patch.object(run_agent.time, 'monotonic', return_value=10):
+            run = Path(directory)
+            state, emit = run_agent.lifecycle(run, 'fixer', 'codex', 'gpt-6.1-sol')
+            emit('turn.started', sdk_status='running', turn_id='turn-test')
+            result = run_agent.collect_codex_turn(SimpleNamespace(id='turn-test', stream=stream), emit=emit)
+            self.assertEqual(result.status.value, 'completed')
+            events = [json.loads(line) for line in (run/'fixer-events.jsonl').read_text().splitlines()]
+            progress_events = [event for event in events if event['event_name'] == 'turn.progress']
+            self.assertEqual(2, len(progress_events))  # Burst is coalesced; terminal metadata is flushed.
+            progress = state['progress']
+            self.assertEqual(44, progress['sdk_event_count'])
+            self.assertEqual({'commandExecution': 1, 'agentMessage': 1}, progress['item_counts'])
+            self.assertEqual({'kind': 'agentMessage', 'status': 'completed'}, progress['last_item'])
+            self.assertEqual(120, progress['token_usage']['total_tokens'])
+            self.assertTrue(all(event['outcome'] == 'RUNNING' for event in progress_events))
+            self.assertNotIn('sentinel-private', (run/'fixer-events.jsonl').read_text())
+            self.assertNotIn('sentinel-private', (run/'fixer-session.json').read_text())
+
+    def test_progress_rejects_unknown_fields_and_invalid_counters(self):
+        valid = {'elapsed_ms': 100, 'sdk_event_count': 1, 'last_sdk_event_at_ms': 1000, 'item_counts': {}}
+        for mutation in ({'command': 'sentinel-private'}, {'sdk_event_count': True},
+                         {'item_counts': {'sentinel-private': 1}}, {'token_usage': {'prompt': 'sentinel-private'}},
+                         {'last_item': {'kind': 'reasoning', 'status': 'completed', 'text': 'sentinel-private'}},
+                         {'token_usage': {'total_tokens': -1}}):
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                run_agent.validated_progress({**valid, **mutation})
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            _, emit = run_agent.lifecycle(run, 'fixer', 'codex', 'gpt-6.1-sol')
+            with self.assertRaises(ValueError):
+                emit('turn.progress', progress={**valid, 'raw': 'sentinel-private'})
+            self.assertEqual('', (run/'fixer-events.jsonl').read_text())
 
 
 if __name__ == '__main__':
