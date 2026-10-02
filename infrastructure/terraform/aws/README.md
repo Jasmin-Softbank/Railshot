@@ -7,6 +7,7 @@ For a new customer node behind the separately managed ALB, set:
 | Input | Required selection |
 | --- | --- |
 | `account_id`, `region`, `ami_id` | Registered account, region and exact Canonical Ubuntu image |
+| `product_environment` | `true` for a new product target: creation tags `ProjectOwner=railshot-product` and `Target=<target_id>`. Default `false` preserves legacy tags. |
 | `vpc_id`, `subnet_id` | Both explicit existing IDs; subnet must belong to the VPC |
 | `http_enabled`, `https_enabled` | Both `false`; no direct public web ingress |
 | `additional_security_group_ids` | Reviewed groups for ALB NodePort and management/cluster traffic; same VPC |
@@ -19,6 +20,10 @@ For a new customer node behind the separately managed ALB, set:
 `node_security_group_id`, `vpc_id`, `subnet_id` and `instance_id` outputs support the separately owned edge rules. `node_descriptor.transport_ref` remains `ssm:<region>:<instance-id>`. It does not open TCP22; the operator uses authenticated SSM forwarding and a separately verified SSH host key. The managed node SSM role retains its explicit Parameter Store deny. When reusing an existing instance profile, its owner must verify the account, SSM permissions and equivalent Parameter Store deny; this module does not modify its IAM policies. Private SSH credentials and WireGuard keys are never Terraform inputs.
 
 `existing_instance_profile=null` preserves the managed IAM defaults through moved blocks. Setting it on an existing managed target would remove that target's IAM resources from this configuration and requires separate lifecycle review. Use reuse for new targets; do not switch existing targets merely to adopt this option.
+
+`product_environment=true` merges the two product tags into provider `default_tags`, retaining `Project=railshot` and `ManagedBy=terraform`. This covers the module-created instance, root EBS, separate data EBS, security group and optional EIP at creation; resource-specific name/retention tags remain. Existing VPCs, subnets, additional security groups and reused IAM profiles are read or referenced without retagging. Implicit EC2 network interfaces and inline security group rules are outside this tag contract. Leave this option false on legacy targets; enabling it on an existing target would plan tag changes.
+
+The pinned [AWS provider 6.66.0 creation implementation](https://github.com/hashicorp/terraform-provider-aws/blob/v6.66.0/internal/service/ec2/ec2_instance.go#L1152-L1195) sends provider defaults in both instance and volume `RunInstances.TagSpecifications`. This supplies the root EBS tags during creation. We omit `root_block_device.tags`, which the [provider documentation](https://github.com/hashicorp/terraform-provider-aws/blob/v6.66.0/website/docs/r/instance.html.markdown#ebs-ephemeral-and-root-block-devices) says applies through a separate post-creation API, and `volume_tags`, which conflicts with separately managed volume tags. Provider-version upgrades must preserve this creation-time behavior before using tag-restricted IAM policies. Source and offline checks establish the configuration contract; the new resources' actual tags still require readback after an approved apply.
 
 Legacy defaults remain: default VPC/subnet selection, public HTTP, EIP and read-only GitHub CI role. Moved blocks preserve their Terraform resource identities when these defaults stay enabled. Disabling resources on an existing target can destroy them and must be reviewed; this configuration is intended for a new customer target. Public IP addresses are egress references, not proof that an application URL exists. The legacy `app_domain` output is null when no EIP is requested.
 

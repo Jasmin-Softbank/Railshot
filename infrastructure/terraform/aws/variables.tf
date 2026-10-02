@@ -8,6 +8,13 @@ variable "name" {
   default = "railshot"
 }
 
+variable "product_environment" {
+  type        = bool
+  default     = false
+  nullable    = false
+  description = "Opt in new product targets to ProjectOwner=railshot-product and Target=target_id tags at resource creation. False preserves legacy tags; do not enable on existing infrastructure without a separate lifecycle review."
+}
+
 variable "instance_type" {
   type    = string
   default = "t3.large" # Nitro x86_64 only: device naming is an explicit profile contract.

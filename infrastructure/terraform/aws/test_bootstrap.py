@@ -138,6 +138,35 @@ class AWSBootstrapTest(unittest.TestCase):
                 self.assertEqual(json.loads(json.loads(result.stdout)), expected)
         self.assertRegex(source, r'iam_instance_profile\s*=\s*var\.existing_instance_profile == null \? aws_iam_instance_profile\.node\[0\]\.name : var\.existing_instance_profile')
 
+    def test_product_tags_are_opt_in_and_use_provider_creation_tags(self):
+        source = (MODULE / 'versions.tf').read_text()
+        locals_block = 'locals {' + source.split('locals {', 1)[1].split('\nprovider ', 1)[0]
+        tags_expression = re.search(r'default_tags[^\S\n]*\{[^\S\n]*tags[^\S\n]*=[^\S\n]*(.+?)[^\S\n]*\}$', source, re.MULTILINE).group(1).strip()
+        legacy = {'Project': 'railshot', 'ManagedBy': 'terraform'}
+        product = {'ProjectOwner': 'railshot-product', 'Target': 'aws-offline'}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'variables.tf').write_text((MODULE / 'variables.tf').read_text())
+            (root / 'locals.tf').write_text(locals_block)
+            base = {'target_id': 'aws-offline', 'owner_ref': 'terraform:offline:test',
+                    'account_id': '000000000000', 'ami_id': 'ami-' + '0' * 17}
+            for selection, expected in (({}, {}), ({'product_environment': False}, {}),
+                                        ({'product_environment': True}, product)):
+                with self.subTest(selection=selection):
+                    inputs = root / 'inputs.tfvars.json'
+                    inputs.write_text(json.dumps({**base, **selection}))
+                    result = subprocess.run(['terraform', 'console', '-no-color', '-var-file=' + str(inputs)], cwd=root,
+                        input='jsonencode([local.product_tags,' + tags_expression + '])\n',
+                        capture_output=True, text=True, check=True)
+                    self.assertNotIn('Error:', result.stderr)
+                    self.assertEqual(json.loads(json.loads(result.stdout)), [expected, {**legacy, **expected}])
+        # Pinned 6.66.0 sends provider defaults in RunInstances volume TagSpecifications.
+        # Do not add root tags (post-create API), or volume_tags (conflicts with the separate data volume).
+        main = (MODULE / 'main.tf').read_text()
+        root_device = main.split('root_block_device {', 1)[1].split('\n  }', 1)[0]
+        self.assertNotRegex(root_device, r'\btags\s*=')
+        self.assertNotRegex(main, r'\bvolume_tags\s*=')
+
     def test_managed_ssm_policy_cannot_restore_parameter_access(self):
         # Actual pure locals are evaluated in a fresh directory: no backend, provider, or real state.
         source = (MODULE / 'main.tf').read_text()
