@@ -4,7 +4,7 @@
 
 운영 AWS EC2의 기존 primary ENI에 EIP를 연결해 WireGuard gateway로 사용한다. 별도 gateway VM을 만들지 않고 ALB에도 EIP를 붙이지 않는다. GCP 앱 target은 터널로 도달할 수 있는 RFC1918 IPv4만 허용한다. 공개 IP, metadata IP, IPv6 및 RFC6598 범위는 거부한다. GCP target attachment는 VPC 밖 IP에 필요한 `availability_zone = all`을 사용한다.
 
-이 코드는 기존 single-app 미적용 인터페이스를 대체한다. 저장소 내 실행 caller는 없으며, 종전 `target_instance_ids`, `target_security_group_id`, `target_port`, `health_path`, `app_domain` 입력 대신 아래 `routes`를 사용한다. 기존 state에 적용했던 별도 운영 환경이 있다면 자동 이관하지 말고 먼저 state/plan을 검토한다.
+이 코드는 기존 single-app 미적용 인터페이스를 대체한다. [gitops/edge.py](../../../gitops/edge.py)가 환경 등록에서 할당한 신규 앱 route를 기존 routes에 추가하고 saved plan을 검사·적용하는 caller다. 종전 `target_instance_ids`, `target_security_group_id`, `target_port`, `health_path`, `app_domain` 입력 대신 아래 `routes`를 사용한다. 기존 state에 적용했던 별도 운영 환경이 있다면 자동 이관하지 말고 먼저 state/plan을 검토한다. [실행·인수 계약](../../../gitops/README.md#신규-앱-주소와-공유-edge-연결)을 따르며 적용만으로 공개 HTTP 성공을 주장하지 않는다.
 
 ## 입력 예시
 

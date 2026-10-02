@@ -85,6 +85,13 @@ class CredentialsTest(unittest.TestCase):
         self.assertEqual(pod['nodeSelector']['railshot.io/node-role'], 'platform')
         self.assertNotIn('hostNetwork', pod)
         self.assertNotIn('hostPath', json.dumps(pod))
+        config = json.loads(next(x for x in items if x['kind'] == 'ConfigMap')['data']['kubeconfig'])
+        self.assertEqual(config['users'], [{'name': 'railshot-credentials', 'user': {
+            'tokenFile': '/var/run/secrets/kubernetes.io/serviceaccount/token'}}])
+        self.assertEqual(config['clusters'][0]['cluster'], {'server': 'https://kubernetes.default.svc:443',
+            'certificate-authority': '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'})
+        self.assertIn({'name': 'KUBECONFIG', 'value': '/etc/railshot/credentials/kubeconfig'},
+                      pod['containers'][0]['env'])
         import yaml
         customer_role = list(yaml.safe_load_all(Path(__file__).with_name('credentials-customer.yaml').read_text()))[0]
         self.assertEqual(customer_role['rules'], [{'apiGroups': [''], 'resources': ['serviceaccounts/token'],

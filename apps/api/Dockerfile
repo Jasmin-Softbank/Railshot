@@ -23,6 +23,7 @@ COPY apps/api/runtime-install.sh apps/api/runtime-smoke.py apps/api/runtime-tool
 COPY apps/api/prepare-state.js ./
 COPY ci/requirements-dev.txt ci/requirements-test.txt /app/ci/
 COPY gitops/bridge.py gitops/argo.py gitops/handoff.py /app/gitops/
+COPY gitops/edge.py gitops/service_name.py /app/gitops/
 COPY gitops/credentials.py /app/gitops/
 COPY ci/scripts/execution.py ci/scripts/observability.py ci/scripts/process.py ci/scripts/publication.py ci/scripts/storage.py /app/ci/scripts/
 COPY ci/scripts/gate/bundle.py /app/ci/scripts/gate/
@@ -32,6 +33,7 @@ COPY ci/scripts/schemas/jasmin.schema.json /app/ci/scripts/schemas/
 COPY infrastructure/providers/terraform_tools/provision.py infrastructure/providers/terraform_tools/capabilities.py infrastructure/providers/terraform_tools/costs.py /app/infrastructure/providers/terraform_tools/
 COPY infrastructure/terraform/aws/ /app/infrastructure/terraform/aws/
 COPY infrastructure/terraform/gcp/ /app/infrastructure/terraform/gcp/
+COPY infrastructure/terraform/aws-edge/ /app/infrastructure/terraform/aws-edge/
 COPY infrastructure/ansible/run.py infrastructure/ansible/transport.py infrastructure/ansible/ansible.cfg infrastructure/ansible/guest.yml infrastructure/ansible/runtime.yml /app/infrastructure/ansible/
 COPY infrastructure/ansible/tasks/guest-checks.yml /app/infrastructure/ansible/tasks/
 COPY infrastructure/ansible/group_vars/all.yml /app/infrastructure/ansible/group_vars/

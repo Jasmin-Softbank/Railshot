@@ -84,7 +84,7 @@ Project 생성은 선언 출력만 수행합니다. 이미 운영 중인 Project
 }
 ```
 
-설정 파일은 실행 사용자 소유 0600, 상태 디렉터리는 0700이어야 합니다. `target`은 위 기존 handoff 계약을 그대로 사용하며 `revision`은 bridge가 생성한 Git commit으로 채웁니다. Private registry는 기존 `image_pull_secret` 참조도 target에 등록합니다. 전용 config checkout은 지정 branch에서 깨끗하고 원격과 일치해야 합니다. Git push 자격, 커밋 작성자, kubeconfig, 제한된 AppProject, namespace/pull Secret, Argo cluster 등록 및 공개 edge 경로는 운영자가 미리 준비합니다. 이 경로는 등록된 app/tenant 한 쌍의 namespace·NodePort·공개 URL을 갱신합니다. 다른 앱의 자동 namespace/NodePort/edge 할당은 지원하지 않습니다.
+설정 파일은 실행 사용자 소유 0600, 상태 디렉터리는 0700이어야 합니다. `target`은 위 기존 handoff 계약을 그대로 사용하며 `revision`은 bridge가 생성한 Git commit으로 채웁니다. Private registry는 기존 `image_pull_secret` 참조도 target에 등록합니다. 전용 config checkout은 지정 branch에서 깨끗하고 원격과 일치해야 합니다. Git push 자격, 커밋 작성자, kubeconfig, 제한된 AppProject, namespace/pull Secret과 Argo cluster 등록은 운영자가 준비합니다. 기존 고정 앱 설정은 그대로 사용할 수 있습니다. 환경 등록 helper가 아래 `edge.prepare`를 호출하면 신규 앱의 NodePort·hostname·공개 route를 할당해 같은 CD 계약으로 연결합니다. namespace·cluster·CI 등록은 환경 등록 담당의 책임입니다.
 
 고정 명령 `python3 gitops/bridge.py --config /private/railshot/cd.json`에 다음 필드만 stdin JSON으로 전달합니다: `action: apply|observe`, `deployment_id`, `target_id`, 서버 시작 때 읽은 설정의 `config_sha256`, 재검증한 `publication`, 그리고 `files` 객체의 파일명별 base64 원본 5개. 설정이 바뀌면 실행 전에 차단하므로 진행 중인 배포가 새 환경으로 향하지 않습니다. 설정 변경 적용은 서버를 다시 시작해 새 요청에서 수행합니다. 앱·대상·원본 해시를 대조한 뒤 기존 `handoff.render`로 선언을 만들고, Git commit/push 및 원격 SHA 재조회, 기존 Argo 소유권·revision·image 검증, 마지막으로 등록된 HTTPS health 경로를 검사합니다. HTTP 200과 기대 JSON의 정확한 일치를 모두 요구하고 리다이렉트·환경 프록시를 사용하지 않습니다. 응답 본문과 native stderr는 제품 결과에 포함하지 않습니다. 이 HTTP 검사는 등록된 경로의 응답 증거이며 실제 Pod imageID 관측을 대신하지 않습니다.
 
@@ -95,6 +95,64 @@ python -m unittest discover -s gitops -p 'test_*.py'
 ```
 
 테스트는 native kubectl 경계를 모의 실행하고 임시 로컬 bare Git에서 commit/push·고정 SHA·불명확 결과의 재실행 차단을 검사합니다. 별도 localhost HTTP 서버에서 기대 본문과 redirect 거부를 확인합니다. 실제 Argo 설치·cluster 등록·sync·공개 HTTPS 배포를 증명하지 않습니다.
+
+### 신규 앱 주소와 공유 edge 연결
+
+`edge.py`는 기존 `service_name.py`와 `infrastructure/terraform/aws-edge`를 재사용합니다. HTTP API가 아니며, 환경 등록 helper가 검증한 provider descriptor와 운영자 profile로 만든 비공개 JSON만 받습니다. 공개 요청의 IP·URL·SG·명령·파일 경로를 직접 전달하지 않습니다. profile wrapper는 `{version:1, cd:{...}, registration:{state_dir,source_repository,pull_secret_file,edge_config_file,expires_at,...}}`이며, 환경 등록 helper가 `registration.edge_config_file`로 준비한 뒤 `envhome/cd.json`의 해당 target row에 `edge.json.reference`를 넣습니다.
+
+운영자 edge 설정 예시(0600, 경로는 실행 host 기준):
+
+```json
+{
+  "version": 1,
+  "state_dir": "/private/railshot/edge-state",
+  "terraform_dir": "/private/railshot/edge-module",
+  "variables_file": "/private/railshot/edge-inputs.tfvars.json",
+  "auto_apply": false
+}
+```
+
+`terraform_dir`는 **기존 공유 ALB의 backend/state로 초기화한 전용 checkout**입니다. 새 state로 초기화하면 전체 인프라 생성 계획이 나와 차단됩니다. `variables_file`에는 기존 고객 3앱·apex·wildcard/apex 인증서·zone·WireGuard 설정을 모두 보존합니다. 실행기는 base routes에 이미 적용한 자체 할당과 이번 route만 더하며 기존 route를 수정·삭제하지 않습니다. 운영 state/자격을 API 컨테이너로 이전할 때는 원래 writer를 먼저 멈추고 한 writer와 동일 backend만 유지해야 합니다. 로컬 `flock`은 서로 다른 host의 동시 writer를 조율하지 않습니다.
+
+등록 helper가 만드는 요청 예시:
+
+```json
+{
+  "target_id": "new-runtime", "tenant": "team", "app": "new-app",
+  "environment_id": "environment-resource-id", "namespace": "tenant-team",
+  "provider_kind": "aws", "target_private_ip": "10.20.0.10",
+  "target_security_group_id": "sg-0123456789abcdef0",
+  "health_path": "/health", "expected_json": {"ok": true},
+  "expires_at": "2026-10-05T14:59:00Z"
+}
+```
+
+GCP는 `target_security_group_id`를 생략하고 기존 WireGuard로 도달 가능한 RFC1918 주소를 사용합니다. namespace와 앱 이름은 기존 등록 대상과 일치해야 합니다. hostname identity는 `(tenant, app, environment_id)`이며 deployment ID나 image revision이 바뀌어도 유지합니다. 다른 identity의 hostname 충돌은 거부하고 NodePort(30000–32767)·priority(1000–49999)는 기존 값과 모든 영속 예약을 피해 할당합니다. 같은 물리 주소·namespace·앱을 다른 환경이 점유하지 못합니다. 등록 helper는 클러스터의 기존 Service 전체에서도 NodePort 충돌을 확인해야 합니다. 만료일은 소유권과 정리 인수용 기록이며 자동 삭제 예약을 대신하지 않습니다.
+
+```sh
+python3 gitops/edge.py prepare --config /private/edge.json \
+  --request /private/request.json --out /private/environment/edge.json
+```
+
+결과의 `node_port`, `public_http`를 CD target에 넣고, `edge.reference`의 `{config_path, allocation_path, config_sha256}`를 CD row의 `edge`에 넣습니다. 이 reference만 별도 비공개 파일에 저장하면 운영자가 saved plan을 검토·적용할 수 있습니다:
+
+```sh
+python3 gitops/edge.py plan --reference /private/reference.json --out /private/plan-receipt.json
+python3 gitops/edge.py apply --reference /private/reference.json \
+  --plan-sha256 <reviewed-plan-receipt-hash> --out /private/apply-receipt.json
+```
+
+계획은 새 route의 target group/attachment/host rule/DNS, 정확한 NodePort SG, 해당 GCP `/32` route 생성만 허용합니다. 공유 ALB SG는 기존 규칙을 그대로 보존한 정확한 사설IP/NodePort egress 추가만 허용합니다. 기존 자원 변경·삭제·교체는 차단합니다. provider refresh가 null collection이나 계산된 ALB 연결을 채운 경우에도 해당 자원의 실행 action이 `no-op`이어야 합니다. plan bytes의 SHA256을 대조하고 외부 apply 전에 `applying`을 영속 저장합니다. 중단·부분 실패 시 자동 replan/reapply 없이 같은 route의 실제 상태를 조회합니다. 소유자가 수동 정리를 완료하기 전에는 예약·불명확 상태를 지우지 않습니다.
+
+플랫폼 담당이 실행 host·state·자격·단일 writer를 인수한 설정에서만 `auto_apply:true`를 사용합니다. bridge 최초 apply는 Git/Argo 전달 뒤 saved plan을 만들고 검사·적용합니다. 반복 `observe`는 변경을 수행하지 않습니다. `auto_apply:false`에서는 운영자 saved-plan 적용을 기다리며 URL 성공을 반환하지 않습니다. 설정 내용이 바뀌면 이전 reference가 거부되므로 설정을 바꿔 이미 접수한 배포를 새 대상으로 돌리지 않습니다.
+
+`reserved/planned/applied`는 공개 사이트 성공이 아닙니다. bridge가 정확한 ALB host/priority/target, Route53 alias, target의 `healthy`, 기본 CA 검증을 사용하는 HTTPS health JSON의 정확한 일치, 실제 앱 route의 HTTPS 200을 모두 관측해야 `public_http.state=succeeded`입니다. redirect·환경 proxy를 사용하지 않습니다. 결과는 검증한 health `url`, 앱 `site_url`, deployment/target/app/tenant/environment/source commit/Git revision/image digest/route digest/plan digest/namespace/expiry가 묶인 `receipt`를 포함합니다. 응답 body·자격·native stderr는 반환하지 않습니다. 실패하면 URL은 null이며 이전 성공 receipt를 현재 성공으로 재사용하지 않습니다.
+
+AWS 경로는 private IP+SG로 ALB에서 접근합니다. GCP도 같은 할당/검증 계약을 쓰지만 WireGuard peer/AllowedIPs·guest forwarding·GCP 방화벽·복귀 경로를 준비하는 기능은 포함하지 않습니다. 다른 클라우드 DB 연결 역시 별도 네트워크 계약입니다. target healthy와 실제 공개 HTTP가 확인되지 않은 GCP 경로를 지원 완료로 표시하지 않습니다.
+
+온프레·cloudflared 자동 공개는 현재 지원하지 않습니다. 승민 원본 `feature/deployment-runtime-seungmin@ec6a9df0258eee9843aa457bc10703aa7026db40`와 통합본의 `deployment/cloudflared/README.md`는 자동 설치가 없는 선택 모듈임을 명시합니다. `deployment/scripts/exposure.py`의 `cloudflare-tunnel`은 운영자가 이미 만든 HTTPS URL을 검사하는 hook이며 tunnel/DNS/자격을 생성하지 않습니다. 따라서 제품 신규 앱 할당은 AWS/GCP ALB로만 진행하고 다른 provider를 차단합니다. 기존 cloudflared URL hook을 ALB hostname의 별도 writer로 연결하지 않습니다. 향후 온프레 connector를 추가할 때는 운영자 route 소유권에서 ALB와 tunnel 중 하나를 명시적으로 선택하고 기존 hostname·NodePort 점유와 중복되지 않게 검증해야 합니다.
+
+형식 근거: [Terraform saved plan JSON](https://developer.hashicorp.com/terraform/internals/json-format), [AWS target health 조회](https://docs.aws.amazon.com/cli/latest/reference/elbv2/describe-target-health.html). 로컬 검사는 `python -m unittest discover -s gitops -p 'test_*.py'`이며 네이티브 경계 모의 검사와 실제 cloud 검증은 별도 증거입니다.
 
 ## 짧은 Argo 고객 토큰 갱신
 
@@ -121,7 +179,7 @@ kubectl --context railshot-control apply -f /private/credentials.json
 kubectl --context railshot-control -n argocd create job --from=cronjob/railshot-credentials railshot-credentials-initial
 ```
 
-선언은 기존 API 이미지의 `/app/gitops/credentials.py`, `argocd/ghcr-pull`, 플랫폼 노드를 사용합니다. 운영 SA는 정책에 등록된 Argo Secret 이름만 `get/patch`할 수 있습니다. 코드와 자격을 ConfigMap에 넣지 않으며 정책만 읽기 전용으로 마운트합니다. CronJob은 동시 실행을 금지하고, 5분 실행 제한과 재시도 0을 사용합니다. 직접 실행은 `python3 gitops/credentials.py renew --policy ...`이며 kubectl의 현재 운영 context 또는 Pod의 projected SA를 사용합니다.
+선언은 기존 API 이미지의 `/app/gitops/credentials.py`, `argocd/ghcr-pull`, 플랫폼 노드를 사용합니다. 운영 SA는 정책에 등록된 Argo Secret 이름만 `get/patch`할 수 있습니다. ConfigMap에는 정책과 projected SA의 CA·token 파일 경로를 참조하는 kubeconfig만 읽기 전용으로 마운트합니다. 실행 코드나 자격 bytes는 넣지 않습니다. `KUBECONFIG`를 명시하여 kubectl이 localhost 기본값으로 연결하지 않도록 합니다. CronJob은 동시 실행을 금지하고, 5분 실행 제한과 재시도 0을 사용합니다. 직접 실행은 `python3 gitops/credentials.py renew --policy ...`이며 kubectl의 현재 운영 context 또는 Pod의 projected SA를 사용합니다.
 
 현재 Secret의 소유권·등록 범위·CA·SA를 확인한 뒤 TokenRequest를 보냅니다. 새 토큰을 원래 CA로 검증한 고객 API에서 SelfSubjectReview의 이름·UID와 각 등록 namespace의 Pod 조회 권한까지 확인한 경우에만 `data.config`의 bearer token을 교체합니다. JSON Patch의 `resourceVersion` test가 동시 변경을 막습니다. 발급·검증 실패 시 기존 값을 보존하고, patch 결과가 불명확하면 읽기 한 번으로 확인하여 `renewed/unchanged/unknown`을 구분합니다. 토큰과 native 오류 원문을 로그에 쓰지 않습니다.
 

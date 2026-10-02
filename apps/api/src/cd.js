@@ -43,7 +43,7 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
       // Kill the entire group immediately: a surviving Git child must not outlive the bridge's lock.
       if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already exited */ } }
     };
-    const timer = globalThis.setTimeout(terminate, Math.min(120_000, Math.max(1, remainingMs)));
+    const timer = globalThis.setTimeout(terminate, Math.min(config.targets[request.target_id]?.edge ? 600_000 : 120_000, Math.max(1, remainingMs)));
     signal?.addEventListener('abort', terminate, { once: true });
     child.stdout.on('data', (chunk) => {
       stdout += chunk.toString();
