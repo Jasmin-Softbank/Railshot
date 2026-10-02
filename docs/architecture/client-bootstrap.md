@@ -36,7 +36,7 @@ sudo bash deployment/bootstrap/install.sh --install-dependencies init --config /
 
 기본 설치는 필요한 소스와 전용 Python 환경을 `/opt/jasmin/bootstrap/`에 배치합니다. 이후 진입점은 `/opt/jasmin/bootstrap/deployment/bootstrap/install.sh`입니다. 기존 설치의 파일 해시가 다르면 자동 덮어쓰지 않습니다. 개발용 `--source-run`은 소스 디렉터리에서 직접 실행합니다.
 
-관리자 ID와 전용 계정 이름은 설정에서 생략하면 입력받습니다. 관리자 암호와 일회용 서비스 등록 키는 항상 별도 입력받습니다. 복사 명령의 `JASMIN_ENROLLMENT_TOKEN` 환경변수로도 일회용 키를 전달할 수 있습니다. 프로그램 시작 시 즉시 환경에서 제거해 자식 프로세스에 전달하지 않습니다. 복사 명령 자체의 셸 기록 노출은 남으므로 짧은 만료와 일회 사용이 필수입니다. 자동화 시 등록 키만 `--enrollment-token-file`로 root 전용 파일에서 받을 수 있습니다. 입력 파일은 자동 삭제하지 않으므로 등록 후 관리자가 제거해야 합니다.
+관리자 ID와 전용 계정 이름은 설정에서 생략하면 입력받습니다. 관리자 암호와 일회용 서비스 등록 키는 항상 별도 입력받습니다. 복사 명령의 `RAILSHOT_ENROLLMENT_TOKEN` (legacy: `JASMIN_ENROLLMENT_TOKEN`) 환경변수로도 일회용 키를 전달할 수 있습니다. 프로그램 시작 시 즉시 환경에서 제거해 자식 프로세스에 전달하지 않습니다. 복사 명령 자체의 셸 기록 노출은 남으므로 짧은 만료와 일회 사용이 필수입니다. 자동화 시 등록 키만 `--enrollment-token-file`로 root 전용 파일에서 받을 수 있습니다. 입력 파일은 자동 삭제하지 않으므로 등록 후 관리자가 제거해야 합니다.
 
 ## 실행 흐름
 

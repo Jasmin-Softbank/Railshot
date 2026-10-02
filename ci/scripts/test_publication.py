@@ -49,7 +49,7 @@ class PublicationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bundle = root / 'bundle'; bundle.mkdir()
-            inputs = {'jasmin.yaml': b'app: my-app\n', 'verdict.json': b'{"ok": true}\n',
+            inputs = {'railshot.yaml': b'app: my-app\n', 'verdict.json': b'{"ok": true}\n',
                       'manifest.json': b'{"version": 1}\n'}
             for name, content in inputs.items():
                 (bundle / name).write_bytes(content)
@@ -78,6 +78,17 @@ class PublicationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'source commit mismatch'):
                 prepare(bundle, images, root / 'bad', {**env, 'GITHUB_SHA': 'b' * 40})
             self.assertFalse((root / 'bad').exists())
+
+            (bundle / 'railshot.yaml').rename(bundle / 'jasmin.yaml')
+            legacy_output = root / 'legacy-published'
+            legacy = prepare(bundle, images, legacy_output, env)
+            self.assertEqual((legacy_output / 'jasmin.yaml').read_bytes(), inputs['railshot.yaml'])
+            self.assertEqual(legacy['files']['jasmin.yaml'], receipt['files']['railshot.yaml'])
+            self.assertNotIn('railshot.yaml', legacy['files'])
+            (bundle / 'railshot.yaml').write_bytes(inputs['railshot.yaml'])
+            with self.assertRaisesRegex(ValueError, 'exactly one'):
+                prepare(bundle, images, root / 'ambiguous', env)
+            self.assertFalse((root / 'ambiguous').exists())
 
     def test_registry_access_is_digest_bound_isolated_and_fail_closed(self):
         images = json.dumps({'web': 'ghcr.io/owner/web@sha256:' + 'a' * 64,

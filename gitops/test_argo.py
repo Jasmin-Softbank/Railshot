@@ -22,7 +22,7 @@ class ArgoTest(unittest.TestCase):
 
     def prepare(self, database=False, image_digest='c' * 64, migration_command=None):
         published = self.root / 'published'; published.mkdir(exist_ok=True)
-        spec = {'apiVersion': 'jasmin/v0', 'app': 'demo', 'services': [
+        spec = {'apiVersion': 'railshot/v0', 'app': 'demo', 'services': [
             {'name': 'web', 'build': {'dockerfile': 'Dockerfile'}, 'port': 8080, 'route': '/health', 'health': '/health'}]}
         if database:
             spec['resources'] = {'postgres': {'size': 'small'}}
@@ -30,7 +30,7 @@ class ArgoTest(unittest.TestCase):
         verdict = {'release_eligible': True, 'ok': True, 'status': 'PASS', 'source_sha256': 'a' * 64,
                    'layers': [{'layer': layer, 'ok': True} for layer in GATE_ORDER],
                    'images': {'web': 'local/web:test'}, 'image_ids': {'web': 'sha256:' + 'b' * 64}}
-        values = {'jasmin.yaml': spec, 'verdict.json': verdict,
+        values = {'railshot.yaml': spec, 'verdict.json': verdict,
                   'images.json': {'web': 'ghcr.io/example/web@sha256:' + image_digest}}
         data = {k: json.dumps(v).encode() for k, v in values.items()}
         manifest = {'version': 1, 'trust': handoff.TRUST, 'source_sha256': verdict['source_sha256'],

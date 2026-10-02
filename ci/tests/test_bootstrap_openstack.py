@@ -24,7 +24,7 @@ def test_cli_secrets_private_config_not_argv_and_cleanup(monkeypatch):
         assert 'secret-value' not in repr(args)
         assert 'OS_PASSWORD' not in kwargs['env']
         assert path.stat().st_mode & 0o777 == 0o600
-        assert json.loads(path.read_text())['clouds']['jasmin']['auth']['application_credential_secret']=='secret-value'
+        assert json.loads(path.read_text())['clouds']['railshot']['auth']['application_credential_secret']=='secret-value'
         assert kwargs['shell'] is False
         return SimpleNamespace(returncode=0, stdout='[]',stderr='')
     assert cli_module.OpenStackCLI({'application_credential_id':'id','application_credential_secret':'secret-value'},runner=runner).run(['server','list']) == []

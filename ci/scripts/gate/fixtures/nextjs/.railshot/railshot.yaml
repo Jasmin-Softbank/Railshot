@@ -1,5 +1,5 @@
-apiVersion: jasmin/v0
-app: fixture-npm-js
+apiVersion: railshot/v0
+app: fixture-nextjs
 services:
   - name: web
     build:

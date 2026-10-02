@@ -10,6 +10,7 @@ import { createDeploymentService } from '../src/github.js';
 import { createAppServer } from '../src/server.js';
 import { archiveFromPath, deploySource, inferredAppName, insideRoot } from '../src/client.js';
 import { fetchPublicGithubSource } from '../src/public-github.js';
+import { readPublished } from '../src/published.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
@@ -204,7 +205,7 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
     const form = new FormData();
     form.set('app', 'my-app');
     form.set('archive', new Blob([await zipOf({ 'index.js': 'test' })]), 'app.zip');
-    const create = await fetch(`${base}/api/deploy`, { method: 'POST', headers: { 'x-jasmin-request': 'deploy' }, body: form });
+    const create = await fetch(`${base}/api/deploy`, { method: 'POST', headers: { 'x-railshot-request': 'deploy' }, body: form });
     assert.equal(create.status, 202);
     assert.equal((await create.json()).run_id, 456);
     assert.equal(observed[0].app, 'my-app');
@@ -246,16 +247,16 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
   } finally { server.close(); }
 });
 
-function publishedFiles({ attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app' } = {}) {
+function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app' } = {}) {
   const hash = (value) => createHash('sha256').update(value).digest('hex');
   const verdict = { ok: true, release_eligible: true, status: 'PASS', source_sha256: 'c'.repeat(64),
     layers: ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'].map((layer) => ({ layer, ok: true, errors: [] })),
     images: { web: 'local/web:gate' }, image_ids: { web: 'sha256:' + 'd'.repeat(64) } };
-  const files = { 'jasmin.yaml': 'app: my-app\n', 'verdict.json': JSON.stringify(verdict),
+  const files = { [specName]: 'app: my-app\n', 'verdict.json': JSON.stringify(verdict),
     'images.json': JSON.stringify({ web: 'ghcr.io/org/demo-my-app-web@sha256:' + 'e'.repeat(64) }) };
   files['manifest.json'] = JSON.stringify({ version: 1, trust: 'trusted-ci-artifact-not-a-signature',
     source_sha256: verdict.source_sha256, images: { web: { local_ref: verdict.images.web, id: verdict.image_ids.web } },
-    files: { 'jasmin.yaml': hash(files['jasmin.yaml']), 'verdict.json': hash(files['verdict.json']), 'images.tar': 'f'.repeat(64) } });
+    files: { [specName]: hash(files[specName]), 'verdict.json': hash(files['verdict.json']), 'images.tar': 'f'.repeat(64) } });
   files['handoff.json'] = JSON.stringify({ version: 2, status: 'published', run_id: 789, producer_attempt: attempt,
     source_commit: sourceCommit, target_id: targetId, tenant: 'demo', app, bundle_artifact_id: 100,
     registry: { visibility: 'public', verification: 'anonymous_manifest_read',
@@ -263,6 +264,28 @@ function publishedFiles({ attempt = 1, sourceCommit = 'a'.repeat(40), targetId =
     files: Object.fromEntries(Object.entries(files).map(([name, value]) => [name, hash(value)])) });
   return files;
 }
+
+test('canonical and historical publications retain exact filename/hash bindings; ambiguity is rejected', async () => {
+  const identity = { runId: 789, attempt: 1, headSha: 'a'.repeat(40), targetId: 'aws-demo', tenant: 'demo' };
+  const entries = (files) => Object.entries(files).map(([path, content]) => ({ path, content: Buffer.from(content) }));
+  for (const specName of ['railshot.yaml', 'jasmin.yaml']) {
+    const files = publishedFiles({ specName });
+    assert.equal(readPublished(entries(files), identity).status, 'published');
+    const { service } = await publicationService({ files });
+    assert.equal((await service.status('789')).state, 'published');
+    const other = specName === 'railshot.yaml' ? 'jasmin.yaml' : 'railshot.yaml';
+    assert.throws(() => readPublished(entries({ ...files, [other]: files[specName] }), identity));
+    const renamed = { ...files, [other]: files[specName] }; delete renamed[specName];
+    assert.throws(() => readPublished(entries(renamed), identity));
+  }
+});
+
+test('source ZIP root detection supports either specification name', async () => {
+  for (const spec of ['.railshot/railshot.yaml', '.jasmin/jasmin.yaml']) {
+    const files = await inspectArchive(await zipOf({ [`project/${spec}`]: 'app: demo\n', 'project/server.py': 'pass\n' }));
+    assert.deepEqual(files.map((file) => file.path).sort(), [spec, 'server.py']);
+  }
+});
 
 async function publicationService({ attempt = 1, producer = attempt, files = publishedFiles({ attempt: producer }),
   expired = false, duplicate = false, release = 'success', headSha = 'a'.repeat(40), artifacts = true, jobRows } = {}) {
@@ -499,7 +522,7 @@ test('HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까�
         source_commit: submitted.source_commit, target_id: submitted.target_id } });
     const bundle = join(root, 'bundle'); await mkdir(bundle);
     const files = publishedFiles({ sourceCommit: submitted.source_commit, targetId: submitted.target_id, app: submitted.app });
-    for (const name of ['jasmin.yaml', 'verdict.json', 'manifest.json']) await writeFile(join(bundle, name), files[name]);
+    for (const name of ['railshot.yaml', 'verdict.json', 'manifest.json']) await writeFile(join(bundle, name), files[name]);
     await writeFile(join(root, 'images.json'), files['images.json']);
     const script = fileURLToPath(new URL('../../../ci/scripts/publication.py', import.meta.url));
     // test/ is under apps/api, so the repository is three parents above that directory.

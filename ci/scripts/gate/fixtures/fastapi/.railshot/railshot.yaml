@@ -1,5 +1,5 @@
-apiVersion: jasmin/v0
-app: fixture-maven-spring
+apiVersion: railshot/v0
+app: fixture-fastapi
 services:
   - name: web
     build:

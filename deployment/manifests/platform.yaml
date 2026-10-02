@@ -118,7 +118,7 @@ spec:
             - {name: GITHUB_REPO, value: railshot-apps}
             - {name: GITHUB_REF, value: main}
             - {name: GITHUB_WORKFLOW, value: railshot-deploy.yml}
-            - {name: JASMIN_TENANT, value: demo}
+            - {name: RAILSHOT_TENANT, value: demo}
             - {name: RAILSHOT_TARGET_ID, value: TARGET_REQUIRED}
             - {name: RAILSHOT_TARGET_PROVIDER, value: aws}
           resources:

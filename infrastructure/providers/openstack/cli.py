@@ -22,15 +22,15 @@ class OpenStackCLI:
         if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
             raise ValueError('CLI arguments must be a list of strings')
         env = {k: v for k, v in os.environ.items() if not k.startswith('OS_')}
-        with tempfile.TemporaryDirectory(prefix='jasmin-openstack-') as directory:
+        with tempfile.TemporaryDirectory(prefix='railshot-openstack-') as directory:
             path = Path(directory) / 'clouds.yaml'
             auth = dict(self.auth)
             options = {k: auth.pop(k) for k in ('region_name', 'interface', 'cacert') if k in auth}
             kind = 'v3applicationcredential' if 'application_credential_id' in auth else 'v3password'
-            path.write_text(json.dumps({'clouds': {'jasmin': {'auth_type': kind, 'auth': auth, **options}}}))
+            path.write_text(json.dumps({'clouds': {'railshot': {'auth_type': kind, 'auth': auth, **options}}}))
             path.chmod(0o600)
-            env.update(OS_CLIENT_CONFIG_FILE=str(path), OS_CLOUD='jasmin')
-            command = ['openstack', '--os-cloud', 'jasmin', *args]
+            env.update(OS_CLIENT_CONFIG_FILE=str(path), OS_CLOUD='railshot')
+            command = ['openstack', '--os-cloud', 'railshot', *args]
             if json_output:
                 command += ['--format', 'json']
             try:

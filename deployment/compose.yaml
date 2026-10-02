@@ -54,7 +54,7 @@ services:
       GITHUB_REPO: ${GITHUB_REPO:-railshot-apps}
       GITHUB_REF: ${GITHUB_REF:-main}
       GITHUB_WORKFLOW: ${GITHUB_WORKFLOW:-railshot-deploy.yml}
-      JASMIN_TENANT: ${JASMIN_TENANT:-demo}
+      RAILSHOT_TENANT: ${RAILSHOT_TENANT:-${JASMIN_TENANT:-demo}}
       RAILSHOT_TARGET_ID: ${RAILSHOT_TARGET_ID:-}
     secrets: [api_token]
     volumes: ["api-state:/var/lib/railshot"]
@@ -73,7 +73,7 @@ services:
       dockerfile: apps/api/Dockerfile
       target: mcp
     environment:
-      JASMIN_API_URL: http://api:4173
+      RAILSHOT_API_URL: http://api:4173
       RAILSHOT_API_TOKEN_FILE: /run/secrets/api_token
     secrets: [api_token]
     stdin_open: true

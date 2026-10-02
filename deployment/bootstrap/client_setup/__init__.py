@@ -1,1 +1,1 @@
-"""Jasmin customer bootstrap. Importing modules never mutates the host."""
+"""Railshot customer bootstrap. Importing modules never mutates the host."""

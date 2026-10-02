@@ -1,5 +1,6 @@
 import base64
 import copy
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -53,6 +54,25 @@ class BridgeTest(unittest.TestCase):
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), '-c', 'core.hooksPath=/dev/null', *args],
                               check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_historical_publication_crosses_bridge_without_renaming_bytes(self):
+        request = copy.deepcopy(self.request)
+        files = {name: base64.b64decode(value) for name, value in request['files'].items()}
+        files['jasmin.yaml'] = files.pop('railshot.yaml')
+        manifest = json.loads(files['manifest.json'])
+        manifest['files']['jasmin.yaml'] = manifest['files'].pop('railshot.yaml')
+        files['manifest.json'] = json.dumps(manifest).encode()
+        receipt = json.loads(files['handoff.json'])
+        receipt['files']['jasmin.yaml'] = receipt['files'].pop('railshot.yaml')
+        receipt['files']['manifest.json'] = hashlib.sha256(files['manifest.json']).hexdigest()
+        files['handoff.json'] = json.dumps(receipt).encode()
+        request['publication'].update(receipt)
+        request['files'] = {name: base64.b64encode(value).decode() for name, value in files.items()}
+        _, accepted, _ = bridge.validate_request(self.config, request)
+        self.assertEqual(accepted, files)
+        request['files']['railshot.yaml'] = request['files']['jasmin.yaml']
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            bridge.validate_request(self.config, request)
 
     def native_local_only(self, args, **kwargs):
         self.calls.append(args)

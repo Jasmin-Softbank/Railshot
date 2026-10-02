@@ -65,7 +65,7 @@ def install_payload(source, target):
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     if target.parent.stat().st_uid != os.geteuid() or target.parent.stat().st_mode & 0o022:
         raise RuntimeError('설치 상위 경로 권한이 안전하지 않습니다.')
-    staging = Path(tempfile.mkdtemp(prefix='.jasmin-install-', dir=target.parent))
+    staging = Path(tempfile.mkdtemp(prefix='.railshot-install-', dir=target.parent))
     try:
         for relative in files:
             destination = staging / relative

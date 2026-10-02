@@ -33,7 +33,7 @@ PR 검사에는 cloud·모델·private registry 자격을 제공하지 않는다
 | 산출물 | 식별과 내용 |
 |---|---|
 | `release-bundle-<run_attempt>` | `loop.outputs.bundle_id`; 검증한 `images.tar`, spec, verdict와 SHA-256 manifest |
-| `published-<run_attempt>` | `release.outputs.published_id`; `images.json`의 원격 digest, 원본 `jasmin.yaml`, `verdict.json`, `manifest.json` 및 출처 영수증 `handoff.json` |
+| `published-<run_attempt>` | `release.outputs.published_id`; `images.json`의 원격 digest, 원본 `railshot.yaml`, `verdict.json`, `manifest.json` 및 출처 영수증 `handoff.json` |
 | `publish-journal-<run_attempt>` | 같은 run의 게시 복구용 `publish.json`만 보존. 자격·Docker 설정·진단 로그는 포함하지 않음 |
 | bundle 연결 | `release.outputs.bundle_id`는 소비한 원본 artifact ID. manifest는 source digest와 spec/verdict/image archive 해시를 보존 |
 
@@ -62,7 +62,7 @@ python -m unittest discover -s ci/scripts/runner -p 'test_*.py'
 
 ## 통합 입력과 게시 계약
 
-source_commit/target_id를 workflow 입력으로 받아 checkout 및 운영자 target과 일치하는지 검사한다. 게시 ZIP은 `images.json`, `jasmin.yaml`, `verdict.json`, `manifest.json`, `handoff.json`의 flat 구조다. 기존 네 evidence 파일은 byte 그대로 유지하며 handoff.json이 source/run/attempt/target과 파일 해시를 연결한다. API는 실제 producer artifact ID로 읽고 published 상태만 표시한다. 자세한 계약은 [CI publication](../docs/api/ci-publication.md)을 따른다.
+source_commit/target_id를 workflow 입력으로 받아 checkout 및 운영자 target과 일치하는지 검사한다. 게시 ZIP은 `images.json`, `railshot.yaml`, `verdict.json`, `manifest.json`, `handoff.json`의 flat 구조다. 기존 네 evidence 파일은 byte 그대로 유지하며 handoff.json이 source/run/attempt/target과 파일 해시를 연결한다. API는 실제 producer artifact ID로 읽고 published 상태만 표시한다. 자세한 계약은 [CI publication](../docs/api/ci-publication.md)을 따른다.
 
 운영자 변수 `RAILSHOT_TARGET_IDS`에 `["k3s-aws","k3s-gcp"]`처럼 허용할 target을 JSON 배열로 등록할 수 있다. 이 변수가 없을 때만 기존 `RAILSHOT_TARGET_ID` 한 개를 사용한다. 빈 배열·중복·잘못된 ID는 차단하며, loop와 release가 동일한 검증 함수를 호출한다. target 선택으로 registry·게시 자격·pull Secret 정책을 바꿀 수는 없다.
 
