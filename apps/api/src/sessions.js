@@ -29,6 +29,8 @@ export async function createDashboardData(db, root) {
     if (db.prepare('SELECT 1 FROM connections WHERE password_encrypted IS NOT NULL LIMIT 1').get()) throw new Error('Connection encryption key is missing');
     const file = await open(keyPath, 'wx', 0o600);
     try { await file.writeFile(randomBytes(32)); await file.sync(); } finally { await file.close(); }
+    const directory = await open(root, 'r');
+    try { await directory.sync(); } finally { await directory.close(); }
   }
   const info = await lstat(keyPath);
   if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077)) throw new Error('Invalid connection encryption key');
