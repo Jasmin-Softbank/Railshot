@@ -175,10 +175,10 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
     const base = `http://127.0.0.1:${server.address().port}`;
     const index = await fetch(base);
     assert.equal(index.status, 200);
-    assert.match(await index.text(), /CD 인계/);
+    assert.match(await index.text(), /id="deploy-form"/);
     const script = await fetch(`${base}/app.js`);
     assert.equal(script.status, 200);
-    assert.match(await script.text(), /publication_unverified/);
+    assert.match(await script.text(), /#review-panel/);
     const form = new FormData();
     form.set('app', 'my-app');
     form.set('archive', new Blob([await zipOf({ 'index.js': 'test' })]), 'app.zip');
