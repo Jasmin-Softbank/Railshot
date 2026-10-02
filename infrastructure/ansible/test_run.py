@@ -218,7 +218,8 @@ class AdapterTests(unittest.TestCase):
                 with transport.forwarded_port('ssm:ap-northeast-2:i-0123456789abcdef0', transport.time.monotonic() + 30) as port:
                     self.assertGreater(port, 0)
                     raise RuntimeError('playbook fixture')
-        stop.assert_called_once_with(12345, transport.signal.SIGTERM)
+        self.assertEqual([args.args for args in stop.call_args_list],
+                         [(12345, transport.signal.SIGTERM), (12345, transport.signal.SIGKILL)])
         self.assertEqual(start.call_args.kwargs['env']['AWS_PAGER'], '')
 
     def test_terraform_descriptors_only_convert_bound_cloud_references(self):
@@ -245,6 +246,21 @@ class AdapterTests(unittest.TestCase):
             self.request['timeout_seconds'] -= 1
             result = adapter.run(self.request, runner=lambda *_: self.fail('must not run'))
         self.assertEqual(result['error']['code'], 'REQUEST_ID_CONFLICT')
+
+    def test_operator_aws_cli_descriptor_keeps_resource_region_and_transport_binding(self):
+        ssh = self.request['inventory']['control_plane'][0]['ssh']
+        descriptor = json.loads((ROOT / 'examples/ansible/aws-node-descriptor.json').read_text())
+        descriptor['execution_driver'] = 'aws-cli'
+        request = adapter.from_descriptor(descriptor, request_id='operator-aws', operation='guest.check', ssh=ssh)
+        self.assertEqual(request['target']['provider'], 'aws')
+        for field, value in [('resource_id', 'i-00000000000000000'),
+                             ('transport_ref', 'ssm:us-east-1:i-0123456789abcdef0'),
+                             ('execution_driver', 'arbitrary-command')]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                adapter.from_descriptor({**descriptor, field: value}, request_id='operator-aws', operation='guest.check', ssh=ssh)
+        gcp = json.loads((ROOT / 'examples/ansible/gcp-node-descriptor.json').read_text())
+        with self.assertRaises(ValueError):
+            adapter.from_descriptor({**gcp, 'execution_driver': 'aws-cli'}, request_id='wrong-driver', operation='guest.check', ssh=ssh)
 
     def test_incomplete_job_and_busy_target_do_not_start_ssh(self):
         adapter.STATE_DIR.mkdir(mode=0o700)

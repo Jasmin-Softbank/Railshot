@@ -3,8 +3,8 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "RAILSHOT operator Ansible jobs API",
-    "version": "1.1.0",
-    "description": "Internal Ansible integration contract for infrastructure/ansible/api.py. Approved AWS/GCP descriptors or OpenStack GET ServerResponse snapshots are resolved on the server. Typed parameters map to inventory and existing playbook variables. Plain HTTP on IPv4 loopback only; upstream service owns user/project authorization and resource creation. Validation does not contact guests or prove readiness. Database configuration is planning-only; the provided HA playbook is not connected to this API. This static specification is not served by the API. Unsupported methods use the standard-library non-JSON 501 response."
+    "version": "1.2.0",
+    "description": "Private localhost operator API for registered targets. Runtime jobs use the existing bounded adapter. Database HA execution requires an approved private profile, exact topology and TLS/Vault references; standalone remains blocked. Acceptance is separate from native readiness and no result implies application or public HTTP readiness."
   },
   "servers": [
     {
@@ -374,7 +374,7 @@
             }
           },
           "501": {
-            "description": "DATABASE_PLAYBOOK_UNAVAILABLE: valid database.configure input, but no installation is admitted or executed.",
+            "description": "Database standalone, insufficient HA topology or missing approved profile remains blocked before admission.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/NoStore"
@@ -390,7 +390,7 @@
                 },
                 "example": {
                   "error": {
-                    "code": "DATABASE_PLAYBOOK_UNAVAILABLE"
+                    "code": "DATABASE_STANDALONE_UNSUPPORTED"
                   }
                 }
               }
@@ -644,12 +644,13 @@
                     "roles": {
                       "type": "array",
                       "minItems": 1,
-                      "maxItems": 2,
+                      "maxItems": 3,
                       "items": {
                         "type": "string",
                         "enum": [
                           "database",
-                          "dcs"
+                          "dcs",
+                          "proxy"
                         ]
                       }
                     }
@@ -694,9 +695,20 @@
                       "type": "integer",
                       "minimum": 0,
                       "maximum": 16
+                    },
+                    "proxy_nodes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 16
                     }
                   }
                 }
+              },
+              "profile_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 63,
+                "pattern": "^[a-z][a-z0-9-]{0,62}$"
               }
             }
           }
@@ -758,7 +770,8 @@
                   "properties": {
                     "mode": {},
                     "nodes": {},
-                    "placements": {}
+                    "placements": {},
+                    "profile_id": {}
                   },
                   "required": [
                     "mode",
@@ -841,8 +854,13 @@
               "executor_preflight",
               "guest",
               "runtime",
-              "unknown"
+              "unknown",
+              "database"
             ]
+          },
+          "database_ready": {
+            "type": "boolean",
+            "description": "Present only for database.configure. True only after the approved HA playbook and bound readiness receipt succeed."
           }
         }
       },
@@ -1152,7 +1170,7 @@
             ]
           }
         },
-        "description": "Safe inventory/variable summary without SSH paths, credentials or local runtime receipt paths. execution_supported means an adapter exists, not that connectivity or guest readiness was observed. DB variables are an integration handoff proposal; the provided HA playbook is not connected to this API."
+        "description": "Safe inventory/variable summary without SSH paths, credentials or local readiness receipt paths. execution_supported confirms a supported runtime adapter or matching private database HA profile, not observed connectivity or readiness. Database execution runs the team's separate PostgreSQL/Patroni/etcd/HAProxy cluster without K3s."
       },
       "InventoryGroup": {
         "type": "object",

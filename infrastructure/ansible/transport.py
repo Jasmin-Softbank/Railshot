@@ -67,12 +67,15 @@ def forwarded_port(reference, deadline):
                     time.sleep(0.2)
             yield port
         finally:
-            if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+            finally:
+                # A finished CLI parent can still leave a forwarding child in its group.
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
                 except ProcessLookupError:
-                    process.wait()
+                    pass
+                process.wait()
