@@ -17,6 +17,8 @@
 
 운영 설치기는 root/amd64, `control` 역할, 기존 설정, 기존 CNI를 검사하고 운영·runtime lock을 잡는다. 공통 `deployment/cilium/preflight.py`도 포함하므로 설치기 파일 하나만 복사하지 않고 저장소 전체를 사용한다. Flannel 설정·인터페이스·다른 활성 CNI가 남은 서버를 자동으로 전환하지 않는다. 재실행은 동일 운영 설정과 Cilium 프로파일·버전의 재조정만 허용한다. 기존 Cilium의 CIDR 또는 버전을 다른 값으로 덮어써서 전환하는 경로도 없다. 공통 설치기를 고객 기본값으로 운영 서버에 직접 실행하지 않는다.
 
+CNI 검사·설치 경로는 K3s의 `/var/lib/rancher/k3s/agent/etc/cni/net.d`, 바이너리는 `/var/lib/rancher/k3s/data/cni`로 명시한다. 다른 container runtime이 사용하는 `/etc/cni/net.d`는 변경하지 않는다. custom data-dir/containerd template은 이 설치 프로파일 밖이므로 별도 검토한다. [K3s CNI 경로](https://docs.k3s.io/networking/multus-ipams)
+
 K3s에서 custom CNI를 사용할 때 Flannel과 내장 NetworkPolicy를 비활성화한다. kube-proxy는 유지하므로 `disable-kube-proxy`는 넣지 않는다. K3s API를 먼저 기다리고 Cilium을 설치한 다음 Node Ready를 기다린다. CNI 설치 전에 Node Ready를 기다리면 새 서버에서 진행이 멈출 수 있다. [K3s custom CNI](https://docs.k3s.io/networking/basic-network-options#custom-cni), [Cilium K3s 설치](https://docs.cilium.io/en/stable/installation/k3s/)
 
 ## 2. 신규 운영 서버

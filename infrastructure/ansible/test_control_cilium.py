@@ -27,6 +27,9 @@ class ControlCiliumTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.host(root)
+            podman = root / 'etc/cni/net.d/87-podman-bridge.conflist'
+            podman.parent.mkdir(parents=True)
+            podman.write_text('{"name":"podman", "plugins":[{"type":"bridge"}]}')
             self.assertEqual(guard.check_host('control', root), ('10.52.0.0/16', '10.53.0.0/16'))
             with self.assertRaisesRegex(ValueError, 'role differs'):
                 guard.check_host('customer', root)
