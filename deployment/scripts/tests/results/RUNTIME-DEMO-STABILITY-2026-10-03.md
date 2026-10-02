@@ -35,6 +35,8 @@
 
 추가 실측 검증은 준비된 Linux VM의 정상 preflight, 없는 health 경로의 HTTP 404 및 exit 1, 기존 Pod/Deployment/Service UID·generation 동일, fallback 명령 HTTP 200, 맥 전달 포트 HTTP 200, 기존 AWS 공개 health HTTP 200입니다. HTTP 404는 의도한 실패 주입을 정상 검출한 결과입니다. [실패 JSON](demo-stability/negative-health.json)과 [fallback 출력](demo-stability/fallback.log)을 제공합니다.
 
+fallback 로그의 HTTP 헤더 줄바꿈은 Git 공백 검사에 맞게 CRLF에서 LF로 정규화했습니다. 응답 내용과 상태 값은 유지합니다.
+
 외부 URL HTTP 503과 5초 응답 지연은 로컬 HTTP 서버에 실제 curl을 실행하여 검사했습니다. 지연 요청은 약 3초 뒤 종료하고 외부 진단만 `degraded`(공개 경로 미확인)로 분리했습니다. 실제 node-local 실패는 Runtime `failed`로 남는 회귀 검사도 통과했습니다.
 
 첫 실행에서 신규 테스트의 점검 개수 오기 1건과, 하위 `python3`에 PyYAML이 없는 개발 환경 오류 2건이 있었습니다. 점검 항목을 실제 11개로 정확히 검증하고 개발 가상환경 PATH를 적용한 뒤 95개 전체를 재실행했습니다. 테스트 삭제·skip 추가·실패 무시는 하지 않았습니다.
