@@ -26,6 +26,7 @@ import run as ansible
 import argo
 import bridge
 import credentials
+from handoff import application_name
 from storage import durable_write
 from publication import validate_target
 
@@ -67,7 +68,7 @@ def load(registry_file, target_id, config_file, binding_file=None):
     argo.require(set(cd) == {'version', 'state_dir', 'repository', 'branch', 'context', 'targets'} and cd['version'] == 1
                  and isinstance(cd['targets'], dict) and target_id in cd['targets'], 'existing CD base config required')
     argo.require(set(settings) >= {'state_dir', 'source_repository', 'pull_secret_file'}
-                 and not set(settings) - {'state_dir', 'source_repository', 'pull_secret_file', 'edge_config_file', 'target_security_group_id', 'expires_at'},
+                 and not set(settings) - {'state_dir', 'source_repository', 'pull_secret_file', 'edge_config_file', 'target_security_group_id', 'expires_at', 'observability_config_file'},
                  'registration settings differ')
     argo.require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', settings['source_repository']), 'source repository required')
     if settings.get('edge_config_file'):
@@ -263,11 +264,44 @@ def install_renewal(cd, renewal):
     argo.require(renewal['secret'] in control('get', 'role', 'railshot-credentials', '-o', 'json')['rules'][0]['resourceNames'], 'renewal role readback differs')
 
 
+def grant_control_objects(cd, registered, target_id):
+    """Append snapshot-derived names to one bootstrap-owned Role, under the registration lock."""
+    namespace, name = 'argocd', 'railshot-product-registrations'
+    expected = {('argoproj.io', 'appprojects'): registered['target']['project'],
+                ('argoproj.io', 'applications'): application_name(target_id, registered['target']['namespace'], registered['app']),
+                ('', 'secrets'): 'railshot-' + target_id}
+    role = argo.kubectl(cd['context'], namespace, 'get', 'role', name, '-o', 'json')
+    rules = role.get('rules') or []
+    seen = set()
+    for rule in rules:
+        argo.require(set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
+                     and len(rule['apiGroups']) == len(rule['resources']) == 1
+                     and rule['verbs'] == ['get', 'patch'] and rule['resourceNames']
+                     and all(label(value) for value in rule['resourceNames']), 'registration Role must contain exact names only')
+        key = (rule['apiGroups'][0], rule['resources'][0])
+        argo.require(key in expected and key not in seen, 'registration Role kind differs')
+        seen.add(key)
+    original = copy.deepcopy(rules)
+    for (group, resource), resource_name in expected.items():
+        rule = next((r for r in rules if r['apiGroups'] == [group] and r['resources'] == [resource]), None)
+        if rule is None:
+            rule = {'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch'], 'resourceNames': []}
+            rules.append(rule)
+        if resource_name not in rule['resourceNames']:
+            rule['resourceNames'].append(resource_name)
+    if rules != original:
+        role['rules'] = rules
+        argo.kubectl(cd['context'], namespace, 'replace', '-f', '-', '-o', 'json', document=role)
+    observed = argo.kubectl(cd['context'], namespace, 'get', 'role', name, '-o', 'json')
+    argo.require(observed.get('rules') == rules, 'registration Role readback differs')
+
+
 def github_variable(repository, name, document=None, *, create=False):
     token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
     argo.require(token, 'operator GitHub token required')
     path = '/repos/' + repository + '/actions/variables' + ('' if create else '/' + name)
-    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
+               'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'}
     request = Request('https://api.github.com' + path, headers=headers,
                       data=bridge.encoded(document) if document is not None else None,
                       method='POST' if create else 'PATCH' if document is not None else 'GET')
@@ -298,6 +332,7 @@ def bind_ci(settings, registered, target_id):
 
 
 def aws_security_group(descriptor, configured=None):
+    configured = configured or descriptor.get('security_group_id')
     _, region, instance = ansible.transport_parts(descriptor['transport_ref'])
     result = json.loads(argo.native(['aws', 'ec2', 'describe-instances', '--region', region,
         '--instance-ids', instance, '--output', 'json', '--no-cli-pager']))
@@ -344,6 +379,9 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                 record['steps'].append(stage)
             save(record_path, record)
         try:
+            checkpoint('permissions')
+            grant_control_objects(cd, registered, target_id)
+            complete('permissions')
             checkpoint('edge')
             if settings.get('edge_config_file'):
                 edge_request = {'target_id': target_id, 'tenant': registered['tenant'], 'app': registered['app'],
@@ -377,6 +415,23 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
             checkpoint('credentials')
             install_renewal(cd, renewal)
             record['credentials'] = {'renewal': 'configured', 'expires_at': expiration}; complete('credentials')
+            if settings.get('observability_config_file'):
+                checkpoint('observability')
+                observation = {'version': 1, 'target_id': target_id, 'environment_id': home.name,
+                    'app': registered['app'], 'namespace': target['namespace'],
+                    'node_ip': identity['descriptor']['addresses']['private'],
+                    'probe_url': registered['public_http']['url'], 'registry_file': str(registry_file), 'context': cd['context']}
+                save(home / 'observability-request.json', observation)
+                rc = ansible.execute([sys.executable, str(ROOT / 'observability/register.py'),
+                    '--config', settings['observability_config_file'], '--request', str(home / 'observability-request.json'),
+                    '--out', str(home / 'observability.json')], 300, dict(os.environ))
+                argo.require(rc == 0, 'observability registration did not complete')
+                observed = read_private(home / 'observability.json')
+                argo.require(observed.get('status') == 'succeeded' and observed.get('target_id') == target_id
+                             and observed.get('app') == registered['app'] and observed.get('registered') is True,
+                             'observability registration binding differs')
+                record['observability'] = {'registered': True, 'collection_state': 'pending'}
+                complete('observability')
             checkpoint('ci')
             bind_ci(settings, registered, target_id); complete('ci')
             save(home / 'cd.json', cd)

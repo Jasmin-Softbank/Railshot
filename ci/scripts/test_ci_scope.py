@@ -24,7 +24,7 @@ class ScopeTests(unittest.TestCase):
             '.dockerignore': {'containers'},
             'infrastructure/providers/openstack/pyproject.toml': {'contracts', 'openstack'},
             'infrastructure/providers/terraform_tools/costs.py': {'contracts', 'terraform', 'api-browser', 'containers'},
-            'infrastructure/terraform/aws-edge/main.tf': {'contracts', 'terraform'},
+            'infrastructure/terraform/aws-edge/main.tf': {'contracts', 'terraform', 'api-browser', 'containers'},
             'infrastructure/ansible/runtime.yml': {'contracts', 'database-ansible', 'api-browser', 'containers'},
             'infrastructure/ansible/ci.yml': {'contracts', 'database-ansible', 'terraform', 'containers'},
             'deployment/manifests/build-runner.yaml': {'contracts', 'containers'},

@@ -96,6 +96,7 @@ spec:
             - {name: RAILSHOT_API_TOKEN_FILE, value: /run/secrets/api/token}
             - {name: RAILSHOT_STATE_DIR, value: /var/lib/railshot/state}
             - {name: RAILSHOT_CD_CONFIG, value: /var/lib/railshot/config/cd.json}
+            - {name: RAILSHOT_OBSERVER_CONFIG, value: /var/lib/railshot/config/observer.json}
             - {name: KUBECONFIG, value: /var/lib/railshot/config/kubeconfig}
             - {name: HOME, value: /var/lib/railshot}
             - {name: GITHUB_TOKEN, valueFrom: {secretKeyRef: {name: railshot-github, key: token}}}

@@ -84,7 +84,7 @@
 
     - name: Install distro runtime packages
       ansible.builtin.apt:
-        name: [docker.io, docker-buildx, python3-venv, python3-yaml, git, jq, iptables, iproute2, ca-certificates]
+        name: [docker.io, docker-buildx, python3-venv, python3-yaml, git, jq, iptables, nftables, iproute2, ca-certificates]
         state: present
         update_cache: true
         cache_valid_time: 3600
@@ -132,91 +132,159 @@
           test -f "$profile" && test ! -L "$profile"
           test "$(stat -c '%u:%a' "$profile")" = '0:644'
           jq -e '.schema_version == 1 and .builder.network == "railshot-quality" and .builder.flags == ["--oci-worker-net=bridge"]' "$profile" >/dev/null
-          ipt() { iptables -w 10 "$@"; }
-          ip6t() { ip6tables -w 10 "$@"; }
           case "${1:-install}" in
-            --check|--fingerprint)
-              # Shared INPUT/FORWARD chains also belong to kube-proxy/Cilium.
-              # Validate our earliest reachable hooks before hashing only their
-              # stable policy. An unrelated rule *before* a hook fails closed:
-              # it could ACCEPT CI traffic before our drop/egress restrictions.
-              # We do not reorder or flush Kubernetes/Cilium chains to pass.
-              policy_state=$(python3 - <<'PYRAILSHOT_POLICY'
-          import json, shlex, subprocess
-
-          def rules(binary, chain):
-              output = subprocess.check_output([binary, '-w', '10', '-S', chain], text=True)
-              result = []
-              for line in output.splitlines():
-                  tokens = shlex.split(line)
-                  if tokens[:1] == ['-A']:
-                      if '--ctstate' in tokens:
-                          index = tokens.index('--ctstate') + 1
-                          tokens[index] = ','.join(sorted(tokens[index].split(',')))
-                      result.append(tokens)
-              return result
-
-          expected = {
-              ('iptables', 'FORWARD'): ['-A FORWARD -j DOCKER-USER'],
-              ('iptables', 'DOCKER-USER'): ['-A DOCKER-USER -i br-railshot -j RAILSHOT-CI-EGRESS'],
-              ('iptables', 'INPUT'): [
-                  '-A INPUT -i rsrun+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
-                  '-A INPUT -i rsrun+ -m comment --comment railshot-runtime-host-block -j DROP',
-                  '-A INPUT -i br-railshot -m comment --comment railshot-ci-host-block -j DROP'],
-              ('ip6tables', 'INPUT'): ['-A INPUT -i rsrun+ -j DROP', '-A INPUT -i br-railshot -j DROP'],
-              ('ip6tables', 'FORWARD'): ['-A FORWARD -i rsrun+ -j DROP', '-A FORWARD -i br-railshot -j DROP'],
-          }
-          policy = {}
-          for (binary, chain), lines in expected.items():
-              prefix = [shlex.split(line) for line in lines]
-              actual = rules(binary, chain)
-              if actual[:len(prefix)] != prefix:
-                  raise SystemExit('CI policy hook missing or preceded by another rule: ' + binary + ' ' + chain)
-              policy[binary + ':' + chain] = prefix
-          egress = rules('iptables', 'RAILSHOT-CI-EGRESS')
-          if not egress or egress[-1][-2:] != ['-j', 'DROP']:
-              raise SystemExit('CI egress policy must end in DROP')
-          policy['iptables:RAILSHOT-CI-EGRESS'] = egress
-          print(json.dumps(policy, sort_keys=True, separators=(',', ':')))
-          PYRAILSHOT_POLICY
-              ) || exit 1
-              # CNI-managed rules after the verified hooks and dynamic container
-              # lists are excluded. Native probes still bind all CI egress rules.
-              fingerprint=$({
-                sha256sum "$profile"
-                printf '%s\n' "$policy_state"
-                sysctl -n net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables
-                docker network inspect railshot-quality | jq -S '.[0] | {Id,Driver,EnableIPv6,Internal,IPAM,Options}'
-              } | sha256sum | cut -d' ' -f1)
-              if [ "$1" = --check ]; then
-                if [ "$#" -ge 2 ]; then
-                  test "$2" = "$(sha256sum "$profile" | cut -d' ' -f1)"
-                fi
-                test -f /var/lib/railshot-ci/network-verified.sha256
-                test "$fingerprint" = "$(cat /var/lib/railshot-ci/network-verified.sha256)"
-              else
-                echo "$fingerprint"
-              fi
-              exit 0 ;;
-            install) ;;
+            install)
+              install -d -m 0700 /var/lib/railshot-ci
+              rm -f /var/lib/railshot-ci/network-verified.sha256 ;;
+            --check|--fingerprint) ;;
             *) echo 'Unsupported network helper action' >&2; exit 2 ;;
           esac
-          # Any reconciliation invalidates prior native-container evidence.
-          install -d -m 0700 /var/lib/railshot-ci
-          rm -f /var/lib/railshot-ci/network-verified.sha256
-          # Only traffic arriving from this worker bridge is affected, never host SSH/IAP.
-          # Guards remain in place on any failed update. Do not remove them in an EXIT trap.
-          ipt -S DOCKER-USER >/dev/null
-          ipt -C DOCKER-USER -i br-railshot -m comment --comment railshot-update-guard -j DROP 2>/dev/null || ipt -I DOCKER-USER 1 -i br-railshot -m comment --comment railshot-update-guard -j DROP
-          ipt -C INPUT -i br-railshot -m comment --comment railshot-ci-host-block -j DROP 2>/dev/null || ipt -I INPUT 1 -i br-railshot -m comment --comment railshot-ci-host-block -j DROP
-          ip6t -C INPUT -i br-railshot -j DROP 2>/dev/null || ip6t -I INPUT 1 -i br-railshot -j DROP
-          ip6t -C FORWARD -i br-railshot -j DROP 2>/dev/null || ip6t -I FORWARD 1 -i br-railshot -j DROP
-          # Per-run internal bridges need DB/app traffic, but no host services.
-          # Reply traffic for the host's localhost health probes remains allowed.
-          ipt -C INPUT -i rsrun+ -m comment --comment railshot-runtime-host-block -j DROP 2>/dev/null || ipt -I INPUT 1 -i rsrun+ -m comment --comment railshot-runtime-host-block -j DROP
-          ipt -C INPUT -i rsrun+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || ipt -I INPUT 1 -i rsrun+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-          ip6t -C INPUT -i rsrun+ -j DROP 2>/dev/null || ip6t -I INPUT 1 -i rsrun+ -j DROP
-          ip6t -C FORWARD -i rsrun+ -j DROP 2>/dev/null || ip6t -I FORWARD 1 -i rsrun+ -j DROP
+          # One owned inet table enforces both IP families before the shared priority-0
+          # Docker/Cilium chains. DROP is terminal; ACCEPT continues through later base
+          # chains, so it cannot override the CNI. Never flush or reorder shared tables.
+          policy_state=$(python3 - "${1:-install}" <<'PYRAILSHOT_POLICY'
+          import json, subprocess, sys
+
+          TABLE = {"family": "inet", "name": "railshot_ci"}
+          objects = [{"table": TABLE}]
+          for chain in ("input", "forward", "egress"):
+              spec = {"family": "inet", "table": "railshot_ci", "name": chain}
+              if chain != "egress":
+                  spec.update(type="filter", hook=chain, prio=-10, policy="accept")
+              objects.append({"chain": spec})
+
+          def match(left, right, op="=="):
+              return {"match": {"op": op, "left": left, "right": right}}
+
+          def meta(key, value, op="=="):
+              return match({"meta": {"key": key}}, value, op)
+
+          def address(field, cidr, op="=="):
+              addr, length = cidr.split("/")
+              return match({"payload": {"protocol": "ip", "field": field}},
+                           addr if length == "32" else {"prefix": {"addr": addr, "len": int(length)}}, op)
+
+          def rule(chain, tests, verdict, comment=None):
+              spec = {"family": "inet", "table": "railshot_ci", "chain": chain,
+                      "expr": tests + [{"counter": {"packets": 0, "bytes": 0}}, verdict]}
+              if comment:
+                  spec["comment"] = comment
+              objects.append({"rule": spec})
+
+          v6 = meta("nfproto", "ipv6")
+          quality = meta("iifname", "br-railshot")
+          runtime = meta("iifname", "rsrun*")
+          reply_states = {"set": ["established", "related"]}
+          rule("input", [runtime, v6], {"drop": None}, "railshot-runtime-ipv6-host-block")
+          rule("input", [runtime, match({"ct": {"key": "state"}}, reply_states)], {"accept": None})
+          rule("input", [runtime], {"drop": None}, "railshot-runtime-host-block")
+          rule("input", [quality], {"drop": None}, "railshot-ci-host-block")
+          rule("forward", [runtime, v6], {"drop": None}, "railshot-runtime-ipv6-forward-block")
+          rule("forward", [quality], {"jump": {"target": "egress"}})
+          rule("egress", [v6], {"drop": None}, "railshot-ci-ipv6-block")
+          rule("egress", [address("saddr", "172.30.0.0/24", "!=")], {"drop": None})
+          rule("egress", [match({"ct": {"key": "state"}}, "invalid", "in")], {"drop": None})
+          rule("egress", [match({"fib": {"result": "type", "flags": ["daddr"]}}, "local")], {"drop": None})
+          for cidr in ("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+                       "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "192.0.0.0/24",
+                       "192.0.2.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+                       "224.0.0.0/4", "240.0.0.0/4", "168.63.129.16/32"):
+              rule("egress", [address("daddr", cidr)], {"drop": None}, "railshot-deny-" + cidr)
+          for protocol, ports in (("tcp", [80, 443]), ("udp", [53]), ("tcp", [53])):
+              rule("egress", [match({"payload": {"protocol": protocol, "field": "dport"}},
+                         {"set": ports} if len(ports) > 1 else ports[0]),
+                   match({"ct": {"key": "state"}}, {"set": ["new", "established"]})], {"accept": None})
+          rule("egress", [], {"drop": None}, "railshot-deny-other-egress")
+
+          def normalize(value):
+              # Handles and packet counts change without changing enforcement. Preserve
+              # rule order, verdicts, expressions and table flags (including dormant).
+              if isinstance(value, list):
+                  return [normalize(item) for item in value]
+              if isinstance(value, dict):
+                  result = {key: normalize(item) for key, item in value.items() if key not in ("handle", "index")}
+                  if "counter" in result and isinstance(result["counter"], dict):
+                      result["counter"] = {}
+                  if "set" in result and isinstance(result["set"], list):
+                      result["set"] = sorted(result["set"], key=lambda item: json.dumps(item, sort_keys=True))
+                  if "fib" in result and isinstance(result["fib"].get("flags"), str):
+                      result["fib"]["flags"] = [result["fib"]["flags"]]
+                  return result
+              return value
+
+          def canonical(entries):
+              tables, chains, rules = [], {}, {}
+              for entry in entries:
+                  if "metainfo" in entry:
+                      continue
+                  kind, value = next(iter(entry.items()))
+                  if value.get("family") != "inet" or value.get("table", value.get("name")) != "railshot_ci":
+                      raise SystemExit("Unexpected object in CI-owned nft table")
+                  value = normalize(value)
+                  if kind == "table":
+                      tables.append(value)
+                  elif kind == "chain":
+                      if value["name"] in chains:
+                          raise SystemExit("Duplicate CI nft chain")
+                      chains[value["name"]] = value
+                  elif kind == "rule":
+                      rules.setdefault(value["chain"], []).append(value)
+                  else:
+                      raise SystemExit("Unexpected CI nft object type")
+              return {"tables": tables, "chains": chains, "rules": rules}
+
+          expected = canonical(objects)
+          if sys.argv[1] == "install":
+              # A single nft transaction replaces only our table. Invalid updates leave
+              # the previous table intact; readiness was invalidated before this call.
+              commands = [{"add": {"table": TABLE}}, {"delete": {"table": TABLE}}]
+              commands.extend({"add": item} for item in objects)
+              subprocess.run(["nft", "-j", "-f", "-"], input=json.dumps({"nftables": commands}),
+                             text=True, check=True, capture_output=True)
+          actual = canonical(json.loads(subprocess.check_output(
+              ["nft", "-j", "list", "table", "inet", "railshot_ci"], text=True))["nftables"])
+          if actual != expected:
+              raise SystemExit("CI nft enforcement differs from the owned policy (hook, priority, rule or verdict)")
+          print(json.dumps(actual, sort_keys=True, separators=(",", ":")))
+          PYRAILSHOT_POLICY
+          ) || exit 1
+          if [ "${1:-install}" != install ]; then
+            fingerprint=$({
+              sha256sum "$profile"
+              printf '%s\n' "$policy_state"
+              sysctl -n net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables
+              docker network inspect railshot-quality | jq -S '.[0] | {Id,Driver,EnableIPv6,Internal,IPAM,Options}'
+            } | sha256sum | cut -d' ' -f1)
+            if [ "$1" = --check ]; then
+              if [ "$#" -ge 2 ]; then
+                test "$2" = "$(sha256sum "$profile" | cut -d' ' -f1)"
+              fi
+              test -f /var/lib/railshot-ci/network-verified.sha256
+              test "$fingerprint" = "$(cat /var/lib/railshot-ci/network-verified.sha256)"
+            else
+              echo "$fingerprint"
+            fi
+            exit 0
+          fi
+          # Migration removes only our exact former hooks after independent enforcement
+          # has been installed and read back. Cilium, kube-proxy and Docker rules stay put.
+          ipt() { iptables -w 10 "$@"; }
+          ip6t() { ip6tables -w 10 "$@"; }
+          remove4() { while ipt -C "$@" 2>/dev/null; do ipt -D "$@"; done; }
+          remove6() { while ip6t -C "$@" 2>/dev/null; do ip6t -D "$@"; done; }
+          remove4 INPUT -i rsrun+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+          remove4 INPUT -i rsrun+ -m comment --comment railshot-runtime-host-block -j DROP
+          remove4 INPUT -i br-railshot -m comment --comment railshot-ci-host-block -j DROP
+          remove4 DOCKER-USER -i br-railshot -j RAILSHOT-CI-EGRESS
+          remove4 DOCKER-USER -i br-railshot -m comment --comment railshot-update-guard -j DROP
+          for chain in INPUT FORWARD; do
+            remove6 "$chain" -i rsrun+ -j DROP
+            remove6 "$chain" -i br-railshot -j DROP
+          done
+          if ipt -S RAILSHOT-CI-EGRESS >/dev/null 2>&1; then
+            ipt -F RAILSHOT-CI-EGRESS
+            ipt -X RAILSHOT-CI-EGRESS
+          fi
           modprobe br_netfilter
           sysctl -q -w net.bridge.bridge-nf-call-iptables=1 net.bridge.bridge-nf-call-ip6tables=1
           if ! docker network inspect railshot-quality >/dev/null 2>&1; then
@@ -231,25 +299,6 @@
             .Options["com.docker.network.bridge.name"] == "br-railshot" and
             .Options["com.docker.network.bridge.enable_icc"] == "false"' >/dev/null
           sysctl -q -w net.ipv6.conf.br-railshot.disable_ipv6=1
-          ipt -S RAILSHOT-CI-EGRESS >/dev/null 2>&1 || ipt -N RAILSHOT-CI-EGRESS
-          ipt -F RAILSHOT-CI-EGRESS
-          ipt -A RAILSHOT-CI-EGRESS ! -s 172.30.0.0/24 -j DROP
-          ipt -A RAILSHOT-CI-EGRESS -m conntrack --ctstate INVALID -j DROP
-          ipt -A RAILSHOT-CI-EGRESS -m addrtype --dst-type LOCAL -j DROP
-          # RFC1918, link-local/metadata, loopback, carrier NAT, special/reserved space.
-          for cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 192.0.0.0/24 192.0.2.0/24 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 168.63.129.16/32; do
-            ipt -A RAILSHOT-CI-EGRESS -d "$cidr" -m comment --comment "railshot-deny-$cidr" -j DROP
-          done
-          ipt -A RAILSHOT-CI-EGRESS -p tcp -m multiport --dports 80,443 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
-          ipt -A RAILSHOT-CI-EGRESS -p udp --dport 53 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
-          ipt -A RAILSHOT-CI-EGRESS -p tcp --dport 53 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
-          ipt -A RAILSHOT-CI-EGRESS -m comment --comment railshot-deny-other-egress -j DROP
-          # Put our jump before Docker's RETURN. The update guard prevents transient allow.
-          while ipt -C DOCKER-USER -i br-railshot -j RAILSHOT-CI-EGRESS 2>/dev/null; do
-            ipt -D DOCKER-USER -i br-railshot -j RAILSHOT-CI-EGRESS
-          done
-          ipt -I DOCKER-USER 1 -i br-railshot -j RAILSHOT-CI-EGRESS
-          ipt -D DOCKER-USER -i br-railshot -m comment --comment railshot-update-guard -j DROP
 
     - name: Install network policy service after Docker
       ansible.builtin.copy:
