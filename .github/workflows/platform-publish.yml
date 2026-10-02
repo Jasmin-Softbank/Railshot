@@ -1,0 +1,29 @@
+name: Publish platform containers
+
+on:
+  workflow_dispatch:
+    inputs:
+      components:
+        description: JSON array of components to build
+        type: string
+        default: '["dashboard","api","mcp","ci-runner"]'
+      publish:
+        description: Publish tested images to GHCR (trusted branch only)
+        type: boolean
+        default: false
+      deploy:
+        description: Update the platform deployment branch after publication (dashboard and api required)
+        type: boolean
+        default: false
+
+# GitHub requires this dispatch entry on the default branch. The reviewed
+# integration ref contains the complete build, publication and deployment jobs.
+permissions: {}
+jobs:
+  select-integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require the reviewed integration workflow
+        run: |
+          echo 'Select integration/team-assembly-20261002 in Run workflow or use gh workflow run --ref integration/team-assembly-20261002.' >&2
+          exit 1
