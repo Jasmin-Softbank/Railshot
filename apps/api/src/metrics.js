@@ -18,10 +18,14 @@ function configuration(path) {
   if (config.version !== 1 || !Array.isArray(config.targets) || config.targets.length > 100) throw new Error('Invalid observer targets');
   const seen = new Set();
   for (const target of config.targets) {
-    const key = `${target.target_id}:${target.app}`;
-    if (!TARGET_ID.test(target.target_id || '') || !APP_NAME.test(target.app || '') || !dns.test(target.namespace || '') ||
-        !instance.test(target.node_instance || '') || !instance.test(target.cluster_instance || '') || seen.has(key)) throw new Error('Invalid observer binding');
-    safeUrl(target.prometheus_url); safeUrl(target.probe_url); seen.add(key);
+    const key = `${target.target_id}:${target.app ?? ''}`;
+    if (!TARGET_ID.test(target.target_id || '') || !instance.test(target.node_instance || '') || seen.has(key) ||
+        target.cluster_instance != null && !instance.test(target.cluster_instance)) throw new Error('Invalid observer binding');
+    if (target.app != null) {
+      if (!APP_NAME.test(target.app) || !dns.test(target.namespace || '') || !instance.test(target.cluster_instance || '')) throw new Error('Invalid app observer binding');
+      safeUrl(target.probe_url);
+    } else if (target.namespace != null || target.probe_url != null) throw new Error('App identity required for app observations');
+    safeUrl(target.prometheus_url); seen.add(key);
   }
   let collector;
   if (config.collector) {
@@ -100,14 +104,17 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
         return result;
       }
     }
-    const bindings = config.targets.filter((item) => item.target_id === record.target_id && (!record.app || item.app === record.app));
+    const registered = config.targets.filter((item) => item.target_id === record.target_id);
+    const exact = record.app ? registered.filter((item) => item.app === record.app) : registered;
+    const bindings = exact.length ? exact : registered.filter((item) => item.app == null);
     // A node-only request cannot choose an arbitrary app or an ambiguous physical target.
     if (!record.app && new Set(bindings.map((item) => `${item.prometheus_url}|${item.node_instance}`)).size > 1) {
       for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable');
       return result;
     }
-    const target = bindings[0] && { ...bindings[0], app: record.app ?? null };
-    if (!record.app) for (const name of ['pods', 'http']) result.metrics[name] = metric(name, 'unsupported');
+    const selected = bindings.find((item) => item.app == null) || bindings[0];
+    const target = selected && { ...selected, app: selected.app && record.app || null };
+    if (!target?.app) for (const name of ['pods', 'http']) result.metrics[name] = metric(name, 'unsupported');
     if (!target) { for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unsupported'); return result; }
     await Promise.all(queries(target).map(async ({ names, query: expression }) => {
       try {

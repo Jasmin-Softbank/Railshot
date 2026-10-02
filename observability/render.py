@@ -38,8 +38,8 @@ def validate(config):
     if any(type(p) is not int or not 30000 <= p <= 32767 for p in ports) or len(set(ports)) != 2:
         raise ValueError('Use two different NodePorts in 30000..32767')
     urls = config['probe_urls']
-    if not isinstance(urls, list) or not 1 <= len(urls) <= 10 or len(set(urls)) != len(urls):
-        raise ValueError('Provide 1..10 unique operator-approved HTTP probe URLs')
+    if not isinstance(urls, list) or not 0 <= len(urls) <= 10 or len(set(urls)) != len(urls):
+        raise ValueError('Provide 0..10 unique operator-approved HTTP probe URLs')
     for value in urls:
         parsed = urlsplit(value)
         if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username
@@ -69,6 +69,8 @@ def prometheus(config):
              {'source_labels': ['__param_target'], 'target_label': 'instance'},
              {'target_label': '__address__', 'replacement': 'blackbox:9115'}]},
     ]
+    if not config['probe_urls']:
+        jobs = [job for job in jobs if job['job_name'] != 'http']
     if config['argocd_metrics']:
         jobs.append({'job_name': 'argocd', 'static_configs': [{'targets': [config['argocd_metrics']]}],
                      'metric_relabel_configs': [{'source_labels': ['__name__'], 'regex': 'argocd_app_info', 'action': 'keep'}]})

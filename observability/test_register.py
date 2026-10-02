@@ -31,7 +31,7 @@ class RegistrationTests(unittest.TestCase):
         row, _ = registration_row(self.config, self.request, self.descriptor)
         rows = merge_rows([], row)
         self.assertEqual(merge_rows(rows, row), rows)
-        for changed in ({'environment_id': 'other'}, {'resource_id': 'instance-2'}, {'app': 'other-app'}):
+        for changed in ({'environment_id': 'other'}, {'resource_id': 'instance-2'}, {'node_instance': '192.0.2.99:30910'}):
             with self.assertRaises(ValueError):
                 merge_rows(rows, {**row, **changed})
         with self.assertRaises(ValueError):
@@ -124,6 +124,42 @@ class RegistrationTests(unittest.TestCase):
             with patch.dict(sys.modules, {'environment': environment, 'argo': SimpleNamespace(native=None)}), patch.object(registration, 'node_request', return_value=({}, self.descriptor)), patch.object(registration, 'sync_observer'):
                 self.assertTrue(registration.register(config, self.request, output)['registered'])
                 self.assertEqual(json.loads((Path(root) / 'product.json').read_text())['targets'][0]['target_id'], 'new-aws')
+
+    def test_node_only_registration_preserves_node_and_cluster_without_a_fake_probe(self):
+        request = {key: value for key, value in self.request.items() if key not in {'app', 'namespace', 'probe_url', 'context'}}
+        row, rendering = registration_row(self.config, request, self.descriptor)
+        self.assertFalse({'app', 'namespace', 'probe_url'} & row.keys())
+        self.assertEqual(rendering['probe_urls'], [])
+        jobs = scrape_config([row])['scrape_configs']
+        self.assertEqual([job['job_name'] for job in jobs], ['node', 'cluster'])
+        app_row, _ = registration_row(self.config, self.request, self.descriptor)
+        for first, second in [(row, app_row), (app_row, row)]:
+            merged = merge_rows(merge_rows([], first), second)
+            self.assertEqual(merged, [first, second])
+            self.assertEqual(merge_rows(merged, second), merged)
+            for key, value in [('resource_id', 'different'), ('prometheus_url', 'http://192.0.2.99:9090'),
+                               ('node_instance', '192.0.2.99:30910'), ('cluster_instance', '192.0.2.99:30911'),
+                               ('node_ip', '192.0.2.99')]:
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    merge_rows([first], {**second, key: value})
+        self.assertEqual(scrape_config([row, app_row])['scrape_configs'][-1]['static_configs'],
+                         [{'targets': [self.request['probe_url']]}])
+        with self.assertRaises(ValueError):
+            registration_row(self.config, {**request, 'probe_url': self.request['probe_url']}, self.descriptor)
+
+
+    def test_gcp_uses_verified_public_route_and_actual_observer_source(self):
+        config = {**self.config, 'observer_source_cidr': '198.51.100.20/32'}
+        settings(config)
+        descriptor = {**self.descriptor, 'provider_kind': 'gcp', 'management_endpoint': 'https://198.51.100.10:6443'}
+        row, rendering = registration_row(config, self.request, descriptor)
+        self.assertEqual(row['node_instance'], '198.51.100.10:30910')
+        self.assertEqual(row['node_ip'], self.request['node_ip'])
+        self.assertEqual(rendering['observer_source_cidr'], '198.51.100.20/32')
+        for source in ['0.0.0.0/0', '198.51.100.0/24', '127.0.0.1/32']:
+            with self.assertRaises(ValueError):
+                settings({**config, 'observer_source_cidr': source})
+
 
 
 if __name__ == '__main__':

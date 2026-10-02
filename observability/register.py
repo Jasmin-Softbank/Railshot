@@ -10,6 +10,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 import re
 import shlex
 import sys
@@ -32,7 +33,7 @@ def require(ok):
 
 
 def settings(config):
-    require(set(config) - {'observer_transport'} == {'version', 'owner', 'lifecycle', 'expires_at', 'state_dir', 'prometheus_url', 'observer_ip',
+    require(set(config) - {'observer_transport', 'observer_source_cidr'} == {'version', 'owner', 'lifecycle', 'expires_at', 'state_dir', 'prometheus_url', 'observer_ip',
                            'observer_registry_file', 'observer_target_id', 'observer_directory',
                            'node_metrics_port', 'cluster_metrics_port'} and config['version'] == 1)
     require(config.get('observer_transport', 'registered') in ('registered', 'direct'))
@@ -41,6 +42,8 @@ def settings(config):
     require(isinstance(config['owner'], str) and re.fullmatch(r'[a-z][a-z0-9-]{2,39}', config['owner']))
     require(str(ipaddress.IPv4Address(config['observer_ip'])) == config['observer_ip'])
     require(config['prometheus_url'] == 'http://' + config['observer_ip'] + ':9090')
+    source = ipaddress.IPv4Network(config.get('observer_source_cidr', config['observer_ip'] + '/32'), strict=True)
+    require(source.prefixlen == 32 and not (source.is_unspecified or source.is_loopback or source.is_multicast or source.is_link_local))
     for key in ('state_dir', 'observer_registry_file', 'observer_directory'):
         path = Path(config[key])
         require(path.is_absolute() and '..' not in path.parts and str(path) != '/')
@@ -52,43 +55,58 @@ def settings(config):
 
 
 def registration_row(config, request, descriptor):
-    require(set(request) == {'version', 'target_id', 'environment_id', 'app', 'namespace', 'node_ip',
-                             'probe_url', 'registry_file', 'context'} and request['version'] == 1)
+    fields = {'version', 'target_id', 'environment_id', 'node_ip', 'registry_file'}
+    app_fields = {'app', 'namespace', 'probe_url'} if request.get('app') is not None else set()
+    require(set(request) - {'context'} == fields | app_fields and request['version'] == 1)
     require(request['target_id'] == descriptor['target_id'] and request['node_ip'] == descriptor['addresses']['private'])
-    for key in ('target_id', 'app', 'namespace'):
+    for key in ('target_id', *(['app', 'namespace'] if app_fields else [])):
         require(isinstance(request[key], str) and re.fullmatch(r'[a-z][a-z0-9-]{1,61}[a-z0-9]', request[key]))
     require(isinstance(request['environment_id'], str) and re.fullmatch(r'[A-Za-z0-9._-]{1,128}', request['environment_id']))
     rendered = validate({'name': config['owner'], 'node_ip': request['node_ip'],
-        'observer_source_cidr': config['observer_ip'] + '/32', 'node_metrics_port': config['node_metrics_port'],
-        'cluster_metrics_port': config['cluster_metrics_port'], 'probe_urls': [request['probe_url']], 'argocd_metrics': None})
+        'observer_source_cidr': config.get('observer_source_cidr', config['observer_ip'] + '/32'), 'node_metrics_port': config['node_metrics_port'],
+        'cluster_metrics_port': config['cluster_metrics_port'], 'probe_urls': [request['probe_url']] if app_fields else [], 'argocd_metrics': None})
     metrics_host = (descriptor['addresses'].get('metrics', request['node_ip'])
                     if descriptor.get('provider_kind') == 'openstack' else request['node_ip'])
-    return {'target_id': request['target_id'], 'app': request['app'], 'namespace': request['namespace'],
+    if descriptor.get('provider_kind') == 'gcp' and descriptor.get('management_endpoint'):
+        # registered_node already binds this endpoint to the provisioned public IPv4.
+        metrics_host = urlsplit(descriptor['management_endpoint']).hostname
+    return {'target_id': request['target_id'], **{key: request[key] for key in app_fields},
             **({'node_ip': request['node_ip']} if metrics_host != request['node_ip'] else {}),
             'prometheus_url': config['prometheus_url'], 'node_instance': f"{metrics_host}:{config['node_metrics_port']}",
-            'cluster_instance': f"{metrics_host}:{config['cluster_metrics_port']}", 'probe_url': request['probe_url'],
+            'cluster_instance': f"{metrics_host}:{config['cluster_metrics_port']}",
             'environment_id': request['environment_id'], 'resource_id': descriptor['resource_id']}, rendered
 
 
 def merge_rows(rows, row):
     require(isinstance(rows, list) and len(rows) <= 100)
-    existing = [item for item in rows if item['target_id'] == row['target_id']]
+    target = [item for item in rows if item['target_id'] == row['target_id']]
+    physical = ('resource_id', 'prometheus_url', 'node_instance', 'cluster_instance', 'node_ip')
+    require(all(all(item.get(key) == row.get(key) for key in physical) for item in target))
+    existing = [item for item in target if item.get('app') == row.get('app')]
     require(not existing or existing == [row])
     if existing:
         return rows
-    require(len(rows) < 100 and not any(item['node_instance'] == row['node_instance'] for item in rows))
+    require(len(rows) < 100 and not any(item['target_id'] != row['target_id'] and
+                                      item['node_instance'] == row['node_instance'] for item in rows))
     return [*rows, row]
 
 
 def scrape_config(rows):
     require(bool(rows))
     first = rows[0]
+    cluster_address = first.get('cluster_instance', first['node_instance'])
     result = prometheus({'node_ip': first['node_instance'].split(':')[0],
         'node_metrics_port': int(first['node_instance'].split(':')[1]),
-        'cluster_metrics_port': int(first['cluster_instance'].split(':')[1]),
-        'probe_urls': [first['probe_url']], 'argocd_metrics': None})
-    for job, key in zip(result['scrape_configs'], ('node_instance', 'cluster_instance', 'probe_url')):
-        job['static_configs'] = [{'targets': sorted({row[key] for row in rows})}]
+        'cluster_metrics_port': int(cluster_address.split(':')[1]),
+        'probe_urls': sorted({row['probe_url'] for row in rows if row.get('probe_url')}), 'argocd_metrics': None})
+    jobs = []
+    for job in result['scrape_configs']:
+        key = {'node': 'node_instance', 'cluster': 'cluster_instance', 'http': 'probe_url'}[job['job_name']]
+        addresses = sorted({row[key] for row in rows if row.get(key)})
+        if addresses:
+            job['static_configs'] = [{'targets': addresses}]
+            jobs.append(job)
+    result['scrape_configs'] = jobs
     return result
 
 
@@ -148,7 +166,7 @@ def register(config, request, output):
     observer, _ = node_request(config['observer_registry_file'], config['observer_target_id'])
     row, rendering = registration_row(config, request, descriptor)
     product = state / 'product.json'
-    receipt = {'status': 'unknown', 'target_id': row['target_id'], 'app': row['app'], 'registered': False,
+    receipt = {'status': 'unknown', 'target_id': row['target_id'], 'app': row.get('app'), 'registered': False,
                'collection_state': 'pending', 'steps': []}
     def save():
         durable_write(output, json.dumps(receipt).encode())
