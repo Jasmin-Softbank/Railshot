@@ -102,4 +102,20 @@ test('target node metrics preserve partial data, real zero, timestamps and node-
   const beforeAmbiguous = calls;
   assert.equal((await observe({ target_id: 'demo' })).metrics.node_up.state, 'unavailable');
   assert.equal(calls, beforeAmbiguous, 'ambiguous node-only binding never picks an arbitrary node');
+  const nodeOnly = { target_id: binding.target_id, prometheus_url: binding.prometheus_url, node_instance: binding.node_instance };
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [nodeOnly] }));
+  for (const app of [undefined, 'removed-app']) {
+    const beforeNodeOnly = calls;
+    result = await observe({ target_id: 'demo', app });
+    assert.equal(calls - beforeNodeOnly, 1, 'a node binding never queries an invented app or probe');
+    assert.equal(result.metrics.node_up.state, 'ready'); assert.equal(result.metrics.network_receive_bytes_per_second.value, 100);
+    for (const name of ['pods', 'http']) { assert.equal(result.metrics[name].state, 'unsupported'); assert.equal(result.metrics[name].value, null); }
+  }
+  failCluster = false;
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [nodeOnly, binding] }));
+  assert.equal((await observe(record)).metrics.pods.value, 1, 'exact app binding takes precedence over node-only fallback');
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [{ ...nodeOnly, probe_url: binding.probe_url }] }));
+  const beforeInvalid = calls;
+  assert.equal((await observe(record)).metrics.node_up.state, 'unavailable');
+  assert.equal(calls, beforeInvalid, 'an app probe without an app identity is rejected before collection');
 });

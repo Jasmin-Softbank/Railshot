@@ -61,6 +61,13 @@ Node Ready와 Pod 상태는 kube-state-metrics가 관측한 API 객체 상태이
 
 ## 설치
 
+노드만 등록할 때 `register.py` 요청에서 `app`, `namespace`, `probe_url` 세 필드를 모두
+생략합니다. node/cluster scrape와 실제 환경 ID는 유지하며 HTTP job은 앱 probe가 있는 행만
+수집합니다. 샘플 앱을 등록하지 않아도 노드 관측을 켤 수 있습니다.
+GCP의 검증된 public management endpoint가 등록되어 있으면 같은 IP의 metrics NodePort를
+사용합니다. NAT 뒤의 실제 송신 주소가 관측 VM 사설 IP와 다르면 등록 설정에
+`observer_source_cidr`를 실제 송신 IPv4 `/32`로 지정합니다. Prometheus 접속 주소는 바꾸지 않습니다.
+
 `bootstrap.py`와 `register.py`의 운영자 설정은 등록된 관측 VM의 SSH transport를 기본으로
 사용합니다. 실행기와 관측 스택을 기존 control VM에 함께 배치하고 그 사설 주소에 직접
 접속할 때만 `"observer_transport": "direct"`를 명시할 수 있습니다. 이 설정도 등록된
@@ -84,7 +91,7 @@ python3 observability/render.py observability/.local/target.json observability/.
 | `node_ip` | 관측 VM에서 도달 가능한 k3s 노드 IPv4. AWS에서는 사설 IP 권장 |
 | `observer_source_cidr` | 대상에서 보이는 관측 VM의 송신 IPv4 `/32`. NAT/VPN 변환 후 주소 확인 |
 | `node_metrics_port`, `cluster_metrics_port` | 충돌하지 않는 두 NodePort. 기본 30910/30081 |
-| `probe_urls` | 운영자가 승인한 정확한 HTTP(S) health URL 1~10개. 비밀 쿼리·인증정보 금지 |
+| `probe_urls` | 운영자가 승인한 정확한 HTTP(S) health URL 0~10개. 노드만 수집하면 빈 목록. 비밀 쿼리·인증정보 금지 |
 | `argocd_metrics` | 기본 null. 필요할 때 기존 Argo controller 메트릭의 사설/VPN IPv4:port |
 
 1. k3s 노드가 한 대인지, Cilium 등 NetworkPolicy 구현이 동작하는지 확인합니다.

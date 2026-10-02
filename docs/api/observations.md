@@ -31,8 +31,13 @@ collector가 실제 활성화되어 샘플을 수집하기 전에는 `no_data/nu
 운영자가 [product.example.json](../../observability/product.example.json)의 형식으로
 소유자 전용 0600 파일을 만들고 API에 `RAILSHOT_OBSERVER_CONFIG` 절대 경로를 지정한다.
 파일은 요청마다 다시 읽으므로 새 target/app 등록은 원자적 파일 교체로 반영할 수 있다.
-각 행은 정확한 target/app, 앱 namespace, node/cluster scrape instance, Blackbox의
-정확한 probe URL을 묶는다. 미등록 앱의 요청은 외부 질의를 하지 않는다.
+앱 관측 행은 정확한 target/app, 앱 namespace, node/cluster scrape instance, Blackbox의
+정확한 probe URL을 묶는다. 노드만 관측하는 행에는 `target_id`, `prometheus_url`,
+`node_instance`만 필요하다. 이 행은 app/namespace/probe_url을 생략하며 cluster_instance는
+선택 사항이다. 샘플 앱을 만들거나 삭제한 앱의 probe를 되살릴 필요가 없다.
+정확한 앱 행이 있으면 우선 사용하고, 없으면 명시적으로 등록된 노드 행으로 노드만 조회한다.
+이때 Pod·HTTP는 unsupported/null이며 다른 앱의 행을 대신 사용하지 않는다.
+노드 행도 없는 미등록 앱의 요청은 외부 질의를 하지 않는다.
 
 Prometheus 접근은 관리망에서 API 노드에만 허용한다. 기본 Compose의 loopback 바인딩을
 그대로 사용하면 별도의 인증된 터널이 필요하다. 직접 사설 bind를 선택하면 SG/방화벽을

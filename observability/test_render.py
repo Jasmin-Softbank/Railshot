@@ -33,7 +33,7 @@ class ConfigurationTests(unittest.TestCase):
                 validate({**self.config, 'probe_urls': [url]})
 
     def test_probe_list_bounds(self):
-        for urls in [[], ['https://example.com'] * 2, ['https://example.com/' + str(i) for i in range(11)]]:
+        for urls in [['https://example.com'] * 2, ['https://example.com/' + str(i) for i in range(11)]]:
             with self.assertRaises(ValueError):
                 validate({**self.config, 'probe_urls': urls})
 
@@ -134,6 +134,12 @@ class ConfigurationTests(unittest.TestCase):
             path = out / 'rules.json'
             path.write_text(json.dumps(rules))
             subprocess.run([os.environ['PROMTOOL'], 'check', 'rules', str(path)], check=True)
+
+    def test_node_only_has_no_http_probe_job(self):
+        config = {**self.config, 'probe_urls': []}
+        validate(config)
+        self.assertEqual([job['job_name'] for job in prometheus(config)['scrape_configs']], ['node', 'cluster'])
+
 
 
 if __name__ == '__main__':
