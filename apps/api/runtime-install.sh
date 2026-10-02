@@ -7,7 +7,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl unzip git openssh-client \
+apt-get install -y --no-install-recommends ca-certificates curl unzip git openssh-client openssl \
   python3 python3-venv groff-base less
 python3 -m venv /opt/railshot-python
 python3 "$ROOT/apps/api/runtime-smoke.py" --requirements > /tmp/railshot-runtime-requirements.txt
@@ -16,6 +16,7 @@ python3 "$ROOT/apps/api/runtime-smoke.py" --requirements > /tmp/railshot-runtime
 ln -s /opt/railshot-python/bin/python3 /usr/local/bin/python3
 ln -s /opt/railshot-python/bin/ansible /usr/local/bin/ansible
 ln -s /opt/railshot-python/bin/ansible-playbook /usr/local/bin/ansible-playbook
+ln -s /opt/railshot-python/bin/ansible-vault /usr/local/bin/ansible-vault
 TASK_TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TASK_TMP"; rm -f /tmp/railshot-runtime-requirements.txt' EXIT
 python3 "$ROOT/apps/api/runtime-smoke.py" --downloads > "$TASK_TMP/downloads.tsv"

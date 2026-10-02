@@ -15,10 +15,21 @@
 - 제출은 자동 재시도하지 않는다. 배포 재요청에는 기존 Idempotency-Key를 유지한다.
   상태 조회 중지와 페이지 종료는 서버 실행을 취소하지 않는다. unknown 결과는 자동
   재실행하지 않으며 서버가 재조정될 때까지 신규 접수를 차단한다.
-- 새 환경 화면은 서버가 등록한 `profiles`로 계획을 저장하고, 검토한 `plan_id`로 환경
-  준비를 요청한다. 현재 AWS/GCP runtime 한 노드·DB 없음만 지원한다. runtime 준비와
-  CI/CD·공개 경로 등록을 별도 상태로 표시한다. 미지원 기능을 실행 가능한 것으로 표시하지 않는다.
+- 실행 대상에서 새 환경 사양을 고르면 계획 확인 후 하나의 `plan_id`로 환경 준비부터 앱 배포까지
+  요청한다. 사양의 `target_id`와 등록 앱 이름을 사용하며, DB를 선택하면 공개된 PostgreSQL·DCS·
+  proxy 수량을 같은 `profile_id`의 placement로 전달한다. `deployment_supported`가 없는 사양은
+  이 경로에서 선택할 수 없다. DB가 없는 사양과 기존 실행 대상은 기존 배포·이미지 게시 동작을 유지한다.
+  `database.required` 사양은 두 환경 폼에서 PostgreSQL HA를 고정하고 DB 없음 선택을 막는다.
+- 별도 새 환경 준비 화면도 같은 사양으로 runtime 한 노드와 선택적 PostgreSQL HA의 계획을
+  저장하고 `/environments`로 실행한다. 앱 소스 제출 없이 환경만 준비하는 경로다. 두 경로 모두
+  실제 자원을 만드는 버튼 앞에서 계획을 표시하고, 만료한 계획은 다시 확인하게 한다.
+- 여러 노드의 Terraform 계획을 순차 생성할 수 있도록 `/plans` POST는 최대 10분 기다린다.
+  컨테이너 Nginx의 upstream read timeout은 610초이며, 외부 ALB의 idle timeout도 배치 담당자가
+  이에 맞춰 설정해야 한다. 다른 브라우저 POST는 기존 120초, 조회는 15초 제한을 유지한다.
 
 UI 개발은 `npm run dev`(Vite 4181), 정적 빌드는 `npm run build`다. Vite 개발 서버는
 기본 API와 같은 origin이 아니므로 전체 연결은 API가 제공하는 4173 또는 운영 프록시를 사용한다.
 브라우저 검사는 [ci/browser](../../ci/browser/README.md)를 따른다.
+환경 폼 회귀 검사도 `npm test --prefix ci/browser`에 포함된다.
+DB 사양→계획→앱 배포의 식별자 일치, DB 없는 사양, 별도 환경 준비, 기존 대상 제출과
+계획 불일치·만료 차단을 localhost fixture에서 검사하며 cloud를 호출하지 않는다.

@@ -4,6 +4,8 @@ This existing Node test package loads the real dashboard and HTTP API on random 
 
 The unconfigured check verifies asset loading, source validation, navigation and disabled execution. The configured check submits GitHub, ZIP and folder sources without browser Authorization, distinguishes published images from deployed applications, verifies the final HTTPS link, and reloads the durable record without resubmitting the source.
 
+The environment form check uses local HTTP fixtures to verify that profile counts become the approved DB placement, one reviewed plan binds the app name and target to the combined deployment, required DB profiles cannot select no DB, and optional/no-DB profiles retain their choices. It also checks environment-only preparation, existing-target builds, and plan mismatch/expiry rejection.
+
 From the repository root (Node 22 or newer):
 
 ```sh

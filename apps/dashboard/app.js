@@ -31,12 +31,16 @@ const sourceBox = document.querySelector('#source-box');
 const error = document.querySelector('#form-error');
 const appName = document.querySelector('#app-name');
 const targetSelect = document.querySelector('#target');
+const deploymentDatabase = document.querySelector('#deployment-database');
 const operation = document.querySelector('#operation');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
 let selectedSource = null;
 let reviewed = null;
 let targets = [];
+let profiles = [];
+let reviewing = false;
+let reviewGeneration = 0;
 let submitting = false;
 // ponytail: remember one resource locator per browser; server owns durable execution records.
 let current = null;
@@ -47,6 +51,7 @@ let pollController;
 const requests = new Set();
 
 function invalidateReview() {
+  reviewGeneration += 1;
   reviewed = null;
   document.querySelector('#review-panel').hidden = true;
   deployButton.disabled = true;
@@ -115,8 +120,52 @@ const labels = { queued: '실행 대기 중', running: '실행 중', succeeded: 
   failed: '실행 실패', blocked: '실행 조건 확인 필요', unknown: '실행 결과 확인 필요', publication_unverified: '게시 결과 확인 필요' };
 function activeRun() { return current && !terminal.has(current.status); }
 function selectedTarget() { return targets.find((item) => item.id === targetSelect.value); }
+function selectedProfile() { return profiles.find((item) => `profile:${item.id}` === targetSelect.value); }
 function supported(target, kind) { return Boolean(target?.capabilities?.[kind === 'builds' ? 'ci_submission' : 'application_deployment']); }
+function databaseSummary(profile, mode) {
+  const database = profile?.database;
+  return mode === 'patroni' && database ? `PostgreSQL ${database.database_nodes}대 · DCS 투표 노드 ${database.dcs_voters}대 · 프록시 ${database.proxy_nodes}대` : 'DB 없음';
+}
+function databaseChoice(select, profile, reset = false) {
+  const available = profile?.database?.mode === 'patroni';
+  const required = available && profile.database.required === true;
+  select.querySelector('[value="none"]').disabled = required;
+  const option = select.querySelector('[value="patroni"]');
+  option.disabled = !available;
+  option.textContent = required ? 'PostgreSQL HA 포함 (필수)' : 'PostgreSQL HA 포함';
+  if (!available) select.value = 'none';
+  else if (reset || required) select.value = 'patroni';
+}
+function renderTargets() {
+  const before = targetSelect.value;
+  const options = targets.map((target) => new Option(target.label || target.id, target.id));
+  for (const profile of profiles) {
+    const option = new Option(`새 환경 · ${profile.label || profile.id} · ${profile.provider}`, `profile:${profile.id}`);
+    option.disabled = !profile.supported || !profile.deployment_supported || !profile.target_id;
+    options.push(option);
+  }
+  targetSelect.replaceChildren(...options);
+  if (!options.length) targetSelect.append(new Option('실행 대상 준비 중', ''));
+  targetSelect.value = options.find((item) => item.value === before && !item.disabled)?.value
+    || options.find((item) => !item.disabled)?.value || '';
+  if (targetSelect.value !== before) databaseChoice(deploymentDatabase, selectedProfile(), true);
+  updateTarget();
+}
 function updateTarget() {
+  const profile = selectedProfile();
+  document.querySelector('#deployment-database-field').hidden = !profile;
+  if (profile) {
+    databaseChoice(deploymentDatabase, profile);
+    for (const option of operation.options) option.disabled = option.value !== 'deployments' || !profile.supported || !profile.deployment_supported;
+    operation.value = profile.supported && profile.deployment_supported ? 'deployments' : '';
+    if (profile.application_name) appName.value = profile.application_name;
+    appName.readOnly = Boolean(profile.application_name);
+    document.querySelector('#deployment-database-note').textContent = databaseSummary(profile, deploymentDatabase.value);
+    document.querySelector('#target-note').textContent = '계획을 확인한 뒤 환경 준비부터 앱 배포까지 한 번에 시작합니다.'
+      + (profile.application_name ? ` 이 환경의 앱 이름은 ${profile.application_name}입니다.` : '');
+    invalidateReview();
+    return;
+  }
   const target = selectedTarget();
   if (operation.value === 'deployments' && target?.application_name) appName.value = target.application_name;
   appName.readOnly = operation.value === 'deployments' && Boolean(target?.application_name);
@@ -131,13 +180,15 @@ function updateTarget() {
   } else appName.readOnly = false;
   invalidateReview();
 }
-targetSelect.addEventListener('change', updateTarget);
+targetSelect.addEventListener('change', () => { databaseChoice(deploymentDatabase, selectedProfile(), true); updateTarget(); });
+deploymentDatabase.addEventListener('change', updateTarget);
 operation.addEventListener('change', updateTarget);
 appName.addEventListener('input', invalidateReview);
 
 async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
-  const timeout = setTimeout(() => controller.abort(), options.method === 'POST' ? 120000 : 15000);
+  const timeoutMs = options.method === 'POST' ? (path === '/api/v1/plans' ? 600000 : 120000) : 15000;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(path, { ...options, signal: controller.signal, redirect: 'error' });
     const data = await response.json();
@@ -150,40 +201,67 @@ async function checkConnection() {
   try {
     const { data } = await request('/api/v1/targets');
     if (!Array.isArray(data.items)) throw new Error('실행 대상 응답을 확인하지 못했습니다.');
-    const before = targetSelect.value;
     targets = data.items;
-    targetSelect.replaceChildren(...targets.map((target) => new Option(target.label || target.id, target.id)));
-    if (!targets.length) targetSelect.append(new Option('실행 대상 준비 중', ''));
-    else if (targets.some((target) => target.id === before)) targetSelect.value = before;
     document.querySelector('#connection-status').textContent = targets.length ? 'API 연결됨 · 실행 대상을 선택하세요.' : 'API 연결됨 · 실행 대상 준비 중';
-    updateTarget();
+    renderTargets();
   } catch (cause) {
     targets = [];
-    targetSelect.replaceChildren(new Option('실행 대상 연결 확인 필요', ''));
     document.querySelector('#connection-status').textContent = cause.message;
-    updateTarget();
+    renderTargets();
   }
 }
 
-document.querySelector('#deploy-form').addEventListener('submit', (event) => {
+async function createPlan(name, profile, mode) {
+  const database = mode === 'patroni' ? { mode, placements: [{ profile_id: profile.id,
+    database_nodes: profile.database.database_nodes, dcs_voters: profile.database.dcs_voters, proxy_nodes: profile.database.proxy_nodes }] } : { mode: 'none' };
+  const { data } = await request('/api/v1/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, runtime: { profile_id: profile.id, node_count: 1 }, database }) });
+  if (typeof data.id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(data.id) || data.name !== name || data.runtime?.profile_id !== profile.id
+      || data.database?.mode !== mode || !Number.isFinite(Date.parse(data.expires_at))) throw new Error('환경 계획 응답이 선택 내용과 일치하지 않습니다.');
+  return data;
+}
+
+document.querySelector('#deploy-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (submitting) return;
+  if (submitting || reviewing) return;
   const target = selectedTarget();
+  const profile = selectedProfile();
   const app = appName.value.trim();
   if (!selectedSource) error.textContent = '배포할 소스를 선택하세요.';
   else if (selectedSource.kind === 'repository' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s?#]+\/?$/.test(selectedSource.label)) error.textContent = '공개 GitHub 저장소 URL을 입력하세요.';
   else if (selectedSource.kind === 'archive' && !archive.files[0].name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
   else if (!/^[a-z][a-z0-9-]{1,28}[a-z0-9]$/.test(app)) error.textContent = '앱 이름은 영문 소문자로 시작하고 소문자나 숫자로 끝나는 3~30자여야 합니다.';
-  else if (!supported(target, operation.value)) error.textContent = '실행 가능한 대상을 선택하세요.';
+  else if (profile ? !profile.supported || !profile.deployment_supported || !profile.target_id || operation.value !== 'deployments'
+    : !supported(target, operation.value)) error.textContent = '실행 가능한 대상을 선택하세요.';
   else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
-    reviewed = { app, source: selectedSource, targetId: target.id, kind: operation.value, key: crypto.randomUUID() };
+    invalidateReview();
+    if (profile) clearPlan();
+    const generation = reviewGeneration;
+    let plan;
+    reviewing = true;
+    const reviewButton = document.querySelector('#deploy-form button[type="submit"]');
+    reviewButton.disabled = true;
+    try {
+      if (profile) {
+        plan = await createPlan(app, profile, deploymentDatabase.value);
+        if (generation !== reviewGeneration) return;
+        if (!plan.executable) throw new Error(`현재 실행할 수 없는 계획입니다: ${(plan.blockers || []).join(', ')}`);
+        if (Date.parse(plan.expires_at) <= Date.now()) throw new Error('환경 계획이 만료됐습니다. 선택 내용을 다시 확인하세요.');
+      }
+    } catch (cause) {
+      if (generation === reviewGeneration) { error.textContent = cause.message; error.hidden = false; }
+      return;
+    } finally { reviewing = false; reviewButton.disabled = false; }
+    reviewed = { app, source: selectedSource, targetId: profile?.target_id || target.id, kind: operation.value, key: crypto.randomUUID(), plan };
     document.querySelector('#review-source').textContent = selectedSource.label;
     document.querySelector('#review-app').textContent = app;
-    document.querySelector('#review-target').textContent = target.label || target.id;
-    document.querySelector('#review-note').textContent = operation.value === 'deployments'
+    document.querySelector('#review-target').textContent = profile ? `새 환경 · ${profile.label || profile.id} · ${databaseSummary(profile, plan.database.mode)}` : target.label || target.id;
+    document.querySelector('#review-note').textContent = plan
+      ? `새 클라우드 자원을 생성하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.`
+      : operation.value === 'deployments'
       ? '소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다.' : '소스 검사와 이미지 게시를 시작합니다. 앱 배포는 수행하지 않습니다.';
-    deployButton.textContent = operation.selectedOptions[0].textContent;
+    deployButton.textContent = plan ? '환경 준비부터 앱 배포까지 시작' : operation.selectedOptions[0].textContent;
     deployButton.disabled = false;
     requestError.hidden = true;
     error.hidden = true;
@@ -245,8 +323,13 @@ deployButton.addEventListener('click', async () => {
   const controls = document.querySelectorAll('#deploy-form input, #deploy-form button, #deploy-form select, #edit-selection');
   controls.forEach((control) => { control.disabled = true; });
   try {
+    if (draft.plan && Date.parse(draft.plan.expires_at) <= Date.now()) {
+      reviewed = null;
+      throw new Error('환경 계획이 만료됐습니다. 선택 내용을 다시 확인하세요.');
+    }
     const payload = new FormData();
     payload.set('app', draft.app); payload.set('target_id', draft.targetId);
+    if (draft.plan) payload.set('plan_id', draft.plan.id);
     if (draft.source.kind === 'repository') payload.set('repository_url', draft.source.label);
     else if (draft.source.kind === 'archive') payload.set('archive', archive.files[0]);
     else {
@@ -324,10 +407,13 @@ checkConnection();
 if (current) { renderRun(); refreshRun(); }
 
 const profileSelect = document.querySelector('#profile');
+const environmentName = document.querySelector('#environment-name');
+const environmentDatabase = document.querySelector('#environment-database');
 const environmentMessage = document.querySelector('#environment-message');
 const environmentButton = document.querySelector('#environment-button');
 const environmentRefresh = document.querySelector('#environment-refresh');
 let environmentPlan = null, environmentKey = null, environmentId = null, environmentTimer;
+let environmentGeneration = 0;
 try { environmentId = localStorage.getItem('railshot.lastEnvironment'); } catch { /* Optional browser locator. */ }
 if (environmentId && !/^[a-zA-Z0-9._-]{1,128}$/.test(environmentId)) environmentId = null;
 let environmentBusy = false;
@@ -335,44 +421,63 @@ async function loadProfiles() {
   try {
     const { data } = await request('/api/v1/profiles');
     if (!Array.isArray(data.items)) throw new Error('환경 사양 응답을 확인하지 못했습니다.');
-    profileSelect.replaceChildren(...data.items.map((profile) => {
+    profiles = data.items;
+    profileSelect.replaceChildren(...profiles.map((profile) => {
       const option = new Option(`${profile.label || profile.id} · ${profile.provider}`, profile.id);
       option.disabled = !profile.supported;
       return option;
     }));
-    if (data.items.some((profile) => profile.supported)) profileSelect.value = data.items.find((profile) => profile.supported).id;
+    if (profiles.some((profile) => profile.supported)) profileSelect.value = profiles.find((profile) => profile.supported).id;
     else {
       profileSelect.replaceChildren(new Option('준비된 환경 사양이 없습니다', ''));
       environmentMessage.textContent = '새 환경을 생성할 수 있는 사양이 아직 등록되지 않았습니다. 준비된 대상에는 바로 배포할 수 있습니다.';
     }
     document.querySelector('#plan-button').disabled = !profileSelect.value;
+    updateEnvironmentProfile();
+    renderTargets();
   } catch (cause) { environmentMessage.textContent = cause.message; }
 }
 function clearPlan() {
+  environmentGeneration += 1;
   environmentPlan = null; environmentKey = null;
   environmentButton.disabled = true; environmentButton.hidden = true;
 }
-profileSelect.addEventListener('change', clearPlan);
-document.querySelector('#environment-name').addEventListener('input', clearPlan);
+function updateEnvironmentProfile() {
+  const profile = profiles.find((item) => item.id === profileSelect.value);
+  databaseChoice(environmentDatabase, profile, true);
+  if (profile?.application_name) environmentName.value = profile.application_name;
+  environmentName.readOnly = Boolean(profile?.application_name);
+  document.querySelector('#environment-database-note').textContent = databaseSummary(profile, environmentDatabase.value);
+  clearPlan();
+}
+profileSelect.addEventListener('change', updateEnvironmentProfile);
+environmentName.addEventListener('input', clearPlan);
+environmentDatabase.addEventListener('change', () => {
+  document.querySelector('#environment-database-note').textContent = databaseSummary(profiles.find((item) => item.id === profileSelect.value), environmentDatabase.value);
+  clearPlan();
+});
 document.querySelector('#environment-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (environmentBusy || !profileSelect.value) return;
-  environmentBusy = true; clearPlan();
+  environmentBusy = true; clearPlan(); invalidateReview();
+  const generation = environmentGeneration;
   try {
-    const { data } = await request('/api/v1/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: document.querySelector('#environment-name').value.trim(), runtime: { profile_id: profileSelect.value, node_count: 1 }, database: { mode: 'none' } }) });
+    const profile = profiles.find((item) => item.id === profileSelect.value);
+    const data = await createPlan(environmentName.value.trim(), profile, environmentDatabase.value);
+    if (generation !== environmentGeneration) return;
     environmentPlan = data; environmentKey = crypto.randomUUID();
     environmentMessage.textContent = data.executable
-      ? `${data.name} · runtime 노드 1대 · DB 없음. 계획을 실행하면 클라우드 자원이 생성됩니다.`
+      ? `${data.name} · runtime 노드 1대 · ${databaseSummary(profile, data.database.mode)}. 계획을 실행하면 클라우드 자원이 생성됩니다.`
       : `현재 실행할 수 없는 계획입니다: ${(data.blockers || []).join(', ')}`;
     environmentButton.hidden = false; environmentButton.disabled = !data.executable;
-  } catch (cause) { environmentMessage.textContent = cause.message; }
+  } catch (cause) { if (generation === environmentGeneration) environmentMessage.textContent = cause.message; }
   finally { environmentBusy = false; }
 });
 environmentButton.addEventListener('click', async () => {
   if (environmentBusy || !environmentPlan?.executable) return;
   environmentBusy = true; environmentButton.disabled = true;
   try {
+    if (Date.parse(environmentPlan.expires_at) <= Date.now()) throw new Error('환경 계획이 만료됐습니다. 환경 계획을 다시 확인하세요.');
     const { data, location } = await request('/api/v1/environments', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': environmentKey }, body: JSON.stringify({ plan_id: environmentPlan.id }) });
     const id = data.resource_id || data.id;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(id) || location !== `/api/v1/environments/${encodeURIComponent(id)}`) throw new Error('환경 조회 주소를 확인하지 못했습니다.');

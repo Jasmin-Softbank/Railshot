@@ -60,6 +60,11 @@
               </div>
               <label class="field-label" for="target">실행 대상</label>
               <select id="target"><option value="">대상을 불러오는 중입니다</option></select>
+              <div id="deployment-database-field" class="form-section" hidden>
+                <label class="field-label" for="deployment-database">새 환경의 데이터베이스</label>
+                <select id="deployment-database"><option value="none">DB 없음</option><option value="patroni">PostgreSQL HA 포함</option></select>
+                <p class="field-note" id="deployment-database-note"></p>
+              </div>
               <label class="field-label" for="operation">실행할 작업</label>
               <select id="operation">
                 <option value="deployments">빌드 후 앱 배포</option>
@@ -81,7 +86,10 @@
               <label class="field-label" for="profile">환경 사양</label>
               <select id="profile"><option value="">환경 사양을 불러오는 중입니다</option></select>
               <label class="field-label" for="environment-name">환경 이름</label>
-              <input id="environment-name" type="text" maxlength="63" placeholder="demo-environment" required />
+              <input id="environment-name" type="text" maxlength="30" pattern="[a-z][a-z0-9-]{1,28}[a-z0-9]" placeholder="demo-environment" required />
+              <label class="field-label" for="environment-database">데이터베이스</label>
+              <select id="environment-database"><option value="none">DB 없음</option><option value="patroni">PostgreSQL HA 포함</option></select>
+              <p class="field-note" id="environment-database-note"></p>
               <button class="secondary-button" id="plan-button" type="submit" disabled>환경 계획 확인</button>
             </form>
             <p id="environment-message" class="review-note" role="status"></p>

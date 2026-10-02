@@ -161,7 +161,7 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       target_id: profile.target.target_id,
       application_name: profile.deployment?.cd?.targets?.[profile.target.target_id]?.app || null,
       deployment_supported: Boolean(profile.deployment),
-      database: profile.database ? { mode: 'patroni', database_nodes: profile.database.nodes.filter((node) => node.roles.includes('database')).length, dcs_voters: profile.database.nodes.filter((node) => node.roles.includes('dcs')).length, proxy_nodes: profile.database.nodes.filter((node) => node.roles.includes('proxy')).length } : null,
+      database: profile.database ? { mode: 'patroni', required: Boolean(profile.deployment?.cd?.targets?.[profile.target.target_id]?.target?.database), database_nodes: profile.database.nodes.filter((node) => node.roles.includes('database')).length, dcs_voters: profile.database.nodes.filter((node) => node.roles.includes('dcs')).length, proxy_nodes: profile.database.nodes.filter((node) => node.roles.includes('proxy')).length } : null,
       supported: blockersFor(profile).length === 0, blockers: blockersFor(profile),
     })),
 
@@ -192,6 +192,8 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
         if (!registered || registered.app !== input.name || registered.target?.id !== profile.target.target_id
             || typeof registered.tenant !== 'string' || !TENANT_NAME.test(registered.tenant))
           blockers.push('DEPLOYMENT_PROFILE_MISMATCH');
+        if (Boolean(registered?.target?.database) !== (input.database.mode === 'patroni'))
+          blockers.push('DATABASE_BINDING_PROFILE_MISMATCH');
       }
       if (input.runtime.node_count !== 1) blockers.push('SINGLE_NODE_ONLY');
       const selected = [{ profile, target: profile.target, roles: ['runtime'] }];

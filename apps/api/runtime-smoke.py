@@ -87,10 +87,13 @@ def installed(rows):
         run('git', '--version')
         subprocess.run(['ssh', '-V'], env=env, check=True, capture_output=True, timeout=10)
         run('ansible-playbook', '--version')
-        for script in ['gitops/bridge.py', 'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py']:
+        run('ansible-vault', '--version')
+        run('openssl', 'version')
+        for script in ['gitops/bridge.py', 'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py',
+                       'infrastructure/ansible/cluster.py', 'infrastructure/providers/terraform_tools/access.py']:
             run(sys.executable, script, '--help')
         # Ansible builtin task imports and all runtime copy sources must actually be packaged.
-        for script in ['guest.yml', 'runtime.yml']:
+        for script in ['guest.yml', 'runtime.yml', 'database.yml', 'application-database.yml']:
             run('ansible-playbook', '-i', 'localhost,', str(ROOT / 'infrastructure/ansible' / script), '--syntax-check')
         for relative in ['ci/scripts/schemas/jasmin.schema.json', 'contracts/ansible-request.schema.json',
                          'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/group_vars/all.yml',

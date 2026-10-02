@@ -156,7 +156,7 @@ test('Patroni request plans every new VM, installs only runtime on app VM, binds
   const profile = config.profiles[0];
   profile.purposes.push('database'); profile.database = { nodes: [] };
   profile.deployment_file = join(home, 'deployment.json');
-  await writeFile(profile.deployment_file, JSON.stringify({ version: 1, cd: { targets: { 'demo-runtime': { app: input.name, tenant: 'demo', target: { id: 'demo-runtime' } } } } }), { mode: 0o600 });
+  await writeFile(profile.deployment_file, JSON.stringify({ version: 1, cd: { targets: { 'demo-runtime': { app: input.name, tenant: 'demo', target: { id: 'demo-runtime', database: { runtime_secret: 'runtime-db', migration_secret: 'migration-db', ca_secret: 'database-ca' } } } } } }), { mode: 0o600 });
   for (const [index, roles] of [['database', 'dcs'], ['database', 'dcs'], ['proxy', 'dcs']].entries()) {
     const file = join(home, `db${index}.json`);
     await writeFile(file, JSON.stringify({ schema_version: 'v1', target_id: `db-${index}`, provider_kind: 'aws',
@@ -194,6 +194,10 @@ test('Patroni request plans every new VM, installs only runtime on app VM, binds
     return { status: 'succeeded', target_id: 'demo-runtime', request_id: args[args.indexOf('--request-id') + 1], operation, guest_ready: true, runtime_ready: true };
   };
   const adapter = await createEnvironmentAdapter({ profilesFile, stateDir: join(home, 'environments'), runner });
+  const noDatabase = await adapter.plan(input, { id: 'missing-database' });
+  assert.equal(noDatabase.public.executable, false);
+  assert.deepEqual(noDatabase.public.blockers, ['DATABASE_BINDING_PROFILE_MISMATCH']);
+  assert.equal(calls.length, 0);
   const plan = await adapter.plan({ ...input, database: { mode: 'patroni', placements: [{ profile_id: profile.id, database_nodes: 2, dcs_voters: 3, proxy_nodes: 1 }] } }, { id: 'all-nodes' });
   assert.equal(plan.public.executable, true); assert.equal(calls.length, 4);
   assert.ok(plan.public.steps.includes('database'));
