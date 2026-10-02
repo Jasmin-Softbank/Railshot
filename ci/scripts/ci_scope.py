@@ -14,6 +14,7 @@ SHA = re.compile(r'[0-9a-f]{40}')
 # Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
 API_NATIVE_FILES = {
     'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
+    'gitops/edge.py', 'gitops/service_name.py',
     'ci/scripts/execution.py', 'ci/scripts/observability.py', 'ci/scripts/process.py',
     'ci/scripts/publication.py', 'ci/scripts/storage.py', 'ci/scripts/gate/bundle.py',
     'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/jasmin.schema.json',
@@ -28,7 +29,8 @@ API_NATIVE_FILES = {
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
 }
 API_NATIVE_PREFIXES = ('infrastructure/providers/terraform_tools/',
-                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/')
+                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/',
+                       'infrastructure/terraform/aws-edge/')
 
 
 def api_native_dependency(path):
