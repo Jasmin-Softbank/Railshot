@@ -54,6 +54,10 @@ class PlatformReleaseTests(unittest.TestCase):
         step = next(step for step in self.workflow["jobs"][job]["steps"] if step.get("name") == name)
         env = {**os.environ, "RUNNER_TEMP": str(self.home), "GITHUB_SHA": self.source_sha,
                "GITHUB_REF": "refs/heads/integration/test", "PUBLISH": "true", "DEPLOY": "true",
+               "GITHUB_REPOSITORY": "Jasmin-Softbank/Railshot", "GITHUB_REPOSITORY_ID": "1400202256",
+               "GITHUB_OUTPUT": str(self.home / "github-output"), "VERIFY_REF": "refs/heads/integration/test",
+               "VERIFY_ROLE": "arn:aws:iam::721622471953:role/railshot-platform-verifier",
+               "VERIFY_VERSION": "1", "VERIFY_HASH": "e" * 64,
                "COMPONENTS": '["dashboard","api"]', "PLATFORM_TARGET": "k3s-aws", "PLATFORM_PORT": "31080",
                **(overrides or {})}
         return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], cwd=self.repo,
@@ -79,16 +83,24 @@ class PlatformReleaseTests(unittest.TestCase):
         for overrides in ({"PUBLISH": "false"}, {"COMPONENTS": '["dashboard"]'},
                           {"PLATFORM_TARGET": ""}, {"PLATFORM_PORT": ""}, {"PLATFORM_PORT": "443"},
                           {"GITHUB_REF": "refs/heads/feature/unreviewed"},
-                          {"COMPONENTS": '["dashboard","api","api"]'}):
+                          {"COMPONENTS": '["dashboard","api","api"]'}, {"VERIFY_REF": "refs/heads/main"},
+                          {"VERIFY_HASH": ""}, {"VERIFY_ROLE": ""}, {"GITHUB_REPOSITORY_ID": "1"}):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.run_step("admission", name, overrides).returncode, 0)
         self.assertIsNone(self.remote_revision())
+        verification = self.workflow["jobs"]["verify"]
+        self.assertEqual(verification["needs"], "deploy")
+        self.assertEqual(verification["permissions"], {"contents": "read", "id-token": "write"})
 
     def test_release_creates_reviewed_branch_and_preserves_its_existing_files(self):
         first = self.deploy()
         self.assertEqual(first.returncode, 0, first.stderr)
         first_revision = self.remote_revision()
         self.assertEqual(json.loads(first.stdout)["revision"], first_revision)
+        outputs = (self.home / "github-output").read_text()
+        self.assertIn(f"revision={first_revision}\n", outputs)
+        self.assertIn(f"dashboard_digest={'a' * 64}\n", outputs)
+        self.assertIn(f"api_digest={'a' * 64}\n", outputs)
         self.assertEqual(self.git("rev-parse", f"{first_revision}^").stdout.strip(), self.source_sha)
         self.assertEqual(self.git("diff", "--name-only", self.source_sha, first_revision).stdout.strip(), WORKLOAD)
 
