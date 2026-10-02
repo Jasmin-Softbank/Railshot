@@ -34,6 +34,8 @@ function configuration(path) {
 }
 const selector = (job, address) => `{job=${JSON.stringify(job)},instance=${JSON.stringify(address)}}`;
 const named = (name, expression) => `label_replace((${expression}), "railshot_metric", "${name}", "", "")`;
+// timestamp drops the metric name; keep the two sources distinct until min aggregates them.
+const oldest = (first, second) => `min(${named('first', `timestamp(${first})`)} or ${named('second', `timestamp(${second})`)})`;
 function queries(target) {
   const node = selector('node', target.node_instance), cluster = selector('cluster', target.cluster_instance), http = selector('http', target.probe_url);
   const disk = `${node.slice(0, -1)},mountpoint="/"}`;
@@ -46,8 +48,8 @@ function queries(target) {
     { names: Object.keys(scopes).filter((name) => scopes[name] === 'target_node'), query: group(node, {
       node_up: [`up${node}`, `timestamp(up${node})`],
       cpu_percent: [`100 * (1 - avg(rate(node_cpu_seconds_total${node.slice(0, -1)},mode="idle"}[2m])))`, `min(timestamp(node_cpu_seconds_total${node}))`],
-      memory_percent: [`100 * (1 - node_memory_MemAvailable_bytes${node} / node_memory_MemTotal_bytes${node})`, `min(timestamp(${node.slice(0, -1)},__name__=~"node_memory_MemAvailable_bytes|node_memory_MemTotal_bytes"}))`],
-      disk_percent: [`max(100 * (1 - node_filesystem_avail_bytes${disk} / node_filesystem_size_bytes${disk}))`, `min(timestamp(${disk.slice(0, -1)},__name__=~"node_filesystem_avail_bytes|node_filesystem_size_bytes"}))`],
+      memory_percent: [`100 * (1 - node_memory_MemAvailable_bytes${node} / node_memory_MemTotal_bytes${node})`, oldest(`node_memory_MemAvailable_bytes${node}`, `node_memory_MemTotal_bytes${node}`)],
+      disk_percent: [`max(100 * (1 - node_filesystem_avail_bytes${disk} / node_filesystem_size_bytes${disk}))`, oldest(`node_filesystem_avail_bytes${disk}`, `node_filesystem_size_bytes${disk}`)],
       network_receive_bytes_per_second: [`sum(rate(node_network_receive_bytes_total${network}[2m]))`, `min(timestamp(node_network_receive_bytes_total${network}))`],
       network_transmit_bytes_per_second: [`sum(rate(node_network_transmit_bytes_total${network}[2m]))`, `min(timestamp(node_network_transmit_bytes_total${network}))`],
     }) },
