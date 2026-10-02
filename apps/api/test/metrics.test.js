@@ -51,3 +51,55 @@ test('bound observations expire, fail closed, and never expose backend details',
   assert.equal((await observe(record)).metrics.pods.state, 'unavailable');
   assert.equal((await createMetricsObserver({ configPath })(record)).metrics.pods.state, 'unavailable');
 });
+
+test('target node metrics preserve partial data, real zero, timestamps and node-only scope', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-node-metrics-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const configPath = join(directory, 'observer.json'), now = 1800000000000;
+  const binding = { target_id: 'demo', app: 'demo-app', namespace: 'tenant-demo-app', prometheus_url: 'http://observer.internal:9090',
+    node_instance: '10.0.0.1:30910', cluster_instance: '10.0.0.1:30081', probe_url: 'https://demo.example.test' };
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [binding] }), { mode: 0o600 });
+  let failCluster = false, age = 10, up = 1, disk = '40', network = false, calls = 0;
+  const observe = createMetricsObserver({ configPath, now: () => now, fetchImpl: async (url) => {
+    calls++;
+    const query = url.searchParams.get('query'), node = query.includes('job="node"'), cluster = query.includes('job="cluster"');
+    if (cluster && failCluster) throw new Error('private cluster failure');
+    if (node) {
+      assert.match(query, /mountpoint="\/"/); assert.match(query, /device!="lo"/);
+      assert.match(query, /rate\(node_network_receive_bytes_total/);
+    }
+    const metrics = node ? { node_up: String(up), cpu_percent: '0', memory_percent: '21', disk_percent: disk,
+      ...(network ? { network_receive_bytes_per_second: '100', network_transmit_bytes_per_second: '0' } : {}) }
+      : cluster ? { pods: '1' } : { http: '0' };
+    const samples = { up: String(up), observed: String(now / 1000 - age) };
+    for (const [name, value] of Object.entries(metrics)) Object.assign(samples, { [name]: value, [`${name}_observed`]: String(now / 1000 - age) });
+    return Response.json({ status: 'success', data: { resultType: 'vector', result: Object.entries(samples).map(([name, value]) => ({ metric: { railshot_metric: name }, value: [now / 1000, value] })) } });
+  } });
+  const record = { target_id: 'demo', app: 'demo-app' };
+  let result = await observe(record);
+  assert.equal(result.deployment_id, null);
+  assert.deepEqual(result.metrics.cpu_percent, { state: 'ready', value: 0, scope: 'target_node', observed_at: new Date(now - 10000).toISOString() });
+  assert.equal(result.metrics.disk_percent.value, 40); assert.equal(result.metrics.node_up.value, 1);
+  assert.equal(result.metrics.network_receive_bytes_per_second.state, 'no_data');
+  assert.equal(result.metrics.network_receive_bytes_per_second.value, null);
+  assert.equal(result.metrics.http.value, 0);
+  failCluster = true; network = true;
+  result = await observe(record);
+  assert.equal(result.metrics.pods.state, 'unavailable'); assert.equal(result.metrics.disk_percent.state, 'ready');
+  assert.equal(result.metrics.network_receive_bytes_per_second.value, 100); assert.equal(result.metrics.network_transmit_bytes_per_second.value, 0);
+  disk = 'NaN'; result = await observe(record);
+  assert.equal(result.metrics.disk_percent.state, 'no_data'); assert.equal(result.metrics.node_up.state, 'ready');
+  disk = null; assert.equal((await observe(record)).metrics.node_up.state, 'unavailable', 'invalid protocol value cannot become a healthy zero');
+  disk = '40'; age = -10; assert.equal((await observe(record)).metrics.node_up.state, 'stale');
+  age = 91; up = 0; assert.equal((await observe(record)).metrics.node_up.state, 'stale', 'old scrape failure is also stale');
+  age = 10; result = await observe(record);
+  assert.equal(result.metrics.node_up.state, 'collection_failed'); assert.equal(result.metrics.node_up.value, null);
+  up = 1; const before = calls;
+  result = await observe({ target_id: 'demo' });
+  assert.equal(calls - before, 1); assert.equal(result.app, null);
+  assert.equal(result.metrics.node_up.state, 'ready'); assert.equal(result.metrics.pods.state, 'unsupported'); assert.equal(result.metrics.http.state, 'unsupported');
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [binding, { ...binding, app: 'another-app', node_instance: '10.0.0.2:30910' }] }));
+  const beforeAmbiguous = calls;
+  assert.equal((await observe({ target_id: 'demo' })).metrics.node_up.state, 'unavailable');
+  assert.equal(calls, beforeAmbiguous, 'ambiguous node-only binding never picks an arbitrary node');
+});

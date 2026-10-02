@@ -6,7 +6,7 @@ from urllib.parse import urlsplit, quote
 
 KEYS = ('dns', 'https_443', 'k3s_source', 'github', 'cilium_cli_source', 'cilium_chart',
         'quay', 'registry_k8s', 'docker_hub', 'ghcr', 'workload_registry',
-        'cloudflare_tunnel', 'wireguard_udp_51820')
+        'cloudflare_tunnel')
 
 
 def registry(image):
@@ -76,6 +76,5 @@ def check(spec, arch, offline=False):
     capabilities['https_443'] = any(d['available'] for d in details.values() if (urlsplit(d['url']).port or 443) == 443)
     details.update(required=sorted(required), required_unavailable=sorted(key for key in required if not capabilities[key]),
                    duration_seconds=round(time.monotonic()-started, 3),
-                   wireguard_udp_51820={'available': None, 'reason': 'Authenticated WireGuard peer/key contract absent; UDP send is not proof'},
                    note='TLS reachability/registry challenge only; image authorization, QUIC and tunnel credentials are not proven')
     return capabilities, details

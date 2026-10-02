@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set +x
 set -euo pipefail
-# 등록 키를 의존성 설치 하위 프로세스에 전달하지 않습니다.
-ENROLLMENT_TOKEN="${RAILSHOT_ENROLLMENT_TOKEN:-${JASMIN_ENROLLMENT_TOKEN:-}}"
+# 폐기한 등록 키를 하위 프로세스에 전달하지 않습니다.
 unset RAILSHOT_ENROLLMENT_TOKEN JASMIN_ENROLLMENT_TOKEN
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_RUN=false
@@ -14,7 +13,14 @@ while [[ $# -gt 0 ]]; do
         *) break ;;
     esac
 done
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then SOURCE_RUN=true; fi
+# Validate the shared CLI/config before package, payload or virtualenv changes.
+for argument in "$@"; do
+    if [[ "$argument" == "--help" || "$argument" == "-h" ]]; then
+        PYTHONPATH="$SCRIPT_DIR" python3 -m client_setup.preflight "$@"
+        exit 0
+    fi
+done
+PYTHONPATH="$SCRIPT_DIR" python3 -m client_setup.preflight "$@"
 if [[ "$INSTALL_DEPS" == true ]]; then
     [[ ${EUID} -eq 0 ]] || { echo '의존성 설치는 root 권한이 필요합니다.' >&2; exit 1; }
     python3 - <<'PY'
@@ -24,7 +30,7 @@ if values.get('ID', '').strip('"') != 'ubuntu' or values.get('VERSION_ID', '').s
     raise SystemExit('Ubuntu 24.04만 지원합니다.')
 PY
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wireguard-tools iproute2 openssh-client python3-venv python3-openstackclient
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 openssh-client python3-venv python3-openstackclient
 fi
 if [[ "$SOURCE_RUN" == false ]]; then
     python3 "$SCRIPT_DIR/install_payload.py"
@@ -47,6 +53,4 @@ PY
 fi
 if [[ -x "${SCRIPT_DIR}/.venv/bin/python" ]]; then PYTHON="${SCRIPT_DIR}/.venv/bin/python"; fi
 export PYTHONPATH="${SCRIPT_DIR}"
-if [[ -n "$ENROLLMENT_TOKEN" ]]; then export RAILSHOT_ENROLLMENT_TOKEN="$ENROLLMENT_TOKEN"; fi
-unset ENROLLMENT_TOKEN
 exec "$PYTHON" -m client_setup.main "$@"

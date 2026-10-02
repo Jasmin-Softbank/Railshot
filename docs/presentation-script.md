@@ -103,7 +103,7 @@
 | K3s / Cilium | Kubernetes 배포판 / 해당 클러스터의 네트워크 구성 요소 |
 | OpenStack Provider | 기존 OpenStack의 VM API를 제품에서 호출하도록 감싸는 팀의 구현 |
 | Route 53 / ALB | DNS 이름 해석 / AWS의 HTTP·HTTPS 요청 분배. Route 53이 HTTP를 중계하지 않음 |
-| WireGuard / EIP | 암호화된 L3 관리 연결 / EC2 종단에 연결할 고정 public IPv4 |
+| 관리 연결 | 공급자별 SSH·Kubernetes API 접근 경로. 앱 공개 LB와 별도로 준비하며 WireGuard는 지원 선택지에서 제거 |
 | Patroni | PostgreSQL 운영·고가용성 구성을 위한 검토 대상. 이번 통합의 HA 완료 주장 아님 |
 | unscoped token | project 범위가 없는 OpenStack 인증 token. 허용 project의 scoped token으로 교환 가능하므로 인증 비밀로 취급 |
 

@@ -87,20 +87,33 @@ def customer_auth(config, review):
     server = argo.https_url(data['server']); url = urlsplit(server)
     argo.require(not url.path, 'explicit API origin required')
     auth = json.loads(data['config']); tls = auth['tlsClientConfig']
-    argo.require(set(auth) == {'bearerToken', 'tlsClientConfig'} and set(tls) == {'caData', 'insecure'} and
+    argo.require(set(auth) == {'bearerToken', 'tlsClientConfig'} and {'caData', 'insecure'} <= set(tls) <= {'caData', 'insecure', 'serverName'} and
                  tls['insecure'] is False and isinstance(auth['bearerToken'], str) and
                  0 < len(auth['bearerToken']) < 32768 and not re.search(r'\s', auth['bearerToken']), 'CA-verified bearer required')
-    return server, base64.b64decode(tls['caData'], validate=True), auth['bearerToken']
+    options = {'server_name': credentials.tls_name(tls['serverName'])} if 'serverName' in tls else {}
+    return (server, base64.b64decode(tls['caData'], validate=True), auth['bearerToken']), options
 
 
-def tail(auth, path):
+def tail(auth, path, *, server_name=None):
     server, ca, token = auth
-    opener = request.build_opener(request.ProxyHandler({}),
-        request.HTTPSHandler(context=ssl.create_default_context(cadata=ca.decode('ascii'))), credentials.NoRedirect())
-    req = request.Request(server + path, headers={'Authorization': 'Bearer ' + token, 'Accept': 'text/plain'})
-    with opener.open(req, timeout=10) as response:
-        argo.require(response.status == 200, 'log read failed')
-        raw = response.read(LIMIT + 1)
+    context = ssl.create_default_context(cadata=ca.decode('ascii'))
+    if server_name is not None:
+        url = urlsplit(server)
+        connection = credentials.RegisteredHTTPSConnection(url.hostname, url.port, server_name=server_name,
+                                                           context=context, timeout=10)
+        try:
+            connection.request('GET', path, headers={'Authorization': 'Bearer ' + token, 'Accept': 'text/plain'})
+            response = connection.getresponse()
+            argo.require(response.status == 200, 'log read failed')
+            raw = response.read(LIMIT + 1)
+        finally:
+            connection.close()
+    else:
+        opener = request.build_opener(request.ProxyHandler({}), request.HTTPSHandler(context=context), credentials.NoRedirect())
+        req = request.Request(server + path, headers={'Authorization': 'Bearer ' + token, 'Accept': 'text/plain'})
+        with opener.open(req, timeout=10) as response:
+            argo.require(response.status == 200, 'log read failed')
+            raw = response.read(LIMIT + 1)
     argo.require(len(raw) <= LIMIT, 'bounded log response required')
     return redact(raw.decode('utf-8', errors='replace')).encode()[:LIMIT // 3].decode('utf-8', errors='ignore')
 
@@ -125,27 +138,27 @@ def execute(config, value):
         return argo.observe(review, live)['deployed']
     if not current():
         return result('unavailable', 'deployment_not_current')
-    auth = customer_auth(config, review)
+    auth, tls_options = customer_auth(config, review)
     namespace = app['spec']['destination']['namespace']
     expected = next(item for item in review['workload']['items'] if item['kind'] == 'Deployment')
     template = expected['spec']['template']
     image = template['spec']['containers'][0]['image']
     argo.require(len(template['spec']['containers']) == 1 and re.search(r'@sha256:[0-9a-f]{64}$', image), 'one pinned runtime image required')
     deployment_path = '/apis/apps/v1/namespaces/' + namespace + '/deployments/' + expected['metadata']['name']
-    live = credentials.customer(*auth, deployment_path)
+    live = credentials.customer(*auth, deployment_path, **tls_options)
     argo.require(live['kind'] == 'Deployment' and live['metadata']['namespace'] == namespace and
                  live['metadata']['name'] == expected['metadata']['name'] and not live['metadata'].get('deletionTimestamp') and
                  live['spec']['selector'] == expected['spec']['selector'] and template_matches(live['spec']['template'], template),
                  'current Deployment binding differs')
     selector = urlencode({'labelSelector': ','.join(k + '=' + v for k, v in template['metadata']['labels'].items()), 'limit': 20})
-    replicas = credentials.customer(*auth, '/apis/apps/v1/namespaces/' + namespace + '/replicasets?' + selector)
+    replicas = credentials.customer(*auth, '/apis/apps/v1/namespaces/' + namespace + '/replicasets?' + selector, **tls_options)
     argo.require(replicas['kind'] == 'ReplicaSetList' and not replicas.get('metadata', {}).get('continue') and
                  len(replicas['items']) <= 20, 'bounded ReplicaSets required')
     owners = {row['metadata']['uid'] for row in replicas['items'] if row['metadata']['namespace'] == namespace and
               not row['metadata'].get('deletionTimestamp') and owns(row, 'Deployment', live['metadata']['uid']) and
               template_matches(row['spec']['template'], template)}
     pod_path = '/api/v1/namespaces/' + namespace + '/pods'
-    pods = credentials.customer(*auth, pod_path + '?' + selector)
+    pods = credentials.customer(*auth, pod_path + '?' + selector, **tls_options)
     argo.require(pods['kind'] == 'PodList' and not pods.get('metadata', {}).get('continue') and len(pods['items']) <= 20,
                  'bounded Pods required')
     selected = [pod for pod in pods['items'] if not pod['metadata'].get('deletionTimestamp') and
@@ -161,12 +174,12 @@ def execute(config, value):
         argo.require(len(statuses) == 1 and statuses[0]['name'] == container and
                      statuses[0].get('imageID', '').endswith(image[image.index('@') + 1:]), 'running image digest differs')
         text = tail(auth, pod_path + '/' + name + '/log?' + urlencode({
-            'container': container, 'tailLines': 100, 'limitBytes': LIMIT // 3, 'timestamps': 'true', 'follow': 'false'}))
+            'container': container, 'tailLines': 100, 'limitBytes': LIMIT // 3, 'timestamps': 'true', 'follow': 'false'}), **tls_options)
         # Reject a replacement Pod or Argo update that occurred during the read.
-        after = credentials.customer(*auth, pod_path + '/' + name)
+        after = credentials.customer(*auth, pod_path + '/' + name, **tls_options)
         argo.require(after['metadata']['uid'] == pod['metadata']['uid'] and template_matches(after, template), 'runtime Pod replaced')
         entries.append({'pod': name, 'container': container, 'text': text})
-    after = credentials.customer(*auth, deployment_path)
+    after = credentials.customer(*auth, deployment_path, **tls_options)
     if after['metadata']['uid'] != live['metadata']['uid'] or after['metadata']['generation'] != live['metadata']['generation'] or not current():
         return result('unavailable', 'deployment_not_current')
     return result('ready', entries=entries)

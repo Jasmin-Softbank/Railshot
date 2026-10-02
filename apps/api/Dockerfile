@@ -14,6 +14,7 @@ WORKDIR /app/apps/api
 COPY --from=dependencies /app/node_modules /app/node_modules
 COPY apps/api/package.json ./package.json
 COPY apps/api/src/ ./src/
+COPY contracts/application.mjs /app/contracts/application.mjs
 USER 1000:1000
 
 FROM base AS api

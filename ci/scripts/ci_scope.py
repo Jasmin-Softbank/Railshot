@@ -144,6 +144,8 @@ def select(paths):
             selected.update(JOBS)
         if api_native_dependency(path):
             selected.add('api-browser')
+        if path == 'apps/api/src/metrics.js':
+            selected.add('observability')
     selected.discard('containers')
     if container_components(paths):
         selected.add('containers')

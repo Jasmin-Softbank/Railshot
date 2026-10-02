@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { inspectArchive, validateFiles, archiveLimits } from './archive.js';
 import { APP_NAME, APP_NAME_MESSAGE, TENANT_NAME, TARGET_ID, SOURCE_COMMIT } from './contract.js';
 import { readPublished } from './published.js';
+import { AgentEventError, agentEventCheckName, agentEventLimits, validateEventBinding, validateEventRun, readAgentEventCheck, emptyAgentEvents } from './agent-events.js';
 
 const API = 'https://api.github.com';
 const diagnosticLimit = 2 * 1024 * 1024;
@@ -77,7 +78,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
   }
   const repoPath = `/repos/${owner}/${repo}`;
 
-  async function request(path, options = {}) {
+  async function request(path, options = {}, maxBytes = null) {
     const response = await fetchImpl(`${API}${path}`, {
       signal: AbortSignal.timeout(30_000), ...options,
       headers: {
@@ -91,7 +92,70 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     if (!response.ok) {
       throw new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502);
     }
-    return response.status === 204 ? {} : response.json();
+    if (response.status === 204) return {};
+    if (maxBytes === null) return response.json();
+    if (Number(response.headers.get('content-length')) > maxBytes) {
+      await response.body?.cancel(); throw new AgentEventError('too_large');
+    }
+    const chunks = []; let bytes = 0;
+    for await (const chunk of response.body) {
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) throw new AgentEventError('too_large');
+      chunks.push(Buffer.from(chunk));
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  }
+
+  // Small process-local cache; the product checks ownership before reaching it.
+  // Always read the run first so a rerun cannot reuse a previous attempt's cache.
+  const eventCache = new Map();
+  async function events(runId, binding) {
+    const identity = { ...binding, runId: String(runId), tenant, owner, repo, ref, workflow };
+    try {
+      validateEventBinding(identity.runId, identity);
+      if (!targetIds.has(identity.target_id)) throw new AgentEventError('binding_mismatch');
+      const options = { redirect: 'error', signal: AbortSignal.timeout(15_000) };
+      const read = (path) => request(path, options, agentEventLimits.responseBytes);
+      const runPath = `${repoPath}/actions/runs/${identity.runId}`;
+      const run = await read(runPath);
+      identity.attempt = validateEventRun(run, identity);
+      const key = JSON.stringify([owner, repo, ref, workflow, identity.runId, identity.attempt, identity.source_commit,
+        identity.app, tenant, identity.target_id, run.status]);
+      let cached = eventCache.get(key);
+      if (!cached || cached.expires <= Date.now()) {
+        const result = (async () => {
+          const checks = [];
+          let complete = false, total = null;
+          for (let page = 1; page <= 5; page++) {
+            const listing = await read(`${repoPath}/commits/${identity.source_commit}/check-runs?check_name=${encodeURIComponent(agentEventCheckName)}&filter=all&app_id=15368&per_page=20&page=${page}`);
+            if (!Number.isSafeInteger(listing.total_count) || listing.total_count < 0 || listing.total_count > 100
+                || !Array.isArray(listing.check_runs) || listing.check_runs.length > 20
+                || total !== null && total !== listing.total_count) throw new AgentEventError('producer_mismatch');
+            total = listing.total_count; checks.push(...listing.check_runs);
+            if (checks.length === total) { complete = true; break; }
+            if (listing.check_runs.length < 20 || checks.length > total) throw new AgentEventError('producer_mismatch');
+          }
+          if (!complete || new Set(checks.map((check) => check.id)).size !== checks.length) throw new AgentEventError('producer_mismatch');
+          const matches = checks.filter((check) => check.external_id === `railshot-events:${identity.runId}:${identity.attempt}`);
+          if (!matches.length) return null;
+          if (matches.length !== 1) throw new AgentEventError('producer_mismatch');
+          return readAgentEventCheck(matches[0], identity);
+        })();
+        cached = { expires: Date.now() + agentEventLimits.cacheMs, result };
+        eventCache.delete(key);
+        if (eventCache.size >= 100) eventCache.delete(eventCache.keys().next().value);
+        eventCache.set(key, cached);
+        result.catch(() => { if (eventCache.get(key) === cached) eventCache.delete(key); });
+      }
+      const envelope = await cached.result;
+      if (validateEventRun(await read(runPath), identity) !== identity.attempt) throw new AgentEventError('attempt_changed');
+      if (!envelope) return emptyAgentEvents(identity, 'not_started', 'not_available');
+      return { ...structuredClone(envelope), state: envelope.items.length ? envelope.status === 'completed' ? 'complete' : 'live' : 'no_data',
+        reason: null, checked_at: new Date().toISOString(), stale: envelope.status === 'running' && Date.now() - Date.parse(envelope.updated_at) > 60_000,
+        next_marker: null };
+    } catch (error) {
+      return emptyAgentEvents(identity, 'unavailable', error instanceof AgentEventError ? error.reason : 'upstream_unavailable');
+    }
   }
 
   async function findAppTree(rootSha, app) {
@@ -280,5 +344,5 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return verified.files;
   }
 
-  return { deploy, status, publishedFiles, allowTarget, targetId, get targetIds() { return Object.freeze([...targetIds]); } };
+  return { deploy, status, events, publishedFiles, allowTarget, targetId, get targetIds() { return Object.freeze([...targetIds]); } };
 }

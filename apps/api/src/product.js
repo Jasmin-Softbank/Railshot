@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
 import { createProductStore } from './product-store.js';
-import { APP_NAME, TARGET_ID } from './contract.js';
+import { APP_NAME, TARGET_ID, sourceAppName } from './contract.js';
 import { validateFiles } from './archive.js';
 import { createMetricsObserver } from './metrics.js';
+import { emptyAgentEvents } from './agent-events.js';
 
 export class ProductError extends Error {
   constructor(status, code, message, { outcomeUnknown = false, retryable = false } = {}) {
@@ -85,12 +86,11 @@ export async function createProductService({ service, directory, target, provide
     const option = deploymentOptions().find((item) => item.environment === environment && item.provider === provider);
     if (!option) throw invalid('배포 환경과 인프라 종류를 확인하세요.');
     if (!option.available) throw new ProductError(409, 'CAPABILITY_UNAVAILABLE', option.message);
-    const { id, cdTarget } = providerSelection(provider);
-    const name = input.source_name || input.repository_url?.split('/').at(-1) || 'my-app';
-    const normalized = name.normalize('NFKD').toLowerCase().replace(/\.zip$/i, '').replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
-    let app = normalized.replace(/^[^a-z]+/, '').slice(0, 30).replace(/-+$/g, '');
-    if (!APP_NAME.test(app)) app = `app-${digest(name).slice(0, 10)}`;
-    return { ...input, app: cdTarget?.applicationName || app, target_id: id };
+    const { id } = providerSelection(provider);
+    const name = input.source_name ?? input.repository_url?.split('/').filter(Boolean).at(-1)?.replace(/\.git$/i, '');
+    let app;
+    try { app = sourceAppName(name); } catch (error) { throw invalid(`소스 이름을 확인하세요. ${error.message}`); }
+    return { ...input, app, target_id: id };
   }
   async function update(id, patch) {
     await store.transaction((state) => { Object.assign(state.operations[id], patch, { updated_at: new Date().toISOString() }); });
@@ -121,7 +121,7 @@ export async function createProductService({ service, directory, target, provide
           || environment.runtime_target_id !== id || !environmentId || plan?.environment_id !== environmentId
           || plan.private?.profile?.target?.target_id !== id || !plan.private.profile.deployment
           || !APP_NAME.test(plan.public?.name || '') || (!standalone && operation.app !== plan.public.name)) continue;
-      return { environment_id: environmentId, applicationName: plan.public.name,
+      return { environment_id: environmentId, applicationName: plan.public.name, provider: plan.private.profile.provider ?? null,
         database_configuration: environment.database?.status === 'succeeded' };
     }
     return null;
@@ -169,7 +169,7 @@ export async function createProductService({ service, directory, target, provide
       checkFree(state);
       checkCapacity(state);
       const applicationName = selectedCdTarget?.applicationName || savedEnvironment?.applicationName;
-      if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid('등록된 배포 앱 이름과 일치하지 않습니다.');
+      if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid(`등록된 배포 앱 이름과 일치하지 않습니다. 이 대상은 ${applicationName} 전용입니다. ${input.app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
       const source = input.files ? input : { ...input, ...await materialize(input.repository_url) };
       const files = validateFiles(source.files);
       const sourceBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.path) + Math.ceil(file.content.length / 3) * 4 + 128, 0);
@@ -256,13 +256,12 @@ export async function createProductService({ service, directory, target, provide
   }
   return {
     dashboard: store.dashboard,
-    list(kind, sessionId) {
-      const state = store.read();
-      if (kind === 'plans') return Object.values(state.plans).filter((row) => owns(row, sessionId)).reverse().map((row) => structuredClone(row.public));
-      return Object.values(state.operations).filter((row) => row.kind === kind && owns(row, sessionId))
-        .reverse().filter((row) => kind !== 'builds' || row.ci?.run_id)
-        .map((row) => ({ id: kind === 'builds' ? String(row.ci.run_id) : row.id, kind, status: row.status,
-          ...Object.fromEntries(['app', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
+    list(kind, sessionId, pagination) {
+      if (kind === 'plans') return Object.values(store.read().plans).filter((row) => owns(row, sessionId)).reverse().map((row) => structuredClone(row.public));
+      const { records, hasMore, total } = store.operationPage(kind, sessionId, pagination);
+      const items = records.map((row) => ({ id: kind === 'builds' ? String(row.ci.run_id) : row.id, kind, status: row.status,
+        ...Object.fromEntries(['app', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
+      return { items, next_marker: hasMore ? items.at(-1).id : null, total };
     },
     deploymentOptions,
     targets(sessionId = null) {
@@ -278,12 +277,21 @@ export async function createProductService({ service, directory, target, provide
         const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id, sessionId);
         const available = staticAvailable || Boolean(registered);
         return { id, label: id === targetId ? target?.label || id : id,
-          provider: [...selections].find(([, selected]) => selected === id)?.[0] || null, environment: 'registered',
+          provider: [...selections].find(([, selected]) => selected === id)?.[0] || registered?.provider || null, environment: 'registered',
+          environment_id: registered?.environment_id || null,
           ...(registered?.applicationName ? { application_name: registered.applicationName, deployment_scope: 'registered_application' } : {}),
           capabilities: { ci_submission: Boolean(service), application_deployment: available,
             database_configuration: !staticAvailable && registered?.database_configuration === true },
           runtime: { status: 'unknown', observed_at: null }, blockers: available ? [] : ['CD_ADAPTER_NOT_CONFIGURED'] };
       });
+    },
+    async getTargetObservation(id, sessionId = null) {
+      const target = TARGET_ID.test(id) && this.targets(sessionId).find((item) => item.id === id);
+      if (!target) throw new ProductError(404, 'NOT_FOUND', '등록된 대상을 찾을 수 없습니다.');
+      const observation = await observeMetrics({ target_id: id, app: target.application_name ?? null });
+      const node = observation.metrics.node_up;
+      return { ...observation, environment_id: target.environment_id,
+        runtime: { status: node.state, observed_at: node.observed_at } };
     },
     async createBuild(input, materialize, sessionId = null) {
       const reserved = await reserve('builds', input, null, materialize, sessionId);
@@ -326,6 +334,26 @@ export async function createProductService({ service, directory, target, provide
         } catch { /* Keep the recorded failure when read-only diagnostics are unavailable. */ }
       }
       return { ...record, observation: await observeMetrics(record) };
+    },
+    async getDeploymentEvents(id, sessionId = null) {
+      const record = find('deployments', id, sessionId);
+      const identity = { runId: record.ci?.run_id ? String(record.ci.run_id) : null,
+        source_commit: record.source_commit, app: record.app, target_id: record.target_id };
+      const empty = (state, reason) => ({ deployment_id: id, ...emptyAgentEvents(identity, state, reason) });
+      if (!identity.runId) return empty('not_started', 'not_dispatched');
+      const bound = () => {
+        const current = find('deployments', id, sessionId), state = store.read();
+        const binding = Object.hasOwn(state.bindings, identity.runId) ? state.bindings[identity.runId] : null;
+        return binding?.operation_id === id && binding.app === identity.app && binding.target_id === identity.target_id
+          && binding.source_commit === identity.source_commit && current.source_commit === identity.source_commit
+          && String(current.ci?.run_id) === identity.runId && current.app === identity.app && current.target_id === identity.target_id;
+      };
+      if (!bound()) return empty('unavailable', 'binding_mismatch');
+      if (typeof service?.events !== 'function') return empty('unavailable', 'not_configured');
+      try {
+        const observed = await service.events(identity.runId, { source_commit: identity.source_commit, app: identity.app, target_id: identity.target_id });
+        return bound() ? { ...observed, deployment_id: id } : empty('unavailable', 'binding_mismatch');
+      } catch { return empty('unavailable', 'upstream_unavailable'); }
     },
     async getDeploymentLogs(id, sessionId = null) {
       const record = publicRecord(find('deployments', id, sessionId));

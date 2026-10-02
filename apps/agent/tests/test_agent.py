@@ -43,15 +43,16 @@ def test_sender_route_and_strict_transport(tmp_path):
         p.write_text('test');p.chmod(0o600)
     def run(args,**kwargs):
         if args[0]=='ip':
-            return SimpleNamespace(returncode=0,stdout='[{"dev":"jasmin0","prefsrc":"10.44.0.1"}]')
+            return SimpleNamespace(returncode=0,stdout='[{"dev":"ens3","prefsrc":"10.44.0.1"}]')
         assert args[-1]==COMMAND
         assert 'StrictHostKeyChecking=yes' in args
         assert '-T' in args
+        assert args[args.index('-b')+1]=='10.44.0.1'
         assert kwargs['shell'] is False
         assert json.loads(kwargs['input'])==REQUEST
         kwargs['stdout'].write(json.dumps({'version':1,'job_id':'job-1','action':'instance.list','ok':True,'result':[],'error':None}).encode())
         return SimpleNamespace(returncode=0)
-    assert send_job(REQUEST,'10.44.0.2','root',key,known,runner=run)['ok']
+    assert send_job(REQUEST,'10.44.0.2','root',key,known,interface='ens3',runner=run)['ok']
 
 
 def test_sender_refuses_wrong_route(tmp_path):
@@ -62,7 +63,7 @@ def test_sender_refuses_wrong_route(tmp_path):
         assert args[0]=='ip'
         return SimpleNamespace(returncode=0,stdout='[{"dev":"eth0","prefsrc":"10.44.0.1"}]')
     with pytest.raises(ProtocolError):
-        send_job(REQUEST,'10.44.0.2','root',key,known,runner=run)
+        send_job(REQUEST,'10.44.0.2','root',key,known,interface='ens3',runner=run)
 
 
 def test_forced_key_line_and_injection_rejection():
@@ -105,3 +106,12 @@ def test_real_transport_success_bytes():
     from apps.agent.sender import _run_ssh_bounded
     code,raw=_run_ssh_bounded([sys.executable,'-c','import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())'],b'hello',timeout=3)
     assert (code,raw)==(0,b'hello')
+
+
+def test_sender_requires_explicit_management_interface():
+    result=subprocess.run([sys.executable,str(ROOT/'apps/agent/sender.py'),
+                           '--host','10.44.0.2','--key','/unused','--known-hosts','/unused',
+                           '--job-id','job-1'],text=True,capture_output=True,timeout=5)
+    assert result.returncode==2
+    assert '--interface' in result.stderr
+    assert not result.stdout

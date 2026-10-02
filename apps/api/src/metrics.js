@@ -2,7 +2,8 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { APP_NAME, TARGET_ID } from './contract.js';
 
 const STALE_SECONDS = 90;
-const scopes = { pods: 'app_pods', cpu_percent: 'target_node', memory_percent: 'target_node', http: 'app_probe' };
+const scopes = { pods: 'app_pods', node_up: 'target_node', cpu_percent: 'target_node', memory_percent: 'target_node',
+  disk_percent: 'target_node', network_receive_bytes_per_second: 'target_node', network_transmit_bytes_per_second: 'target_node', http: 'app_probe' };
 const dns = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const instance = /^[a-zA-Z0-9.-]+:[0-9]{1,5}$/;
 function safeUrl(value) {
@@ -33,20 +34,28 @@ function configuration(path) {
 }
 const selector = (job, address) => `{job=${JSON.stringify(job)},instance=${JSON.stringify(address)}}`;
 const named = (name, expression) => `label_replace((${expression}), "railshot_metric", "${name}", "", "")`;
+// timestamp drops the metric name; keep the two sources distinct until min aggregates them.
+const oldest = (first, second) => `min(${named('first', `timestamp(${first})`)} or ${named('second', `timestamp(${second})`)})`;
 function queries(target) {
   const node = selector('node', target.node_instance), cluster = selector('cluster', target.cluster_instance), http = selector('http', target.probe_url);
+  const disk = `${node.slice(0, -1)},mountpoint="/"}`;
+  const network = `${node.slice(0, -1)},device!="lo"}`;
   const pod = `kube_pod_status_phase{job="cluster",instance=${JSON.stringify(target.cluster_instance)},namespace=${JSON.stringify(target.namespace)},phase="Running"}`;
   const podLabels = `kube_pod_labels{job="cluster",instance=${JSON.stringify(target.cluster_instance)},namespace=${JSON.stringify(target.namespace)},label_app_kubernetes_io_name=${JSON.stringify(target.app)},label_railshot_io_target=${JSON.stringify(target.target_id)}}`;
   const group = (labels, values) => [named('up', `up${labels}`), named('observed', `timestamp(up${labels})`),
     ...Object.entries(values).flatMap(([name, [value, timestamp]]) => [named(name, value), named(`${name}_observed`, timestamp)])].join(' or ');
   return [
-    { names: ['cpu_percent', 'memory_percent'], query: group(node, {
+    { names: Object.keys(scopes).filter((name) => scopes[name] === 'target_node'), query: group(node, {
+      node_up: [`up${node}`, `timestamp(up${node})`],
       cpu_percent: [`100 * (1 - avg(rate(node_cpu_seconds_total${node.slice(0, -1)},mode="idle"}[2m])))`, `min(timestamp(node_cpu_seconds_total${node}))`],
-      memory_percent: [`100 * (1 - node_memory_MemAvailable_bytes${node} / node_memory_MemTotal_bytes${node})`, `min(timestamp(node_memory_MemAvailable_bytes${node}) or timestamp(node_memory_MemTotal_bytes${node}))`],
+      memory_percent: [`100 * (1 - node_memory_MemAvailable_bytes${node} / node_memory_MemTotal_bytes${node})`, oldest(`node_memory_MemAvailable_bytes${node}`, `node_memory_MemTotal_bytes${node}`)],
+      disk_percent: [`max(100 * (1 - node_filesystem_avail_bytes${disk} / node_filesystem_size_bytes${disk}))`, oldest(`node_filesystem_avail_bytes${disk}`, `node_filesystem_size_bytes${disk}`)],
+      network_receive_bytes_per_second: [`sum(rate(node_network_receive_bytes_total${network}[2m]))`, `min(timestamp(node_network_receive_bytes_total${network}))`],
+      network_transmit_bytes_per_second: [`sum(rate(node_network_transmit_bytes_total${network}[2m]))`, `min(timestamp(node_network_transmit_bytes_total${network}))`],
     }) },
     { names: ['pods'], query: group(cluster, { pods: [`sum(${pod} and on(namespace,pod,uid) ${podLabels})`, `min(timestamp(${pod}) and on(namespace,pod,uid) ${podLabels})`] }) },
     { names: ['http'], query: group(http, { http: [`probe_success${http}`, `timestamp(probe_success${http})`] }) },
-  ];
+  ].filter(({ names }) => target.app || names[0] !== 'pods' && names[0] !== 'http');
 }
 async function query(url, expression, fetchImpl) {
   const endpoint = new URL(`${url.replace(/\/$/, '')}/api/v1/query`);
@@ -65,8 +74,9 @@ async function query(url, expression, fetchImpl) {
   const values = new Map();
   for (const row of result.data.result) {
     const name = row.metric?.railshot_metric, value = Number(row.value?.[1]);
-    if (typeof name !== 'string' || values.has(name) || !Number.isFinite(value)) throw new Error('Ambiguous observer sample');
-    values.set(name, value);
+    if (typeof name !== 'string' || values.has(name) || typeof row.value?.[1] !== 'string' || !row.value[1].trim()) throw new Error('Ambiguous observer sample');
+    // Undefined arithmetic (for example a zero-sized filesystem) does not erase sibling metrics.
+    values.set(name, Number.isFinite(value) ? value : undefined);
   }
   return values;
 }
@@ -76,7 +86,7 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
   return async (record) => {
     const checked = now();
     const metric = (name, state, value = null, observed_at = null) => ({ state, value, observed_at, scope: scopes[name] });
-    const result = { deployment_id: record.id, target_id: record.target_id, app: record.app,
+    const result = { deployment_id: record.id ?? null, target_id: record.target_id, app: record.app ?? null,
       checked_at: new Date(checked).toISOString(), stale_after_seconds: STALE_SECONDS,
       metrics: Object.fromEntries(Object.keys(scopes).map((name) => [name, metric(name, 'not_configured')])) };
     if (!configPath) return result;
@@ -90,18 +100,25 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
         return result;
       }
     }
-    const target = config.targets.find((item) => item.target_id === record.target_id && item.app === record.app);
+    const bindings = config.targets.filter((item) => item.target_id === record.target_id && (!record.app || item.app === record.app));
+    // A node-only request cannot choose an arbitrary app or an ambiguous physical target.
+    if (!record.app && new Set(bindings.map((item) => `${item.prometheus_url}|${item.node_instance}`)).size > 1) {
+      for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable');
+      return result;
+    }
+    const target = bindings[0] && { ...bindings[0], app: record.app ?? null };
+    if (!record.app) for (const name of ['pods', 'http']) result.metrics[name] = metric(name, 'unsupported');
     if (!target) { for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unsupported'); return result; }
     await Promise.all(queries(target).map(async ({ names, query: expression }) => {
       try {
         const values = await query(target.prometheus_url, expression, fetchImpl);
         for (const name of names) {
-          const times = [values.get('observed'), values.get(`${name}_observed`)];
-          const timestamp = times.every(Number.isFinite) ? Math.min(...times) * 1000 : null;
+          const times = values.get('up') === 0 ? [values.get('observed')] : [values.get('observed'), values.get(`${name}_observed`)];
+          const timestamp = times.every((time) => Number.isFinite(time) && time >= 0 && time <= 8640000000000) ? Math.min(...times) * 1000 : null;
           const fresh = timestamp !== null && checked - timestamp <= STALE_SECONDS * 1000 && timestamp <= checked + 5000;
           const value = values.get(name);
-          const state = values.get('up') === 0 ? 'collection_failed' : values.get('up') !== 1 || timestamp === null ? 'no_data' : !fresh ? 'stale'
-            : value === undefined || value < 0 || (name === 'http' ? ![0, 1].includes(value) : name.endsWith('percent') && value > 100) ? 'no_data' : 'ready';
+          const state = ![0, 1].includes(values.get('up')) || timestamp === null ? 'no_data' : !fresh ? 'stale' : values.get('up') === 0 ? 'collection_failed'
+            : value === undefined || value < 0 || (['http', 'node_up'].includes(name) ? ![0, 1].includes(value) : name.endsWith('percent') && value > 100) ? 'no_data' : 'ready';
           result.metrics[name] = metric(name, state, state === 'ready' ? value : null, timestamp === null ? null : new Date(timestamp).toISOString());
         }
       } catch { for (const name of names) result.metrics[name] = metric(name, 'unavailable'); }

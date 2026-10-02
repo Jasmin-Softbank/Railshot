@@ -161,7 +161,7 @@ def test_isolated_runner_entrypoint_rejects_shell_without_traceback():
     assert json.loads(result.stdout)["error"]["code"] == "command_rejected"
 
 
-def test_sender_refuses_non_tunnel_route_before_ssh(monkeypatch):
+def test_sender_refuses_unapproved_management_route_before_ssh(monkeypatch):
     from apps.agent import sender
     monkeypatch.setattr(sender, "_private_input", lambda value: Path(value))
     calls = []
@@ -169,7 +169,7 @@ def test_sender_refuses_non_tunnel_route_before_ssh(monkeypatch):
         calls.append(command)
         return subprocess.CompletedProcess(command, 0, '[{"dev":"eth0","prefsrc":"192.0.2.1"}]', "")
     with pytest.raises(ProtocolError):
-        sender.send_job(json.loads(valid_request()), "192.0.2.2", "root", "/private/key", "/private/hosts", runner=fake)
+        sender.send_job(json.loads(valid_request()), "192.0.2.2", "root", "/private/key", "/private/hosts", interface="ens3", runner=fake)
     assert len(calls) == 1
     assert calls[0][0] == "ip"
 
@@ -179,7 +179,7 @@ def test_sender_fixed_ssh_and_response_correlation(monkeypatch):
     monkeypatch.setattr(sender, "_private_input", lambda value: Path(value))
     def fake(command, **kwargs):
         if command[0] == "ip":
-            return subprocess.CompletedProcess(command, 0, '[{"dev":"jasmin0","prefsrc":"10.200.0.1"}]', "")
+            return subprocess.CompletedProcess(command, 0, '[{"dev":"ens3","prefsrc":"10.200.0.1"}]', "")
         assert command[-1] == "jasmin-job-v1"
         assert "StrictHostKeyChecking=yes" in command
         assert "IdentityAgent=none" in command
@@ -190,7 +190,7 @@ def test_sender_fixed_ssh_and_response_correlation(monkeypatch):
         kwargs["stdout"].write(json.dumps({"version":1,"job_id":"DIFFERENT-JOB","action":"instance.list","ok":True,"result":[],"error":None}).encode())
         return subprocess.CompletedProcess(command, 0)
     with pytest.raises(ProtocolError):
-        sender.send_job(json.loads(valid_request()), "192.0.2.2", "root", "/private/key", "/private/hosts", runner=fake)
+        sender.send_job(json.loads(valid_request()), "192.0.2.2", "root", "/private/key", "/private/hosts", interface="ens3", runner=fake)
 
 
 def test_restricted_key_renderer_rejects_options_and_path_injection():

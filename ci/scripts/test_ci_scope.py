@@ -63,6 +63,7 @@ class ScopeTests(unittest.TestCase):
             'README.md': set(),
             'AGENT.md': set(),
             'apps/api/src/server.js': {'api-browser', 'containers'},
+            'apps/api/src/metrics.js': {'api-browser', 'observability', 'containers'},
             'apps/dashboard/app.js': {'api-browser', 'containers'},
             'ci/browser/smoke.test.mjs': {'api-browser'},
             'package.json': {'api-browser', 'containers'},

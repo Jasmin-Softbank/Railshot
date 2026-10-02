@@ -232,6 +232,41 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(tls['serverName'], descriptor['addresses']['private'])
         self.assertIs(tls['insecure'], False)
 
+    def test_gcp_public_management_route_binds_allocated_ip_and_preserves_tls_identity(self):
+        descriptor = json.loads((ROOT / 'examples/ansible/gcp-node-descriptor.json').read_text())
+        descriptor['target_id'] = self.target
+        descriptor['addresses']['public'] = '34.47.68.21'
+        self.write('descriptor.json', descriptor)
+        selected = self.registry['targets'][self.target]
+        for endpoint in (None, 'http://34.47.68.21:6443', 'https://34.47.68.22:6443',
+                'https://34.47.68.21:443', 'https://34.47.68.21:6443/api'):
+            selected['management_endpoint'] = endpoint
+            self.write('registry.json', self.registry)
+            with self.assertRaises(ValueError):
+                self.run_registration()
+            self.assertFalse(self.shared.exists())
+        for public in ('224.0.0.1', '239.1.2.3'):
+            descriptor['addresses']['public'] = public
+            self.write('descriptor.json', descriptor)
+            selected['management_endpoint'] = f'https://{public}:6443'
+            self.write('registry.json', self.registry)
+            with self.assertRaises(ValueError):
+                env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
+            self.assertFalse(self.shared.exists())
+        descriptor['addresses']['public'] = '34.47.68.21'
+        self.write('descriptor.json', descriptor)
+        selected['management_endpoint'] = 'https://34.47.68.21:6443'
+        self.write('registry.json', self.registry)
+        result = self.run_registration()
+        self.assertEqual(result['status'], 'succeeded', result)
+        renewal = json.loads((self.home / 'renewal.json').read_text())
+        self.assertEqual(renewal['server'], selected['management_endpoint'])
+        self.assertEqual(renewal['tls_server_name'], descriptor['addresses']['private'])
+        secret = self.control.objects['argocd', 'secret', 'railshot-' + self.target]
+        tls = json.loads(base64.b64decode(secret['data']['config']))['tlsClientConfig']
+        self.assertEqual(tls['serverName'], descriptor['addresses']['private'])
+        self.assertIs(tls['insecure'], False)
+
     def test_openstack_management_endpoint_is_explicit_and_bound_to_the_connection_host(self):
         self.use_openstack()
         selected = self.registry['targets'][self.target]

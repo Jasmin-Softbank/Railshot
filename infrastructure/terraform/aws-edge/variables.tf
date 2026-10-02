@@ -22,7 +22,7 @@ variable "public_subnet_ids" {
   }
 }
 variable "routes" {
-  description = "Administrator-assigned app routes; one IP target per app. Set manage_dns=false only after explicit DNS state ownership transfer; the ALB fallback route remains."
+  description = "Administrator-assigned AWS app routes; one IP target per app. Set manage_dns=false only after explicit DNS state ownership transfer."
   type = map(object({
     host                     = string
     provider_kind            = string
@@ -35,16 +35,16 @@ variable "routes" {
   }))
   validation {
     condition = length(var.routes) > 0 && length(var.routes) <= 50 && alltrue([for key, route in var.routes :
-      can(regex("^[a-z][a-z0-9-]{1,39}$", key)) && contains(["aws", "gcp"], route.provider_kind) &&
+      can(regex("^[a-z][a-z0-9-]{1,39}$", key)) && route.provider_kind == "aws" &&
       can(cidrnetmask("${route.target_private_ip}/32")) &&
       can(regex("^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)", route.target_private_ip)) &&
       route.node_port >= 30000 && route.node_port <= 32767 && floor(route.node_port) == route.node_port &&
       route.priority >= 1 && route.priority <= 50000 && floor(route.priority) == route.priority &&
       length(route.health_path) <= 1024 && can(regex("^/[^\\r\\n]*$", route.health_path)) &&
       length(route.host) <= 253 && can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$", route.host)) &&
-      (route.provider_kind == "aws" ? can(regex("^sg-[0-9a-f]{8,17}$", route.target_security_group_id)) : route.target_security_group_id == null)
+      can(regex("^sg-[0-9a-f]{8,17}$", route.target_security_group_id))
     ])
-    error_message = "Use 1-50 named AWS/GCP routes with an RFC1918 IPv4, NodePort, health path, DNS host and priority. Only AWS routes require a dedicated target SG. Public IP targets are forbidden."
+    error_message = "Use 1-50 named AWS routes with an RFC1918 IPv4, NodePort, health path, DNS host, priority and dedicated target SG. GCP uses its native L7 entrypoint; WireGuard routes are retired."
   }
   validation {
     condition     = length(distinct([for r in values(var.routes) : r.host])) == length(var.routes) && length(distinct([for r in values(var.routes) : r.priority])) == length(var.routes)
@@ -143,28 +143,47 @@ variable "openstack_app_egress" {
     error_message = "Bind the existing app relay to an RFC1918 IPv4, integer TCP port and its single-line rule description, or leave null."
   }
 }
+
+# Rejection sentinel for old tfvars, not a transport option.
 variable "wireguard_network_interface_id" {
   type        = string
-  description = "Existing platform operations node primary ENI, not a separate gateway VM. Its owner must disable source_dest_check."
-}
-variable "wireguard_security_group_id" {
-  type        = string
-  description = "Dedicated rules-only SG already attached to the operations ENI. No inline rules or other writer may own the rules added here."
-}
-variable "wireguard_peer_cidrs" {
-  type    = set(string)
-  default = []
+  default     = null
+  description = "Retired input: remove this field after the reviewed WireGuard migration."
   validation {
-    condition     = alltrue([for c in var.wireguard_peer_cidrs : can(cidrnetmask(c)) && endswith(c, "/32")])
-    error_message = "Specify exact known peer/NAT public IPv4 /32 endpoints, or an empty list before registering GCP routes."
+    condition     = var.wireguard_network_interface_id == null
+    error_message = "WireGuard is retired; complete the documented migration and remove wireguard_network_interface_id."
   }
 }
+
+# Rejection sentinel for old tfvars, not a transport option.
+variable "wireguard_security_group_id" {
+  type        = string
+  default     = null
+  description = "Retired input: remove this field after the reviewed WireGuard migration."
+  validation {
+    condition     = var.wireguard_security_group_id == null
+    error_message = "WireGuard is retired; complete the documented migration and remove wireguard_security_group_id."
+  }
+}
+
+# Rejection sentinel for old tfvars, not a transport option.
+variable "wireguard_peer_cidrs" {
+  type        = set(string)
+  default     = []
+  description = "Retired input: remove this field after the reviewed WireGuard migration."
+  validation {
+    condition     = length(var.wireguard_peer_cidrs) == 0
+    error_message = "WireGuard is retired; complete the documented migration and remove wireguard_peer_cidrs."
+  }
+}
+
+# Rejection sentinel for old tfvars, not a transport option.
 variable "wireguard_route_table_ids" {
   type        = set(string)
   default     = []
-  description = "Existing route tables used by every ALB subnet. Edge owns only registered GCP target /32 routes to the operations ENI; do not duplicate them in inline route blocks."
+  description = "Retired input: remove this field after the reviewed WireGuard migration."
   validation {
-    condition     = alltrue([for id in var.wireguard_route_table_ids : can(regex("^rtb-[0-9a-f]{8,17}$", id))])
-    error_message = "Use existing route table IDs."
+    condition     = length(var.wireguard_route_table_ids) == 0
+    error_message = "WireGuard is retired; complete the documented migration and remove wireguard_route_table_ids."
   }
 }

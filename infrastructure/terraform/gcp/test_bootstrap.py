@@ -99,8 +99,7 @@ class BootstrapRenderTests(unittest.TestCase):
                          ['shared-vpc', 'shared-subnet'])
         source = (MODULE / 'main.tf').read_text()
         self.assertIn('subnetwork = local.subnetwork_ref', source)
-        for name in ('web', 'iap_ssh', 'host_https', 'host_deny_other', 'wireguard_ingress',
-                     'wireguard_egress', 'database_ingress', 'database_egress'):
+        for name in ('web', 'iap_ssh', 'host_https', 'host_deny_other', 'database_ingress', 'database_egress'):
             rule = source.split(f'resource "google_compute_firewall" "{name}" {{', 1)[1].split('\n}', 1)[0]
             self.assertRegex(rule, r'network\s*=\s*local.network_ref')
         for kind in ('network', 'subnetwork'):
@@ -110,6 +109,30 @@ class BootstrapRenderTests(unittest.TestCase):
     def test_optional_iap_and_runtime_limit_are_off_by_default(self):
         policy = evaluate("{iap = local.iap_ssh, runtime = local.runtime_limit}")
         self.assertEqual(policy, {"iap": None, "runtime": None})
+
+    def test_management_api_accepts_only_bounded_ipv4_hosts(self):
+        sources = [(MODULE / 'control-api.tf', 'k3s_control_source_cidrs'),
+                   (MODULE.parent / 'control' / 'external-api.tf', 'external_k3s_api_cidrs')]
+        cases = [([], True), (['192.0.2.1/32'], True), (['0.0.0.0/0'], False),
+                 (['192.0.2.0/24'], False), (['2001:db8::1/128'], False),
+                 (['invalid/32'], False), ([f'192.0.2.{n}/32' for n in range(1, 22)], False)]
+        for source, variable in sources:
+            with tempfile.TemporaryDirectory(prefix='railshot-api-cidrs-') as directory:
+                work = Path(directory)
+                # Evaluate the real variable validation without cloud resources or state.
+                (work / 'main.tf').write_text(source.read_text().split('\nresource ', 1)[0])
+                fixture = work / 'fixture.tfvars.json'
+                for cidrs, valid in cases:
+                    with self.subTest(variable=variable, cidrs=cidrs):
+                        fixture.write_text(json.dumps({variable: cidrs}))
+                        result = subprocess.run(
+                            ['terraform', 'console', '-no-color', '-var-file=' + str(fixture)],
+                            input=f'jsonencode(var.{variable})\n', cwd=work, text=True, capture_output=True,
+                        )
+                        accepted = result.returncode == 0 and 'Error:' not in result.stderr
+                        self.assertEqual(accepted, valid, result.stderr)
+                        if accepted:
+                            self.assertEqual(set(json.loads(json.loads(result.stdout))), set(cidrs))
 
     def test_registry_oauth_scope_is_explicit_and_read_only(self):
         self.assertEqual(evaluate("local.node_oauth_scopes"), [])
@@ -128,22 +151,27 @@ class BootstrapRenderTests(unittest.TestCase):
             "seconds": 7200, "automatic_restart": False, "instance_termination_action": "STOP",
         })
 
-    def test_optional_operator_key_and_wireguard_peer_are_bounded(self):
+    def test_optional_operator_key_is_bounded(self):
         key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyTestNotARealKey offline'
         self.assertNotIn('users', self.git)
         configured = yaml.safe_load(evaluate('local.cloud_init', overrides={'operator_ssh_public_key': key}))
         self.assertEqual(configured['users'][1], {
             'name': 'railshot-operator', 'lock_passwd': True, 'shell': '/bin/bash',
             'sudo': 'ALL=(ALL) NOPASSWD:ALL', 'ssh_authorized_keys': [key]})
-        self.assertEqual(evaluate('var.wireguard_peer_public_cidrs'), [])
-        self.assertEqual(evaluate('var.wireguard_peer_public_cidrs', overrides={
-            'wireguard_peer_public_cidrs': ['192.0.2.1/32']}), ['192.0.2.1/32'])
-        for invalid in (['0.0.0.0/0'], ['192.0.2.0/24'], ['::1/128'], ['not-an-ip/32']):
-            with self.subTest(peer=invalid), self.assertRaises((ValueError, subprocess.CalledProcessError)):
-                evaluate('var.wireguard_peer_public_cidrs', overrides={'wireguard_peer_public_cidrs': invalid})
         for invalid in ('-----BEGIN OPENSSH PRIVATE KEY-----', key + '\nroot: injected'):
             with self.assertRaises((ValueError, subprocess.CalledProcessError)):
                 evaluate('local.cloud_init', overrides={'operator_ssh_public_key': invalid})
+
+    def test_wireguard_is_rejected_and_existing_firewalls_are_retained(self):
+        self.assertEqual(evaluate('var.wireguard_peer_public_cidrs'), [])
+        with self.assertRaisesRegex(ValueError, 'WireGuard is retired'):
+            evaluate('var.wireguard_peer_public_cidrs', overrides={
+                'wireguard_peer_public_cidrs': ['192.0.2.1/32']})
+        source = (MODULE / 'main.tf').read_text()
+        for name in ('wireguard_ingress', 'wireguard_egress'):
+            self.assertNotIn(f'resource "google_compute_firewall" "{name}"', source)
+            self.assertRegex(source, rf'removed\s*{{\s*from\s*=\s*google_compute_firewall\.{name}\s+lifecycle\s*{{\s*destroy\s*=\s*false\s*}}\s*}}')
+        self.assertNotIn('wireguard', (MODULE / 'outputs.tf').read_text())
 
     def test_node_identity_is_explicit_and_existing_fqdn_can_be_preserved(self):
         config = yaml.safe_load(self.file(self.git, "/etc/railshot/host.yml")["content"])
