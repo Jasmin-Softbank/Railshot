@@ -40,8 +40,10 @@ class EngineTests(unittest.TestCase):
         self.spec=parse_input(fixture()).spec
         self.open=patch('engine.open',return_value=MagicMock()); self.open.start()
         self.flock=patch('engine.fcntl.flock'); self.flock.start()
+        self.preflight=patch('engine.check_network', return_value=({'docker_hub': True}, {'required_unavailable': []})); self.preflight.start()
     def tearDown(self):
         self.flock.stop(); self.open.stop()
+        self.preflight.stop()
 
     def test_success_states_and_provider_independence(self):
         runner=Runner(self.spec); engine=DeploymentEngine(self.spec,runner)

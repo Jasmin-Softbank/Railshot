@@ -13,6 +13,10 @@ from urllib.request import Request, ProxyHandler, build_opener
 from uuid import uuid4
 from models import DeploymentResult
 from render import NAME, ROOT, labels, render
+sys.path.insert(0, str(ROOT))
+from airgap.scripts import bundle as bundles
+from network_preflight import check as check_network
+from exposure import apply as apply_exposure
 
 
 class DeploymentError(RuntimeError):
@@ -58,11 +62,13 @@ class CommandRunner:
 
 
 class DeploymentEngine:
-    def __init__(self, spec, runner=None):
+    def __init__(self, spec, runner=None, network_checker=None):
         self.spec, self.runner = spec, runner or CommandRunner()
         self.result = DeploymentResult()
         self.stage = 'NODE_READY'
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith(('K3S_', 'INSTALL_K3S_'))}
+        self.bundle = None
+        self.network_checker = network_checker or check_network
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith(('K3S_', 'INSTALL_K3S_', 'RAILSHOT_BUNDLE', 'RAILSHOT_OFFLINE', 'CILIUM_CHART', 'CILIUM_VALUES'))}
         self.env.update({'K3S_VERSION': spec.runtime.k3s_version, 'CILIUM_VERSION': spec.runtime.cilium_version,
                          'CILIUM_CLI_VERSION': spec.runtime.cilium_cli_version,
                          'WAIT_TIMEOUT': f'{spec.runtime.timeout_seconds}s',
@@ -83,6 +89,56 @@ class DeploymentEngine:
         self.stage = state
         self.result.states.append({'state': state, 'timestamp': datetime.now(timezone.utc).isoformat()})
         print(f'[{state}]', file=sys.stderr)
+
+    def network_state(self, state):
+        # Preserve the legacy 0.1 states enum/order. Extended phases have their own 0.2 field.
+        self.stage = state
+        self.result.network_states.append({'state': state, 'timestamp': datetime.now(timezone.utc).isoformat()})
+        print(f'[{state}]', file=sys.stderr)
+
+    def select_mode(self):
+        bundles.approved(self.spec)
+        self.network_state('NETWORK_CHECKING')
+        caps, details = self.network_checker(self.spec, bundles.architecture(), self.spec.runtime.mode == 'offline')
+        self.result.network_capabilities, self.result.network_details = caps, details
+        if self.spec.runtime.bundle_path:
+            self.network_state('BUNDLE_VERIFYING')
+            self.bundle = bundles.verify(self.spec.runtime.bundle_path, self.spec, self.spec.runtime.bundle_sha256)
+            self.result.bundle_verified = True
+            self.result.bundle_version = self.bundle['manifest']['bundle_version']
+            self.env['RAILSHOT_BUNDLE'] = self.bundle['root']
+            self.env['RAILSHOT_BUNDLE_SHA256'] = self.bundle['manifest_sha256']
+        blocked = details.get('required_unavailable', [])
+        mode = self.spec.runtime.mode
+        if mode == 'online' and blocked:
+            raise DeploymentError('NETWORK_UNAVAILABLE', 'Online mode requires: ' + ', '.join(blocked))
+        if mode == 'offline' or (mode == 'auto' and blocked):
+            if not self.bundle:
+                raise DeploymentError('BUNDLE_REQUIRED', 'Offline/fallback needs a valid local bundle; unreachable: ' + ', '.join(blocked))
+            self.enable_airgap('registry_unreachable' if set(blocked) & {'quay', 'docker_hub', 'ghcr', 'registry_k8s', 'workload_registry'} else 'artifact_source_unreachable', fallback=mode == 'auto')
+        else:
+            self.result.deployment_mode = 'online'
+            self.env['RAILSHOT_OFFLINE'] = 'false'
+
+    def enable_airgap(self, reason, fallback=True):
+        self.result.deployment_mode = 'airgap'
+        self.result.fallback_used = fallback
+        self.result.fallback_reason = reason if fallback else None
+        self.env['RAILSHOT_OFFLINE'] = 'true'
+
+    def effective_image(self, image):
+        if self.bundle:
+            ref = bundles.canonical(image)
+            for record in self.bundle['manifest']['images']:
+                if record['reference'] == ref:
+                    return bundles.pinned(ref, record['digest'])
+            raise bundles.BundleError('BUNDLE_IMAGE_MISSING', ref)
+        return image
+
+    def preload(self):
+        if self.bundle:
+            self.network_state('AIRGAP_PRELOADING')
+            self.result.preload = bundles.preload(self.bundle)
 
     def owned(self, kind, name, namespace=None):
         args = ['get', kind, name, '--ignore-not-found', '-o', 'json']
@@ -122,7 +178,7 @@ class DeploymentEngine:
         deployment = json.loads(self.kube('-n', ns, 'get', 'deployment', NAME, '-o', 'json'))
         live = deployment['spec']
         container = live['template']['spec']['containers'][0]
-        if (live['replicas'] != self.spec.workload.replicas or container['image'] != self.spec.workload.image
+        if (live['replicas'] != self.spec.workload.replicas or container['image'] != self.effective_image(self.spec.workload.image)
                 or container['ports'][0]['containerPort'] != self.spec.workload.container_port
                 or container['readinessProbe']['httpGet']['path'] != self.spec.workload.health_path):
             raise DeploymentError('WORKLOAD_DRIFT', 'Live workload does not match the requested image/replicas/port/health path')
@@ -135,7 +191,8 @@ class DeploymentEngine:
         url = f'http://{NAME}.{ns}.svc.cluster.local{self.spec.workload.health_path}'
         pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': name, 'namespace': ns, 'labels': labels(self.spec)},
                'spec': {'restartPolicy': 'Never', 'automountServiceAccountToken': False,
-                        'containers': [{'name': 'check', 'image': 'curlimages/curl:8.12.1',
+                        'containers': [{'name': 'check', 'image': self.effective_image(bundles.policy()['health_image']),
+                                        'imagePullPolicy': 'Never' if self.result.deployment_mode == 'airgap' else 'IfNotPresent',
                                         'command': ['curl', '--silent', '--show-error', '--connect-timeout', '3',
                                                     '--max-time', '10', '--output', '/dev/null', '--write-out', '%{http_code}', url]}]}}
         try:
@@ -180,7 +237,7 @@ class DeploymentEngine:
             raise DeploymentError('NODE_IP_INVALID', 'Node InternalIP must be IPv4') from None
         base = f'http://{addresses[0]}:{self.spec.exposure.node_port}'
         urls = [base + self.spec.workload.health_path]
-        if self.spec.exposure.verification_url:
+        if self.spec.exposure.verification_url and self.result.deployment_mode != 'airgap':
             urls.append(self.spec.exposure.verification_url)
         opener = build_opener(ProxyHandler({}))
         for url in urls:
@@ -202,6 +259,39 @@ class DeploymentEngine:
         self.result.endpoint = base
         self.result.endpoint_scope = 'node-local-with-additional-url' if len(urls) > 1 else 'node-local'
         self.state('ENDPOINT_READY')
+
+    def reconcile(self, action):
+        if action == 'deploy':
+            self.state('K3S_INSTALLING')
+            self.shell('bootstrap/install-k3s.sh')
+        else:
+            self.stage = 'K3S_READY'
+            self.shell('bootstrap/health.sh')
+        self.result.cluster_status = 'api_ready'
+        self.state('K3S_READY')
+        if action == 'cleanup':
+            self.cleanup_workload()
+            self.result.status = 'cleaned'
+            return
+        if action == 'deploy':
+            self.preload()
+            self.state('CILIUM_INSTALLING')
+            self.shell('cilium/install.sh')
+        else:
+            self.stage = 'CILIUM_READY'
+        self.shell('cilium/health.sh')
+        self.result.cilium_status, self.result.cluster_status = 'healthy', 'ready'
+        self.state('CILIUM_READY')
+        self.stage = 'WORKLOAD_DEPLOYING'
+        self.ownership(required=action == 'verify')
+        if action == 'deploy':
+            self.state('WORKLOAD_DEPLOYING')
+            self.kube('apply', '-f', '-', input_text=json.dumps(render(self.spec,
+                self.effective_image(self.spec.workload.image), 'Never' if self.result.deployment_mode == 'airgap' else 'IfNotPresent')))
+        self.workload_ready()
+        self.endpoints()
+        apply_exposure(self.spec, self.result, self.result.deployment_mode == 'airgap')
+        self.result.status = 'ready'
 
     def cleanup_workload(self):
         self.stage = 'WORKLOAD_DEPLOYING'
@@ -235,33 +325,29 @@ class DeploymentEngine:
                 self.result.status = 'cleaned'
                 return self.result
             if action == 'deploy':
-                self.state('K3S_INSTALLING')
-                self.shell('bootstrap/install-k3s.sh')
-            else:
-                self.stage = 'K3S_READY'
-                self.shell('bootstrap/health.sh')
-            self.result.cluster_status = 'api_ready'
-            self.state('K3S_READY')
-            if action == 'cleanup':
-                self.cleanup_workload()
-                self.result.status = 'cleaned'
-                return self.result
-            if action == 'deploy':
-                self.state('CILIUM_INSTALLING')
-                self.shell('cilium/install.sh')
-            else:
-                self.stage = 'CILIUM_READY'
-            self.shell('cilium/health.sh')
-            self.result.cilium_status, self.result.cluster_status = 'healthy', 'ready'
-            self.state('CILIUM_READY')
-            self.stage = 'WORKLOAD_DEPLOYING'
-            self.ownership(required=action == 'verify')
-            if action == 'deploy':
-                self.state('WORKLOAD_DEPLOYING')
-                self.kube('apply', '-f', '-', input_text=json.dumps(render(self.spec)))
-            self.workload_ready()
-            self.endpoints()
-            self.result.status = 'ready'
+                self.select_mode()
+            elif action == 'verify':
+                self.result.deployment_mode = 'airgap' if self.spec.runtime.mode == 'offline' else 'online'
+                if self.spec.runtime.bundle_path:
+                    self.bundle = bundles.verify(self.spec.runtime.bundle_path, self.spec, self.spec.runtime.bundle_sha256)
+                    self.result.bundle_verified = True
+                    self.result.bundle_version = self.bundle['manifest']['bundle_version']
+            try:
+                self.reconcile(action)
+            except DeploymentError as exc:
+                message = str(exc).lower()
+                image_failure = any(word in message for word in ('imagepullbackoff', 'errimagepull'))
+                artifact_stage = self.stage in ('K3S_INSTALLING', 'CILIUM_INSTALLING')
+                artifact_failure = artifact_stage and (any(word in message for word in ('curl:', 'failed to download'))
+                    or ('https://' in message and any(word in message for word in ('no such host', 'connection refused'))))
+                network_failure = image_failure or artifact_failure
+                if (action == 'deploy' and self.spec.runtime.mode == 'auto' and self.bundle
+                        and self.result.deployment_mode == 'online' and network_failure):
+                    print('[FALLBACK] Online artifact/image access failed; retry with verified local bundle', file=sys.stderr)
+                    self.enable_airgap('online_artifact_or_image_failure')
+                    self.reconcile(action)
+                else:
+                    raise
         except (DeploymentError, OSError, ValueError, KeyError) as exc:
             stage = self.stage
             if stage.startswith('K3S'):

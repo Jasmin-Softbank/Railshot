@@ -1,4 +1,4 @@
-/Users/seungminlee/Desktop/Development/Softbank Hackerton 2026/Jasmin/deployment/scripts/tests/provider_simulation.py:155: SyntaxWarning: 'break' in a 'finally' block
+<SOURCE_REPOSITORY>/deployment/scripts/tests/provider_simulation.py:155: SyntaxWarning: 'break' in a 'finally' block
   break
 [RUN] aws: railshot-sim-aws-20261002080234
 [PASS] aws: clean/bootstrap/Cilium/workload/health/update/cleanup + host HTTP

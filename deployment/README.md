@@ -14,6 +14,8 @@
 - [제거](#제거)
 - [자동 테스트](#자동-테스트)
 - [별도 VM에서 Provider 모의 통합 검사](#별도-vm에서-provider-모의-통합-검사)
+- [네트워크 검사와 Online/Offline 배포](#네트워크-검사와-onlineoffline-배포)
+- [Release artifact 배포](#release-artifact-배포)
 - [Provider 및 Ansible 연결](#provider-및-ansible-연결)
 - [확정이 필요한 계약과 후속 모듈](#확정이-필요한-계약과-후속-모듈)
 
@@ -21,6 +23,7 @@
 
 ```text
 deployment/
+├── airgap/          # 로컬 bundle 준비·검증·이미지 preload 및 버전 기준입니다.
 ├── bootstrap/       # Linux 사전 조건·K3s 설치·상태 확인·전체 제거입니다.
 ├── cilium/          # Cilium 설치·상태 확인·최소 통신 정책 템플릿입니다.
 ├── cloudflared/     # 향후 외부 접속 터널을 연결할 위치입니다.
@@ -59,13 +62,13 @@ sudo apt-get update
 sudo apt-get install -y python3 curl ca-certificates iproute2 util-linux procps
 ```
 
-- GitHub·get.k3s.io·helm.cilium.io·quay.io·registry.k8s.io·Docker Hub 및 사용 앱의 레지스트리(이미지 저장소)에 DNS와 HTTPS로 접근할 수 있어야 합니다.
+- `online` 실행에는 승인된 GitHub artifact·helm.cilium.io·quay.io·Docker Hub 및 앱 registry(이미지 저장소)의 DNS·HTTPS 접근이 필요합니다. `offline` 실행에는 같은 CPU 구조의 검증된 로컬 bundle이 필요합니다. 선택 registry와 프로토콜은 아래 capability(통신 가능 항목) 검사에서 구분합니다.
 - Pod CIDR(앱 네트워크 주소 범위) `10.42.0.0/16`, Service CIDR `10.43.0.0/16`이 기존 네트워크와 겹치지 않아야 합니다.
 - 외부 클라이언트에서 NodePort(서버 포트로 앱을 공개하는 방식)에 접근하려면 방화벽·보안 그룹·NAT(주소 변환) 구성이 필요합니다. 이 runtime은 이를 변경하지 않습니다.
 
 ### 입력 JSON
 
-이 형식은 **팀의 최종 외부 API 계약이 아닌 임시 계약 `0.1`**입니다. [입력 schema(데이터 형식 규약)](scripts/schemas/input.schema.json)를 제공합니다. 구문·타입 검증 외에 필드 사이의 의미 제약은 adapter가 검사합니다.
+기존 형식은 **팀의 최종 외부 API 계약이 아닌 임시 계약 `0.1`**입니다. 네트워크·bundle·선택 공개 경로에는 새 `0.2`를 제공합니다. 기존 입력과 출력 형식은 유지하며 자세한 차이는 아래 새 배포 절에서 설명합니다. [입력 schema(데이터 형식 규약)](scripts/schemas/input.schema.json)를 제공합니다. 구문·타입 검증 외에 필드 사이의 의미 제약은 adapter가 검사합니다.
 
 ```json
 {
@@ -108,12 +111,12 @@ sudo apt-get install -y python3 curl ca-certificates iproute2 util-linux procps
 | `workload.container_port` | 앱이 실제로 듣는 포트이며 기본 80입니다. 이미지 내부의 서버 설정을 자동 변경하지 않습니다. |
 | `workload.health_path` | HTTP 정상 응답 확인 주소이며 기본 `/`입니다. query와 fragment는 받지 않습니다. |
 | `workload.sample_content` | 기본 `false`입니다. 샘플 nginx에서는 `true`로 지정하여 `Railshot Runtime OK` 본문을 제공합니다. nginx tag·포트 80·경로 `/` 조합으로 제한합니다. |
-| `exposure.type` | 현재는 `nodeport`만 지원합니다. |
+| `exposure.type` | `0.1`은 `nodeport`입니다. `0.2`는 기존 공개 URL을 확인하는 선택 `cloudflare-tunnel` hook(연결 지점)도 받습니다. 터널을 자동 설치하지는 않습니다. |
 | `exposure.node_port` | 기본 30080, 범위 30000~32767입니다. |
 | `exposure.verification_url` | 선택 추가 HTTP(S) 검사 URL입니다. **health path를 포함한 전체 주소**를 지정합니다. 자격정보·query·fragment는 거부합니다. |
 | `runtime.node_ip` | 선택 내부 IPv4입니다. 지정하면 실행 노드 NIC(네트워크 장치)에 실제 할당된 주소인지 확인합니다. 공인 NAT 주소를 넣지 않습니다. |
 | `runtime.timeout_seconds` | 준비·상태 확인 대기이며 기본 180초, 범위 5~900초입니다. 다운로드와 진단을 포함한 작업 전체 제한과는 다릅니다. |
-| `runtime.k3s_version` | 기본 `v1.34.11+k3s1`입니다. 기존 버전과 다르면 자동 변경하지 않습니다. |
+| `runtime.k3s_version` | 승인된 기본 `v1.34.11+k3s1`입니다. 다른 profile(검증된 버전 조합)은 별도 검사·승격 전까지 거부하며 자동 업그레이드하지 않습니다. |
 | `runtime.cilium_version` | 기본 `1.20.2`입니다. |
 | `runtime.cilium_cli_version` | 기본 `v0.20.1`입니다. 다운로드 checksum(파일 무결성 값)을 확인합니다. |
 
@@ -177,12 +180,13 @@ NODE_READY → K3S_INSTALLING → K3S_READY
 
 1. OS·root·kernel·systemd·swap·도구를 확인하고, 공통 잠금으로 deploy·verify·cleanup의 동시 실행을 막습니다.
 2. K3s의 기존 설정·버전을 확인합니다. 관리하지 않는 설치, 다른 설정, 추가 config 디렉터리를 자동 병합하지 않습니다. 동일한 설정·버전이면 기존 서비스를 재사용합니다.
-3. K3s 설정은 `flannel-backend: none`, `disable-network-policy: true`이며 kube-proxy(기본 Service 트래픽 처리 기능)는 유지합니다. Traefik·ServiceLB·metrics-server·local-storage는 비활성화합니다. kubeconfig(접속 설정)는 `/etc/rancher/k3s/k3s.yaml`, 권한은 `0600`입니다.
-4. 공식 Cilium CLI로 설치하거나 동일 선언을 재적용합니다. `kubeProxyReplacement=false`, 단일 operator(관리 기능), VXLAN(가상 네트워크 통로), Pod 주소 범위 `10.42.0.0/16`을 사용합니다. Cilium·Node·CoreDNS 상태를 확인합니다.
-5. namespace와 기존 앱·Service·ConfigMap(설정 데이터)의 소유권을 확인합니다. `app.kubernetes.io/managed-by=railshot-runtime`과 `railshot.io/environment`가 일치하지 않으면 덮어쓰기를 거부합니다.
-6. JSON 템플릿을 구조화된 Kubernetes 객체로 변환하고 적용합니다. 이미지·복제본·포트·health path는 공통 설정에서 주입하며 셸 문자열로 실행하지 않습니다.
-7. Deployment는 `maxUnavailable=0`(기존 준비 앱 유지), `maxSurge=1`(추가 앱 한 개), 준비 확인 3초, 종료 전 대기 5초를 사용합니다. startup·readiness·liveness probe(시작·준비·생존 검사)를 HTTP 경로에 연결합니다.
-8. rollout(순차 교체) 완료와 실제 앱 설정을 확인하고, 내부 통신과 endpoint를 검사합니다.
+3. 배포에는 기본 `auto` 네트워크 검사·버전 기준 확인을 수행합니다. 외부 접근이 불가능하면 입력으로 지정한 검증된 bundle을 사용합니다. 자세한 내용은 [Airgap 설명](airgap/README.md)을 확인하실 수 있습니다.
+4. K3s 설정은 `flannel-backend: none`, `disable-network-policy: true`이며 kube-proxy(기본 Service 트래픽 처리 기능)는 유지합니다. Traefik·ServiceLB·metrics-server·local-storage는 비활성화합니다. kubeconfig(접속 설정)는 `/etc/rancher/k3s/k3s.yaml`, 권한은 `0600`입니다.
+5. 공식 Cilium CLI로 설치하거나 동일 선언을 재적용합니다. `kubeProxyReplacement=false`, 단일 operator(관리 기능), VXLAN(가상 네트워크 통로), Pod 주소 범위 `10.42.0.0/16`을 사용합니다. Cilium·Node·CoreDNS 상태를 확인합니다.
+6. namespace와 기존 앱·Service·ConfigMap(설정 데이터)의 소유권을 확인합니다. `app.kubernetes.io/managed-by=railshot-runtime`과 `railshot.io/environment`가 일치하지 않으면 덮어쓰기를 거부합니다.
+7. JSON 템플릿을 구조화된 Kubernetes 객체로 변환하고 적용합니다. 이미지·복제본·포트·health path는 공통 설정에서 주입하며 셸 문자열로 실행하지 않습니다.
+8. Deployment는 `maxUnavailable=0`(기존 준비 앱 유지), `maxSurge=1`(추가 앱 한 개), 준비 확인 3초, 종료 전 대기 5초를 사용합니다. startup·readiness·liveness probe(시작·준비·생존 검사)를 HTTP 경로에 연결합니다.
+9. rollout(순차 교체) 완료와 실제 앱 설정을 확인하고, 내부 통신과 endpoint를 검사합니다.
 
 K3s 구성 근거는 [K3s configuration](https://docs.k3s.io/installation/configuration), Cilium 구성 근거는 [Cilium K3s installation](https://docs.cilium.io/en/stable/installation/k3s/)을 참고했습니다.
 
@@ -294,6 +298,78 @@ limactl delete --force railshot-sim-openstack-<실행-ID>
 
 이 검사는 AWS IAM·Security Group·Elastic IP·VPC routing, GCP IAM·VPC Firewall·External IP 및 실제 cloud metadata semantics를 검증하지 않습니다. 해당 항목은 모두 **`requires real cloud smoke test`(실제 클라우드에서 짧은 통합 확인 필요)**입니다. 공통 엔진이 metadata(클라우드가 노드에 제공하는 정보)를 읽지 않으므로 metadata mock은 추가하지 않았습니다.
 
+## 네트워크 검사와 Online/Offline 배포
+
+기존 JSON → Input Adapter(입력 변환 계층) → DeploymentSpec(공통 배포 설정) → Engine(실행 엔진) → Result(결과) 구조를 유지합니다. 노드 전제조건 확인과 실행 잠금 후 endpoint별 capability(통신 가능 항목)를 검사하여 설치 경로를 선택합니다.
+
+```text
+NODE_READY
+    ↓ Network Capability Preflight
+    ├─ 필수 경로 가능 → online → 승인 버전 artifact 다운로드 또는 로컬 재사용
+    └─ 필수 경로 불가 → bundle 검증 → airgap → 로컬 binary/system images 준비
+    ↓ K3s → 추가 이미지 preload → Cilium → workload → node-local health
+    ↓ 선택 Exposure(외부 공개 경로) → endpoint/result
+```
+
+```bash
+# 대상 Linux 노드에서 실행합니다. 기본 모드는 auto입니다.
+sudo ./deployment/scripts/deploy.sh --mode auto --bundle /var/lib/railshot-deployment/bundle --input input.json
+sudo ./deployment/scripts/deploy.sh --mode online --input input.json
+sudo ./deployment/scripts/deploy.sh --mode offline --bundle /var/lib/railshot-deployment/bundle --input input.json
+```
+
+| 모드 | 선택 규칙 |
+| --- | --- |
+| `auto` | 필수 endpoint가 가능하면 online입니다. 실패하고 유효한 local bundle이 있으면 airgap입니다. 둘 다 불가능하면 오류입니다. |
+| `online` | 외부 artifact/registry 접근을 요구하고 승인된 버전을 유지합니다. 자동 airgap 전환은 하지 않습니다. |
+| `offline` | 외부 capability 검사와 외부 URL 접근을 생략하고 bundle만 사용합니다. 내부 Kubernetes 통신은 계속 필요합니다. |
+
+DNS(이름 해석)·HTTPS 443·버전 고정 K3s/GitHub/Cilium chart 주소·quay·Docker Hub·registry.k8s.io·필요한 workload registry를 검사합니다. GHCR은 해당 workload를 쓰는 경우 필수입니다. 개별 검사 제한은 기본 3초이며 병렬 실행합니다. Cloudflare TCP/TLS 7844는 선택 검사입니다. 인증된 WireGuard UDP 51820이나 QUIC 검증을 수행했다고 주장하지 않습니다. 불명확/미검사 capability는 `null`입니다. 실제 방화벽 규칙 변경은 Runtime 기능이 아닙니다.
+
+### 새 JSON 계약과 기존 consumer 호환성
+
+기존 `schema_version: "0.1"` 입력은 기존 출력 필드와 `states` enum(허용 상태 목록)을 그대로 반환합니다. 새 옵션 없이 실행해도 선택 모드는 `auto`이므로 **예전보다 필수 외부 경로 검사가 엄격해진 동작 차이**는 있습니다. `verify`·`cleanup`은 설치 전 네트워크 검사를 요구하지 않습니다.
+
+입력에 `schema_version: "0.2"`를 지정하거나 CLI의 `--mode`·`--bundle`·`--bundle-sha256`을 명시하면 새 출력 `0.2`를 반환합니다. 기존 schema의 `additionalProperties=false` 제약을 고려하여 새 필드를 몰래 `0.1`에 추가하지 않습니다. 새 schema는 [input-v0.2](scripts/schemas/input-v0.2.schema.json)와 [output-v0.2](scripts/schemas/output-v0.2.schema.json)에 있습니다.
+
+```json
+{
+  "schema_version": "0.2",
+  "provider": "openstack",
+  "environment_id": "railshot-demo",
+  "node": {"host": "localhost"},
+  "workload": {
+    "image": "nginx:1.28.0-alpine",
+    "namespace": "railshot-demo",
+    "sample_content": true
+  },
+  "runtime": {
+    "mode": "auto",
+    "bundle_path": "/var/lib/railshot-deployment/bundle",
+    "preflight_timeout_seconds": 3
+  },
+  "exposure": {"type": "nodeport", "node_port": 30080}
+}
+```
+
+새 결과에는 기존 필드와 함께 `deployment_mode`(`online`/`airgap`), `bundle_version`, `bundle_verified`, `network_capabilities`, `network_details`, `fallback_used`, `fallback_reason`, `preload`, `exposure_status`를 제공합니다. `NETWORK_CHECKING`·`BUNDLE_VERIFYING`·`AIRGAP_PRELOADING`은 별도 `network_states`에 기록하여 기존 `states` 목록을 바꾸지 않습니다. 실패의 `error.stage`는 새 단계 이름을 포함할 수 있으므로 오류 소비자는 알 수 없는 단계도 표시할 수 있어야 합니다.
+
+승인된 버전은 `airgap/versions.json`에 고정합니다. 기존 입력의 형식은 유지하지만 이 기준 밖의 Runtime 버전은 `VERSION_NOT_APPROVED`로 거부합니다. 최신 버전 조회는 별도의 `airgap/check-updates.sh`에서 수행하며 실제 설치 버전을 자동 변경하지 않습니다. 배포 중에는 최신 버전을 조회하지 않아 `update_available`는 `null`입니다.
+
+### 선택 공개 경로와 두 번의 Touch
+
+`exposure.type: "cloudflare-tunnel"`은 이미 구성된 HTTPS `public_url`을 확인하는 선택 hook(연결 지점)입니다. token/domain/auth 계약이 없어 자동 설치·Tunnel 생성·DNS 변경은 구현하지 않습니다. 공개 URL이 없거나 접근이 실패하면 `exposure_status.status: "degraded"`를 반환하고 정상 node-local endpoint를 유지합니다. Offline에서는 공개 URL 확인을 생략합니다. NodePort는 기본 공개 방식이며 실제 인터넷 공개 여부는 별도 클라이언트에서 확인해야 합니다.
+
+**첫 번째 Touch(최초 준비)**는 Linux 전제조건·실행 권한·Runtime·bundle 전달·신뢰한 manifest digest 전달·원격 연결 준비입니다. 수동/반자동이어도 허용합니다. **두 번째 Touch 이후(반복 배포)**에는 상위 도구가 저장한 bundle 경로와 요청 JSON을 전달하면 Runtime이 기본 `auto`로 경로를 선택합니다. 사용자가 매번 online/offline을 고를 필요가 없습니다.
+
+이는 Internet-independent(외부 인터넷 없이 내부망/로컬 파일로 배포 가능)입니다. 중앙과 노드 간 통신까지 없는 Network-independent 원격 배포는 주장하지 않습니다. Bundle 준비·digest·preload·업데이트·제거·실제 시험 범위는 [airgap/README.md](airgap/README.md)와 [실제 검증 기록](scripts/tests/results/AIRGAP-VALIDATION-2026-10-02.md)에 설명합니다.
+
+## Release artifact 배포
+
+Online 앱 이미지의 기준 저장소는 GHCR(깃허브 이미지 저장소), offline bundle은 GitHub Release asset(버전별 첨부 파일)입니다. 공식 시스템 이미지는 공식 registry에서 준비합니다. 앱 빌드·GHCR push는 CI 담당 영역이며 이 Runtime에서 구현하지 않습니다.
+
+`airgap/release-pack.sh`로 로컬 파일을 만들고, 선택 `release-upload.sh`·`release-download.sh`로 정확한 버전을 전달합니다. 큰 archive·생성 bundle·dist는 Git에서 제외합니다. CPU 구조별 manifest·checksum·metadata만 Git에 보존합니다. 이번 arm64 archive는 약 713 MiB이며 amd64는 아직 실제 생성·검증하지 않았습니다. GitHub 인증과 쓰기 권한은 확인했지만 실제 Release 업로드·원격 다운로드는 수행하지 않았습니다. 자세한 명령과 검증 범위는 [Airgap Release 설명](airgap/README.md#artifact-storage와-github-release)을 확인하시면 됩니다.
+
 ## Provider 및 Ansible 연결
 
 | 단계 | 담당과 인계 내용 |
@@ -314,6 +390,10 @@ AWS/GCP는 NodePort까지의 보안 그룹·방화벽·라우팅을 해당 담�
 - NodePort·외부 주소·TLS·공개 접근 검사·health path·검증 Pod 권한을 합의해야 합니다.
 - 이미지 digest 사용·private registry 자격정보·실행 사용자·Pod 보안·NetworkPolicy를 팀의 승인된 계약과 연결해야 합니다. 현재 generic 템플릿은 임의 앱의 UID나 읽기 전용 파일시스템을 강제하지 않습니다.
 - CIDR 변경·여러 NIC·다중 노드·운영 클러스터 업그레이드·작업 중단 복구·설치 drift(선언과 실제 설정 차이)는 추가 설계 대상입니다.
-- Argo CD, cloudflared, airgap preload(인터넷 없는 환경의 이미지 사전 적재), NFD(노드 기능 탐지), CNPG, Sealed Secrets, Gateway API, 복잡한 GitOps는 확정 기능으로 구현하지 않습니다.
+- Airgap preload(인터넷 없는 환경의 이미지 사전 적재)는 이번에 추가했습니다. Argo CD, cloudflared 자동 설치, NFD(노드 기능 탐지), CNPG, Sealed Secrets, Gateway API, 복잡한 GitOps는 구현하지 않습니다.
 - 향후 모듈은 `cilium` 준비 다음과 앱 배포 전/후 등 승인된 단계에 연결합니다. 지금은 빈 확장 위치를 README로 보존하며 임의 명령 실행이나 plugin 로딩 기능은 추가하지 않습니다.
 - Terraform provider·자원 provisioning·CI/GitHub Actions·MCP server·Dashboard·Patroni·cross-cloud HA·멀티 클라우드 DB 복제는 담당 범위에 포함하지 않습니다.
+
+후속 Release 분리와 16개 Linux 시나리오의 실제 결과는 [최신 Release 검증 기록](scripts/tests/results/RELEASE-VALIDATION-2026-10-02.md)에 정리했습니다.
+
+새 Railshot 위치의 재검증·첫 실패·최종 통과 결과는 [이관 검증 기록](scripts/tests/results/MIGRATION-VALIDATION-2026-10-02.md)을 확인하시면 됩니다.

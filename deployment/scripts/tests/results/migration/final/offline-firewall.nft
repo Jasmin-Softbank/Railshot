@@ -1,0 +1,9 @@
+table inet railshot_airgap_test {
+ chain output { type filter hook output priority -50; policy accept;
+  oifname "eth0" tcp sport 22 accept
+  oifname "eth0" counter reject
+ }
+ chain forward { type filter hook forward priority -50; policy accept;
+  oifname "eth0" counter reject
+ }
+}

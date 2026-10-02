@@ -1,0 +1,30 @@
+{
+  "schema_version": "0.2",
+  "provider": "aws",
+  "environment_id": "railshot-airgap-test",
+  "node": {
+    "host": "localhost",
+    "ssh_user": "ubuntu"
+  },
+  "workload": {
+    "image": "nginx:1.28.0-alpine",
+    "namespace": "railshot-airgap-test",
+    "replicas": 1,
+    "container_port": 80,
+    "health_path": "/",
+    "sample_content": true
+  },
+  "exposure": {
+    "type": "nodeport",
+    "node_port": 30080
+  },
+  "runtime": {
+    "timeout_seconds": 180,
+    "preflight_timeout_seconds": 5,
+    "mode": "auto",
+    "endpoint_overrides": {
+      "quay": "https://127.0.0.1:9/v2/",
+      "docker_hub": "https://127.0.0.1:9/v2/"
+    }
+  }
+}

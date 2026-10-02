@@ -12,11 +12,18 @@ if [[ ! -f $config ]] || ! grep -Fxq '# Managed by Railshot deployment runtime. 
 fi
 [[ -x /usr/local/bin/k3s-uninstall.sh ]] || die '공식 K3s uninstall 스크립트가 없습니다.'
 CILIUM=/usr/local/lib/railshot-deployment/cilium
-if [[ -x $CILIUM ]]; then "$CILIUM" uninstall --wait --timeout "$WAIT_TIMEOUT"; fi
+if [[ -x $CILIUM ]]; then
+  if ! "$CILIUM" uninstall --wait --timeout "$WAIT_TIMEOUT"; then
+    # Dedicated-node full deletion must also work when CNI/agents are already broken.
+    log 'WARN: Cilium 정상 제거가 실패했습니다. 명시된 전용 노드 전체 제거로 K3s 데이터까지 삭제합니다.'
+  fi
+fi
 for link in cilium_host cilium_net cilium_vxlan; do
   if ip link show "$link" >/dev/null 2>&1; then ip link delete "$link"; fi
 done
 /usr/local/bin/k3s-uninstall.sh
 [[ ! -e $CILIUM ]] || unlink "$CILIUM"
 [[ ! -e /etc/sysctl.d/90-railshot-deployment.conf ]] || unlink /etc/sysctl.d/90-railshot-deployment.conf
+[[ ! -e /usr/local/bin/k3s && ! -e /var/lib/rancher/k3s && ! -e /etc/rancher/k3s/config.yaml ]] || die 'K3s 핵심 파일이 남았습니다.'
+sync
 log 'K3s / Cilium removed'

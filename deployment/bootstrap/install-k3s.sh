@@ -29,6 +29,12 @@ fi
 [[ ! -d /etc/rancher/k3s/config.yaml.d ]] || die 'K3s config.yaml.d가 있습니다. 설정 충돌을 피하도록 전용 노드를 사용하세요.'
 install -d -m 755 /etc/rancher/k3s
 install -m 600 "$TEMP_DIR/config.yaml" "$config"
+if [[ -n ${RAILSHOT_BUNDLE:-} ]]; then
+  python3 "$ROOT_DIR/airgap/scripts/bundle.py" stage-k3s --bundle "$RAILSHOT_BUNDLE" \
+    --manifest-sha256 "$RAILSHOT_BUNDLE_SHA256"
+elif [[ ${RAILSHOT_OFFLINE:-false} == true ]]; then
+  die 'offline 설치에는 검증된 bundle이 필요합니다.'
+fi
 sysctl -w net.ipv4.ip_forward=1
 printf 'net.ipv4.ip_forward = 1\n' > /etc/sysctl.d/90-railshot-deployment.conf
 if [[ -x /usr/local/bin/k3s ]]; then
@@ -37,8 +43,14 @@ if [[ -x /usr/local/bin/k3s ]]; then
 fi
 if [[ ! -x /usr/local/bin/k3s || ! -e /etc/systemd/system/k3s.service ]]; then
   log "공식 installer로 K3s $K3S_VERSION 설치 (kube-proxy 유지)"
-  download https://get.k3s.io "$TEMP_DIR/k3s-install.sh"
-  INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC=server sh "$TEMP_DIR/k3s-install.sh"
+  if [[ -n ${RAILSHOT_BUNDLE:-} ]]; then
+    installer=$(python3 -c 'import json,sys; from pathlib import Path; p=Path(sys.argv[1]); print(p/json.loads((p/"bundle-manifest.json").read_text())["files"]["installer"]["path"])' "$RAILSHOT_BUNDLE")
+    INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_SKIP_SELINUX_RPM=true INSTALL_K3S_EXEC=server sh "$installer"
+  else
+    # Immutable release tag: latest detection never selects the runtime version.
+    download "https://raw.githubusercontent.com/k3s-io/k3s/$K3S_VERSION/install.sh" "$TEMP_DIR/k3s-install.sh"
+    INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC=server sh "$TEMP_DIR/k3s-install.sh"
+  fi
 else
   log '동일 설정/버전의 K3s 재사용'
 fi

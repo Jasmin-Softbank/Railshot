@@ -1,0 +1,1 @@
+{"status": "prepared", "path": "/var/tmp/railshot-airgap-bundle-builder-check", "bundle_version": "2026-10-02.1-builder-check", "manifest_sha256": "19d6d00617b7d491b51b88b324a510671620ff06e1c0121e6f5ee5505f5ab313", "platform": "linux/arm64", "images": 17}

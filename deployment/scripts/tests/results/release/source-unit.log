@@ -1,0 +1,112 @@
+test_bundle_inside_managed_cleanup_directory_is_rejected (test_airgap.BundleIntegrityTests.test_bundle_inside_managed_cleanup_directory_is_rejected) ... ok
+test_corrupt_file_and_wrong_pinned_manifest_rejected (test_airgap.BundleIntegrityTests.test_corrupt_file_and_wrong_pinned_manifest_rejected) ... ok
+test_missing_workload_image_is_not_hidden_by_cached_image (test_airgap.BundleIntegrityTests.test_missing_workload_image_is_not_hidden_by_cached_image) ... ok
+test_oci_blob_mismatch_rejected_even_if_outer_archive_checksum_is_rewritten (test_airgap.BundleIntegrityTests.test_oci_blob_mismatch_rejected_even_if_outer_archive_checksum_is_rewritten) ... ok
+test_path_escape_and_symlink_rejected (test_airgap.BundleIntegrityTests.test_path_escape_and_symlink_rejected) ... ok
+test_platform_mismatch (test_airgap.BundleIntegrityTests.test_platform_mismatch) ... ok
+test_sample_image_required_even_for_a_different_workload (test_airgap.BundleIntegrityTests.test_sample_image_required_even_for_a_different_workload) ... ok
+test_valid_checksums_and_image_index (test_airgap.BundleIntegrityTests.test_valid_checksums_and_image_index) ... ok
+test_custom_registry_required_but_optional_cloudflare_not_required (test_airgap.NetworkModeTests.test_custom_registry_required_but_optional_cloudflare_not_required) ... ok
+test_extended_options_require_version_02_and_valid_urls (test_airgap.NetworkModeTests.test_extended_options_require_version_02_and_valid_urls) ... ok
+test_late_fallback_does_not_hide_readiness_connection_errors (test_airgap.NetworkModeTests.test_late_fallback_does_not_hide_readiness_connection_errors) ... [NODE_READY]
+[NETWORK_CHECKING]
+[BUNDLE_VERIFYING]
+[FALLBACK] Online artifact/image access failed; retry with verified local bundle
+[NODE_READY]
+[NETWORK_CHECKING]
+[BUNDLE_VERIFYING]
+[FAILED]
+ok
+test_latest_detection_never_selects_or_writes_runtime_versions (test_airgap.NetworkModeTests.test_latest_detection_never_selects_or_writes_runtime_versions) ... ok
+test_legacy_output_shape_and_explicit_cli_negotiation (test_airgap.NetworkModeTests.test_legacy_output_shape_and_explicit_cli_negotiation) ... ok
+test_local_containerd_timeout_returns_machine_readable_failure (test_airgap.NetworkModeTests.test_local_containerd_timeout_returns_machine_readable_failure) ... [NODE_READY]
+[NETWORK_CHECKING]
+[BUNDLE_VERIFYING]
+[K3S_INSTALLING]
+[K3S_READY]
+[AIRGAP_PRELOADING]
+[FAILED]
+ok
+test_mode_selection_only_auto_falls_back_and_never_requires_optional_caps (test_airgap.NetworkModeTests.test_mode_selection_only_auto_falls_back_and_never_requires_optional_caps) ... [NETWORK_CHECKING]
+[NETWORK_CHECKING]
+[BUNDLE_VERIFYING]
+[NETWORK_CHECKING]
+[BUNDLE_VERIFYING]
+[NETWORK_CHECKING]
+ok
+test_offline_probe_does_not_spawn_external_commands (test_airgap.NetworkModeTests.test_offline_probe_does_not_spawn_external_commands) ... ok
+test_registry_challenge_is_reachable_but_403_is_not (test_airgap.NetworkModeTests.test_registry_challenge_is_reachable_but_403_is_not) ... ok
+test_short_image_is_docker_hub_not_tag_as_hostname (test_airgap.NetworkModeTests.test_short_image_is_docker_hub_not_tag_as_hostname) ... ok
+test_unapproved_version_not_selected (test_airgap.NetworkModeTests.test_unapproved_version_not_selected) ... ok
+test_cli_invalid_input_and_flags_always_return_one_json (test_contract.ContractTests.test_cli_invalid_input_and_flags_always_return_one_json) ... ok
+test_fixtures_and_cli_failure_against_published_schemas (test_contract.ContractTests.test_fixtures_and_cli_failure_against_published_schemas) ... ok
+test_generic_image_preserves_custom_port_path_replicas (test_contract.ContractTests.test_generic_image_preserves_custom_port_path_replicas) ... ok
+test_invalid_inputs_rejected_before_engine (test_contract.ContractTests.test_invalid_inputs_rejected_before_engine) ... ok
+test_malformed_duplicate_and_nonfinite_json (test_contract.ContractTests.test_malformed_duplicate_and_nonfinite_json) ... ok
+test_provider_normalization_has_identical_core_spec_and_manifests (test_contract.ContractTests.test_provider_normalization_has_identical_core_spec_and_manifests) ... ok
+test_result_context_is_added_only_at_boundary (test_contract.ContractTests.test_result_context_is_added_only_at_boundary) ... ok
+test_cleanup_only_deletes_named_owned_resources (test_engine.EngineTests.test_cleanup_only_deletes_named_owned_resources) ... [NODE_READY]
+[K3S_READY]
+ok
+test_failed_rollout_reports_stage_and_diagnostic (test_engine.EngineTests.test_failed_rollout_reports_stage_and_diagnostic) ... [NODE_READY]
+[NETWORK_CHECKING]
+[K3S_INSTALLING]
+[K3S_READY]
+[CILIUM_INSTALLING]
+[CILIUM_READY]
+[WORKLOAD_DEPLOYING]
+[FAILED]
+ok
+test_foreign_namespace_is_never_overwritten (test_engine.EngineTests.test_foreign_namespace_is_never_overwritten) ... [NODE_READY]
+[NETWORK_CHECKING]
+[K3S_INSTALLING]
+[K3S_READY]
+[CILIUM_INSTALLING]
+[CILIUM_READY]
+[FAILED]
+ok
+test_full_cleanup_requires_explicit_flag_before_commands (test_engine.EngineTests.test_full_cleanup_requires_explicit_flag_before_commands) ... [FAILED]
+ok
+test_lock_contention_stops_before_mutation (test_engine.EngineTests.test_lock_contention_stops_before_mutation) ... [FAILED]
+ok
+test_requested_image_drift_is_failure (test_engine.EngineTests.test_requested_image_drift_is_failure) ... [NODE_READY]
+[K3S_READY]
+[CILIUM_READY]
+[FAILED]
+ok
+test_success_states_and_provider_independence (test_engine.EngineTests.test_success_states_and_provider_independence) ... [NODE_READY]
+[NETWORK_CHECKING]
+[K3S_INSTALLING]
+[K3S_READY]
+[CILIUM_INSTALLING]
+[CILIUM_READY]
+[WORKLOAD_DEPLOYING]
+[WORKLOAD_READY]
+[ENDPOINT_READY]
+ok
+test_timeout_stops_descendant_from_mutating_after_failure (test_engine.EngineTests.test_timeout_stops_descendant_from_mutating_after_failure) ... ok
+test_verify_does_not_install_or_apply (test_engine.EngineTests.test_verify_does_not_install_or_apply) ... [NODE_READY]
+[K3S_READY]
+[CILIUM_READY]
+[WORKLOAD_READY]
+[ENDPOINT_READY]
+ok
+test_artifact_extraction_rejects_paths_and_links (test_provider_simulation.SimulationHarnessTests.test_artifact_extraction_rejects_paths_and_links) ... ok
+test_core_hashes_cover_engine_and_bootstrap_without_test_files (test_provider_simulation.SimulationHarnessTests.test_core_hashes_cover_engine_and_bootstrap_without_test_files) ... ok
+test_failed_vm_stop_returns_json_and_does_not_start_the_next_vm (test_provider_simulation.SimulationHarnessTests.test_failed_vm_stop_returns_json_and_does_not_start_the_next_vm) ... ok
+test_host_http_200_with_wrong_body_is_rejected (test_provider_simulation.SimulationHarnessTests.test_host_http_200_with_wrong_body_is_rejected) ... ok
+test_profiles_change_environment_only_and_keep_provider_out_of_core (test_provider_simulation.SimulationHarnessTests.test_profiles_change_environment_only_and_keep_provider_out_of_core) ... ok
+test_both_architecture_names_and_invalid_version (test_release.ReleaseTests.test_both_architecture_names_and_invalid_version) ... ok
+test_corrupt_release_archive_rejected (test_release.ReleaseTests.test_corrupt_release_archive_rejected) ... ok
+test_download_requires_trusted_archive_and_manifest_pins (test_release.ReleaseTests.test_download_requires_trusted_archive_and_manifest_pins) ... ok
+test_github_write_permission_required (test_release.ReleaseTests.test_github_write_permission_required) ... ok
+test_local_compression_roundtrip_excludes_unlisted_files (test_release.ReleaseTests.test_local_compression_roundtrip_excludes_unlisted_files) ... ok
+test_same_verified_bundle_reused_and_different_manifest_refused (test_release.ReleaseTests.test_same_verified_bundle_reused_and_different_manifest_refused) ... ok
+test_traversal_archive_rejected (test_release.ReleaseTests.test_traversal_archive_rejected) ... ok
+test_upload_draft_only_and_no_overwrite (test_release.ReleaseTests.test_upload_draft_only_and_no_overwrite) ... ok
+test_upload_explicit_repo_and_assets_never_clobbers (test_release.ReleaseTests.test_upload_explicit_repo_and_assets_never_clobbers) ... ok
+
+----------------------------------------------------------------------
+Ran 49 tests in 2.025s
+
+OK
