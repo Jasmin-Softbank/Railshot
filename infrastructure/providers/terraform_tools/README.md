@@ -92,6 +92,8 @@ Target JSON retains this existing shape; use a real private ledger and reviewed 
 }
 ```
 
+WireGuard variables are rejected before state creation or Terraform execution. Provider-local app ingress and a separately verified management route replace new cross-cloud WireGuard setup. A Terraform `forget` plan retains the remote object while ending state ownership; it requires the existing maintenance receipt and explicit ownership/cleanup handoff, and is not proof of live tunnel shutdown.
+
 The executor injects `owner_ref` with the exact external state path. Use `initialize_empty_data_disk: true` only for a reviewed new empty module-created disk. The public SSH key is configuration, not a private credential. Never put SSH private keys, registry tokens or WireGuard private keys in target JSON or Terraform state.
 
 ```sh

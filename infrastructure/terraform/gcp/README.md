@@ -14,7 +14,9 @@ HTTP/HTTPS ingress는 기본 닫힘이다. IAP SSH도 별도 opt-in이며 `35.23
 
 자동 관리용으로 `allow_iap_ssh: true`, `operator_ssh_public_key`에 공개키 한 줄을 지정하면 첫 부팅에 잠긴 암호와 noninteractive sudo를 가진 `railshot-operator`를 만들고 해당 VM의 OS Login을 끈다. 공개키를 지정하지 않으면 기존 OS Login 방식을 유지한다. private key는 입력하지 않는다. IAP 터널 권한과 신뢰한 SSH host key 검증은 별도로 필요하며 `node_descriptor.transport_ref`는 기존 `iap:<project>/<zone>/<name>` 형식이다. 기존 VM의 metadata 변경만으로 사용자·키가 다시 설치되지는 않는다.
 
-AWS 운영 노드와 WireGuard를 연결할 때 `wireguard_peer_public_cidrs: ["<운영 AWS 공인 IP>/32"]`를 지정한다. 명시한 최대 4개 IPv4 endpoint에 대해서만 UDP51820 ingress/egress가 열린다. 기본은 빈 목록이다. 터널 설치, private key, peer AllowedIPs, 전달·라우팅·Cilium 설정은 별도 guest 관리 작업이며 Terraform `wireguard.readiness`는 `unconfigured`다. `allow_http`와 `allow_https`는 계속 false로 두고 외부 앱 경로는 AWS edge와 터널을 통해 구성한다.
+WireGuard 선택 항목과 출력은 폐기했다. 이전 `wireguard_peer_public_cidrs`에 값이 있으면 Terraform 입력 검사가 실패하므로 검토한 target 설정에서 해당 필드를 제거한다. 이 module은 새 UDP51820 방화벽이나 터널을 만들지 않는다. GCP native L7는 별도 준비 대상이며 이 변경으로 생성되지 않는다.
+
+기존 `google_compute_firewall.wireguard_ingress`와 `wireguard_egress`는 Terraform 1.7 이상의 `removed { lifecycle { destroy = false } }`로 인계한다. 검토한 migration plan을 적용하면 Terraform 관리 대상에서 빠지고 실제 규칙은 남는다. VM·정적 IP·디스크·VPC/subnet 주소는 유지하며 이 소스 변경만으로 live state나 guest를 바꾸지 않는다. 기존 `*-wireguard-in` / `*-wireguard-out` 규칙과 guest 터널은 GCP L7·DNS 전환 및 Argo의 Kubernetes API6443 대체 경로가 검증된 후 별도 운영 작업으로 제거해야 한다. 제거 전 남은 리소스 ID와 소유자를 기록하고, 관리에서 빠졌다는 사실을 삭제 완료로 간주하지 않는다.
 
 `max_run_duration_seconds`는 기본 null이다. 설정하면 매 start마다 지정 기간 후 STOP, `automatic_restart = false`를 적용한다. 작업 drain·절대 예산 cap·disk/IP 삭제는 수행하지 않는다. `desired_status`를 강제하지 않고 `allow_stopping_for_update = false`를 유지한다. cutoff를 다른 reconciler가 다시 시작하지 않도록 운영자가 확인해야 한다. [GCP runtime limits](https://docs.cloud.google.com/compute/docs/instances/limit-vm-runtime).
 

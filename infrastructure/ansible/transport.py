@@ -94,9 +94,11 @@ def forwarded_port(reference, deadline):
                 session_id = owned_ssm_session(log)
             yield port
         except BaseException as error:
-            failure = error
+            normal_exit = isinstance(error, SystemExit) and (error.code is None or isinstance(error.code, int) and error.code == 0)
+            failure = None if normal_exit else error
             raise
         finally:
+            cleanup_failures = []
             try:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
@@ -109,7 +111,11 @@ def forwarded_port(reference, deadline):
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    process.wait()
+                    finally:
+                        process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                cleanup_failures.append('Local cloud tunnel process cleanup could not be verified ('
+                                        + type(error).__name__ + '); operator reconciliation required')
             finally:
                 if ssm_region:
                     try:
@@ -118,8 +124,10 @@ def forwarded_port(reference, deadline):
                             raise ValueError('SSM session ownership changed')
                         terminate_ssm_session(executable, ssm_region, observed, env)
                     except Exception:
-                        message = 'SSM session cleanup could not be verified; operator reconciliation required'
-                        if failure is not None:
-                            failure.add_note(message)
-                        else:
-                            raise ValueError(message) from None
+                        cleanup_failures.append('SSM session cleanup could not be verified; operator reconciliation required')
+            if cleanup_failures:
+                if failure is not None:
+                    for message in cleanup_failures:
+                        failure.add_note(message)
+                else:
+                    raise ValueError('; '.join(cleanup_failures)) from None
