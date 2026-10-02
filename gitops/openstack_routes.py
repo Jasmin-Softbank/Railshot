@@ -69,13 +69,9 @@ def ensure(config_path, request):
         receipt = json.loads(result.stdout)
     except (TypeError, ValueError):
         raise RouteError(unknown=True) from None
-    if (result.returncode == 1 and isinstance(receipt, dict)
-            and set(receipt) == {'status', 'https_verified', 'reason'}
-            and receipt['status'] in ('blocked', 'unknown') and receipt['https_verified'] is False
-            and isinstance(receipt['reason'], str) and receipt['reason']):
-        # Preserve the worker's state without forwarding its diagnostic text.
-        raise RouteError(unknown=receipt['status'] == 'unknown')
     if result.returncode != 0:
+        # The worker can report blocked after creating a pool or firewall rule.
+        # Its failure status cannot prove the remote operation made no changes.
         raise RouteError(unknown=True)
     if not (isinstance(receipt, dict) and receipt.get('status') == 'configured'
             and receipt.get('https_verified') is False

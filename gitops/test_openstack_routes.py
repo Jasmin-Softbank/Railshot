@@ -54,7 +54,8 @@ class OpenStackRoutesTest(unittest.TestCase):
                         'status': status, 'https_verified': False, 'reason': 'private-worker-diagnostic'}), '')
                     with self.subTest(status=status), self.assertRaises(routes.RouteError) as raised:
                         routes.ensure(path, request)
-                    self.assertEqual(raised.exception.unknown, status == 'unknown')
+                    # A blocked readback may follow a successful pool/SG create.
+                    self.assertTrue(raised.exception.unknown)
                     self.assertNotIn('private-worker', str(raised.exception))
                 for stdout in ('private-non-json-output', json.dumps({'status': 'blocked', 'reason': 'invalid'})):
                     run.return_value = subprocess.CompletedProcess([], 1, stdout, '')
