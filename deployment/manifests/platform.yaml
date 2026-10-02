@@ -120,6 +120,9 @@ spec:
             - name: GOOGLE_APPLICATION_CREDENTIALS
               valueFrom:
                 configMapKeyRef: {name: railshot-environments, key: google_credentials_file, optional: true}
+            - name: CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE
+              valueFrom:
+                configMapKeyRef: {name: railshot-environments, key: google_credentials_file, optional: true}
             - {name: GITHUB_TOKEN, valueFrom: {secretKeyRef: {name: railshot-github, key: token}}}
             - {name: GITHUB_OWNER, value: Jasmin-Softbank}
             - {name: GITHUB_REPO, value: railshot-apps}
