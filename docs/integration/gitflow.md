@@ -19,6 +19,24 @@
 
 Vercel Preview는 별도 웹 배포 연동이다. 런타임·Ansible·CI 검증과 구분하며, 프로젝트 설정·로그가 확인되지 않은 Vercel 실패를 팀 런타임 테스트 실패로 기록하지 않는다. 현재 강제 필수 검사 설정은 없으며 위 절차는 이번 통합의 운영 규칙이다.
 
+## 2026-10-02 전체 팀 브랜치 대조
+
+새 Railshot와 이전 Jasmin 저장소의 원격 브랜치를 함께 확인했다. `source-map.json`은 최초 조립 시점의 기록으로 보존하고 후속 대조를 여기에 적는다.
+
+| 원본 브랜치 | 확인한 최신 SHA | 통합 상태 |
+|---|---|---|
+| Jasmin `feature/ansible_JB` | `90b5196f643850aeff16dfc0ebb17606d035b686` | 매핑 12개 모두 포함. 10개 동일, README/site.yml은 통합 연결부 수정 |
+| Jasmin `feature/poc-onprem-hwagyun` | `e308749cc78408c3d933ea76aa06ab982045450b` | OpenStack 50개 파일 모두 동일 |
+| Jasmin `feature/fe-mcp-jingi` | `6840d1387798d375234bbf97919210eec96709a3` | 매핑 16개 모두 포함. 이후 API/MCP/CLI/UI 통합 변경 유지 |
+| Jasmin `feature/deployment-runtime-seungmin` | `ec6a9df0258eee9843aa457bc10703aa7026db40` | Railshot `c732b3b`에 후속 airgap 변경 포함. 원본 465개 중 462개 동일, 문서 2개와 VM 검사 timeout 옵션만 후속 수정 |
+| Railshot `feature/poc-cloud-jihwan` | `efa4d7c599bf9af512112a353b3d5324c036db68` | [PR #2](https://github.com/Jasmin-Softbank/Railshot/pull/2)로 이력 연결 |
+| Railshot `feature/deployment-runtime-seungmin` | `c732b3bc83ad1b9cab416f1d763cfee9be26ea05` | [PR #3](https://github.com/Jasmin-Softbank/Railshot/pull/3)로 이력·Ansible asset 연결 |
+| Railshot `feature/dashboard-ui` | `4fb39c88e17070d2ac048ec0667083f0252b644c` | [PR #4](https://github.com/Jasmin-Softbank/Railshot/pull/4)에서 원본 UI·npm workspace 통합 및 새 Railshot CI 검증 |
+
+이전 cloud 승민 브랜치 `fb503fd`, 지환 `9e13c7c`, 구조 문서 `4b5e22c`, 초기 main `e100373`도 확인했다. 이미 후속 구현으로 대체됐거나 코드 추가가 없는 브랜치를 다시 덮어쓰지 않는다. Patroni와 제품 UI→배포 자동 연결은 원본에도 완성돼 있지 않아 누락 병합으로 분류하지 않는다. 별도 채팅에서 진행 중인 새 Ansible API 작업은 완료 PR과 CI 결과를 받은 뒤 통합한다.
+
+향후 병합에는 [Railshot CI](../../.github/workflows/railshot-ci.yml)의 `Railshot CI gate` 성공을 확인한다. 이 검사는 실제 일회성 Linux 런타임 설치와 정리를 포함하지만 외부 AWS/GCP 제품 배포 성공을 대신하지 않는다. [배포 해제 경로](e2e-teardown.md)는 같은 PR에서 관리한다.
+
 ## 지환 feature 이력 연결
 
 기준 integration은 `adda5c7532c22da95e938a3cf1a7ba4c05e4ca47`, 개인 feature는 `efa4d7c599bf9af512112a353b3d5324c036db68`이다. 개인 feature의 210개 파일 중 208개는 통합본과 내용·mode가 동일하다. 나머지는 개인 범위를 설명하는 README와 Ansible 문서 상단 안내뿐이다.
