@@ -253,7 +253,7 @@ flowchart LR
 | DB 서버 | 별도 VM의 PostgreSQL·Patroni·etcd·HAProxy. K3s 설치·노드 가입 없음 |
 | 데이터 | 데이터 볼륨과 백업의 보존·복구 정책을 DB 담당 구현에서 확정 |
 | DB 통신 | 앱에서 DB의 사설 주소로 TCP 5432. 공인 EIP·ALB를 DB 접속 주소로 사용하지 않음 |
-| 환경 간 접속 | VPC/LAN 또는 기존 WireGuard 사설 경로의 route·복귀 경로 필요. Ansible이 터널을 새로 생성하지 않음 |
+| 환경 간 접속 | 운영자가 준비한 VPC/LAN 등의 route·복귀 경로 필요. Ansible이 관리 네트워크를 새로 생성하지 않음 |
 | 접근 제어 | DB의 listen 주소·방화벽·`pg_hba.conf`를 제한하고 앱 전용 계정 사용 |
 | 비밀 전달 | 앱 namespace의 Secret으로 전달. Git·HTTP 요청·작업 로그에 DB 비밀번호를 저장하지 않음 |
 
@@ -381,6 +381,6 @@ python3 infrastructure/ansible/run.py \
   --request examples/ansible/runtime-single-node.json --validate-only
 ```
 
-OpenStack은 실행기에서 사설 주소까지 직접 route 또는 WireGuard 경로로 SSH에 도달해야 합니다. AWS SSM·GCP IAP도 게스트의 SSH를 운반하는 관리 터널이며 SSH를 제거하는 방식이 아닙니다. `StrictHostKeyChecking=yes`를 유지하고 임의 ProxyCommand·ProxyJump·agent 전달은 차단합니다. 키 내용·클라우드 토큰을 Ansible 변수로 전달하지 않습니다.
+OpenStack은 실행기에서 사설 주소까지 운영자가 준비한 경로로 SSH에 도달해야 합니다. WireGuard는 지원 선택지에서 제거했습니다. AWS SSM·GCP IAP도 게스트의 SSH를 운반하는 관리 터널이며 SSH를 제거하는 방식이 아닙니다. `StrictHostKeyChecking=yes`를 유지하고 임의 ProxyCommand·ProxyJump·agent 전달은 차단합니다. 키 내용·클라우드 토큰을 Ansible 변수로 전달하지 않습니다.
 
 일반 SIGTERM/SIGINT 종료는 새 접수를 닫고 현재 worker의 자체 제한 시간과 Ansible·SSM/IAP 정리까지 기다립니다. 서비스 관리자나 컨테이너의 종료 유예 시간은 `timeout_seconds`에 터널별 정리 여유(최대 5초씩)를 더한 값 이상으로 설정해야 합니다. SIGKILL·호스트 장애 시 자식 프로세스 정리는 보장하지 않습니다. 남은 intent는 재시작 시 `unknown`으로 처리하고 운영자가 실제 노드 상태를 대조하기 전 자동 재실행하지 않습니다.

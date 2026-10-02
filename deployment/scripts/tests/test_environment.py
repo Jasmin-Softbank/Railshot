@@ -225,6 +225,20 @@ class RegistrationTest(unittest.TestCase):
         self.assertEqual(result['status'], 'unknown')
         self.assertEqual(self.runtime.applications, 0)
 
+    def test_gcp_aws_edge_is_rejected_before_registration_side_effects(self):
+        descriptor = json.loads((ROOT / 'examples/ansible/gcp-node-descriptor.json').read_text())
+        descriptor['target_id'] = self.target
+        self.write('descriptor.json', descriptor)
+        self.config['registration'].update(edge_config_file='/private/edge.json', expires_at='2099-01-01T00:00:00Z')
+        self.write('config.json', self.config)
+        with self.assertRaisesRegex(Exception, 'AWS edge is AWS-only'):
+            self.run_registration()
+        self.assertFalse(self.shared.exists())
+        self.assertFalse(self.home.exists())
+        self.assertEqual(self.runtime.applications, 0)
+        self.assertEqual(self.control.applications, 0)
+        self.assertIsNone(self.variable)
+
     def test_missing_edge_expiry_blocks_before_registration_claim_or_remote_calls(self):
         self.config['registration'].update(edge_config_file='/private/edge.json', expires_at=None)
         self.write('config.json', self.config)

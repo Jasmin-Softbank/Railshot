@@ -72,6 +72,8 @@ def load(registry_file, target_id, config_file, binding_file=None):
                  'registration settings differ')
     argo.require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', settings['source_repository']), 'source repository required')
     if settings.get('edge_config_file'):
+        argo.require(descriptor['provider_kind'] == 'aws',
+                     'AWS edge is AWS-only; GCP requires a provider-local public URL and verified management route')
         expiry = settings.get('expires_at')
         argo.require(isinstance(expiry, str) and expiry.endswith('Z')
                      and datetime.fromisoformat(expiry.replace('Z', '+00:00')) > datetime.now(timezone.utc),

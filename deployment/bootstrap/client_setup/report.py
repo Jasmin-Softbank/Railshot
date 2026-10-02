@@ -16,4 +16,4 @@ def sanitize(value):
 
 def installation_report(state, capabilities, access):
     return sanitize({"installation": state.get("stages", {}), "capabilities": capabilities, "vm_access": access,
-                     "limitations": ["VM connectivity requires separate verify-vm execution", "No continuous command agent is installed"]})
+                     "limitations": ["VM connectivity requires separate verify-vm execution", "No continuous command agent is installed", "No network tunnel or remote management route is configured"]})
