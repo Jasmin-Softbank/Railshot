@@ -43,6 +43,12 @@ Vercel Preview는 별도 웹 배포 연동이다. 런타임·Ansible·CI 검증�
 
 이미 반영된 CI·CSP·네트워크·Ansible·GitOps 구현을 다시 복사하지 않고 merge로 계보를 연결했다. README와 Ansible 문서는 통합 범위의 설명을 유지했다. 통합본에만 있는 팀 구현과 실제 앱 선언은 보존했다.
 
+## 화균 하이브리드 DB 후속 통합
+
+이후 새로 게시된 `feature/multicloud-db-hwagyun@67d19efc81b01b2a55b6dd54c198088b018bdd1f`는 공통 조상이 없는 독립 root commit이다. 임시 통합 브랜치에서 `--allow-unrelated-histories` merge로 원본 이력을 보존했다. 루트 README는 통합 안내와 원본 사용법 링크를 유지하고 `.gitignore`는 합집합으로 해결했다. `ansible.cfg`는 기존 guest/runtime 설정을 보존하면서 DB 역할 검색 경로만 추가했다. 각 팀 DB playbook은 이미 `become`을 명시하므로 원본의 전역 권한 상승 설정을 다른 작업에 적용하지 않는다.
+
+DB 역할·playbook·template과 기존 15개 테스트는 원본 그대로다. 공통 Ansible 전체를 새 lint 규칙으로 바꾸지 않도록 담당 `playbooks roles inventories/example` 경로에 lint를 적용하고 별도 CI job에 syntax·lint·실제 localhost 입력/렌더 검사를 연결했다. `database.configure` 및 `patroni.install` 실행에는 연결하지 않는다. 원본은 최소 DB 2·etcd 3·proxy 1 구성으로 단일 DB VM 지원과 실제 DB 복제·복원·정리는 후속 담당 범위다.
+
 ## 정빈 observability 후속 통합
 
 검사 진행 중 새로 게시된 Railshot `feature/observability_JB@180482ad2f069eb09edf5056f2ad3d0621e70532`를 merge했다. 담당자의 `observability/` 구현과 이력을 그대로 유지한다. 기존 14개 unittest를 CI에 연결하며 Compose가 지정한 Prometheus/Blackbox 이미지에서 도구를 꺼내 native 검사 두 개도 생략하지 않는다. 컨테이너는 도구 추출 후 삭제하고 HTTP fixture·Blackbox 프로세스는 테스트의 finally에서 종료한다. 실제 운영 observer·exporter를 배포한 결과는 아니다.

@@ -26,7 +26,7 @@ examples/ansible/                    # 자격증명이 없는 입력 예제
 | OpenStack Controller / CSP 코드 | VM 생성·상태 조회, 프로젝트·자원 정보 반환 | OpenStack 생성의 `202 accepted`를 guest 준비 완료로 해석하지 않습니다. |
 | Ansible 연결부 | 등록 target 조회, 입력 변환, 실행 상태와 준비 확인 결과 반환 | 새 큐·AWX 서버를 추가하지 않고 기존 worker·CLI를 사용합니다. |
 | 정빈 님 guest / 승민 님 runtime | OS 선행조건 확인 / 단일 노드 K3s·Cilium 설치 | 원본 설치 로직을 재작성하지 않습니다. |
-| 화균 님 DB 구현 | PostgreSQL·Patroni 설치 정책과 플레이북 | 현재 integration에 설치 플레이북이 없어 실행은 차단합니다. |
+| 화균 님 DB 구현 | PostgreSQL·Patroni 설치 정책과 플레이북 | 선택형 하이브리드 HA 플레이북을 통합했으나 이 API 실행에는 미연결입니다. 기본 단일 PostgreSQL VM 설치도 지원하지 않아 차단을 유지합니다. |
 | Argo CD 경로 | 준비된 실행 클러스터에 앱 선언 적용 | `runtime.install`에서 앱을 배포하지 않습니다. |
 
 ```mermaid
@@ -249,11 +249,11 @@ PostgreSQL의 [listen 주소·기본 5432 포트](https://www.postgresql.org/doc
 | `nodes[].roles` | `database`, `dcs` 역할. 같은 역할·VM·관리 IP 중복을 거부합니다. |
 | `placements[]` | 실제 등록 정보의 provider/site별 역할 수와 `database_nodes`, `dcs_voters`가 일치해야 합니다. |
 | `inventory` | `database`, `dcs` 그룹의 안전한 호스트 요약. SSH 접속 설정이 포함된 실행 inventory는 아닙니다. |
-| `variables.railshot_database` | `mode`, `port: 5432`, `placements`. DB 담당자에게 전달할 통합 매핑이며 아직 소비하는 플레이북은 없습니다. |
+| `variables.railshot_database` | `mode`, `port: 5432`, `placements`. DB 담당자에게 전달할 통합 매핑이며 통합된 HA 플레이북의 변수로 아직 연결하지 않았습니다. |
 
 standalone은 DB 1개·DCS 0개를 검사합니다. Patroni 모드에서는 역할·배치 일치만 검사하며 복제·quorum·장애 도메인·장애 전환 가능 여부를 검증하지 않습니다. 회의의 AWS 3개·온프렘 2개 예시는 배치를 변수로 전달하려는 설명으로 해석하며 기본 노드 수로 고정하지 않습니다.
 
-검증 결과가 유효해도 DB는 `execution_supported: false`, `blockers: [{"code":"DATABASE_PLAYBOOK_UNAVAILABLE"}]`입니다. 이후 담당자의 버전·인증/비밀 참조·데이터 경로·백업·준비 상태 확인 계약이 정해지면 그 플레이북의 실제 변수 이름에 맞춰 연결합니다. 현재 비어 있는 부분을 임의의 설치 구현으로 채우지 않습니다.
+검증 결과가 유효해도 DB는 `execution_supported: false`, `blockers: [{"code":"DATABASE_PLAYBOOK_UNAVAILABLE"}]`입니다. 통합된 [HA 입력 규격](deployment-inputs.md)은 DB 2대 이상·etcd 홀수 3대 이상·proxy 1대 이상과 별도 TLS·Ansible Vault 입력을 요구하며, 위 기본 단일 PostgreSQL VM 요청을 실행하지 못합니다. 단일 DB 설치 지원과 운영자 비밀 참조·데이터 경로·백업·준비 상태 계약을 담당자와 맞춘 뒤 실제 변수 이름에 연결해야 합니다. 이 문서 수정으로 API·Schema·실행 차단 동작을 바꾸지는 않습니다.
 
 ## F. Integration / Verification
 
@@ -297,7 +297,7 @@ python3 infrastructure/ansible/api.py \
 
 POST는 `application/json`, 1–8192바이트의 Content-Length 본문을 사용합니다. query string·후행 `/`·CORS·동적 등록·취소·삭제는 지원하지 않습니다. HTTP 상세 헤더·오류는 OpenAPI를 기준으로 합니다.
 
-기존 직접 CLI는 [내부 요청 Schema](../../contracts/ansible-request.schema.json)와 [runtime 예제](../../examples/ansible/runtime-single-node.json)를 유지합니다. `--validate-only`는 입력 검사만 수행합니다. 기존 `patroni.install` CLI도 담당 플레이북 부재로 계속 차단하며 새 HTTP의 `database.configure`와 혼용하지 않습니다.
+기존 직접 CLI는 [내부 요청 Schema](../../contracts/ansible-request.schema.json)와 [runtime 예제](../../examples/ansible/runtime-single-node.json)를 유지합니다. `--validate-only`는 입력 검사만 수행합니다. 기존 `patroni.install` CLI도 담당 플레이북 실행 연결 전까지 계속 차단하며 새 HTTP의 `database.configure`와 혼용하지 않습니다.
 
 ```bash
 python3 infrastructure/ansible/run.py \

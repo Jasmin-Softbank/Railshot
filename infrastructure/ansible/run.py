@@ -143,7 +143,7 @@ def fail(result, status, code, message, *, unknown=False):
 
 def support_error(request):
     if request['operation'] == 'patroni.install':
-        return ('PATRONI_PLAYBOOK_UNAVAILABLE', 'Placement is recorded; no team Patroni playbook is supplied.')
+        return ('PATRONI_PLAYBOOK_UNAVAILABLE', 'Placement is recorded; the team Patroni playbook is not connected to this executor.')
     inv = request['inventory']
     if len(inv['control_plane']) != 1 or inv['workers']:
         return ('SINGLE_NODE_ONLY', 'Current runtime supports one control-plane node and no workers.')

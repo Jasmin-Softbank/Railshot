@@ -29,3 +29,9 @@ dist/
 *.sqlite-*
 /apps/**/AGENTS.md
 /apps/**/CONTRACTS.md
+*.retry
+.vault-password
+*.key
+*.pem
+infrastructure/ansible/inventories/production/
+.ansible/
