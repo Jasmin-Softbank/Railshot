@@ -204,6 +204,16 @@ class RegistrationTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.run_registration()
             self.assertFalse(self.shared.exists())
+        for public in ('224.0.0.1', '239.1.2.3'):
+            descriptor['addresses']['public'] = public
+            self.write('descriptor.json', descriptor)
+            selected['management_endpoint'] = f'https://{public}:6443'
+            self.write('registry.json', self.registry)
+            with self.assertRaises(ValueError):
+                env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
+            self.assertFalse(self.shared.exists())
+        descriptor['addresses']['public'] = '34.47.68.21'
+        self.write('descriptor.json', descriptor)
         selected['management_endpoint'] = 'https://34.47.68.21:6443'
         self.write('registry.json', self.registry)
         result = self.run_registration()

@@ -92,7 +92,8 @@ def registered_node(selected, target_id, request_id, *, timeout_seconds=None):
         if 'management_endpoint' in selected:
             argo.require(request['target']['provider'] == 'gcp', 'management endpoint override requires GCP or OpenStack')
             public = ipaddress.IPv4Address(resource['addresses'].get('public', ''))
-            argo.require(public.is_global and selected['management_endpoint'] == f'https://{public}:6443',
+            argo.require(public.is_global and not public.is_multicast
+                         and selected['management_endpoint'] == f'https://{public}:6443',
                          'GCP management endpoint must match the provisioned public IPv4 API')
             resource['management_endpoint'] = selected['management_endpoint']
     for key in ('identity_file', 'known_hosts_file'):
