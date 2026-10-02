@@ -46,7 +46,7 @@ railshot/
 │   ├── api/
 │   ├── decisions/
 │   └── poc/
-├── AGENTS.md
+├── AGENT.md
 └── README.md
 ```
 
@@ -72,6 +72,10 @@ railshot/
 6. Existing code may be located outside the agreed layout. Do not move that code as part of this guidelines task, and do not treat a mismatch as permission to reorganize the repository during later work.
 7. Do not unnecessarily modify code owned by another responsibility area. Keep changes limited to the requested scope.
 
+## API Conventions
+
+For new or changed HTTP API contracts, follow [docs/api/conventions.md](docs/api/conventions.md), based on the existing Hwagyun OpenStack controller. Use resource-oriented `/api/v1` routes and its response/error formats for new product APIs. Static resource names must be short lowercase plural nouns such as `builds`, `deployments`, `profiles`, and `plans`: no hyphens, underscores, camelCase compounds, or internal executor terminology. This is a local naming rule, not a REST or URI standard requirement. Keep the existing snake_case JSON format; do not rename HTTP headers or opaque external IDs to enforce route naming. Preserve documented legacy routes and internal Ansible contracts until their callers are explicitly migrated. Keep designs, implemented routes, generated OpenAPI, and HTTP verification results distinct; do not claim an endpoint exists from a design document alone.
+
 ## Scope of This Guidelines Task
 
-Create or update only the root `AGENTS.md`. Do not modify feature code, create the documented directories, or change the actual directory structure. The tree above records the agreement; it is not a migration instruction.
+Create or update only the root `AGENT.md`. Do not modify feature code, create the documented directories, or change the actual directory structure. The tree above records the agreement; it is not a migration instruction.
