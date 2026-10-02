@@ -37,7 +37,7 @@ class CiliumEntryTests(unittest.TestCase):
     def test_reuses_team_installer_with_lock(self):
         tasks = self.play['tasks']
         copy = next(t for t in tasks if 'Reuse the team Cilium' in t['name'])
-        self.assertEqual(copy['loop'], ['scripts/common.sh', 'cilium/install.sh', 'airgap/versions.json'])
+        self.assertEqual(copy['loop'], ['scripts/common.sh', 'cilium/install.sh', 'cilium/preflight.py', 'airgap/versions.json'])
         install = next(t for t in tasks if t['name'].startswith('Install Cilium before'))
         self.assertEqual(install['ansible.builtin.command']['argv'][:3],
                          ['/usr/bin/flock', '--nonblock', '/run/railshot-deployment.lock'])
