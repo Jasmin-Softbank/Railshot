@@ -185,7 +185,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       versioned = url.pathname.startsWith('/api/v1');
       if (request.method === 'GET' && url.pathname === '/healthz') {
         // Liveness remains local; readiness also requires usable durable state and operator config.
-        const configured = Boolean(await productReady.catch(() => null));
+        const configured = Boolean(await productReady.catch(() => null))
+          && Boolean(product || service?.targetId || environmentAdapter || process.env.RAILSHOT_PROFILES_FILE);
         json(response, 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
       if (url.pathname.startsWith('/api/')) {

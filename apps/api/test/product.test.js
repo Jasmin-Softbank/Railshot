@@ -308,6 +308,7 @@ test('unconfigured server persists dashboard state while listing empty execution
   const { base, server } = await httpFixture(t, { service: null, deployPublished: undefined });
   for (const path of ['targets', 'profiles']) assert.deepEqual(await (await fetch(`${base}/api/v1/${path}`)).json(), { items: [], next_marker: null });
   assert.ok((await server.productReady).dashboard);
+  assert.equal((await (await fetch(`${base}/healthz`)).json()).configured, false, 'dashboard storage alone does not configure an executor');
   const response = await fetch(`${base}/api/v1/sessions`, { method: 'POST' });
   assert.equal(response.status, 201);
   assert.match(response.headers.get('set-cookie'), /railshot_session=/);
