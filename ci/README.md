@@ -6,7 +6,7 @@
 
 | 검사 | 실행 범위 |
 |---|---|
-| Python / OpenStack contracts | 기존 CI·Ansible·runtime·GitOps·provider 검사와 OpenAPI. 모델·외부 API는 mock |
+| Python / OpenStack contracts | 기존 CI·Ansible·runtime·GitOps·provider 검사와 OpenAPI. observability는 실제 promtool 설정 검사와 loopback HTTP 200/503/redirect probe를 포함. 모델·외부 API는 mock |
 | HTTP publication and browser E2E | 실제 HTTP ZIP 업로드 → Python 게시 산출물 → API 읽기. GitHub·registry는 mock. Chromium은 실제 dashboard 선택·검토·탐색을 실행 |
 | Terraform validation | 모든 현재 모듈의 fmt/init/validate 및 기존 계약 검사. credentials/backend/apply 없음 |
 | Linux amd64 runtime E2E and cleanup | 일회성 GitHub runner에 실제 K3s/Cilium 설치 → Pod·서비스·HTTP 검증 → 소유 자원과 클러스터 정리 |

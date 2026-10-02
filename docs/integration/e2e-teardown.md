@@ -143,6 +143,8 @@ terraform -chdir="$RAILSHOT_TF_WORK" state pull \
 
 ## 5. 완료 확인과 잔존 자원
 
+관측 도구를 별도로 설치했다면 [observability 정리 절차](../../observability/README.md)를 따른다. 해당 출력 디렉터리의 `docker compose down`은 named volume을 보존하며 `down -v`는 관측 데이터를 삭제한다. 고객 클러스터에서는 검토한 `cluster.json`의 자원만 제거한다. 이 manifest에는 ClusterRole/ClusterRoleBinding도 있어 namespace만 지우면 자원이 남는다. 공유 이름을 쓰므로 다른 대상의 관측 구성이 같은 자원을 사용하는지 먼저 확인한다. 현재 PR CI는 관측 VM·exporter를 설치하지 않으며, 도구 추출 컨테이너와 loopback 테스트 프로세스만 자체 정리한다.
+
 삭제 완료는 native apply 성공만으로 끝내지 않는다. 정확한 계정/project에서 대상 VM과 삭제 대상 디스크·예약 IP의 부재를 조회하고, 보존 자원 목록을 남긴다. AWS retained root EBS, 보존한 data disk·snapshot, 별도 state의 ALB/WireGuard EIP·DNS zone은 고객 VM 삭제 후에도 남을 수 있다. GHCR 이미지·GitOps 기록·SSM SecureString 등 별도 소유 자원도 함께 자동 삭제되지 않는다.
 
 전체 PoC를 철거할 때의 순서는 앱 선언·공개 route → 고객 앱 노드 → 사용이 끝난 CI → 공유 edge와 운영 노드다. Edge는 운영 ENI를 참조하므로 운영 노드를 먼저 삭제하지 않는다. 도메인·zone을 보존할 경우, 보호된 DNS와 삭제할 edge 자원의 소유권을 분리하는 검토가 필요하다. 공통 destroy API와 공유 자원 전체 철거 자동화는 이번 PR CI의 구현 범위가 아니다.
