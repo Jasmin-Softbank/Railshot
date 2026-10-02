@@ -1,3 +1,5 @@
+import { sourceAppName } from '../../contracts/application.mjs';
+
 const views = {
   deploy: document.querySelector('#deploy-view'),
   history: document.querySelector('#history-view'),
@@ -222,15 +224,10 @@ async function createPlan(name, profile, mode) {
   return data;
 }
 
-async function sourceApplication(profile, source) {
-  if (!profile.create_per_request && profile.application_name) return profile.application_name;
-  const name = source.kind === 'repository' ? source.label.split('/').filter(Boolean).at(-1).replace(/\.git$/, '')
+function sourceApplication(source) {
+  const name = source.kind === 'repository' ? source.label.split('/').filter(Boolean).at(-1).replace(/\.git$/i, '')
     : source.kind === 'archive' ? archive.files[0].name : (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0];
-  const app = name.normalize('NFKD').toLowerCase().replace(/\.zip$/i, '').replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '').replace(/^[^a-z]+/, '').slice(0, 30).replace(/-+$/g, '');
-  if (/^[a-z][a-z0-9-]{1,28}[a-z0-9]$/.test(app)) return app;
-  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(name))));
-  return `app-${[...hash].map((value) => value.toString(16).padStart(2, '0')).join('').slice(0, 10)}`;
+  return sourceAppName(name);
 }
 
 document.querySelector('#deploy-form').addEventListener('submit', async (event) => {
@@ -248,14 +245,16 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else {
     invalidateReview();
     const generation = reviewGeneration, source = selectedSource;
-    let plan;
+    let plan, app;
     reviewing = true;
     const reviewButton = document.querySelector('#deploy-form button[type="submit"]');
     reviewButton.disabled = true;
     try {
+      app = sourceApplication(source);
       if (profile) {
-        const app = await sourceApplication(profile, source);
-        if (generation !== reviewGeneration) return;
+        if (!profile.create_per_request && profile.application_name && profile.application_name !== app) {
+          throw new Error(`선택한 환경은 ${profile.application_name} 앱 전용입니다. ${app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
+        }
         plan = await createPlan(app, profile, deploymentDatabase.value);
         if (generation !== reviewGeneration) return;
         if (!plan.executable) throw new Error(`현재 실행할 수 없는 계획입니다: ${(plan.blockers || []).join(', ')}${planCost(plan)}`);
@@ -268,9 +267,10 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
     reviewed = { ...selected, source, kind: 'deployments', key: crypto.randomUUID(), plan,
       targetId: plan?.runtime_target_id || profile?.target_id };
     document.querySelector('#review-source').textContent = source.label;
+    document.querySelector('#review-app').textContent = app;
     document.querySelector('#review-target').textContent = profile ? `클라우드 · ${profile.label || profile.id} · ${databaseSummary(profile, plan.database.mode)}` : option.label;
     document.querySelector('#review-note').textContent = plan
-      ? `앱 ${plan.name}: 새 자원을 생성하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.${planCost(plan)}`
+      ? `앱 ${plan.name}: 환경을 준비하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.${planCost(plan)}`
       : option.message;
     deployButton.disabled = false;
     requestError.hidden = true;
