@@ -1,5 +1,6 @@
 """Local HTTP journeys with fake Ansible receipts; no cloud or SSH calls."""
 from http.client import HTTPConnection
+import copy
 import json
 from pathlib import Path
 import sys
@@ -32,6 +33,7 @@ class APIJourney(unittest.TestCase):
         self.release = threading.Event()
         self.started = threading.Event()
         self.calls = []
+        self.variables = []
 
     def write(self, name, content):
         path = self.root / name
@@ -45,6 +47,7 @@ class APIJourney(unittest.TestCase):
 
         def fake_receipt(argv, *_):
             variables = json.loads(Path(argv[-1][1:]).read_text())
+            self.variables.append(variables)
             stage = Path(argv[3]).stem
             Path(variables['railshot_receipt_path']).write_text(json.dumps({
                 'request_id': variables['railshot_request_id'], 'target_id': variables['railshot_target_id'],
@@ -89,7 +92,7 @@ class APIJourney(unittest.TestCase):
             self.assertEqual(self.request(server, 'POST', '/v1/ansible/jobs', body, headers={'Host': 'evil.invalid'})[0], 403)
             for key in ('ssh', 'descriptor_file', 'credentials', 'command', 'validate_only'):
                 self.assertEqual(self.request(server, 'POST', '/v1/ansible/jobs', {**body, key: '/private/key'})[0], 400)
-            self.assertEqual(self.request(server, 'POST', '/v1/ansible/jobs', {**body, 'target_id': '../other'})[0], 404)
+            self.assertEqual(self.request(server, 'POST', '/v1/ansible/jobs', {**body, 'target_id': '../other'})[0], 400)
             status, accepted, location = self.request(server, 'POST', '/v1/ansible/jobs', body)
             self.assertEqual(status, 202)
             self.assertEqual(location, '/v1/ansible/jobs/runtime-001')
@@ -146,10 +149,102 @@ class APIJourney(unittest.TestCase):
         finally:
             restarted.close()
 
+    def register_openstack(self):
+        config = json.loads((self.root / 'targets.json').read_text())
+        examples = json.loads((api.ansible.ROOT / 'examples/ansible/api-targets.json').read_text())
+        server = json.loads((api.ansible.ROOT / 'examples/ansible/openstack-server.json').read_text())
+        for target_id, address in [('demo-openstack', '192.168.50.10'), ('db-onprem', '192.168.50.20')]:
+            target = examples['targets'][target_id]
+            target['ssh'] = config['targets']['demo-aws']['ssh']
+            target['server_file'] = str(self.root / (target_id + '.json'))
+            config['targets'][target_id] = target
+            self.write(target_id + '.json', json.dumps({**server, 'id': target['resource_id'],
+                'addresses': [{'network': 'management', 'address': address, 'version': 4}]}))
+        self.write('targets.json', json.dumps(config))
+
+    def test_openstack_preview_and_runtime_parameters_reach_existing_playbooks(self):
+        self.register_openstack()
+        server, thread = self.server()
+        body = {'request_id': 'openstack-001', 'target_id': 'demo-openstack', 'operation': 'runtime.install',
+                'parameters': {'wait_timeout_seconds': 180}}
+        try:
+            status, plan, _ = self.request(server, 'POST', '/v1/ansible/validate', body)
+            self.assertEqual(status, 200)
+            self.assertTrue(plan['execution_supported'])
+            host = plan['inventory']['all']['children']['k3s_server']['hosts']['demo-openstack']
+            self.assertEqual((host['ansible_host'], host['railshot_provider']), ('192.168.50.10', 'openstack'))
+            self.assertEqual(plan['variables']['railshot_wait_timeout_seconds'], 180)
+            self.assertEqual(self.calls, []); self.assertEqual(server.jobs.records, {})
+            for forbidden in (str(self.root), self.token, 'identity_file', 'known_hosts_file'):
+                self.assertNotIn(forbidden, json.dumps(plan))
+            for params in ({'extra_vars': {'command': 'id'}}, {'wait_timeout_seconds': True},
+                           {'wait_timeout_seconds': 601}, {'mode': 'standalone'}):
+                self.assertEqual(self.request(server, 'POST', '/v1/ansible/validate', {**body, 'parameters': params})[0], 400)
+            self.assertEqual(self.request(server, 'POST', '/v1/ansible/validate', {**body, 'operation': 'guest.check'})[0], 400)
+            status, _, location = self.request(server, 'POST', '/v1/ansible/jobs', body)
+            self.assertEqual(status, 202); self.assertTrue(self.started.wait(2))
+            conflict = {**body, 'parameters': {'wait_timeout_seconds': 181}}
+            self.assertEqual(self.request(server, 'POST', '/v1/ansible/jobs', conflict)[0], 409)
+            self.release.set()
+            deadline = time.monotonic() + 3
+            while True:
+                result = self.request(server, 'GET', location)[1]
+                if result['status'] not in ('queued', 'running') or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(result['status'], 'succeeded')
+            self.assertEqual([v['railshot_wait_timeout_seconds'] for v in self.variables], [180, 180])
+            self.assertEqual(self.request(server, 'POST', '/v1/ansible/jobs', body)[0], 200)
+            self.assertEqual(len(self.calls), 1)
+            snapshot = json.loads((self.root / 'demo-openstack.json').read_text())
+            self.write('demo-openstack.json', json.dumps({**snapshot, 'project_id': 'another-project'}))
+            rejected = self.request(server, 'POST', '/v1/ansible/jobs', {**body, 'request_id': 'wrong-project'})
+            self.assertEqual(rejected[:2], (503, {'error': {'code': 'TARGET_CONFIGURATION_INVALID'}}))
+            self.assertEqual(len(self.calls), 1)
+        finally:
+            self.release.set(); server.shutdown(); server.server_close(); thread.join(2)
+
+    def test_database_inventory_is_external_and_cannot_dispatch_installation(self):
+        self.register_openstack()
+        body = json.loads((api.ansible.ROOT / 'examples/ansible/database-validate.json').read_text())
+        server, thread = self.server()
+        try:
+            status, plan, _ = self.request(server, 'POST', '/v1/ansible/validate', body)
+            self.assertEqual(status, 200)
+            self.assertFalse(plan['execution_supported'])
+            self.assertEqual(plan['blockers'], [{'code': 'DATABASE_PLAYBOOK_UNAVAILABLE'}])
+            self.assertEqual(set(plan['inventory']['all']['children']), {'database', 'dcs'})
+            self.assertEqual(plan['inventory']['all']['children']['dcs']['hosts'], {})
+            self.assertEqual(plan['variables']['railshot_database']['port'], 5432)
+            rejected = self.request(server, 'POST', '/v1/ansible/jobs', body)
+            self.assertEqual(rejected[:2], (501, {'error': {'code': 'DATABASE_PLAYBOOK_UNAVAILABLE'}}))
+            for edit in ('count', 'purpose', 'duplicate', 'missing', 'standalone-dcs'):
+                bad = copy.deepcopy(body)
+                if edit == 'count': bad['parameters']['placements'][0]['database_nodes'] = 3
+                if edit == 'purpose': bad['parameters']['nodes'][0]['target_id'] = 'demo-openstack'
+                if edit == 'duplicate': bad['parameters']['nodes'] *= 2
+                if edit == 'missing': del bad['parameters']
+                if edit == 'standalone-dcs':
+                    bad['parameters']['nodes'][0]['roles'].append('dcs')
+                    bad['parameters']['placements'][0]['dcs_voters'] = 1
+                self.assertEqual(self.request(server, 'POST', '/v1/ansible/validate', bad)[0], 400, edit)
+            patroni = copy.deepcopy(body)
+            patroni['parameters']['mode'] = 'patroni'
+            # Only placement mapping is validated; one DB with no DCS is not an HA claim.
+            self.assertFalse(self.request(server, 'POST', '/v1/ansible/validate', patroni)[1]['execution_supported'])
+            runtime = {'request_id': 'wrong-purpose', 'target_id': 'db-onprem', 'operation': 'runtime.install'}
+            self.assertEqual(self.request(server, 'POST', '/v1/ansible/jobs', runtime)[1]['error']['code'], 'TARGET_PURPOSE_MISMATCH')
+            guest = {**runtime, 'operation': 'guest.check'}
+            self.assertTrue(self.request(server, 'POST', '/v1/ansible/validate', guest)[1]['execution_supported'])
+            self.assertEqual(self.calls, []); self.assertEqual(server.jobs.records, {})
+        finally:
+            server.shutdown(); server.server_close(); thread.join(2)
+
     def test_openapi_example_matches_local_http_contract(self):
         spec = json.loads((api.ansible.ROOT / 'docs/api/ansible.openapi.json').read_text())
         self.assertEqual(spec['openapi'], '3.1.0')
-        self.assertEqual(set(spec['paths']), {'/v1/ansible/jobs', '/v1/ansible/jobs/{request_id}'})
+        self.assertEqual(set(spec['paths']), {'/v1/ansible/validate', '/v1/ansible/jobs', '/v1/ansible/jobs/{request_id}'})
+        self.assertEqual(spec['components']['schemas']['JobRequest'], json.loads(api.inputs.JOB_SCHEMA.read_text()))
         self.assertEqual(spec['security'], [{'operatorBearer': []}])
         post = spec['paths']['/v1/ansible/jobs']['post']
         schemas = spec['components']['schemas']

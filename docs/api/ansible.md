@@ -1,221 +1,291 @@
-# Ansible 실행 인터페이스 사용 안내
+# Ansible 실행 인터페이스
 
-버전 1.0 · 작성일 2026-10-02
+버전 1.1 · 2026-10-02 · 팀 통합 기준
 
-이 문서는 상위 API에서 Ansible 작업을 호출하는 방법을 설명합니다. CLI는 `infrastructure/ansible/run.py`이며 JSON 요청을 받아 JSON 결과를 반환합니다. 운영자 전용 비동기 HTTP API는 `infrastructure/ansible/api.py`이며 localhost에서만 수신합니다. HTTP 사용법은 9절에 있습니다. 입력 검사, guest 준비, runtime 설치 완료를 구분합니다. 이 문서의 테스트는 오프라인 검증이며 실제 노드·SSM/IAP·클라우드 준비 완료를 증명하지 않습니다. 앱 적용은 별도 Argo CD 경로가 소유합니다.
+> 상위 API가 확정한 자원과 작업별 입력을 Ansible inventory·변수로 변환하는 인터페이스입니다. VM 생성, guest 준비 확인, 런타임 설치, 앱 배포의 책임을 구분합니다. DB는 K3s 밖의 별도 VM에 두는 기본안을 사용하며, 이번 구현은 DB 담당자에게 전달할 배치 입력을 검증하는 범위입니다.
 
-## 1. 실행 환경과 호출
+## A. Directory Architecture
 
-신뢰된 운영 실행기에서 사용합니다. 실행기에 Python 3과 `ansible-playbook`이 필요하며, 대상 서버에는 Python 3과 비대화식 sudo 권한이 있어야 합니다. runtime 설치에는 curl·tar·systemd 등 기존 설치 스크립트의 선행조건도 필요합니다.
-
-저장소 루트에서 다음 명령을 실행합니다. 아래 명령은 입력만 검사하며 SSH 파일이나 대상 노드에 접근하지 않습니다.
-
-```bash
-python3 infrastructure/ansible/run.py --request examples/ansible/guest-check.json --validate-only
-python3 infrastructure/ansible/run.py --request examples/ansible/runtime-single-node.json --validate-only
+```text
+contracts/
+├── ansible-job.schema.json          # 상위 API의 작업·변수 입력
+└── ansible-request.schema.json      # 내부 CLI 실행 요청
+infrastructure/ansible/
+├── api.py                          # 인증, 등록 자원 해석, 작업 접수·조회
+├── inputs.py                       # 작업별 입력 검사, inventory·변수 요약
+├── run.py                          # Provider 결과 변환, 실행·중복 방지
+├── transport.py                    # AWS SSM / GCP IAP 관리 접속
+├── guest.yml                       # 정빈 님 공통 guest 검사
+└── runtime.yml                     # 승민 님 K3s·Cilium 설치 코드 호출
+examples/ansible/                    # 자격증명이 없는 입력 예제
 ```
 
-표준 입력으로도 요청을 전달할 수 있습니다.
-
-```bash
-python3 infrastructure/ansible/run.py --request - --validate-only < examples/ansible/runtime-single-node.json
-```
-
-결과는 표준 출력(stdout)에 JSON 객체 하나로 반환합니다. `--validate-only`의 `validated`는 입력과 지원 범위를 확인했다는 뜻이며 준비·설치 성공을 보장하지 않습니다. 실제 실행은 대상과 자격 참조를 확인한 뒤 이 옵션을 제거하면 시작됩니다. 예제의 VM ID·주소·파일 경로는 실제 접속 정보로 바꾸어야 합니다.
-
-Terraform의 `output -json node_descriptor` 결과도 변환할 수 있습니다. 예제는 실제 자원·자격이 없는 [AWS descriptor](../../examples/ansible/aws-node-descriptor.json)와 [GCP descriptor](../../examples/ansible/gcp-node-descriptor.json)입니다.
-
-```bash
-python3 infrastructure/ansible/run.py \
-  --node-descriptor examples/ansible/aws-node-descriptor.json \
-  --request-id aws-runtime-001 --operation runtime.install \
-  --ssh-user railshot-operator \
-  --identity-file /secure/railshot/identity_ed25519 \
-  --known-hosts-file /secure/railshot/known_hosts \
-  --state-dir /secure/railshot/ansible-jobs --validate-only
-```
-
-GCP에는 GCP descriptor 파일을 지정하면 됩니다. 변환은 `x86_64`를 `amd64`로 매핑하고 target/resource/private IPv4를 보존합니다. AWS region 또는 GCP zone을 placement로 사용하며, `transport_ref`의 instance와 실제 resource ID가 일치해야 합니다. descriptor의 `public` 주소나 runtime readiness 주장은 설치 성공으로 사용하지 않습니다. AWS는 cloud-init 완료, GCP는 preconfigured guest 및 존재하는 cloud-init의 완료를 검사합니다. `--validate-only`는 상태 디렉터리·터널·SSH에 접근하지 않습니다.
-
-## 2. 작업 목록과 공통 규칙
-
-| operation | 실행 내용 | 현재 지원 범위 |
+| 구성요소 | 책임 | 경계 |
 |---|---|---|
-| `guest.check` | JB 공통 검사와 architecture·주소·디스크·cloud-init 상태 확인 | control-plane 1개, worker 없음 |
-| `runtime.install` | guest 확인 후 승민의 K3s/Cilium runtime 설치 | amd64, Ubuntu 22.04/24.04, K3s 1.34.11+k3s1, Cilium 1.20.2 |
-| `patroni.install` | 환경별 배치 입력 검사 | 담당자 플레이북이 없어 `blocked` 반환 |
-
-control-plane이 여러 개이거나 worker가 있으면 `SINGLE_NODE_ONLY`로 차단합니다. 요청한 노드를 생략하거나 단일 노드로 줄여 실행하지 않습니다. `guest.check`는 amd64/arm64 요청을 실제 서버 정보와 비교할 수 있지만, 통합 runtime의 ARM64 지원은 아직 검증하지 않았습니다.
-
-호출자는 playbook 경로·shell 명령·임의 extra-vars를 지정할 수 없습니다. `runtime.install`에는 앱·CD·DB 설치가 포함되지 않습니다. Patroni 작업은 `PATRONI_PLAYBOOK_UNAVAILABLE` 오류를 반환하며 설치를 시작하지 않습니다.
-
-## 3. 요청 입력
-
-요청 형식은 [ansible-request.schema.json](../../contracts/ansible-request.schema.json)을 따릅니다. [runtime 요청](../../examples/ansible/runtime-single-node.json), [guest 확인 요청](../../examples/ansible/guest-check.json), [Patroni 배치 요청](../../examples/ansible/patroni-placement-blocked.json) 예제를 사용할 수 있습니다.
-
-| 필드 | 형식·규칙 |
-|---|---|
-| `schema_version` | `1.0` |
-| `request_id` | 상위 실행·시도의 식별자이자 영속 중복 방지 키. 같은 ID와 입력은 저장한 결과만 반환합니다. |
-| `operation` | 2절의 작업 이름 중 하나 |
-| `target` | `id`, `provider`, `placement`, `os`, `architecture`, `initialization` |
-| `target.provider` | `aws`, `gcp`, `openstack`, `onprem` 중 하나 |
-| `target.placement` | 지역 또는 현장 식별자 |
-| `target.os` · `target.architecture` | `linux`; architecture는 `amd64` 또는 `arm64`. 작업별 지원 범위는 2절을 따릅니다. |
-| `target.initialization` | `cloud-init` 또는 `preconfigured` |
-| `inventory.control_plane` · `inventory.workers` | 노드 객체 배열. 각 항목에 `id`, `resource_id`, `private_ipv4`, `ssh`를 지정합니다. |
-| `ssh` | `user`, `port`, 절대 경로인 `identity_file`과 `known_hosts_file`; 선택적 `transport_ref` |
-| `ssh.transport_ref` | `ssm:region:i-instance` 또는 `iap:project/zone/instance`. provider·placement·resource와 일치해야 하며 guest SSH 22번만 허용합니다. |
-| `timeout_seconds` | guest와 runtime을 합한 제한 시간, 30–1800초. 각 단계에는 남은 시간만 적용합니다. |
-| `patroni.placements` | provider/site별 `database_nodes`와 `dcs_voters`를 각각 지정합니다. |
-
-`private_ipv4`에는 RFC1918 사설 IPv4만 허용합니다. 공인·loopback·link-local 주소와 중복된 node ID·resource ID·주소는 거부합니다. `control_plane`은 Ansible의 `k3s_server`, `workers`는 `k3s_workers`로 변환하지만 현재 worker 요청은 실행 전에 차단합니다.
-
-`patroni.placements`는 DB 노드 수와 DCS 투표 노드 수를 별도로 표현합니다. 같은 provider/site의 중복 항목과 두 수가 모두 0인 항목은 거부합니다. 이 검사는 quorum이나 HA 구성의 유효성을 확인하지 않습니다. 회의에서 언급한 3+2 배치도 기본값으로 사용하지 않습니다.
-
-상위 API는 사용자 인증과 대상 접근 권한을 확인한 뒤 서버 측 target 설정으로 요청을 만들어야 합니다. 일반 사용자가 임의 주소나 SSH 파일 경로를 지정하도록 이 도구를 그대로 공개하지 마세요. provider·placement·resource ID는 대상의 출처를 기록하는 값이며, 그 값만으로 클라우드 자원 소유권이 검증되지는 않습니다.
-
-현재 OpenStack Controller의 `resource_id/status/addresses` 결과에는 guest 접속 정보가 없습니다. 설치 전에 대상 준비 계약으로 접속 정보를 연결해야 합니다. 실제 키·토큰·비밀번호는 요청 본문에 넣지 않습니다.
-
-## 4. SSH와 guest 준비 확인
-
-`transport_ref`가 없으면 실행기에서 VPN 또는 underlay 경로로 대상의 사설 주소와 SSH 포트에 도달해야 합니다. 이 도구는 VPN·라우팅·보안 그룹을 설정하거나 SSH를 공개하지 않습니다. SSH 성공은 해당 사설 경로의 접속 확인이며 VPN handshake를 별도로 검사한 결과는 아닙니다.
-
-SSH는 지정한 개인키와 known_hosts를 사용합니다. `StrictHostKeyChecking=yes`, `IdentitiesOnly=yes`, `IdentityAgent=none`, `-F /dev/null`을 적용하고 ProxyCommand·ProxyJump·agent forwarding·암호 및 대화식 인증을 차단합니다. 서버 host key는 신뢰할 수 있는 경로로 미리 확인해 등록하세요. 최초 접속에서 받은 키를 자동으로 신뢰하는 방식은 사용하지 않습니다.
-
-SSM은 `aws` CLI와 `session-manager-plugin`, IAP는 `gcloud`가 실행기에 필요합니다. 실행기는 검증된 값으로만 AWS `AWS-StartPortForwardingSession` 또는 `gcloud compute start-iap-tunnel`의 argv를 구성합니다. 임시 localhost 포트가 열린 뒤 Ansible이 접속하며 `HostKeyAlias=사설IPv4`로 원래 호스트 키를 확인합니다. known_hosts에는 원래 사설 IPv4의 키를 신뢰된 별도 경로로 등록해야 합니다. 클라우드 CLI 로그인·IAP/SSM 권한·대상 SSH 공개키 설치는 선행조건입니다. GCP OS Login을 쓰면 등록된 OS Login 사용자와 키를 지정하고, 모듈의 operator 키 방식을 쓰면 `railshot-operator`를 지정합니다.
-
-터널만 클라우드 CLI 환경을 상속합니다. Ansible과 guest에는 클라우드 토큰을 전달하지 않으며 ProxyCommand는 계속 차단합니다. 터널 준비 시간은 전체 deadline 안에서 최대 60초이고, 완료·실패 시 로컬 터널 프로세스 그룹을 종료합니다. SSH timeout이 원격 설치 종료까지 보장하지는 않습니다.
-
-참조 파일은 비어 있지 않은 실행기 소유의 일반 파일이어야 하며 파일 자체의 symbolic link는 거부합니다. 개인키에는 group/other 권한을 허용하지 않고, known_hosts에는 group/other 쓰기 권한을 허용하지 않습니다. 경로는 공백·셸 메타문자가 없는 절대 경로로 제한합니다.
-
-준비 확인에는 다음 검사를 수행합니다.
-
-| 검사 | 통과 조건 |
-|---|---|
-| 접속·권한 | SSH를 통한 Python fact 수집과 비대화식 sudo 성공 |
-| JB 공통 조건 | Ubuntu, systemd, CPU 2개 이상, 메모리 1800MiB 이상, swap 비활성 |
-| 요청과 서버 일치 | 요청한 architecture와 NIC의 사설 IPv4 일치 |
-| 디스크 | root 파일시스템 여유 공간 10GiB 이상 |
-| 초기 설정 | `cloud-init` 요청이면 도구가 존재하고 상태가 `done`. `preconfigured`도 cloud-init이 존재하면 `done` 확인 |
-
-cloud-init을 시작하거나 재실행하지는 않습니다. 진행 중·실패·필수 도구 부재는 준비 확인 실패로 처리합니다. **VM의 ACTIVE는 guest 준비 완료를 뜻하지 않습니다.**
-
-inventory와 변수 파일은 비공개 임시 파일로 만들고 실행 후 제거합니다. 임의 Ansible 환경 설정·클라우드 자격·SSH agent를 Ansible 자식 프로세스에 전달하지 않으며 Ansible의 원문 출력도 API 결과에 포함하지 않습니다. 패키지·release·registry에 대한 outbound 접근과 LAN/VPC/VPN 대비 Pod/Service CIDR 충돌은 운영자가 확인해야 합니다. 현재 runtime CIDR은 팀의 고정 값을 사용합니다.
-
-## 5. 설치 흐름과 파일 구성
-
-`runtime.install`은 **JB guest 검사 → 승민 K3s 설치 → Cilium 설치 → 준비 상태 확인** 순서로 실행합니다. JB의 기존 `site.yml`에 있는 1.37/Flannel 설치는 이 경로에서 호출하지 않습니다.
-
-| 파일 | 역할 |
-|---|---|
-| `infrastructure/ansible/run.py` | JSON·descriptor 검사, 영속 요청 기록, target/resource 잠금, 플레이북 호출과 receipt 검증 |
-| `infrastructure/ansible/transport.py` | native SSM/IAP SSH 터널 준비·종료 |
-| `infrastructure/ansible/guest.yml` | guest 조건 확인과 준비 확인 기록 작성 |
-| `infrastructure/ansible/tasks/guest-checks.yml` | JB 원본 `90b5196f…`에서 추출한 첫 guest 검사. 기존 `site.yml`과 공유합니다. |
-| `infrastructure/ansible/runtime.yml` | 대상 identity 확인, runtime 스크립트 전달·실행, 실제 노드 상태 검사 |
-| `deployment/bootstrap/{preflight,install-k3s,health}.sh` | 최신 팀 runtime의 guest 선행조건·K3s 설치·API health 검사 |
-| `deployment/cilium/{install,health}.sh` | Cilium 설치 및 Cilium·Node·CoreDNS 준비 확인 |
-
-최신 `deployment/scripts/runtime.py deploy`는 bootstrap과 앱을 함께 실행하는 별도 진입점입니다. 이 어댑터는 앱 CLI나 Argo Application을 적용하지 않습니다. runtime 준비 뒤 앱 적용은 Argo CD가 단독 소유합니다.
-
-control-plane ID는 inventory·receipt 식별자이며 Kubernetes hostname을 강제로 변경하지 않습니다. 사설 IPv4는 `NODE_IP`로 전달하고 실제 단일 노드의 InternalIP·architecture·version·Ready를 대조합니다. target·resource·node·주소·architecture·버전과 profile은 비공개 소유권 기록에 저장합니다. 기존 K3s가 있는데 이 기록이 없으면 사용을 거부하고, 기록이 있으면 요청과 같은 identity인지 비교합니다. 기존 K3s 설정도 설치기가 다시 비교합니다. 이전 어댑터 profile 또는 예전 runtime 관리표식은 자동 승계하지 않습니다. 최신 팀 bootstrap 관리표식과 맞는 새로운 `team-bootstrap-json-0.1` profile을 사용합니다. 자동 cluster adoption·업그레이드·CIDR 변경·worker join은 지원하지 않습니다.
-
-runtime은 kube-proxy를 유지하고 Flannel·내장 network-policy·Traefik·ServiceLB·metrics-server·local-storage를 비활성화하는 기존 승민 구성을 사용합니다. 원격 bootstrap 전체는 팀 CLI와 같은 `/run/railshot-deployment.lock`을 사용합니다. 로컬 실행기는 `--state-dir`(기본 `~/.local/state/railshot/ansible`)에 입력의 SHA-256과 검증한 단계별 receipt·최종 결과만 저장합니다. 디렉터리는 실행기 소유 0700, 기록은 0600이며 요청 본문·키 내용·원문 로그를 저장하지 않습니다. 같은 실행기의 target ID와 resource ID를 각각 잠가 동시 요청을 차단합니다.
-
-동일 request ID와 동일 입력은 `replayed=true`와 저장된 결과를 반환하며 SSH를 다시 실행하지 않습니다. 이것은 과거 실행 결과 조회이고 현재 readiness 재검사가 아닙니다. 같은 ID의 입력 변경은 `REQUEST_ID_CONFLICT`, 동시 target 사용은 `TARGET_BUSY`입니다. 시작 기록만 남은 중단 작업은 `PREVIOUS_OUTCOME_UNKNOWN`으로 차단합니다. 운영자가 실제 상태를 확인한 후 새로운 request ID로 재개해야 합니다. 잠금·중복 방지는 같은 state 디렉터리를 공유하는 실행기에 적용되므로 API 인스턴스도 동일 디렉터리를 사용해야 합니다.
-
-## 6. 결과와 완료 확인
-
-| status | 종료 코드 | 의미 |
-|---|---|---|
-| `validated` | 0 | 검사 전용 요청의 형식과 지원 범위 통과. 모든 readiness는 false입니다. |
-| `succeeded` | 0 | 요청한 작업의 실제 준비 확인 기록 검증 완료 |
-| `invalid` | 2 | JSON·알 수 없는 필드·주소·중복·범위 오류. 실행하지 않습니다. |
-| `blocked` | 3 | 작업·노드 구성·architecture 미지원, SSH 참조·터널·작업 기록 또는 Ansible 부재. 새 원격 작업을 실행하지 않습니다. |
-| `failed` | 4 | guest/runtime 실행, 제한 시간, 준비 확인 기록 검증 또는 실행 후 영속 기록 실패 |
-
-결과는 `schema_version`, `request_id`, `target_id`, `operation`, `status`, `stage`, `steps`, `replayed`, 네 가지 readiness 필드와 `error`를 포함합니다. `steps`에는 단계별 `stage`, `exit_code`와 성공 시 검증한 `receipt`의 허용 필드를 기록합니다. 입력 검증에 실패하면 검증되지 않은 요청 식별자를 그대로 반환하지 않습니다.
-
-플레이북은 검사가 모두 끝난 뒤 request·target·node·stage·실행 nonce를 결합한 비공개 확인 기록(receipt)을 작성합니다. 어댑터는 이를 현재 요청과 대조합니다. **종료 코드가 0이어도 일치하는 확인 기록이 없으면 성공으로 처리하지 않습니다.**
-
-| 결과 필드 | 확인하는 상태 |
-|---|---|
-| `guest_ready` | 4절의 실제 guest 검사 통과 |
-| `runtime_ready` | 단일 노드 수·사설 InternalIP·architecture·kubelet 버전·Ready 및 Cilium/Operator/CoreDNS rollout 확인 |
-| `application_ready` | 이 도구에서 검사하지 않으므로 false |
-| `public_http_verified` | 이 도구에서 검사하지 않으므로 false |
-
-runtime 성공은 앱 이미지 pull·CD revision·SQL·공개 HTTP 성공을 뜻하지 않습니다. kubeconfig나 cluster-admin 자격도 로컬로 내보내지 않습니다.
-
-## 7. 오류와 재시도
-
-`error`에는 `code`, 안전한 `message`, `retryable`, `outcome_unknown`이 포함됩니다. 모든 오류의 `retryable`은 false이며 자동 재시도·롤백·VM 삭제를 수행하지 않습니다.
-
-runtime 실행 실패·시간 초과·확인 기록 부재에서는 일부 원격 변경이 남을 수 있어 `outcome_unknown=true`를 반환합니다. 먼저 대상의 현재 상태를 확인하세요. guest 검사까지 성공했다면 `guest_ready=true`는 유지하지만 `runtime_ready`는 false입니다. 오류 응답에는 원문 실행 로그나 관리 자격을 포함하지 않습니다.
-
-## 8. 검증 범위와 작성 근거
-
-다음은 이번 로컬 검증 결과입니다.
-
-| 검증 | 결과 |
-|---|---|
-| stdlib unittest 26개 | 통과. 기존 receipt·guest/runtime 실패 경계, descriptor 변환·transport/resource 불일치·native argv·터널 종료·영속 중복 방지·잠금·중단 작업 차단을 확인했습니다. HTTP 접수→상태 조회, 인증·등록 target 제한, 재시작 후 증거 대조, 실제 CLI의 SSH 실행 전 차단, OpenAPI 예제와 실제 HTTP 응답 대조도 포함합니다. |
-| `ansible.openapi.json` | OpenAPI 3.1 구조 검증 통과 (`openapi-spec-validator`). 명세 파일 검증이며 실제 VM 실행 검증은 아님 |
-| `guest.yml`, `runtime.yml`, 기존 `site.yml` | Ansible syntax-check 통과 |
-| 현재 bootstrap/Cilium shell | 6개 `bash -n` 통과 |
-| locale | 초기 syntax-check의 호스트 locale 오류를 UTF-8 locale 명시로 해결. 어댑터도 자식 프로세스에 플랫폼별 UTF-8 locale을 지정 |
-
-테스트는 다음 명령으로 실행합니다.
-
-```bash
-python3 -m unittest discover -s infrastructure/ansible -p 'test_*.py' -v
-```
-
-테스트의 receipt는 로컬 fixture이며 실제 준비 완료의 증거로 사용할 수 없습니다. 오프라인 테스트는 SSH·SSM/IAP·guest·K3s·Cilium·Patroni·클라우드를 실행하지 않습니다. 실제 대상에서 초기 설치·재실행·실패 복구와 사설 통신을 별도로 확인해야 합니다.
-
-이 문서는 10/1 허들 2:49:20–2:51:07의 Ansible 변수 전달·CSP/온프레 배치 요청과 지환의 명세 작성 과제를 기준으로 작성했습니다. 상세 근거는 [회의·Notion·PDF 대조 기록](../research/openstack-ansible-evidence.md)에 있습니다. Patroni의 배치 예시와 아직 정하지 않은 quorum·HA 구성을 확정 계약으로 취급하지 않습니다.
-
-
-## 9. 운영자 전용 비동기 HTTP API
-
-이 HTTP 구현은 Ansible 준비 작업만 접수합니다. `apps/api`의 사용자 API와 아직 연결하지 않았으며, 외부 ALB에 공개하거나 사용자 로그인·tenant 권한을 대신 처리하지 않습니다. Terraform 생성과 Argo 적용도 여기서 시작하지 않습니다. 상위 제어 서비스는 Terraform이 완료한 descriptor를 운영자 target에 등록한 뒤 이 API를 호출할 수 있습니다.
-
-다음은 신규 작업 접수부터 준비 상태 조회까지의 데이터 흐름입니다.
+| 상위 API·MCP | 유저 권한 확인, 대상·작업 선택, 생성→조회→설치 순서 조율 | 유저가 임의 IP·명령·키 경로를 지정하지 않도록 합니다. |
+| OpenStack Controller / CSP 코드 | VM 생성·상태 조회, 프로젝트·자원 정보 반환 | OpenStack 생성의 `202 accepted`를 guest 준비 완료로 해석하지 않습니다. |
+| Ansible 연결부 | 등록 target 조회, 입력 변환, 실행 상태와 준비 확인 결과 반환 | 새 큐·AWX 서버를 추가하지 않고 기존 worker·CLI를 사용합니다. |
+| 정빈 님 guest / 승민 님 runtime | OS 선행조건 확인 / 단일 노드 K3s·Cilium 설치 | 원본 설치 로직을 재작성하지 않습니다. |
+| 화균 님 DB 구현 | PostgreSQL·Patroni 설치 정책과 플레이북 | 현재 integration에 설치 플레이북이 없어 실행은 차단합니다. |
+| Argo CD 경로 | 준비된 실행 클러스터에 앱 선언 적용 | `runtime.install`에서 앱을 배포하지 않습니다. |
 
 ```mermaid
-%%{init: {'theme': 'default', 'themeVariables': {'fontFamily': 'Arial', 'fontSize': '13px', 'primaryColor': '#dbeafe', 'primaryBorderColor': '#3b82f6', 'primaryTextColor': '#1e293b', 'lineColor': '#6366F1'}}}%%
-sequenceDiagram
-    autonumber
-    participant C as 운영자 호출자
-    participant A as api.py / localhost
-    participant T as 등록 target JSON
-    participant S as 로컬 작업 기록
-    participant R as run.py / CLI
-    participant N as 대상 VM / Ansible
-    C->>A: POST jobs + Bearer<br>request_id, target_id, operation
-    A->>T: target_id 조회
-    T-->>A: descriptor + SSH 참조 + timeout
-    A->>A: CLI 요청 1.0 조립 + 입력 해시
-    A->>S: queued 기록 영속 저장
-    A-->>C: 202 + Location + 작업 문서
-    Note over A,R: 단일 worker가 비동기로 실행
-    A->>R: subprocess stdin JSON<br>target, inventory, timeout_seconds
-    R->>N: 사설 SSH 또는 SSM/IAP 위 SSH<br>guest.yml → 조건부 runtime.yml
-    N-->>R: request/target/node/stage/nonce receipt
-    R->>R: 바인딩·준비 상태 검증
-    R-->>A: stdout 결과 JSON + 종료 코드
-    A->>S: status + 공개 result/error 저장
-    C->>A: GET jobs/request_id + Bearer
-    A->>S: 작업 조회 · 필요 시 CLI 기록 대조
-    S-->>A: 저장된 작업 상태
-    A-->>C: 200 + 작업 문서
-    Note over C,N: succeeded는 guest/runtime 준비<br>앱 배포·공개 HTTPS·DB 준비는 별도
+flowchart LR
+    API["상위 API<br>유저 권한·작업 선택"] --> R["등록 자원 해석<br>Provider 결과 + 운영자 접속 설정"]
+    R --> V["입력 검사<br>inventory·변수 매핑"]
+    V --> P["validate<br>요약 반환·원격 실행 없음"]
+    V --> J["jobs<br>기록 저장 후 202 반환"]
+    J --> G["guest.yml<br>VM 준비 확인"]
+    G --> K["runtime.yml<br>K3s·Cilium 설치"]
+    K --> S["준비 확인 기록 검증<br>작업 상태 저장"]
 ```
 
-기계가독 명세는 [Ansible OpenAPI 3.1 JSON](ansible.openapi.json)입니다. Swagger 등 OpenAPI 3.1을 지원하는 도구에서 파일을 가져와 확인할 수 있습니다. 기존 [Ansible 요청 JSON Schema](../../contracts/ansible-request.schema.json)는 private CLI 입력용이며, HTTP 요청은 아래 세 필드만 받습니다. 서버는 `/openapi.json`이나 Swagger UI를 제공하지 않고 CORS·OPTIONS도 구현하지 않으므로 외부 문서 화면에서 직접 호출하는 방식은 지원하지 않습니다.
+DB 요청은 검증·요약까지 지원합니다. `jobs`에 DB 설치를 요청하면 `501 DATABASE_PLAYBOOK_UNAVAILABLE`을 반환하며 작업을 만들지 않습니다.
 
-운영자는 [등록 파일 예제](../../examples/ansible/api-targets.json)를 바탕으로 private 파일을 준비합니다. 등록 파일은 `version: 1`과 `targets` 맵을 가지며 각 target에는 `descriptor_file`, `ssh`, 선택적 `timeout_seconds`를 지정합니다. descriptor 파일과 SSH 접속 정보는 서버가 해석합니다. 등록 파일·descriptor·Bearer 파일은 실행기 소유이며 group/other 권한이 없어야 합니다. Bearer 파일은 32–512자의 무작위 ASCII 토큰을 담은 0600 파일로 준비합니다. 토큰·키 내용은 Git이나 요청 본문에 넣지 않습니다.
+## B. Request / Response Contract
+
+### B-1. 호출 경로
+
+| 메서드·경로 | 입력 | 응답 |
+|---|---|---|
+| `POST /v1/ansible/validate` | 작업·등록 target·작업별 parameters | `200`: 입력 검사와 inventory·변수 요약. SSH·설치·작업 기록 생성 없음 |
+| `POST /v1/ansible/jobs` | 같은 입력 형식 | 신규 작업은 `202`와 `Location`, `Retry-After: 2` |
+| `GET /v1/ansible/jobs/{request_id}` | 접수한 작업 ID | `200`: 저장한 상태와 준비 확인 결과 |
+
+기계가독 명세는 [OpenAPI 3.1](ansible.openapi.json), 호출 입력은 [Job JSON Schema](../../contracts/ansible-job.schema.json)를 따릅니다. 기본 주소는 실행기 내부의 `http://127.0.0.1:4180`이며 모든 경로에서 운영자 Bearer 인증을 확인합니다. 브라우저·유저에게 직접 공개하는 API가 아닙니다. 상위 API가 다른 호스트에 있다면 인증된 내부 연결 방법을 별도로 정해야 합니다.
+
+### B-2. 공통 입력과 작업별 변수
+
+| 필드 | 규칙 |
+|---|---|
+| `request_id` | 1–128자 영문·숫자·`.`·`_`·`-`. 작업 접수의 중복 방지 키입니다. `validate`는 ID를 예약하지 않습니다. |
+| `target_id` | 실행기에 등록된 자원 별칭. 영문 소문자로 시작하며 소문자·숫자·`-`, 최대 63자입니다. |
+| `operation` | `guest.check`, `runtime.install`, `database.configure` |
+| `parameters` | 작업별로 정의한 필드만 받습니다. 알 수 없는 필드·다른 작업의 변수·JSON 중복 키는 거부합니다. |
+
+| operation | parameters | 처리 |
+|---|---|---|
+| `guest.check` | 생략 또는 `{}` | runtime·database 용도 VM 모두 공통 guest 검사 가능 |
+| `runtime.install` | 선택적 `wait_timeout_seconds`: 정수 30–600, 생략 시 300초 | 기존 K3s·Cilium 스크립트의 `WAIT_TIMEOUT`으로 전달 |
+| `database.configure` | 필수 `mode`, `nodes`, `placements` | DB 담당자 전달용 배치 매핑만 검증. 설치 미지원 |
+
+`command`, `playbook`, `extra_vars`, SSH 키·파일 경로, 클라우드 자격증명은 HTTP 입력에 없습니다. 작업 전체 제한 시간은 운영자 target 설정의 `timeout_seconds`이며 기본 1200초, 허용 범위는 30–1800초입니다. `wait_timeout_seconds`는 그 안에서 사용하는 개별 준비 상태 대기 값으로, 전체 제한 시간을 늘리지 않습니다.
+
+런타임 요청 예시입니다.
+
+```json
+{
+  "request_id": "runtime-001",
+  "target_id": "demo-openstack",
+  "operation": "runtime.install",
+  "parameters": {"wait_timeout_seconds": 180}
+}
+```
+
+### B-3. 입력 검사와 실행 가능 여부
+
+`validate` 응답의 `valid: true`는 입력과 등록 정보의 매핑이 유효하다는 뜻입니다. `execution_supported`는 해당 실행 코드의 존재 여부이며, SSH 연결·자원 소유권·guest 준비를 실시간으로 확인했다는 뜻이 아닙니다. inventory는 키 경로와 SSH 설정을 제거한 요약이므로 그대로 설치에 사용하는 파일이 아닙니다.
+
+| 반환 항목 | 의미 |
+|---|---|
+| `operation`, `target_id` | 검사한 작업과 대상 |
+| `execution_supported`, `blockers` | 현재 실행 지원 여부와 차단 사유 |
+| `inventory` | 그룹·호스트 별칭·관리 IP·Provider·배치 위치·자원 ID |
+| `variables` | 기존 플레이북에 전달되는 변수 또는 DB 담당자 전달용 매핑 |
+
+현재 runtime은 Ubuntu 22.04/24.04의 amd64 단일 노드입니다. K3s `v1.34.11+k3s1`, Cilium `1.20.2`를 사용합니다. ARM64 runtime과 다중 노드 설치는 지원으로 표시하지 않습니다.
+
+## C. Provider Result → Inventory → Variables
+
+### C-1. 자원 정보의 출처
+
+상위 API는 의도한 프로젝트의 권한으로 자원을 생성·조회한 후 운영자 등록 정보와 연결합니다. 실행기는 등록된 파일을 읽으며 Provider에 다시 조회하지 않습니다. target 등록·변경은 현재 운영자 설정 단계이고 동적 등록 endpoint는 없습니다. target 목록 변경은 실행기를 정상 종료한 뒤 다시 시작해 반영합니다. Provider 응답 파일은 실행 시 읽으므로 변경 시 기존 요청 ID와 충돌할 수 있습니다.
+
+| 출처 | 사용하는 필드 | 내부 매핑·검사 |
+|---|---|---|
+| AWS/GCP `node_descriptor` | `target_id`, `provider_kind`, `resource_id`, `addresses.private`, `location`, `transport_ref`, `architecture` | target·사설 IP·지역/zone을 보존. `x86_64`→`amd64`. SSM/IAP 대상과 자원 ID 일치 검사 |
+| OpenStack `GET /api/v1/servers/{id}` | `id`, `project_id`, `status`, `addresses[].network/address/version` | 등록한 VM·프로젝트와 일치하고 `ACTIVE`여야 합니다. 지정 관리망의 IPv4가 정확히 하나여야 합니다. |
+| 운영자 target 설정 | 관리망 이름, placement, architecture, initialization, SSH 참조 | Controller 응답에 없는 접속·초기화 정보를 보완합니다. |
+
+OpenStack 생성 응답의 `resource_id/status: accepted`는 사용할 수 없습니다. 상세 조회의 `id/status: ACTIVE`가 필요합니다. 관리망 선택에는 `addresses[].network`의 실제 이름/키를 사용하며 네트워크 UUID라고 가정하지 않습니다. 주소가 없거나 여러 개이면 임의로 첫 주소를 선택하지 않습니다. 관리 주소는 RFC1918 IPv4만 허용합니다.
+
+필드 대조는 등록 정보와 응답의 일치 검사입니다. 자원 소유권을 독립적으로 조회하거나 VM의 현재 상태를 보장하지는 않습니다. 상위 API가 최신 응답과 프로젝트 접근 권한을 책임집니다.
+
+### C-2. 운영자 등록 파일
+
+[전체 등록 예제](../../examples/ansible/api-targets.json)에 AWS/GCP runtime, OpenStack runtime, 별도 DB VM을 구분했습니다. 아래는 OpenStack runtime 항목입니다.
+
+```json
+{
+  "server_file": "/secure/railshot/openstack/demo-openstack/server.json",
+  "resource_id": "example-runtime-vm",
+  "project_id": "example-project",
+  "management_network": "management",
+  "placement": "onprem-a",
+  "architecture": "amd64",
+  "initialization": "cloud-init",
+  "purpose": "runtime",
+  "ssh": {
+    "user": "railshot-operator",
+    "identity_file": "/secure/railshot/identity_ed25519",
+    "known_hosts_file": "/secure/railshot/known_hosts"
+  },
+  "timeout_seconds": 1200
+}
+```
+
+이 객체는 `version: 1`, `targets` 맵의 `demo-openstack` 항목으로 저장합니다. VM ID·프로젝트·주소·경로는 설명용이며 실제 값으로 교체해야 합니다. SSH 포트는 OpenStack에서 생략 시 22번입니다. DB VM은 다른 자원 ID·IP를 등록하고 `purpose: database`를 사용합니다. 이 값은 운영자의 용도 지정이며 VM에 K3s가 없는지 탐지하는 기능은 아닙니다.
+
+### C-3. 실제 Ansible 매핑
+
+| 입력·설정 | inventory / extra-vars | 읽는 구현 |
+|---|---|---|
+| VM 별칭·사설 IPv4 | `k3s_server.hosts.<id>`, `ansible_host` | `guest.yml`, `runtime.yml` |
+| 운영자 SSH 참조 | `ansible_user`, `ansible_port`, 개인키·known_hosts 설정 | 실행기에만 존재하는 실제 inventory |
+| 요청·대상·자원 ID | `railshot_request_id`, `railshot_target_id`, `railshot_resource_id` | 실행 요청·준비 확인 기록의 대상 바인딩 |
+| architecture·initialization | `railshot_expected_arch`, `railshot_initialization` | 실제 guest와 요청 비교, cloud-init 완료 확인 |
+| VM IP·별칭 | `railshot_node_ip`, `k3s_api_host`, `k3s_node_name` | NIC 주소·runtime identity 확인 |
+| 팀 버전 정책 | `k3s_version` | 기존 설치 버전 검사 |
+| `parameters.wait_timeout_seconds` | `railshot_wait_timeout_seconds` → `WAIT_TIMEOUT` | K3s·Cilium 준비 상태 대기 |
+| 실행기가 만든 값 | `railshot_nonce`, `railshot_receipt_path` | 요청과 실행 단계가 일치하는 준비 확인 기록 검사 |
+
+실제 inventory와 변수는 비공개 임시 JSON 파일로 만들고 `ansible-playbook -i inventory.json ... --extra-vars @vars.json`에 전달합니다. API 호출자가 파일명이나 명령 문자열을 조립하지 않습니다. Ansible의 [inventory·그룹 모델](https://docs.ansible.com/projects/ansible/latest/inventory_guide/intro_inventory.html)과 [JSON/YAML 변수 파일 입력](https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_variables.html#vars-from-a-json-or-yaml-file)을 사용합니다.
+
+## D. Execution / Status
+
+### D-1. 실행 순서
+
+1. 호출자 인증과 입력 형식을 확인합니다.
+2. 등록 target에서 Provider 결과와 접속 설정을 읽고 내부 CLI 요청을 만듭니다.
+3. `validate`는 요약을 반환하고 끝납니다. DB 작업 접수는 설치 미지원 오류로 끝납니다.
+4. 실행 작업은 입력 해시와 `queued` 상태를 저장한 뒤 `202`를 반환합니다.
+5. 기존 단일 worker가 CLI를 실행합니다. 사설 SSH 또는 SSM/IAP 위 SSH로 guest를 검사하고, `runtime.install`이면 팀 runtime을 설치합니다.
+6. 요청·노드·단계·nonce가 일치하는 준비 확인 기록을 검사하고 결과를 저장합니다. 호출자는 `Location` 경로를 조회합니다.
+
+접수와 완료를 분리하고 상태 자원의 위치와 조회 간격을 반환하는 [비동기 요청·응답 패턴](https://learn.microsoft.com/en-us/azure/architecture/patterns/async-request-reply)을 적용했습니다. 상태 조회 자체가 `200`이어도 본문의 `status`가 실패일 수 있습니다.
+
+| 상태 | 의미 |
+|---|---|
+| `queued`, `running` | 접수·실행 중 |
+| `succeeded` | 해당 guest/runtime 단계의 준비 확인 기록 검증 완료 |
+| `failed`, `blocked` | 실패 또는 실행 전제 미충족 |
+| `unknown` | 실행 후 결과를 확정할 수 없어 운영자 확인 필요 |
+
+`application_ready`와 `public_http_verified`는 항상 false입니다. K3s 설치 성공을 앱·DB·공개 HTTPS 성공으로 바꾸어 표시하지 않습니다. guest는 Ubuntu·systemd·CPU 2개 이상·RAM 1800MiB 이상·swap 비활성·root 여유 10GiB·NIC 주소·초기화 완료를 확인합니다.
+
+### D-2. 중복 요청과 오류
+
+동일한 요청 ID와 동일한 서버 측 확장 입력이면 기존 작업·결과를 반환합니다. `parameters`, Provider 결과, 접속 설정, 제한 시간으로 만든 내부 요청이 달라지면 `409 REQUEST_ID_CONFLICT`입니다. 한 번에 한 작업을 접수하며 다른 작업이 실행 중이면 `409 EXECUTOR_BUSY`입니다. 무제한 대기열이나 자동 재시도는 없습니다.
+
+| HTTP / 코드 | 처리 방법 |
+|---|---|
+| `400 INVALID_JOB_REQUEST` | 필드·타입·작업별 변수·DB 배치 수를 수정합니다. |
+| `400 TARGET_PURPOSE_MISMATCH` | DB VM에 runtime 설치를 요청했거나 DB 목록에 runtime VM을 넣었는지 확인합니다. |
+| `401` / `403` | Bearer 인증 또는 localhost Host/Origin 조건을 확인합니다. |
+| `404 TARGET_NOT_REGISTERED` | 승인된 target을 등록한 뒤 호출합니다. |
+| `409 REQUEST_ID_CONFLICT` | 같은 ID로 입력을 바꾸지 않습니다. |
+| `409 TARGET_RECONCILE_REQUIRED` | 이전 미확정 작업의 실제 결과와 준비 확인 기록을 확인합니다. |
+| `501 DATABASE_PLAYBOOK_UNAVAILABLE` | DB 담당 플레이북 연결 전에는 설치를 요청하지 않습니다. |
+| `503 TARGET_CONFIGURATION_INVALID` | 등록 파일·자원/프로젝트·관리 주소와 OpenStack ACTIVE 상태를 확인합니다. 자동 재시도를 지시하는 응답이 아닙니다. |
+
+HTTP 오류는 `{"error":{"code":"INVALID_JOB_REQUEST"}}` 형식입니다. 접수된 작업의 `error`는 `code`, `outcome_unknown`을 가지며 원문 예외·비밀·SSH 파일 경로는 반환하지 않습니다. API가 중단되면 기록과 일치하는 CLI 완료 결과가 있을 때만 복구하고, 없으면 `unknown`으로 남깁니다. 시간 초과가 원격 설치 중단을 보장하지 않습니다.
+
+## E. Database 기본안 — K3s 밖의 별도 VM
+
+### E-1. 구성과 접속
+
+기본안은 **PostgreSQL 전용 VM 1대, DB 노드 1개, DCS 0개**입니다. K3s를 재설치하거나 앱을 정리할 때 DB 수명주기가 함께 바뀌지 않도록 분리합니다. Kubernetes에서 DB를 운영할 수 없다는 뜻은 아닙니다. 현재 단일 노드 K3s 구성에서는 저장장치·백업·복구까지 추가로 설계해야 하므로 별도 VM을 선택합니다. 단일 DB VM도 단일 장애 지점이며 HA를 제공하지 않습니다.
+
+```mermaid
+flowchart LR
+    A["유저 앱 Pod<br>실행 K3s"] -->|"사설 경로 · TCP 5432"| D["DB 전용 VM<br>PostgreSQL · systemd"]
+    S["앱 namespace Secret<br>DB 접속 자격"] -.-> A
+    D --> V["영속 데이터 볼륨<br>VM 재생성과 분리"]
+    D -.->|"담당 구현에서 구성"| B["별도 백업 저장소<br>복구 시험 필요"]
+    O["Ansible 실행기"] -.->|"사설 SSH · guest 검사"| D
+```
+
+위 그림은 배치 설계입니다. PostgreSQL 설치·볼륨·백업·Secret·방화벽을 이번 연결부가 생성한 것은 아닙니다.
+
+| 항목 | 기본 설계 |
+|---|---|
+| DB 서버 | 별도 VM에 PostgreSQL을 서비스로 설치. K3s control-plane·worker로 등록하지 않음 |
+| 데이터 | 데이터 볼륨과 백업의 보존·복구 정책을 DB 담당 구현에서 확정 |
+| DB 통신 | 앱에서 DB의 사설 주소로 TCP 5432. 공인 EIP·ALB를 DB 접속 주소로 사용하지 않음 |
+| 환경 간 접속 | VPC/LAN 또는 기존 WireGuard 사설 경로의 route·복귀 경로 필요. Ansible이 터널을 새로 생성하지 않음 |
+| 접근 제어 | DB의 listen 주소·방화벽·`pg_hba.conf`를 제한하고 앱 전용 계정 사용 |
+| 비밀 전달 | 앱 namespace의 Secret으로 전달. Git·HTTP 요청·작업 로그에 DB 비밀번호를 저장하지 않음 |
+
+PostgreSQL의 [listen 주소·기본 5432 포트](https://www.postgresql.org/docs/current/runtime-config-connection.html)와 [클라이언트 주소·DB·계정별 접근 규칙](https://www.postgresql.org/docs/current/auth-pg-hba-conf.html)을 기준으로 설계합니다. 외부 DB가 관찰하는 원본 주소는 CNI의 SNAT 여부에 따라 노드 IP 또는 Pod IP일 수 있으므로, 실제 출발 주소와 복귀 경로를 확인한 뒤 허용 범위를 정해야 합니다.
+
+현재 팀의 `deployment/cilium/network-policy.json.template`은 **Ingress만** 정의합니다. 앱→외부 DB의 Egress 허용 정책이나 DB 방화벽이 구현됐다고 볼 수 없습니다. Pod CIDR `10.42.0.0/16`, Service CIDR `10.43.0.0/16`과 LAN/VPC/VPN 대역 중복도 실제 환경에서 확인해야 합니다.
+
+현재 [CD 인계 경로](../../gitops/README.md)도 DB·앱 Secret 주입·외부 egress를 지원 범위에서 제외하며, 생성하는 NetworkPolicy는 egress를 차단합니다. 이미지 pull Secret 참조 지원과 DB 자격 주입은 다른 기능입니다. 따라서 위 앱 접속 구조는 기본 설계이며 기존 자동 배포만으로 DB 자격과 TCP 5432 접속 정책까지 적용되지 않습니다. DB 사용 앱을 연결할 때 해당 계약을 담당자와 함께 확장해야 합니다.
+
+### E-2. 담당자에게 전달할 입력
+
+[DB 검증 요청 예제](../../examples/ansible/database-validate.json)를 `POST /v1/ansible/validate`에 보냅니다.
+
+```json
+{
+  "request_id": "db-plan-001",
+  "target_id": "db-onprem",
+  "operation": "database.configure",
+  "parameters": {
+    "mode": "standalone",
+    "nodes": [{"target_id": "db-onprem", "roles": ["database"]}],
+    "placements": [{
+      "provider": "openstack", "site": "onprem-a",
+      "database_nodes": 1, "dcs_voters": 0
+    }]
+  }
+}
+```
+
+| 입력 | 매핑·검사 |
+|---|---|
+| `mode` | 기본안은 `standalone`. `patroni`는 배치 의견 전달만 허용하며 HA 적합성을 판정하지 않습니다. |
+| `nodes[].target_id` | 모두 `purpose: database`로 등록한 별도 VM. 요청의 대표 target도 목록에 포함해야 합니다. |
+| `nodes[].roles` | `database`, `dcs` 역할. 같은 역할·VM·관리 IP 중복을 거부합니다. |
+| `placements[]` | 실제 등록 정보의 provider/site별 역할 수와 `database_nodes`, `dcs_voters`가 일치해야 합니다. |
+| `inventory` | `database`, `dcs` 그룹의 안전한 호스트 요약. SSH 접속 설정이 포함된 실행 inventory는 아닙니다. |
+| `variables.railshot_database` | `mode`, `port: 5432`, `placements`. DB 담당자에게 전달할 통합 매핑이며 아직 소비하는 플레이북은 없습니다. |
+
+standalone은 DB 1개·DCS 0개를 검사합니다. Patroni 모드에서는 역할·배치 일치만 검사하며 복제·quorum·장애 도메인·장애 전환 가능 여부를 검증하지 않습니다. 회의의 AWS 3개·온프렘 2개 예시는 배치를 변수로 전달하려는 설명으로 해석하며 기본 노드 수로 고정하지 않습니다.
+
+검증 결과가 유효해도 DB는 `execution_supported: false`, `blockers: [{"code":"DATABASE_PLAYBOOK_UNAVAILABLE"}]`입니다. 이후 담당자의 버전·인증/비밀 참조·데이터 경로·백업·준비 상태 확인 계약이 정해지면 그 플레이북의 실제 변수 이름에 맞춰 연결합니다. 현재 비어 있는 부분을 임의의 설치 구현으로 채우지 않습니다.
+
+## F. Integration / Verification
+
+### F-1. 회의 요구사항과 이번 반영
+
+근거는 [2026-10-01 Slack 허들 전문](https://softbankhackathon2026.slack.com/files/USLACKBOT/F0C63236BL1/___________________)의 자동 전사입니다. 원문 MD와 해시를 연구 자료에 보존했으며 이번에 오디오를 대조한 것은 아닙니다.
+
+| 원문 위치 | 확인한 요구 | 반영 |
+|---|---|---|
+| 2:45:09 이후 | DB/Patroni 설치와 Kubernetes 배치 논의 | DB를 별도 VM으로 설명하고 현재 설치 미지원 명시 |
+| 2:49:49–2:50:07 | Web/MCP 요청이 Ansible을 호출하고 변수 전달 필요 | 작업별 HTTP 입력→검증→inventory·extra-vars 매핑 |
+| 2:50:14–2:51:07 | Provider별 배치·개수를 전달할 명세 요청 | nodes의 역할과 provider/site별 placements를 대조 |
+| 2:53:19–2:53:42 | DB 담당 범위 확인 | 담당 플레이북을 새로 대신 구현하지 않고 연결 경계 보존 |
+| 이번 추가 지시 | DB는 기본 구성부터, 클러스터 밖 배치 검토 | PostgreSQL 전용 VM 1대의 설계·제약 정리 |
+
+현재 상위 API의 자동 자원 등록·배포 전체 오케스트레이션까지 연결된 것은 아닙니다. 이번 변경은 승인된 자원을 Ansible 입력으로 변환하는 연결부, 내부 HTTP 계약, 기존 runtime 실행, DB 배치 검증을 대상으로 합니다.
+
+### F-2. 브랜치·시험·병합
+
+작업 브랜치는 `feature/ansible-integration-contract`, 기준은 `integration/team-assembly-20261002`입니다. 별도 worktree에서 작업하며 팀원 구현과 개인 작업 공간의 미커밋 변경을 보존합니다. PR로 검토한 뒤 integration에 merge commit으로 반영하고, squash·rebase·force push는 사용하지 않습니다.
+
+```bash
+python3 -m unittest discover -s infrastructure/ansible -p 'test_*.py'
+```
+
+검사는 OpenStack 상세 응답의 ID·프로젝트·관리 주소, 잘못된 변수 거부, HTTP 검증/접수/조회, 변수의 실제 CLI 전달, 중복 방지, DB 배치 수·용도 분리·실행 차단을 다룹니다. HTTP 시험은 localhost 서버를 실제로 띄우며 원격 Ansible 실행만 모의 처리합니다. Ansible inventory parser와 `guest.yml`, `runtime.yml` syntax-check도 별도로 확인합니다.
+
+이 검사는 실제 OpenStack/CSP VM 설치나 DB 서비스 가동의 증거가 아닙니다. 실제 대상에서는 사설 경로·SSH 호스트키·guest 상태·패키지 접근·runtime 준비를 확인해야 하고, DB 플레이북 연결 후에는 앱에서 인증된 DB 연결과 백업 복구를 별도로 검증해야 합니다.
+
+### F-3. 실행기 설정과 기존 CLI
+
+등록 파일·Provider 응답 파일·Bearer 파일은 실행기 소유 0600 파일로 관리합니다. 개인키는 group/other 권한 없이, known_hosts는 group/other 쓰기 권한 없이 준비하고 신뢰된 경로로 호스트키를 확인합니다. 실제 토큰·키는 예제에 포함하지 않습니다.
 
 ```bash
 python3 infrastructure/ansible/api.py \
@@ -225,44 +295,13 @@ python3 infrastructure/ansible/api.py \
   --listen 127.0.0.1 --port 4180
 ```
 
-`--listen`은 `127.0.0.1`만 허용하며 plain HTTP를 사용합니다. TLS/mTLS는 구현하지 않았고 기본 응답 프로토콜은 HTTP/1.0입니다. 구현된 POST/GET 요청은 정확히 하나의 `Authorization: Bearer …`로 인증하며, 값은 constant-time 방식으로 대조합니다. Host는 정확히 하나이며 `127.0.0.1:<실제 포트>` 또는 `localhost:<실제 포트>`여야 합니다. Origin은 없거나 정확히 하나의 `http://127.0.0.1:<실제 포트>` 또는 `http://localhost:<실제 포트>`여야 합니다. 임의 Proxy/Forwarded 헤더를 신뢰하지 않습니다. 같은 상태 디렉터리에서는 API 프로세스를 하나만 실행할 수 있습니다.
+POST는 `application/json`, 1–8192바이트의 Content-Length 본문을 사용합니다. query string·후행 `/`·CORS·동적 등록·취소·삭제는 지원하지 않습니다. HTTP 상세 헤더·오류는 OpenAPI를 기준으로 합니다.
 
-| 요청 | 결과 |
-|---|---|
-| `POST /v1/ansible/jobs` | 정확히 `request_id`, `target_id`, `operation` 세 필드만 받음. 신규 접수 또는 동일한 queued/running 작업은 202와 `Location`, 그 외 동일 작업의 저장된 상태는 200 반환 |
-| `GET /v1/ansible/jobs/{request_id}` | 저장한 작업 상태와 검증한 readiness 조회. 설치를 새로 실행하지 않음 |
+기존 직접 CLI는 [내부 요청 Schema](../../contracts/ansible-request.schema.json)와 [runtime 예제](../../examples/ansible/runtime-single-node.json)를 유지합니다. `--validate-only`는 입력 검사만 수행합니다. 기존 `patroni.install` CLI도 담당 플레이북 부재로 계속 차단하며 새 HTTP의 `database.configure`와 혼용하지 않습니다.
 
-경로는 정확히 일치해야 하며 query string이나 마지막 `/`를 붙이면 404입니다. 목록·취소·삭제 endpoint는 없습니다. POST/GET 외 메서드는 표준 라이브러리의 501 응답을 사용하며 아래 JSON 오류 형식의 대상이 아닙니다. POST 본문은 `application/json`이며 `Content-Length` 헤더 하나가 필요합니다. 그 값은 1–5자리 ASCII 숫자로 표현한 1–8192바이트여야 합니다. 값이 있는 `Transfer-Encoding`, JSON 중복 키, NaN·Infinity는 거부합니다.
-
-접수 본문 예시입니다.
-
-```json
-{"request_id":"aws-runtime-001","target_id":"demo-aws","operation":"runtime.install"}
+```bash
+python3 infrastructure/ansible/run.py \
+  --request examples/ansible/runtime-single-node.json --validate-only
 ```
 
-operation은 `guest.check` 또는 `runtime.install`만 허용합니다. 등록된 AWS/GCP target만 사용할 수 있으며 `ssh`, `command`, `credentials`, 경로, Terraform 변수, `validate_only` 같은 추가 필드는 거부합니다. 토큰을 명령행 인자에 노출하지 않는 Python 호출 예시는 다음과 같습니다.
-
-```python
-import json
-from pathlib import Path
-from urllib.request import Request, urlopen
-
-base = 'http://127.0.0.1:4180'
-headers = {'Authorization': 'Bearer ' + Path('/secure/railshot/ansible-api-token').read_text().strip(),
-           'Content-Type': 'application/json'}
-body = {'request_id': 'aws-runtime-001', 'target_id': 'demo-aws', 'operation': 'runtime.install'}
-with urlopen(Request(base + '/v1/ansible/jobs', data=json.dumps(body).encode(), headers=headers)) as response:
-    job = json.load(response)
-with urlopen(Request(base + '/v1/ansible/jobs/' + job['request_id'], headers=headers)) as response:
-    print(json.load(response))
-```
-
-한 번에 한 작업만 접수·실행합니다. 별도 무제한 대기열은 없으며 실행 중 다른 작업은 `409 EXECUTOR_BUSY`입니다. 같은 request ID와 같은 서버 측 입력은 현재 또는 저장된 결과를 반환합니다. 비교 대상에는 서버가 확장한 descriptor·SSH 참조·timeout도 포함하며, 입력이 달라지면 `409 REQUEST_ID_CONFLICT`입니다. 같은 target의 미확정 작업이 남아 있으면 `409 TARGET_RECONCILE_REQUIRED`로 추가 변경을 막습니다. 동일한 HTTP 요청을 다시 보내도 CLI를 재실행하거나 저장된 `result.replayed`를 true로 바꾸지 않습니다.
-
-상태는 `queued`, `running`, `succeeded`, `failed`, `blocked`, `unknown`입니다. `created_at`과 `updated_at`은 소수 부분을 포함하는 Unix 초 숫자입니다. `succeeded`는 guest/runtime receipt 검증 완료이고 앱 배포 성공이 아닙니다. `result.application_ready`와 `result.public_http_verified`는 항상 false입니다. 인증 실패는 401, Host/Origin 거부는 403, 미등록 target·없는 작업은 404, 입력 오류는 400, 서버 측 등록·상태 저장 문제는 503으로 반환합니다. Content-Length 누락·형식 오류는 411, 0바이트 또는 8192바이트 초과는 413, 잘못된 Content-Type·Transfer-Encoding은 415입니다. 접수한 작업이 나중에 실패해도 상태 조회 자체는 200이며 본문의 상태와 error를 확인해야 합니다.
-
-요청 자체의 HTTP 오류는 `{"error":{"code":"UNAUTHORIZED"}}`처럼 코드만 갖습니다. 반면 접수된 작업의 `error`는 null 또는 `{"code":"WORKER_INTERRUPTED","outcome_unknown":true}`이고, `result`는 null 또는 실행기의 상태·readiness·stage·replayed입니다. JSON 응답에는 `Cache-Control: no-store`와 `X-Content-Type-Options: nosniff`, 401에는 `WWW-Authenticate: Bearer`를 함께 반환합니다.
-
-HTTP 작업 기록은 같은 상태 디렉터리의 `http-jobs/`에 저장하고 기존 `run.py`가 target/resource 잠금과 nonce receipt를 관리합니다. HTTP 오류는 코드만 반환하며 원문 예외·SSH 경로·credential·native stdout/stderr는 내보내지 않습니다. subprocess의 stderr는 운영자 전용 0600 로그에만 남깁니다. 기존 `storage.durable_write`를 사용하여 접수와 상태 변경을 영속화합니다.
-
-API가 중단되면 이전 queued/running 작업을 자동 실행하지 않습니다. 시작 시 또는 GET 조회 시 입력 해시와 일치하는 native 완료 기록이 있으면 그 결과로 상태를 복구하고, 없으면 `unknown`으로 남깁니다. 살아남은 CLI가 나중에 완료 기록을 쓰면 이후 GET에서 대조할 수 있습니다. native 완료 증거가 없는 unknown은 운영자 확인이 필요하며 HTTP 강제 초기화·자동 재시도 기능은 제공하지 않습니다. 이 API의 정상 종료는 진행 중 worker가 끝날 때까지 기다립니다. 강제 종료나 timeout은 원격 설치 중단을 보장하지 않습니다.
+OpenStack은 실행기에서 사설 주소까지 직접 route 또는 WireGuard 경로로 SSH에 도달해야 합니다. AWS SSM·GCP IAP도 게스트의 SSH를 운반하는 관리 터널이며 SSH를 제거하는 방식이 아닙니다. `StrictHostKeyChecking=yes`를 유지하고 임의 ProxyCommand·ProxyJump·agent 전달은 차단합니다. 키 내용·클라우드 토큰을 Ansible 변수로 전달하지 않습니다.
