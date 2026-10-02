@@ -2,6 +2,8 @@
 
 버전 1.0 · 작성일 2026-10-02
 
+**개인 feature의 실행 범위:** 이 브랜치는 공통 CLI·HTTP API·wrapper·계약 테스트만 포함합니다. 실제 `guest.check`와 `runtime.install`은 팀 guest 검사와 runtime 스크립트가 있는 [고정 통합 checkout](https://github.com/Jasmin-Softbank/Railshot/tree/0ab08b2971ea437d90e65a0349db0b39683411e1)에서 실행합니다. 개인 clone에는 `tasks/guest-checks.yml`과 `deployment/`가 없으며, 아래 오프라인 검사 통과를 원격 실행 가능 또는 설치 성공으로 해석하지 않습니다. 세부 의존은 [개인 feature README](../../README.md#실행에-필요한-통합-코드)에 있습니다.
+
 이 문서는 상위 API에서 Ansible 작업을 호출하는 방법을 설명합니다. CLI는 `infrastructure/ansible/run.py`이며 JSON 요청을 받아 JSON 결과를 반환합니다. 운영자 전용 비동기 HTTP API는 `infrastructure/ansible/api.py`이며 localhost에서만 수신합니다. HTTP 사용법은 9절에 있습니다. 입력 검사, guest 준비, runtime 설치 완료를 구분합니다. 이 문서의 테스트는 오프라인 검증이며 실제 노드·SSM/IAP·클라우드 준비 완료를 증명하지 않습니다. 앱 적용은 별도 Argo CD 경로가 소유합니다.
 
 ## 1. 실행 환경과 호출
