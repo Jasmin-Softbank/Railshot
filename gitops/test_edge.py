@@ -95,6 +95,11 @@ class EdgeTest(unittest.TestCase):
         with patch('edge.terraform') as tf:
             edge.ensure(reference)
             tf.assert_not_called()
+        second = edge.prepare(self.path, {**self.request, 'app': 'second-app'})
+        config, other = edge.load(second['reference'])
+        other.update(phase='planned', plan_sha256='f' * 64); edge.save(config, other)
+        with self.assertRaisesRegex(ValueError, 'another edge apply'):
+            edge.apply_route(second['reference'], 'f' * 64)
 
     def test_plan_rejects_existing_route_mutation_replacement_and_sg_broadening(self):
         first = self.prepared()

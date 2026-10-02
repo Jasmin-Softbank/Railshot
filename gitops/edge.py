@@ -237,6 +237,12 @@ def apply_route(reference, plan_sha256):
     with locked(config):
         config, row = load(reference)
         require(row['phase'] == 'planned' and row['plan_sha256'] == plan_sha256, 'reviewed saved plan required')
+        for key in read_private(Path(config['state_dir']) / 'allocations.json'):
+            require(re.fullmatch(r'app-[a-f0-9]{24}', key), 'registered allocation key required')
+            require(read_private(Path(config['state_dir']) / (key + '.json'))['phase'] != 'applying',
+                    'another edge apply needs reconciliation')
+        require(datetime.fromisoformat(row['request']['expires_at'].replace('Z', '+00:00')) > datetime.now(timezone.utc),
+                'route allocation has expired')
         saved = Path(config['state_dir']) / (row['route_key'] + '.tfplan')
         require(hashlib.sha256(saved.read_bytes()).hexdigest() == plan_sha256, 'saved plan changed')
         validate_plan(json.loads(terraform(config, 'show', '-json', str(saved))), row)
