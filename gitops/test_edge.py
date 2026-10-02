@@ -226,6 +226,19 @@ class EdgeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'binding differs'):
             edge.validate_binding(reference, registered)
 
+    def test_existing_app_port_and_external_dns_contract(self):
+        request = {**self.request, 'node_port': 32123, 'expected_status': 200, 'manage_dns': False}
+        del request['expected_json']
+        row = edge.prepare(self.path, request)
+        self.assertEqual(row['node_port'], 32123)
+        self.assertFalse(row['route']['manage_dns'])
+        self.assertEqual(row['public_http']['expected_status'], 200)
+        self.assertEqual(edge.prepare(self.path, request), row)
+        for patch_value in ({'expected_status': True}, {'expected_status': 204}, {'node_port': 80},
+                            {'app': 'other-app', 'namespace': 'other-app'}):
+            with self.assertRaises(ValueError):
+                edge.prepare(self.path, {**request, **patch_value})
+
 
 if __name__ == '__main__':
     unittest.main()
