@@ -1,0 +1,169 @@
+"""Run with: python3 -m unittest discover -s ci/scripts -p test_ci_scope.py -v."""
+import copy
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+import ci_scope
+
+
+class ScopeTests(unittest.TestCase):
+    def test_directory_dependencies_and_document_fixtures(self):
+        cases = {
+            'docs/architecture/README.md': set(),
+            'README.md': set(),
+            'apps/api/src/server.js': {'api-browser', 'containers'},
+            'apps/dashboard/app.js': {'api-browser', 'containers'},
+            'ci/browser/smoke.test.mjs': {'api-browser'},
+            'package.json': {'api-browser', 'containers'},
+            'package-lock.json': {'api-browser', 'containers'},
+            '.dockerignore': {'containers'},
+            'infrastructure/providers/openstack/pyproject.toml': {'contracts', 'openstack'},
+            'infrastructure/providers/terraform_tools/costs.py': {'contracts', 'terraform'},
+            'infrastructure/terraform/aws-edge/main.tf': {'contracts', 'terraform'},
+            'infrastructure/ansible/runtime.yml': {'contracts', 'database-ansible'},
+            'infrastructure/ansible/ci.yml': {'contracts', 'database-ansible', 'terraform'},
+            'deployment/bootstrap/install-k3s.sh': {'contracts', 'runtime-smoke'},
+            'gitops/argo/render.py': {'contracts'},
+            'observability/compose.yaml': {'observability'},
+            'docs/api/ansible.openapi.json': {'contracts'},
+            'examples/ansible/runtime-single-node.json': {'contracts'},
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(ci_scope.select([path]), expected)
+
+    def test_shared_and_unknown_changes_validate_everything(self):
+        for path in ('contracts/ansible-job.schema.json', '.github/workflows/railshot-ci.yml',
+                     '.github/workflows/platform-containers.yml', 'ci/scripts/publication.py',
+                     'new-owner/service.py', 'docs/new-executable.json', '../bad'):
+            with self.subTest(path=path):
+                self.assertEqual(ci_scope.select([path]), set(ci_scope.JOBS))
+
+    def test_scope_union(self):
+        self.assertEqual(ci_scope.select(['docs/api/README.md', 'apps/dashboard/styles.css',
+                                         'infrastructure/terraform/gcp/main.tf']),
+                         {'api-browser', 'contracts', 'terraform', 'containers'})
+
+    def test_image_build_context_dependencies(self):
+        cases = {
+            'apps/dashboard/styles.css': {'dashboard', 'api'},
+            'apps/dashboard/package.json': {'dashboard', 'api', 'mcp'},
+            'apps/api/src/server.js': {'api', 'mcp'},
+            'apps/api/package.json': {'dashboard', 'api', 'mcp'},
+            'package-lock.json': {'dashboard', 'api', 'mcp'},
+            '.dockerignore': set(ci_scope.COMPONENTS),
+            'ci/scripts/publication.py': {'ci-runner'},
+            'ci/scripts/runner/entrypoint.sh': {'ci-runner'},
+            'ci/runner-compose.yml': {'ci-runner'},
+            'deployment/manifests/platform.yaml': {'dashboard', 'api', 'mcp'},
+            'deployment/bootstrap/install-k3s.sh': set(),
+            'docs/architecture/README.md': set(),
+            '.github/workflows/platform-containers.yml': set(ci_scope.COMPONENTS),
+            'ci/scripts/container-smoke.py': set(ci_scope.COMPONENTS),
+            'unknown/source.py': set(ci_scope.COMPONENTS),
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(ci_scope.container_components([path]), expected)
+                self.assertEqual('containers' in ci_scope.select([path]), bool(expected))
+
+    def test_gate_requires_success_for_selected_and_skip_only_for_unselected(self):
+        checks = {job: {'result': 'skipped'} for job in ci_scope.JOBS}
+        checks['changes'] = {'result': 'success', 'outputs': {'selected': '[]'}}
+        ci_scope.validate_gate(checks)  # A real docs-only diff remains mergeable.
+        checks['changes']['outputs']['selected'] = json.dumps(['api-browser'])
+        with self.assertRaises(ValueError):
+            ci_scope.validate_gate(checks)  # Unexpected skipped dependency cannot turn green.
+        checks['api-browser']['result'] = 'success'
+        ci_scope.validate_gate(checks)
+        for state in ('failure', 'cancelled', 'skipped'):
+            bad = copy.deepcopy(checks)
+            bad['changes']['result'] = state
+            with self.assertRaises(ValueError):
+                ci_scope.validate_gate(bad)
+            bad = copy.deepcopy(checks)
+            bad['api-browser']['result'] = state
+            with self.assertRaises(ValueError):
+                ci_scope.validate_gate(bad)
+        for selected in ('{}', '["unknown"]', '["api-browser", "api-browser"]', '[1]', ''):
+            bad = copy.deepcopy(checks)
+            bad['changes']['outputs']['selected'] = selected
+            with self.assertRaises(ValueError):
+                ci_scope.validate_gate(bad)
+        for mutation in ('omit', 'extra', 'unexpected_success'):
+            bad = copy.deepcopy(checks)
+            if mutation == 'omit':
+                del bad['terraform']
+            elif mutation == 'extra':
+                bad['unchecked'] = {'result': 'success'}
+            else:
+                bad['terraform']['result'] = 'success'
+            with self.assertRaises(ValueError):
+                ci_scope.validate_gate(bad)
+
+
+class GitBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.git('init', '-q', '-b', 'main')
+        self.git('config', 'user.name', 'CI scope test')
+        self.git('config', 'user.email', 'ci-scope@example.invalid')
+        self.write('apps/api/old.js', 'before\n')
+        self.base = self.commit()
+
+    def git(self, *args):
+        return subprocess.check_output(['git', *args], cwd=self.root, stderr=subprocess.PIPE).decode().strip()
+
+    def write(self, path, text):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+    def commit(self):
+        self.git('add', '--all')
+        self.git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture')
+        return self.git('rev-parse', 'HEAD')
+
+    def test_push_rename_deletion_and_literal_newline_filenames(self):
+        (self.root / 'docs').mkdir(exist_ok=True)
+        self.git('mv', 'apps/api/old.js', 'docs/old.md')
+        self.write('apps/dashboard/line\n$(printf dangerous).js', 'literal\n')
+        head = self.commit()
+        paths = ci_scope.changed_paths('push', {'before': self.base, 'after': head}, self.root)
+        self.assertEqual(set(paths), {'apps/api/old.js', 'docs/old.md',
+                                     'apps/dashboard/line\n$(printf dangerous).js'})
+        self.assertEqual(ci_scope.select(paths), {'api-browser', 'containers'})
+        self.git('rm', '--', 'apps/dashboard/line\n$(printf dangerous).js')
+        deleted = self.commit()
+        self.assertEqual(ci_scope.select(ci_scope.changed_paths(
+            'push', {'before': head, 'after': deleted}, self.root)), {'api-browser', 'containers'})
+
+    def test_pull_request_uses_merge_base_not_unrelated_base_branch_changes(self):
+        self.git('checkout', '-qb', 'feature')
+        self.write('docs/new.md', 'documentation\n')
+        head = self.commit()
+        self.git('checkout', '-q', 'main')
+        self.write('deployment/new.sh', 'new base work\n')
+        base = self.commit()
+        event = {'pull_request': {'base': {'sha': base}, 'head': {'sha': head}}}
+        paths = ci_scope.changed_paths('pull_request', event, self.root)
+        self.assertEqual(paths, ['docs/new.md'])
+        self.assertEqual(ci_scope.select(paths), set())
+
+    def test_manual_new_branch_missing_base_and_invalid_boundaries(self):
+        self.assertIsNone(ci_scope.changed_paths('workflow_dispatch', {}, self.root))
+        self.assertIsNone(ci_scope.changed_paths('other', {}, self.root))
+        for base in ('0' * 40, 'f' * 40):
+            self.assertIsNone(ci_scope.changed_paths('push', {'before': base, 'after': self.base}, self.root))
+        with self.assertRaises(ValueError):
+            ci_scope.changed_paths('push', {'before': '--output=/tmp/bad', 'after': self.base}, self.root)
+        self.assertEqual(ci_scope.changed_paths('push', {'before': self.base, 'after': self.base}, self.root), [])
+
+
+if __name__ == '__main__':
+    unittest.main()

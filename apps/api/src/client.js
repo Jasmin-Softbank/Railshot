@@ -2,9 +2,15 @@ import { readFile, readdir, lstat, realpath } from 'node:fs/promises';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import yazl from 'yazl';
 import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
+import { readApiToken } from './access.js';
 
 const skipped = new Set(['.git', 'node_modules', '.DS_Store', '__MACOSX']);
 const defaultUrl = process.env.JASMIN_API_URL || 'http://127.0.0.1:4173';
+
+function authorization() {
+  const token = readApiToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
 
 export function inferredAppName(source) {
   const raw = /^https?:\/\//i.test(source)
@@ -17,7 +23,7 @@ export function inferredAppName(source) {
 
 async function sendDeploy(form, baseUrl) {
   const response = await fetch(new URL('/api/deploy', baseUrl), {
-    method: 'POST', headers: { 'x-jasmin-request': 'deploy' }, body: form,
+    method: 'POST', headers: { 'x-jasmin-request': 'deploy', ...authorization() }, body: form, redirect: 'error',
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `API ${response.status}`);
@@ -93,7 +99,7 @@ export async function deploySource({ source, app = inferredAppName(source), targ
 
 export async function getRun(runId, baseUrl = defaultUrl) {
   if (!/^\d+$/.test(String(runId))) throw new Error('run_id는 숫자여야 합니다.');
-  const response = await fetch(new URL(`/api/runs/${runId}`, baseUrl));
+  const response = await fetch(new URL(`/api/runs/${runId}`, baseUrl), { headers: authorization(), redirect: 'error' });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `API ${response.status}`);
   return result;

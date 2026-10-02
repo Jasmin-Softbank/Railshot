@@ -18,8 +18,36 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
+  changes:
+    name: Select affected checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      selected: ${{ steps.select.outputs.selected }}
+      contracts: ${{ steps.select.outputs.contracts }}
+      openstack: ${{ steps.select.outputs.openstack }}
+      database-ansible: ${{ steps.select.outputs['database-ansible'] }}
+      api-browser: ${{ steps.select.outputs['api-browser'] }}
+      terraform: ${{ steps.select.outputs.terraform }}
+      runtime-smoke: ${{ steps.select.outputs['runtime-smoke'] }}
+      observability: ${{ steps.select.outputs.observability }}
+      containers: ${{ steps.select.outputs.containers }}
+      container_components: ${{ steps.select.outputs.container_components }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check routing and dependency gate regressions
+        run: python3 -m unittest discover -s ci/scripts -p test_ci_scope.py -v
+      - name: Compare the complete PR or push change set
+        id: select
+        run: python3 ci/scripts/ci_scope.py select
+
   contracts:
     name: Python contracts
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -50,6 +78,23 @@ jobs:
           with open('docs/api/ansible.openapi.json') as stream:
               validate(json.load(stream))
           PY
+
+  observability:
+    name: Observability configuration and probes
+    needs: changes
+    if: needs.changes.outputs.observability == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: ci/requirements-test.txt
+      - run: python -m pip install PyYAML==6.0.3
       - name: Observability config and real loopback probes
         run: |
           python - <<'PY'
@@ -69,6 +114,8 @@ jobs:
 
   openstack:
     name: OpenStack contracts
+    needs: changes
+    if: needs.changes.outputs.openstack == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -89,6 +136,8 @@ jobs:
 
   database-ansible:
     name: Database Ansible contracts
+    needs: changes
+    if: needs.changes.outputs['database-ansible'] == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -111,6 +160,8 @@ jobs:
 
   api-browser:
     name: HTTP publication and browser E2E
+    needs: changes
+    if: needs.changes.outputs['api-browser'] == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -150,6 +201,8 @@ jobs:
 
   terraform:
     name: Terraform validation
+    needs: changes
+    if: needs.changes.outputs.terraform == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -177,6 +230,8 @@ jobs:
 
   runtime-smoke:
     name: Linux amd64 runtime E2E and cleanup
+    needs: changes
+    if: needs.changes.outputs['runtime-smoke'] == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -207,24 +262,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  containers:
+    name: Container build and smoke
+    needs: changes
+    if: needs.changes.outputs.containers == 'true'
+    uses: ./.github/workflows/platform-containers.yml
+    with:
+      components: ${{ needs.changes.outputs.container_components }}
+    permissions:
+      contents: read
+
   gate:
     name: Railshot CI gate
     if: always()
-    needs: [contracts, openstack, database-ansible, api-browser, terraform, runtime-smoke]
+    needs: [changes, contracts, openstack, database-ansible, api-browser, terraform, runtime-smoke, observability, containers]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - name: Require every integration check and cleanup
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Require selected checks and reject unexpected skips
         env:
           RESULTS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          checks = json.loads(os.environ['RESULTS'])
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
-              summary.write('| Check | Result |\n|---|---|\n')
-              for name, check in checks.items():
-                  summary.write(f"| {name} | {check['result']} |\n")
-              summary.write('\nHTTP publication uses mocked external services. Runtime E2E installs on an isolated GitHub runner and removes its resources. These checks do not prove product UI to AWS/GCP automation.\n')
-          assert all(check['result'] == 'success' for check in checks.values()), checks
-          PY
+        run: python3 ci/scripts/ci_scope.py gate
