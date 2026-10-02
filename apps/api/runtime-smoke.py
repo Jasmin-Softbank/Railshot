@@ -69,6 +69,7 @@ def installed(rows):
     # All probes are local. Isolated config prevents discovery of host/operator credentials.
     with tempfile.TemporaryDirectory(prefix='railshot-runtime-smoke-') as temporary:
         env = {**os.environ, 'HOME': temporary, 'CLOUDSDK_CONFIG': temporary,
+               'ANSIBLE_CONFIG': str(ROOT / 'infrastructure/ansible/ansible.cfg'),
                'CLOUDSDK_CORE_DISABLE_PROMPTS': '1', 'CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK': 'true',
                'AWS_EC2_METADATA_DISABLED': 'true', 'AWS_PAGER': '', 'PYTHONDONTWRITEBYTECODE': '1', 'CHECKPOINT_DISABLE': '1'}
         def run(*args):
@@ -87,12 +88,16 @@ def installed(rows):
         run('git', '--version')
         subprocess.run(['ssh', '-V'], env=env, check=True, capture_output=True, timeout=10)
         run('ansible-playbook', '--version')
+        run('ansible-vault', '--version')
+        run('openssl', 'version')
         for script in ['observability/register.py', 'observability/bootstrap.py', 'gitops/bridge.py', 'gitops/edge.py',
                        'gitops/credentials.py', 'deployment/scripts/environment.py', 'ci/scripts/runner/replenish.py',
-                       'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py']:
+                       'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py',
+                       'infrastructure/providers/terraform_tools/budget.py',
+                       'infrastructure/ansible/cluster.py', 'infrastructure/providers/terraform_tools/access.py']:
             run(sys.executable, script, '--help')
         # Ansible builtin task imports and all runtime copy sources must actually be packaged.
-        for script in ['guest.yml', 'runtime.yml']:
+        for script in ['guest.yml', 'runtime.yml', 'database.yml', 'application-database.yml']:
             run('ansible-playbook', '-i', 'localhost,', str(ROOT / 'infrastructure/ansible' / script), '--syntax-check')
         for relative in ['ci/scripts/schemas/jasmin.schema.json', 'contracts/ansible-request.schema.json',
                          'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/group_vars/all.yml',

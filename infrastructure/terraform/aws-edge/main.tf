@@ -92,6 +92,7 @@ resource "aws_lb" "app" {
   load_balancer_type         = "application"
   subnets                    = var.public_subnet_ids
   security_groups            = [aws_security_group.alb.id]
+  idle_timeout               = var.idle_timeout
   drop_invalid_header_fields = true
   lifecycle {
     precondition {

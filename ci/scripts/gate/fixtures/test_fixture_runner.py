@@ -20,6 +20,17 @@ spec.loader.exec_module(generator)
 
 
 class FixtureRunnerTests(unittest.TestCase):
+    def test_private_source_variant_preserves_bytes_and_requires_private_modes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'npm-js'
+            shutil.copytree(ROOT / 'npm-js', target)
+            before = {p.relative_to(target): p.read_bytes() for p in target.rglob('*') if p.is_file()}
+            self.assertEqual('PASS', e2e.variant(target, 'npm-js', 'private-source'))
+            self.assertEqual(0o700, target.stat().st_mode & 0o777)
+            for name, content in before.items():
+                self.assertEqual(content, (target / name).read_bytes())
+                self.assertEqual(0o600, (target / name).stat().st_mode & 0o777)
+
     def test_new_public_fixture_inputs_remain_readable_under_private_umask(self):
         for stack, filename in (("yarn-js", ".yarnrc.yml"), ("requirements-fastapi", "requirements.txt")):
             with self.subTest(stack=stack), tempfile.TemporaryDirectory() as directory, \

@@ -5,6 +5,18 @@
       - ansible_facts.distribution == 'Ubuntu'
       - ansible_facts.distribution_version == '24.04'
       - ansible_facts.service_mgr == 'systemd'
+- name: Require the product PostgreSQL data mount before installing or initializing the database
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.mounts | selectattr('mount', 'equalto', '/var/lib/postgresql') | list | length == 1
+      - ansible_facts.mounts | selectattr('mount', 'equalto', '/') | list | length == 1
+      - >-
+        (ansible_facts.mounts | selectattr('mount', 'equalto', '/var/lib/postgresql') | first).device !=
+        (ansible_facts.mounts | selectattr('mount', 'equalto', '/') | first).device
+    fail_msg: The retained PostgreSQL disk is not mounted; refusing a root-disk fallback.
+  when:
+    - railshot_require_postgres_mount | default(false) | bool
+    - inventory_hostname in groups['db_nodes']
 - name: Check existing PostgreSQL data directory
   ansible.builtin.stat:
     path: '{{ postgres_data_dir }}'

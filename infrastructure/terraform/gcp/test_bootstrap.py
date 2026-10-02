@@ -75,6 +75,38 @@ class BootstrapRenderTests(unittest.TestCase):
         self.assertIn('runtime_ready":"not_configured', script)
         self.assertNotIn("mkfs.ext4 -F", script)
 
+    def test_database_mount_and_private_ports(self):
+        config = yaml.safe_load(evaluate('local.cloud_init', overrides={'purpose': 'database'}))
+        script = self.file(config, '/usr/local/sbin/railshot-bootstrap')['content']
+        self.assertIn('mount_path=/var/lib/postgresql', script)
+        self.assertNotIn('/var/lib/rancher', script)
+        self.assertIn('RAILSHOT_SSH_HOST_KEY', script)
+        self.assertIn('/etc/ssh/ssh_host_ed25519_key.pub', script)
+        self.assertIn('> /dev/ttyS0', script)
+        self.assertIn('runtime_ready":"not_configured', script)
+        subprocess.run(['bash', '-n'], input=script, text=True, check=True)
+        rules = [{'port': port, 'cidr': '10.42.0.1/32'} for port in (5432, 2379, 2380, 8008)]
+        self.assertEqual(evaluate('var.database_ingress', overrides={'database_ingress': rules}), rules)
+        for rule in ({'port': 5432, 'cidr': '0.0.0.0/0'}, {'port': 5432, 'cidr': '10.0.0.0/1'},
+                     {'port': 22, 'cidr': '10.1.0.0/16'}, {'port': 5432, 'cidr': '192.168.999.1/32'}):
+            with self.subTest(rule=rule), self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                evaluate('var.database_egress', overrides={'database_egress': [rule]})
+        self.assertEqual(evaluate('local.web_ports', overrides={'purpose': 'database', 'allow_http': True}), [])
+
+    def test_shared_network_references_and_legacy_moves(self):
+        values = {'existing_network_name': 'shared-vpc', 'existing_subnetwork_name': 'shared-subnet'}
+        self.assertEqual(evaluate('[var.existing_network_name, var.existing_subnetwork_name]', overrides=values),
+                         ['shared-vpc', 'shared-subnet'])
+        source = (MODULE / 'main.tf').read_text()
+        self.assertIn('subnetwork = local.subnetwork_ref', source)
+        for name in ('web', 'iap_ssh', 'host_https', 'host_deny_other', 'wireguard_ingress',
+                     'wireguard_egress', 'database_ingress', 'database_egress'):
+            rule = source.split(f'resource "google_compute_firewall" "{name}" {{', 1)[1].split('\n}', 1)[0]
+            self.assertRegex(rule, r'network\s*=\s*local.network_ref')
+        for kind in ('network', 'subnetwork'):
+            self.assertIn(f'to   = google_compute_{kind}.node[0]', source)
+        self.assertIn('data.google_compute_subnetwork.existing[0].network == data.google_compute_network.existing[0].self_link', source)
+
     def test_optional_iap_and_runtime_limit_are_off_by_default(self):
         policy = evaluate("{iap = local.iap_ssh, runtime = local.runtime_limit}")
         self.assertEqual(policy, {"iap": None, "runtime": None})

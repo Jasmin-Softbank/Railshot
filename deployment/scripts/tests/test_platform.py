@@ -97,6 +97,13 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(api['spec']['replicas'], 1)
         self.assertEqual(api['spec']['template']['spec']['initContainers'][0]['image'], images['api'])
         self.assertTrue(any(v.get('persistentVolumeClaim') for v in api['spec']['template']['spec']['volumes']))
+        environment = {value['name']: value.get('value') for value in container['env']}
+        self.assertEqual(environment['TMPDIR'], '/var/lib/railshot/tmp')
+        self.assertEqual(environment['TF_PLUGIN_CACHE_DIR'], '/var/lib/railshot/provider-cache')
+        profiles = next(value for value in container['env'] if value['name'] == 'RAILSHOT_PROFILES_FILE')
+        self.assertEqual(profiles['valueFrom']['configMapKeyRef'],
+                         {'name': 'railshot-environments', 'key': 'profiles_file', 'optional': True})
+        self.assertIn({'name': 'state', 'mountPath': '/var/lib/railshot'}, container['volumeMounts'])
         self.assertIn("configured", container["readinessProbe"]["exec"]["command"][-1])
         self.assertTrue(all(item["spec"]["type"] == "ClusterIP" for item in output["items"] if item["kind"] == "Service"))
         public = module.render(images, "k3s-aws", 31080)

@@ -25,3 +25,9 @@ uv run --python 3.13 --with pyyaml python infrastructure/terraform/gcp/test_boot
 ```
 
 검사는 임시 source-only 디렉터리의 Terraform console, YAML 및 `bash -n`만 사용한다. 계정·provider·state를 읽거나 guest 명령을 실행하지 않는다. 실제 apply는 [관리자 실행 절차](../../providers/terraform_tools/README.md)에 따라 saved plan을 검토한 뒤 별도로 수행한다. 생성 후 project/zone/image/SA/network/disk ID, cloud-init 결과와 실제 mount UUID를 확인해야 하며 team runtime readiness는 별도 증거가 필요하다.
+
+`purpose: database`는 retained disk를 `/var/lib/postgresql`에 mount하고 공개 HTTP/HTTPS ingress를 닫는다. 기본 runtime은 기존 `/var/lib/rancher`를 사용한다. `database_ingress` / `database_egress`는 TCP 5432/2379/2380/8008과 RFC1918 /16-/32 CIDR만 받는다. 앱→proxy, proxy→DB, DB↔etcd 등 실제 peer만 등록하며 방화벽 규칙은 라우팅·도달성 성공을 뜻하지 않는다.
+
+여러 VM이 같은 환경 네트워크를 쓰려면 `existing_network_name`과 `existing_subnetwork_name`을 함께 지정한다. 같은 project/region의 subnet이 지정 network에 속하는지 검사하고 이 module에서 새 VPC/subnet을 만들지 않는다. 두 값을 생략하면 기존 전용 네트워크 생성 방식이다. 기존 Terraform 주소는 moved block으로 보존한다. DB 노드별로 새 VPC를 생성하는 설정을 공통 클러스터 네트워크로 간주하지 않는다.
+
+첫 bootstrap은 SSH Ed25519 **공개키만** `RAILSHOT_SSH_HOST_KEY` marker로 serial port 1에 기록한다. 공통 `access.py`는 인증된 Compute API에서 instance ID/private IP를 대조하고 이 marker를 읽어 0600 known_hosts를 생성한다. SSH keyscan/accept-new는 사용하지 않는다. marker가 없는 기존 VM은 자동으로 신뢰하지 않으며, metadata 변경만으로 bootstrap을 재실행했다고 가정하지 않는다.

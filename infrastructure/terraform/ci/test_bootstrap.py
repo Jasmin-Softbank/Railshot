@@ -1,5 +1,6 @@
 """Render and parse the exact cloud-init; compile embedded code without executing it."""
 import base64
+import gzip
 import json
 from pathlib import Path
 import subprocess
@@ -9,6 +10,43 @@ import yaml
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_existing_bootstrap_preserves_compressed_bytes_and_rejects_invalid_input(self):
+        here = Path(__file__).resolve().parent
+        source = (here/'main.tf').read_text()
+        variable = source.split('variable "existing_user_data_base64" {', 1)[1].split('variable "admin_ssh_public_key"', 1)[0]
+        expression = source.split('  user_data_base64 = ', 1)[1].split('\n  user_data_replace_on_change', 1)[0]
+        pins = {'platform_ref': 'a'*40, 'archive_sha256': 'b'*64,
+                'admin_ssh_public_key': 'ssh-ed25519 AAAATEST', 'stop_at': '2030-01-01T00:00:00Z'}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path/'cloud-init.yaml.tftpl').write_bytes((here/'cloud-init.yaml.tftpl').read_bytes())
+            declarations = '\n'.join(f'variable "{key}" {{ default = {json.dumps(value)} }}' for key, value in pins.items())
+            (path/'main.tf').write_text('variable "existing_user_data_base64" {' + variable + declarations
+                                       + '\nlocals { bootstrap = ' + expression + ' }\n')
+
+            def evaluate(value=None):
+                args = ['terraform', 'console']
+                if value is not None:
+                    (path/'existing.tfvars.json').write_text(json.dumps({'existing_user_data_base64': value}))
+                    args += ['-var-file=existing.tfvars.json']
+                return subprocess.run(args, cwd=tmp, input='local.bootstrap\n', text=True, capture_output=True)
+
+            generated = evaluate()
+            self.assertEqual(generated.returncode, 0, generated.stderr)
+            rendered = json.loads(generated.stdout)
+            payload = gzip.decompress(base64.b64decode(rendered))
+            # Same cloud-init, deliberately different gzip header/compressor bytes.
+            existing = base64.b64encode(gzip.compress(payload, mtime=123)).decode()
+            self.assertNotEqual(existing, rendered)
+            preserved = evaluate(existing)
+            self.assertEqual(preserved.returncode, 0, preserved.stderr)
+            self.assertEqual(json.loads(preserved.stdout), existing)
+            evaluate('not-base64-or-gzip')
+            invalid = subprocess.run(['terraform', 'plan', '-input=false', '-refresh=false',
+                                      '-var-file=existing.tfvars.json'], cwd=tmp, text=True, capture_output=True)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn('verified existing gzip/base64', invalid.stderr)
+
     def test_pinned_public_source_ssm_only_and_absolute_deadline(self):
         here = Path(__file__).resolve().parent
         variables = {'platform_ref': 'a'*40, 'archive_sha256': 'b'*64,
