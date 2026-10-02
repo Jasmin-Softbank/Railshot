@@ -4,6 +4,8 @@ This module bootstraps the retained `infrastructure/ansible/ci.yml` CI container
 
 The instance role has SSM agent permissions with an explicit deny for all Parameter Store and Secrets Manager credential reads. No model/GitHub/registry key or cloud management permission is installed. The SSH public key belongs to the private administrator, who connects through authenticated SSM; SSH is not exposed on the public interface. The administrator has sudo and this VM is not a multi-tenant host boundary. Uploaded app checks execute under the common container policy. GitHub self-hosted runner registration is not provided by this module.
 
+Optional `name` (default `railshot-ci-poc`) identifies this dedicated CI VM, separately from the CD handoff target.
+
 Required variables: registered `account_id`, exact Canonical Ubuntu 24.04 amd64 `ami_id`, published `platform_ref`, SHA256 of `https://codeload.github.com/Jasmin-Softbank/Railshot/tar.gz/<platform_ref>`, administrator Ed25519 **public** key without comment, and UTC `stop_at`. No private key is copied to the VM or Terraform state. Bootstrap arms an absolute systemd STOP timer before network installs and refuses already-expired reuse. This guest timer is a bounded PoC cutoff, not cloud-enforced orchestration or job draining. Stopping retains disk data and disk cost. Review and set a new deadline before intentional reuse.
 
 ```sh

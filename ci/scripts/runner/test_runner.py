@@ -10,7 +10,7 @@ import tomllib
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import run_agent
 
@@ -52,13 +52,14 @@ class RunnerTest(unittest.TestCase):
         import openai_codex
         profile = run_agent.load_yaml(run_agent.PLATFORM / 'runner/profiles.yaml')
         cfg = profile['providers']['codex']
-        self.assertEqual(cfg['model'], 'gpt-6.1-sol')
+        self.assertEqual(cfg['model'], 'gpt-5.6-sol')
+        self.assertEqual(cfg['reasoning_effort'], 'xhigh')
         result = SimpleNamespace(status='completed', final_response='{"status":"proposed"}', id='turn-test')
         observed = []
         def complete():
             self.assertEqual(observed[-1], ('turn.started', {'turn_id': 'turn-test'}))
             return result
-        thread = SimpleNamespace(id='thread-test', turn=lambda *a, **kw: native_turn(before=complete))
+        thread = SimpleNamespace(id='thread-test', turn=Mock(return_value=native_turn(before=complete)))
         with tempfile.TemporaryDirectory() as d, patch.object(openai_codex, 'Codex') as sdk, patch.dict('os.environ', {'RAILSHOT_AUTH_MODE':'subscription', 'RAILSHOT_CODEX_HOME':'/tmp/operator-auth', 'CODEX_API_KEY':'', 'OPENAI_API_KEY':''}):
             sdk.return_value.__enter__.return_value.thread_start.return_value = thread
             out, meta = run_agent.run_codex(cfg, 'policy', 'task', {'type':'object','properties':{}}, Path(d), Path(d),
@@ -77,8 +78,11 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(rules['glob_scan_max_depth'], 32)
             self.assertEqual(args['approval_mode'], openai_codex.ApprovalMode.deny_all)
             self.assertTrue(args['ephemeral'])
-            self.assertEqual(args['model'], 'gpt-6.1-sol')
-            self.assertEqual(meta['requested_model'], 'gpt-6.1-sol')
+            self.assertEqual(args['model'], 'gpt-5.6-sol')
+            thread.turn.assert_called_once()
+            self.assertEqual(thread.turn.call_args.kwargs['effort'], 'xhigh')
+            self.assertEqual(meta['requested_model'], 'gpt-5.6-sol')
+            self.assertEqual(meta['requested_reasoning_effort'], 'xhigh')
             self.assertEqual(meta['session_id'], 'thread-test')
             self.assertEqual(meta['turn_id'], 'turn-test')
             self.assertEqual([event for event, _ in observed], ['session.starting', 'session.started', 'turn.started', 'session.finished'])
