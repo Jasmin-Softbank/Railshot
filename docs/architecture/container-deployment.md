@@ -121,6 +121,8 @@ API는 UID/GID 1000, root filesystem 읽기 전용, 쓰기 가능한 `/tmp`와 `
 
 `railshot-executors` Secret은 init container가 `/var/lib/railshot/config`에 복사한다. 디렉터리 0700·설정 파일 0600과 API 실행 UID 소유 조건을 맞추며 기본 manifest는 `cd.json`·`kubeconfig` 경로를 설정한다. 새 환경 기능을 켜려면 `RAILSHOT_PROFILES_FILE`, profile의 Terraform state·target·SSH 참조와 Provider 자격도 이 권한 모델로 준비해야 한다. Secret을 root 소유 0444로 직접 mount하는 것만으로 개인키·비공개 profile 검사를 통과하지 않는다. known_hosts는 신뢰된 host key를 사전 등록하고 group/other 쓰기를 금지한다.
 
+[prepare-state.js](../../apps/api/prepare-state.js)는 최초 PVC에서 `Jasmin-Softbank/Railshot`의 기존 `deployment/apps` 브랜치를 `/var/lib/railshot/repository`에 clone한다. 이후 init은 저장된 checkout의 브랜치·origin을 확인한다. 이 앱 선언 브랜치는 API rollout 전에 별도로 준비해야 하며, 플랫폼 이미지 release가 생성하는 `deployment/platform`과 구분한다. init과 CD의 Git 인증은 서버 내부 `GITHUB_TOKEN`과 이미지의 askpass를 사용한다.
+
 HOME은 쓰기 가능한 `/var/lib/railshot`이며 Ansible·gcloud의 실행 파일과 임시 상태가 이 경로를 사용할 수 있다. Git config checkout·Terraform state도 API UID가 쓰고 외부에 공개되지 않는 경로여야 한다. GitHub·Provider·SSH 자격을 전달하는 설정은 서버 운영 설정이며 사용자 로그인 데이터가 아니다. 현재 기본 manifest의 CD 설정과 추가 환경 profile 준비 여부를 실제 배포 전에 각각 확인한다.
 
 ## 로컬 실행
@@ -191,7 +193,7 @@ python3 deployment/scripts/render-platform.py /private/images.json \
 
 운영 CNI의 목표 소스는 Cilium `1.20.2`이며 기존 Flannel 서버는 [별도 전환 절차](../operations/control-cilium-migration.md)를 따른다. Cilium 사전 검사는 운영 server 한 대와 전용 build agent 한 대의 배치를 허용하고 고객 프로필의 단일 노드 제한은 유지한다. 이는 노드 가입과 Docker/Cilium 공존이 실제로 검증됐다는 뜻은 아니다.
 
-1. 운영자가 `railshot-system` namespace와 해당 namespace의 `ghcr-pull`, `railshot-api` Secret(`token`), `railshot-github` Secret(`token`), `railshot-executors` Secret을 비공개 입력에서 준비한다. 내부 API token은 API UID/GID 1000과 Dashboard UID/GID 101이 각각 읽도록 0440과 각 Pod의 fsGroup으로 mount한다. Nginx가 내부 요청에만 token을 주입하며 브라우저에 전달하지 않는다. GitHub·native 실행 자격은 API에만 준다. PVC 바인딩과 init container의 설정 소유권·권한을 확인한다.
+1. 운영자가 `railshot-system` namespace와 해당 namespace의 `ghcr-pull`, `railshot-api` Secret(`token`), `railshot-github` Secret(`token`), `railshot-executors` Secret을 비공개 입력에서 준비한다. 내부 API token은 API UID/GID 1000과 Dashboard UID/GID 101이 각각 읽도록 0440과 각 Pod의 fsGroup으로 mount한다. Nginx가 내부 요청에만 token을 주입하며 브라우저에 전달하지 않는다. GitHub·native 실행 자격은 API에만 준다. rollout 전에 `deployment/apps` 브랜치, 등록 대상의 고객 AppProject/Application, [railshot-product ServiceAccount·권한](../../deployment/manifests/product-access.yaml)을 별도로 bootstrap한다. 권한 선언의 `APPLICATION_REQUIRED`는 등록한 Application 이름으로 치환한다. 제품 API는 그 Application의 get/patch만 허용하므로 최초 생성은 운영자 bootstrap이 담당한다. PVC 바인딩과 init container의 설정 소유권·권한을 확인한다.
 2. Actions의 target·NodePort 변수를 설정하고 검토한 ref에서 `publish=true`, `deploy=true`로 실행해 전용 `deployment/platform` 브랜치와 workload 선언을 만든다. Application의 `targetRevision`은 이 브랜치를 가리킨다. AppProject/Application 파일은 workload 경로 밖에 유지한다.
 3. namespace·저장소 접근·선언 범위를 확인한 뒤 [AppProject/Application](../../gitops/applications/railshot-platform.yaml)을 최초 적용한다. 이후 전용 브랜치 변경은 native Argo 자동 sync가 적용한다. `prune:false`, `selfHeal:true`이며 Namespace/Secret 자동 생성은 허용하지 않는다. API의 한 replica·Recreate·PVC와 초기 requests/limits를 확인한다. 초기 자원값은 측정 전 시작값이므로 운영 노드 여유량과 업로드·native 도구 사용량을 확인한다.
 4. 기본 Service는 모두 ClusterIP다. 우선 승인된 운영 context에서 `kubectl -n railshot-system port-forward service/railshot-dashboard 4181:8080`, API는 `service/railshot-api 4173:4173`으로 검증한다. API readiness는 `configured:true`도 확인하지만 GitHub 자격의 실제 권한을 보증하지 않으므로 실요청 검증이 별도로 필요하다.
