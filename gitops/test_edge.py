@@ -48,6 +48,8 @@ class EdgeTest(unittest.TestCase):
         self.assertNotEqual(other['node_port'], taken_port)
         self.assertNotEqual(other['priority'], taken_priority)
         self.assertNotEqual(first['hostname'], other['hostname'])
+        numeric = edge.prepare(self.path, {**self.request, 'tenant': '123', 'namespace': 'tenant-numeric'})
+        self.assertNotEqual(first['hostname'], numeric['hostname'])
         self.assertNotIn(first['node_port'], [r['node_port'] for r in self.values['routes'].values()])
         with self.assertRaisesRegex(ValueError, 'belongs to another'):
             edge.prepare(self.path, {**self.request, 'target_private_ip': '10.0.0.9'})

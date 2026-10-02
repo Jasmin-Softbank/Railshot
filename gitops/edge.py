@@ -79,9 +79,11 @@ def prepare(config_path, request):
               'namespace', 'health_path', 'expected_json', 'expires_at'}
     require(isinstance(request, dict) and fields <= set(request) <= fields | {'target_security_group_id'},
             'exact registered route input required')
-    for key in ('target_id', 'tenant', 'app', 'namespace'):
+    for key in ('target_id', 'app', 'namespace'):
         require(isinstance(request[key], str) and re.fullmatch(r'[a-z][a-z0-9-]{0,61}[a-z0-9]|[a-z]', request[key]),
                 'registered DNS identity required')
+    require(isinstance(request['tenant'], str) and re.fullmatch(r'[a-z0-9]{1,20}', request['tenant']),
+            'registered CI tenant required')
     require(isinstance(request['environment_id'], str) and
             re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', request['environment_id']), 'registered environment identity required')
     require(request['namespace'] not in ('default', 'kube-system', 'kube-public', 'kube-node-lease', 'argocd'),
