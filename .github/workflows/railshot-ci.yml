@@ -327,7 +327,7 @@ jobs:
         run: python3 ci/scripts/ci_scope.py gate
 
   release:
-    name: Promote the verified multicloud release
+    name: Promote the verified platform release
     needs: [changes, gate]
     if: ${{ always() && !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.release == 'true' && github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && vars.RAILSHOT_AUTO_RELEASE == 'true' }}
     uses: ./.github/workflows/platform-publish.yml
@@ -335,7 +335,7 @@ jobs:
       components: '["dashboard","api","mcp","ci-runner"]'
       publish: true
       deploy: true
-      multicloud: true
+      multicloud: ${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}
       skip_build: true
       ci_run_id: ${{ format('{0}', github.run_id) }}
     permissions: {contents: write, actions: read, packages: write, id-token: write}

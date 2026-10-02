@@ -60,6 +60,7 @@ class PlatformReleaseTests(unittest.TestCase):
                "GITHUB_OUTPUT": str(self.home / "github-output"), "VERIFY_REF": "refs/heads/integration/test",
                "VERIFY_ROLE": "arn:aws:iam::721622471953:role/railshot-platform-verifier",
                "VERIFY_VERSION": "1", "VERIFY_HASH": "e" * 64,
+               "RELEASE_VERSION": "", "RELEASE_HASH": "",
                "COMPONENTS": '["dashboard","api"]', "PLATFORM_TARGET": "k3s-aws", "PLATFORM_PORT": "31080",
                "PROVIDER_TARGETS": "{}",
                **(overrides or {})}
@@ -102,7 +103,7 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertEqual(verification["needs"], "deploy")
         self.assertEqual(verification["permissions"], {"contents": "read", "id-token": "write"})
 
-    def test_same_run_reuse_requires_opted_in_trusted_full_multicloud_release(self):
+    def test_same_run_reuse_requires_opted_in_trusted_complete_image_set(self):
         triggers = self.workflow.get('on', self.workflow.get(True))
         self.assertIs(triggers['workflow_call']['inputs']['skip_build']['default'], False)
         self.assertNotIn('skip_build', triggers['workflow_dispatch']['inputs'])
@@ -125,17 +126,38 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertIn('= "$GITHUB_SHA"', publish)
         valid = {'SKIP_BUILD': 'true', 'AUTO_RELEASE': 'true', 'MULTICLOUD': 'true',
                  'GITHUB_EVENT_NAME': 'push', 'COMPONENTS': '["dashboard","api","mcp","ci-runner"]',
+                 'RELEASE_VERSION': '2', 'RELEASE_HASH': 'f' * 64,
                  'PROVIDER_TARGETS': '{"aws":"k3s-aws","gcp":"k3s-gcp","openstack":"k3s-openstack"}'}
         name = 'Validate publication and deployment inputs'
         result = self.run_step('admission', name, valid)
         self.assertEqual(result.returncode, 0, result.stderr)
         for changes in ({'GITHUB_EVENT_NAME': 'pull_request'}, {'GITHUB_EVENT_NAME': 'workflow_dispatch'},
                         {'GITHUB_REF': 'refs/heads/integration/other'}, {'AUTO_RELEASE': 'false'},
-                        {'CI_RUN_ID': '124'}, {'PUBLISH': 'false'}, {'DEPLOY': 'false'}, {'MULTICLOUD': 'false'},
+                        {'CI_RUN_ID': '124'}, {'PUBLISH': 'false'}, {'DEPLOY': 'false'},
                         {'COMPONENTS': '["dashboard","api","ci-runner"]'}, {'GITHUB_REPOSITORY_ID': '1'},
                         {'PROVIDER_TARGETS': '{"aws":"k3s-aws","gcp":"k3s-gcp"}'}):
             with self.subTest(changes=changes):
                 self.assertNotEqual(self.run_step('admission', name, {**valid, **changes}).returncode, 0)
+
+    def test_platform_automatic_release_does_not_require_multicloud_activation(self):
+        triggers = self.workflow.get('on', self.workflow.get(True))
+        for trigger in ('workflow_call', 'workflow_dispatch'):
+            self.assertIs(triggers[trigger]['inputs']['multicloud']['default'], False)
+        ci = yaml.safe_load((ROOT / '.github/workflows/railshot-ci.yml').read_text())
+        release = ci['jobs']['release']
+        self.assertEqual(release['with']['multicloud'], "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}")
+        self.assertIn("vars.RAILSHOT_AUTO_RELEASE == 'true'", release['if'])
+        self.assertNotIn('RAILSHOT_MULTICLOUD_RELEASE', release['if'])
+        automatic = {'SKIP_BUILD': 'true', 'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push',
+                     'COMPONENTS': '["dashboard","api","mcp","ci-runner"]'}
+        name = 'Validate publication and deployment inputs'
+        result = self.run_step('admission', name, automatic)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        multicloud = {**automatic, 'MULTICLOUD': 'true', 'RELEASE_VERSION': '2', 'RELEASE_HASH': 'f' * 64,
+                      'PROVIDER_TARGETS': '{"aws":"k3s-aws","gcp":"k3s-gcp","openstack":"k3s-openstack"}'}
+        for missing in ({'PROVIDER_TARGETS': '{}'}, {'RELEASE_VERSION': ''}, {'RELEASE_HASH': ''}):
+            with self.subTest(missing=missing):
+                self.assertNotEqual(self.run_step('admission', name, {**multicloud, **missing}).returncode, 0)
 
     def test_current_source_gate_is_rechecked_immediately_before_each_mutation(self):
         for job, mutation in (('deploy', 'Commit the tested digest declaration to the platform branch'),

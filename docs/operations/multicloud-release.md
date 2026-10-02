@@ -1,6 +1,6 @@
 # 공통 릴리스 배포
 
-`railshot-ci.yml`의 성공한 `Railshot CI gate`가 같은 커밋의 플랫폼 릴리스를 호출한다. `RAILSHOT_AUTO_RELEASE=true`이고 현재 브랜치가 `RAILSHOT_PLATFORM_VERIFY_REF`와 일치할 때만 자동 실행된다. 초기 운영 바인딩과 세 환경 검증이 끝나기 전에는 이 변수를 활성화하지 않는다.
+`railshot-ci.yml`의 성공한 `Railshot CI gate`가 같은 커밋의 플랫폼 릴리스를 호출한다. `RAILSHOT_AUTO_RELEASE=true`이고 현재 브랜치가 `RAILSHOT_PLATFORM_VERIFY_REF`와 일치하면 문서 전용 변경을 제외한 플랫폼·런타임·공통 정책 변경을 자동 게시하고 플랫폼 배포를 검증한다. 기존 플랫폼 자동 릴리스는 이 변수로 계속 운영한다. 중앙 워커와 AWS/GCP/OpenStack까지 같은 릴리스를 적용하려면 별도로 `RAILSHOT_MULTICLOUD_RELEASE=true`를 설정한다. 이 두 번째 변수는 미설정·`false`가 기본이며, 초기 운영 바인딩과 세 환경 검증을 준비한 뒤 활성화한다. 수동 실행은 `multicloud` 입력으로 선택한다.
 
 1. dashboard/API/ci-runner를 시험하고 같은 실행에서 얻은 GHCR digest를 고정한다.
 2. 기존 `deployment/platform` 브랜치에 플랫폼 선언을 반영하고 실제 Argo 상태·파드 digest·공개 HTTPS를 검증한다.

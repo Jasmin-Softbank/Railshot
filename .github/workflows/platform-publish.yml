@@ -6,7 +6,7 @@ on:
       components: {type: string, default: '["dashboard","api","mcp","ci-runner"]'}
       publish: {type: boolean, default: true}
       deploy: {type: boolean, default: true}
-      multicloud: {type: boolean, default: true}
+      multicloud: {type: boolean, default: false}
       ci_run_id: {type: string, required: true}
       skip_build:
         description: Reuse tested-image artifacts from this same trusted CI run
@@ -61,6 +61,8 @@ jobs:
           VERIFY_ROLE: ${{ vars.RAILSHOT_PLATFORM_VERIFY_ROLE_ARN }}
           VERIFY_VERSION: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_VERSION }}
           VERIFY_HASH: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_SHA256 }}
+          RELEASE_VERSION: ${{ vars.RAILSHOT_RELEASE_DOCUMENT_VERSION }}
+          RELEASE_HASH: ${{ vars.RAILSHOT_RELEASE_DOCUMENT_SHA256 }}
         run: |
           set -euo pipefail
           if [ "$PUBLISH" = true ]; then
@@ -74,9 +76,11 @@ jobs:
           assert len(components) == len(set(components)) and set(components) <= allowed, 'components must be unique supported names'
           if os.environ['SKIP_BUILD'] == 'true':
               assert os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['AUTO_RELEASE'] == 'true', 'artifact reuse requires the enabled automatic push release'
-              assert os.environ['DEPLOY'] == 'true' and os.environ['MULTICLOUD'] == 'true', 'artifact reuse requires the complete multicloud deployment'
+              assert os.environ['DEPLOY'] == 'true', 'artifact reuse requires platform deployment'
               assert os.environ['CI_RUN_ID'] == os.environ['GITHUB_RUN_ID'], 'artifact reuse requires the calling CI run gate'
               assert set(components) == allowed, 'automatic deployment requires all tested components'
+          if os.environ['MULTICLOUD'] == 'true':
+              assert os.environ['DEPLOY'] == 'true', 'multicloud release requires platform deployment'
           if os.environ['DEPLOY'] == 'true':
               assert os.environ['GITHUB_REPOSITORY'] == 'Jasmin-Softbank/Railshot' and os.environ['GITHUB_REPOSITORY_ID'] == '1400202256', 'deploy requires the registered platform repository'
               assert os.environ['VERIFY_REF'] and os.environ['GITHUB_REF'] == os.environ['VERIFY_REF'], 'deploy requires the exact OIDC trusted ref'
@@ -94,6 +98,7 @@ jobs:
               if os.environ.get('MULTICLOUD') == 'true':
                   assert {'dashboard', 'api', 'ci-runner'} <= set(components), 'multicloud release requires the central worker images'
                   assert set(selections) == {'aws', 'gcp', 'openstack'}, 'multicloud release requires all three provider bindings'
+                  assert re.fullmatch(r'[1-9][0-9]*', os.environ['RELEASE_VERSION']) and re.fullmatch(r'[a-f0-9]{64}', os.environ['RELEASE_HASH']), 'release document version and hash are required'
               port = os.environ['PLATFORM_PORT']
               assert re.fullmatch(r'[0-9]+', port) and 30000 <= int(port) <= 32767, 'RAILSHOT_PLATFORM_NODE_PORT must be 30000..32767'
           PYCODE
