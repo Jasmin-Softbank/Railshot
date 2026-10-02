@@ -25,8 +25,11 @@ async function fixture(t, overrides = {}) {
   return { product, service, directory, dispatches: () => dispatches, reads: () => reads, cdCalls: () => cdCalls };
 }
 async function settle(get, predicate = (record) => !['queued', 'running'].includes(record.status)) {
-  for (let attempt = 0; attempt < 100; attempt++) { const record = await get(); if (predicate(record)) return record; await pause(5); }
-  assert.fail('Operation did not settle');
+  const deadline = performance.now() + 10000;
+  let record;
+  // Durable writes and HTTP polling take longer on shared CI runners than local fixtures.
+  do { record = await get(); if (predicate(record)) return record; await pause(5); } while (performance.now() < deadline);
+  assert.fail(`Operation did not settle: status=${record?.status}, stage=${record?.stage}`);
 }
 
 test('snapshot and intent are durable before one dispatch; replay returns the same completed deployment', async (t) => {
