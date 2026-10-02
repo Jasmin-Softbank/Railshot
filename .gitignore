@@ -3,7 +3,6 @@ node_modules/
 dist/
 .env
 .env.*
-!.env.example
 *.sqlite
 *.sqlite-*
 /apps/**/AGENTS.md
