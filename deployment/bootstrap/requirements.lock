@@ -1,0 +1,2 @@
+# Bootstrap encryption dependency; OpenStackClient is supplied by the customer node.
+cryptography==50.0.2

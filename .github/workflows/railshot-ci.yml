@@ -134,10 +134,12 @@ jobs:
       - run: uv sync --frozen --project infrastructure/providers/openstack --group dev
       - working-directory: infrastructure/providers/openstack
         run: |
-          uv run --frozen ruff check .
-          uv run --frozen ruff format --check .
+          uv run --frozen ruff check src tests scripts
+          uv run --frozen ruff format --check src tests scripts
           uv run --frozen mypy
           uv run --frozen pytest -q
+      - name: Customer OpenStack bootstrap and restricted SSH jobs
+        run: uv run --frozen --project infrastructure/providers/openstack --with-requirements deployment/bootstrap/requirements.lock bash ci/scripts/check-bootstrap.sh
 
   database-ansible:
     name: Database Ansible contracts
@@ -233,11 +235,11 @@ jobs:
       - name: Validate without credentials, backend or apply
         run: |
           terraform fmt -check -recursive infrastructure/terraform
-          for module in aws aws-edge ci control gcp azure platform-verification; do
+          for module in aws aws-edge openstack-edge ci control gcp azure platform-verification; do
             terraform -chdir="infrastructure/terraform/$module" init -backend=false -input=false
             terraform -chdir="infrastructure/terraform/$module" validate
           done
-          for suite in infrastructure/terraform/aws infrastructure/terraform/aws-edge infrastructure/terraform/ci infrastructure/terraform/gcp infrastructure/terraform/azure/tests; do
+          for suite in infrastructure/terraform/aws infrastructure/terraform/aws-edge infrastructure/terraform/openstack-edge infrastructure/terraform/ci infrastructure/terraform/gcp infrastructure/terraform/azure/tests; do
             python -m unittest discover -s "$suite" -p 'test_*.py' -v
           done
 
