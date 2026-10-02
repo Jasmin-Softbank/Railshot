@@ -44,6 +44,9 @@ test('snapshot and intent are durable before one dispatch; replay returns the sa
   assert.equal(complete.status, 'succeeded');
   assert.equal(complete.url, deployed.public_http.url);
   assert.equal(complete.ci.run_id, '123');
+  assert.match(complete.source_digest, /^[a-f0-9]{64}$/);
+  assert.equal(complete.observation.deployment_id, complete.id);
+  assert.equal(complete.observation.metrics.pods.state, 'not_configured');
   assert.equal(complete.ci.publication_artifact_id, '456');
   assert.equal(f.cdCalls(), 1);
   assert.equal((await f.product.createDeployment(input, 'same')).id, created.id);
@@ -67,6 +70,30 @@ test('concurrent identical keys dispatch once; another intent is refused while a
   release();
   await settle(() => f.product.getDeployment(first.id));
   assert.equal(calls, 1);
+});
+
+test('CD progress persists revision and HTTP stage before completion while observer failure stays separate', async (t) => {
+  let finish;
+  const waiting = new Promise((resolve) => { finish = resolve; });
+  const images = { web: `ghcr.io/example/demo@sha256:${'c'.repeat(64)}` };
+  const f = await fixture(t, {
+    service: { status: async () => ({ run_id: 123, state: 'published', publication: { ...publication, images } }) },
+    deployPublished: async ({ onProgress }) => {
+      await onProgress({ cd: deployed.cd, public_http: { state: 'unverified', verified_at: null, url: null } });
+      await waiting; return deployed;
+    },
+    observeMetrics: async (record) => ({ deployment_id: record.id, metrics: { pods: { state: 'unavailable', value: null } } }),
+  });
+  const first = await f.product.createDeployment(input, 'progress');
+  try {
+    const progressing = await settle(() => f.product.getDeployment(first.id), (record) => record.stage === 'http');
+    assert.equal(progressing.status, 'running'); assert.equal(progressing.cd.revision, deployed.cd.revision);
+    assert.deepEqual(progressing.ci.images, images); assert.equal(progressing.url, null);
+    assert.equal(progressing.observation.metrics.pods.state, 'unavailable');
+    const disk = JSON.parse(await readFile(join(f.directory, 'state.json')));
+    assert.equal(disk.operations[first.id].stage, 'http');
+  } finally { finish(); }
+  assert.equal((await settle(() => f.product.getDeployment(first.id))).status, 'succeeded');
 });
 
 test('GitHub URL replay keeps the first pinned source without fetching current HEAD', async (t) => {
@@ -166,6 +193,43 @@ function form() {
   const value = new FormData(); value.set('app', 'demo-app'); value.set('target_id', 'demo'); value.set('source_type', 'folder');
   value.append('files', new Blob(['hello']), 'app.js'); value.set('paths', '["app.js"]'); return value;
 }
+test('deployment polling preserves normalized CI steps while running and after publication', async (t) => {
+  const runningSteps = [
+    { key: 'loop', status: 'in_progress', conclusion: null, observed_attempt: 2 },
+    { key: 'release', status: 'queued', conclusion: null, observed_attempt: null },
+  ];
+  let upstream = { run_id: 123, state: 'running', status: 'in_progress', conclusion: null, steps: runningSteps };
+  const { base } = await httpFixture(t, { service: {
+    targetId: 'demo', deploy: async () => ({ run_id: '123', source_commit: publication.source_commit }),
+    status: async () => structuredClone(upstream),
+  } });
+  const accepted = await fetch(`${base}/api/v1/deployments`, { method: 'POST', body: form(), headers: { 'Idempotency-Key': 'steps-progress' } });
+  assert.equal(accepted.status, 202);
+  const get = async () => (await fetch(`${base}${accepted.headers.get('location')}`)).json();
+  const running = await settle(get, (record) => record.ci?.steps?.[0]?.status === 'in_progress');
+  assert.equal(running.status, 'running'); assert.equal(running.stage, 'ci');
+  assert.equal(running.ci.run_id, '123'); assert.equal(running.cd.state, 'not_started');
+  assert.deepEqual(running.ci.steps, runningSteps);
+
+  const releasingSteps = [
+    { key: 'loop', status: 'completed', conclusion: 'success', observed_attempt: 2 },
+    { key: 'release', status: 'in_progress', conclusion: null, observed_attempt: 2 },
+  ];
+  upstream = { ...upstream, steps: releasingSteps };
+  const releasing = await settle(get, (record) => record.ci?.steps?.[1]?.status === 'in_progress');
+  assert.equal(releasing.status, 'running'); assert.equal(releasing.stage, 'ci');
+  assert.deepEqual(releasing.ci.steps, releasingSteps);
+
+  const completedSteps = releasingSteps.map((step) => ({ ...step, status: 'completed', conclusion: 'success' }));
+  upstream = { ...upstream, state: 'published', status: 'completed', conclusion: 'success', steps: completedSteps, publication };
+  const complete = await settle(get);
+  assert.equal(complete.status, 'succeeded'); assert.equal(complete.stage, 'complete');
+  assert.deepEqual(complete.ci.steps, completedSteps);
+  assert.equal(complete.ci.producer_attempt, 1); // Observation attempt and verified artifact producer remain distinct.
+  assert.deepEqual((await (await fetch(`${base}/api/v1/builds/123`)).json()).steps, completedSteps);
+  assert.deepEqual((await (await fetch(`${base}/api/runs/123`)).json()).steps, completedSteps);
+});
+
 test('v1 HTTP contract has accepted/error headers, strict fields, preserved legacy and no foreign reads', async (t) => {
   const { base } = await httpFixture(t);
   const targets = await (await fetch(`${base}/api/v1/targets`)).json();
@@ -255,7 +319,7 @@ test('running intent becomes unknown after restart without dispatch or CD replay
   await f.product.close();
   const restarted = await createProductService({ service: f.service, directory: f.directory, deployPublished: async () => assert.fail('No replay') });
   try {
-    assert.equal(restarted.getDeployment(first.id).status, 'unknown');
+    assert.equal((await restarted.getDeployment(first.id)).status, 'unknown');
     assert.equal((await restarted.createDeployment(input, 'interrupted')).id, first.id);
     assert.equal(f.dispatches(), 1);
     assert.equal(f.cdCalls(), 0);

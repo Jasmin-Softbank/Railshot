@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 HERE = Path(__file__).resolve().parent
 NAMESPACE = 'railshot-observability'
 KSM_METRICS = [
-    'kube_node_status_condition', 'kube_deployment_spec_replicas',
+    'kube_node_status_condition', 'kube_pod_status_phase', 'kube_pod_labels', 'kube_deployment_spec_replicas',
     'kube_deployment_status_replicas_available',
     'kube_pod_container_status_restarts_total',
     'kube_pod_container_status_waiting_reason',
@@ -91,7 +91,8 @@ def cluster(config):
                 'runAsNonRoot': True, 'runAsUser': 65534,
                 'capabilities': {'drop': ['ALL']}, 'seccompProfile': {'type': 'RuntimeDefault'}}
     ksm = {'name': 'metrics', 'image': 'registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.18.0',
-           'args': ['--resources=nodes,pods,deployments', '--metric-allowlist=' + ','.join(KSM_METRICS)],
+           'args': ['--resources=nodes,pods,deployments',
+                    '--metric-labels-allowlist=pods=[app.kubernetes.io/name,railshot.io/target]', '--metric-allowlist=' + ','.join(KSM_METRICS)],
            'ports': [{'containerPort': 8080}], 'securityContext': security,
            'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
            'readinessProbe': {'httpGet': {'path': '/readyz', 'port': 8081}, 'periodSeconds': 10}}
