@@ -52,3 +52,9 @@ Vercel Preview는 별도 웹 배포 연동이다. 런타임·Ansible·CI 검증�
 [원본 PR #1](https://github.com/Jasmin-Softbank/Railshot/pull/1)의 `c732b3bc83ad1b9cab416f1d763cfee9be26ea05`를 merge했다. `deployment/`는 원본과 byte 단위로 동일하게 유지한다. 새 Cilium 설치 코드가 online 경로에서도 읽는 `airgap/versions.json`을 Ansible 전달 목록에 추가했다. 버전 정책 누락을 잡는 기존 경계 검사를 보강했고, 수정 전 실패·수정 후 통과를 확인했다.
 
 통합 checkout에서 runtime 단위·계약 검사 49개, Ansible 검사 26개를 통과했다. 전달할 7개 파일의 존재와 Ansible 실행 버전·팀 정책 버전의 일치도 확인했다. 이 결과는 오프라인 통합 검사이며 새 코드로 AWS/GCP를 재설치하거나 기존 서비스를 재배포한 결과가 아니다. 원본 PR의 Linux 실검증 기록은 그 PR에 보존한다.
+
+## 대시보드 통합 후보
+
+`feature/dashboard-ui@4fb39c88e17070d2ac048ec0667083f0252b644c`의 화면을 원본 그대로 채택했다. `.gitignore`는 양쪽 규칙을 보존하고, 루트 npm workspace lock에 기존 `apps/api`를 함께 반영했다. API의 정적 화면 검사는 이전 화면의 문구 대신 새 화면의 실제 요소를 확인하도록 조정했다. API 19개 검사와 Vite production build를 통과했다.
+
+이 UI는 소스·환경 선택과 선택 결과 확인까지 구현돼 있다. `/api/deploy` 호출이나 Provider→Ansible→CD 자동 연결을 추가하지 않았다. Railshot PR CI를 먼저 마련한 뒤 이 후보 PR의 자동 검사 결과를 확인하고 병합한다.
