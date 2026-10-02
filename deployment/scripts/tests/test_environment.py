@@ -295,6 +295,8 @@ class RegistrationTest(unittest.TestCase):
         rules = next(d['rules'] for d in docs if d['kind'] == 'Role')
         self.assertFalse(any('secrets' in r['resources'] or '*' in r['resources'] for r in rules))
         self.assertTrue(any('jobs' in r['resources'] for r in rules))
+        self.assertEqual([r for r in rules if 'pods/log' in r['resources']],
+                         [{'apiGroups': [''], 'resources': ['pods/log'], 'verbs': ['get']}])
 
 
 if __name__ == '__main__':

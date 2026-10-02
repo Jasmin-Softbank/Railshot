@@ -71,3 +71,5 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 현재 공개 플랫폼 manifest는 검증된 AWS 대상에 `RAILSHOT_TARGET_PROVIDER=aws`를 명시한다. 대상 인프라를 바꾸면 이 운영자 설정도 함께 바꿔야 한다. provider 미설정 시 화면 선택 실행은 차단되며 대상 ID 문자열로 provider를 추측하지 않는다. UI의 클라우드/온프레미스 카드와 provider 선택을 backend의 target ID나 실행 종류 드롭다운으로 대체하지 않는다.
 
 `GET /api/v1/builds`, `/api/v1/deployments`, `/api/v1/environments`는 현재 세션의 실행 요약 목록을, `GET /api/v1/plans`는 현재 세션의 계획 목록을 반환한다. 배포 내역은 서버 목록으로 복원하며 localStorage의 기존 마지막 실행 ID를 사용하지 않는다. 세션·설정·OpenStack 연결 API는 [별도 명세](dashboard-sessions.md)에 정리했다.
+
+실패 CI의 세부 단계와 검증된 원인은 `steps[].tasks`, `ci.diagnostics`로 전달한다. 결과 불확실 상태는 `unknown`으로 유지한다. 앱 로그 조회는 `GET /api/v1/deployments/{id}/logs`이며 세션·현재 배포 버전·런타임 소유권 검증을 거친다. 상세 제한은 [제품 관측 계약](observations.md)을 따른다.

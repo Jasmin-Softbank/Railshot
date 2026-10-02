@@ -15,26 +15,28 @@ One gate step failed. Change the writable files so that this failure's root caus
 
 1. Read `failure.txt` and `lessons.md`. Write the root cause as one sentence and point to the log line or `file:line` that proves it.
 2. Check your remit:
-   - class F7 (application code), F8 (transient) or a destroy/replace in a plan: you should not have been called; return `give_up`;
+   - class F7 needs source scope; F8 (transient), infrastructure/authentication failures or a destroy/replace in a plan require operator repair, so return `give_up`;
    - the cause lies outside writable paths: return `give_up` with the exact user action.
 3. If `lessons.md` shows this signature after a change like the one you plan, do something different that the evidence supports, or `give_up`. Never repeat a failed change.
 4. Edit only writable files. Fix the cause (wrong path, missing build step, wrong bind host, missing system package, wrong port, wrong health path) rather than working around it.
 5. Re-check C1–C11 and the forbidden patterns.
-6. Return the report with `root_cause` and `addresses_failure` set.
+6. Return the report with `root_cause`, `addresses_failure` and `gate_plan` set. Plan L0, L1, Q, L2, L4, L3 even when the observed failure is early. Inspect downstream needs and include all supported fixes in the same bounded proposal; never label an unexecuted check as passed.
 
 ## Per-class guidance
 
 | Class | Typical cause | Allowed fix |
 |---|---|---|
-| F1 dependencies | missing system library, wrong install command, lockfile not used | add OS packages in the build stage, use the lockfile install command. Never edit manifests. One attempt, then `give_up`. |
+| F1 dependencies | missing system library, wrong install command, lockfile not used | add OS packages in the build stage or use the lockfile install command. Source scope also permits additive exact-version dependencies; the harness regenerates native locks. Never change existing dependency versions or author locks. |
 | F2 build context | wrong `COPY` path, `.dockerignore` hides a needed file, wrong context | fix paths, context or ignore rules |
+| F3 architecture/base | incompatible runtime architecture or base | use a compatible allowlisted explicit-version base; never waive platform/architecture checks |
 | F4 start, port, health | binds 127.0.0.1, wrong port, health path 404/5xx, slow start, missing runtime file | fix `CMD` flags or env, the spec port, a health path that exists in code, copy the missing file from the build stage |
 | F5 spec or policy | schema error, gate L1 rule | follow the rule message; change the spec or Dockerfile, never the rule |
 | F6 vulnerability | CRITICAL with a fixed version | newer patch-level base image or package in the build; never ignore |
 | F9 infrastructure plan | the spec asks for something the catalog or policy rejects | adjust the spec within the catalog; if the user explicitly asked for it, `give_up` and explain |
+| QUALITY | missing tests/test setup, lint/type/unit failure | in source scope, fix application source or add meaningful tests and missing supported test/typecheck scripts; preserve existing tests, checker rules and scripts |
 
 ## Must not
 
-- Touch anything that judges you: tests, policies, CI, the contract, ignore files.
+- Weaken anything that judges you: existing tests, policies, CI, the contract and checker configuration. Source scope may add tests exercising application code; once created their assertions are immutable on later attempts.
 - Make a check pass without making the app work: a health path that always succeeds while the app is down, `|| true`, error-swallowing wrappers in `CMD`, pointing a route at a placeholder.
 - Rewrite files wholesale when a few lines fix the cause.

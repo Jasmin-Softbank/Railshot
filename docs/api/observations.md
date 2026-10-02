@@ -6,8 +6,8 @@
 이미지 digest 참조이고, `source_digest`는 접수한 입력 snapshot의 SHA-256이다.
 원문 소스, Prometheus 주소, 쿼리, 자격증명은 응답하지 않는다.
 
-대시보드는 15초마다 조회하며 완료된 배포도 관측을 계속한다. 재접속 시 브라우저에
-저장한 deployment ID를 다시 조회한다. 영속 실행 결과의 성공과 현재 운영 상태는 별개다.
+대시보드는 15초마다 조회하며 완료된 배포도 관측을 계속한다. 재접속 시 세션에 속한
+서버 배포 내역에서 최근 deployment ID를 다시 조회한다. 영속 실행 결과의 성공과 현재 운영 상태는 별개다.
 현재 HTTP probe 실패로 과거 배포 완료 기록을 실패로 바꾸지 않는다. 새로고침은 POST를 하지 않는다.
 
 ## 설정
@@ -62,3 +62,13 @@ binding, 오래된 샘플, 수집 실패, HTTP 실패, reload, URL 노출 조건
 
 샘플 시각 근거: [Prometheus timestamp 함수](https://prometheus.io/docs/prometheus/latest/querying/functions/#timestamp),
 [HTTP query API](https://prometheus.io/docs/prometheus/latest/querying/api/#instant-queries).
+
+## CI 진단과 앱 로그
+
+CI의 `steps[].tasks`는 조회한 GitHub job의 내부 단계와 결과다. 알려진 플랫폼 단계 이름만 반환하며 임의 단계 이름은 번호로 표시한다. 실패한 현재 attempt의 `loop-N` artifact는 run ID, source SHA, 개수·크기·만료를 확인한 뒤 `ci.diagnostics`로 축약한다. 원문 오류, SDK 세션, 비밀 경로는 공개하지 않는다. `repair_scope`, `agent_attempts`, `changed_file_count`는 실제 기록에서 읽는다. `changed_files`는 공개해도 되는 정해진 패키징 파일 이름만 포함한다.
+
+`NO_TESTS` 등 차단은 `blocked`, 결과 유실은 `unknown`을 보존한다. unknown은 새 실행 접수를 계속 막으며 자동 재시도하지 않는다. 예전 실패 기록은 상세 GET에서 진단만 보강할 수 있다. 진단 자료를 읽지 못한 경우 30초 이후 재조회하며 CI·CD를 다시 제출하지 않는다. 배포 내역에서 연 모니터에도 실패 요약과 GitHub Actions 링크를 표시한다.
+
+`GET /api/v1/deployments/{id}/logs`는 해당 세션 소유의 배포에서 최근 앱 로그를 읽는다. 서버의 CD 설정과 저장된 검증 receipt를 재사용하고, 현재 Argo revision·이미지·Deployment→ReplicaSet→Pod 소유권을 대조한다. 같은 앱에 새 CD 작업이 시작되면 이전 기록은 `superseded`로 막는다. 실제 앱 적용 전은 `not_deployed`, 설정 없음은 `not_configured`, 조회 실패는 `unavailable`, 출력 없음은 `no_data`다. HTTP 오류가 없는 빈 결과를 수집 성공 로그로 꾸미지 않는다.
+
+최대 세 컨테이너, 각각 최근 100줄, 전체 32 KiB로 제한하며 tail만 조회한다. 요청에서 namespace, Pod, 명령, 주소를 받지 않는다. 기존 namespace Role에 `pods/log:get`만 추가하고, 제품 API에는 등록된 클러스터 Secret 한 개의 `get`만 허용한다. 인증 정보는 서버 내부에서만 사용한다. 흔한 자격 문자열을 가리고 UI는 textContent로 표시하지만, 임의 앱이 출력한 모든 비밀을 탐지한다고 보장하지 않는다. 앱 로그 탭을 열었을 때만 조회하고 기존 15초 갱신과 연결한다.

@@ -169,6 +169,7 @@ def runtime_documents(target, owner, pull, binding):
     rules = [{'apiGroups': [group], 'resources': resources, 'verbs': verbs} for group, resources in (
         ('apps', ['deployments']), ('', ['services']), ('networking.k8s.io', ['networkpolicies']))]
     rules.extend([{'apiGroups': [''], 'resources': ['pods', 'events'], 'verbs': ['get', 'list', 'watch']},
+                  {'apiGroups': [''], 'resources': ['pods/log'], 'verbs': ['get']},
                   {'apiGroups': ['apps'], 'resources': ['replicasets'], 'verbs': ['get', 'list', 'watch']},
                   {'apiGroups': [''], 'resources': ['serviceaccounts/token'], 'resourceNames': [SA], 'verbs': ['create']}])
     if binding:
