@@ -4,6 +4,7 @@ import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
+import importlib.util
 import ipaddress
 import json
 import os
@@ -16,7 +17,11 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(ROOT / 'deployment/scripts'), str(ROOT / 'infrastructure/ansible'),
                str(ROOT / 'gitops'), str(ROOT / 'ci/scripts')]
-from render import cluster, prometheus, NAMESPACE, validate
+# Other deployment helpers also have a render.py; bind this renderer by path.
+_renderer_spec = importlib.util.spec_from_file_location('railshot_observer_render', ROOT / 'observability/render.py')
+_renderer = importlib.util.module_from_spec(_renderer_spec)
+_renderer_spec.loader.exec_module(_renderer)
+cluster, prometheus, NAMESPACE, validate = _renderer.cluster, _renderer.prometheus, _renderer.NAMESPACE, _renderer.validate
 from storage import durable_write
 
 

@@ -468,7 +468,11 @@ class ObservationRegistryTest(unittest.TestCase):
         import importlib.util
         spec = importlib.util.spec_from_file_location('observation_register', ROOT / 'observability/register.py')
         self.observation = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.observation)
+        # Full discovery has already imported deployment/scripts/render.py.
+        foreign_renderer = object()
+        with patch.dict(sys.modules, {'render': foreign_renderer}):
+            spec.loader.exec_module(self.observation)
+            self.assertIs(sys.modules['render'], foreign_renderer)
         self.config = {'owner': 'shared-observer', 'prometheus_url': 'http://10.0.0.20:9090',
             'observer_ip': '10.0.0.20', 'node_metrics_port': 31490, 'cluster_metrics_port': 31491}
         self.request = {'version': 1, 'target_id': 'new-openstack', 'environment_id': 'env-1', 'app': 'demo-app',
