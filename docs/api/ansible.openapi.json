@@ -1,0 +1,639 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "RAILSHOT operator Ansible jobs API",
+    "version": "1.0.0",
+    "description": "Contract for infrastructure/ansible/api.py. Plain HTTP on IPv4 loopback only; no TLS/mTLS, public ingress, user/tenant authentication, Terraform provisioning or Argo deployment. Responses use the standard-library HTTP/1.0 protocol. Only the two GET/POST operations below are implemented. Other methods use the standard-library 501 response, outside this JSON API. This static specification is not served by the API; there are no Swagger UI or OpenAPI routes."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:{port}",
+      "description": "Host must occur exactly once and equal 127.0.0.1:<port> or localhost:<port>. Origin must be absent or occur exactly once and equal http://127.0.0.1:<port> or http://localhost:<port>. No CORS/preflight support. Forwarded headers do not alter these checks.",
+      "variables": {
+        "port": {
+          "default": "4180",
+          "description": "Configured local server port (CLI range 1..65535)."
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "operatorBearer": []
+    }
+  ],
+  "paths": {
+    "/v1/ansible/jobs": {
+      "post": {
+        "operationId": "submitAnsibleJob",
+        "summary": "Submit or retrieve a registered target job",
+        "description": "The request ID binds the expanded private descriptor, SSH configuration, operation and timeout, not just the three submitted fields. Exactly matching retries return the current/stored job; no automatic retry of uncertain work. The path is exact: query strings and a trailing slash are unsupported.",
+        "parameters": [
+          {
+            "name": "Content-Length",
+            "in": "header",
+            "required": true,
+            "description": "Exactly one header; one to five ASCII decimal digits; total encoded body size must be 1..8192 bytes. Chunked/Transfer-Encoding requests are rejected.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8192
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobRequest"
+              },
+              "example": {
+                "request_id": "openapi-runtime-001",
+                "target_id": "demo-aws",
+                "operation": "runtime.install"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An existing request with the same expanded server-side input has a stored non-active status (succeeded, failed, blocked or unknown). Returns that job without starting another executor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "A new job was durably recorded before executor dispatch, or the same request is already queued/running. One worker is allowed; this is not an unbounded queue.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              },
+              "Location": {
+                "description": "Relative status URL for this request.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^/v1/ansible/jobs/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_JSON (including duplicate object keys, NaN/Infinity or an incomplete body), or INVALID_JOB_REQUEST (wrong fields, request ID, target type or operation).",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "INVALID_JOB_REQUEST"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "TARGET_NOT_REGISTERED for an unknown target. An unsupported GET/POST path instead returns NOT_FOUND after authentication.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "TARGET_NOT_REGISTERED"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "REQUEST_ID_CONFLICT for changed expanded input; EXECUTOR_BUSY for another active job; TARGET_RECONCILE_REQUIRED for unresolved prior work on this target.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "TARGET_RECONCILE_REQUIRED"
+                  }
+                }
+              }
+            }
+          },
+          "411": {
+            "description": "CONTENT_LENGTH_REQUIRED: exactly one Content-Length header with one to five ASCII decimal digits is required.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "CONTENT_LENGTH_REQUIRED"
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "REQUEST_TOO_LARGE: body length is zero or greater than 8192 bytes.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "REQUEST_TOO_LARGE"
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "JSON_BODY_REQUIRED: Content-Type must be application/json; a non-empty Transfer-Encoding header is rejected.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "JSON_BODY_REQUIRED"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "TARGET_CONFIGURATION_INVALID, EXECUTOR_UNAVAILABLE or API_UNAVAILABLE. The operator must inspect server-side configuration/state; this response does not establish a safe retry.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "API_UNAVAILABLE"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ansible/jobs/{request_id}": {
+      "get": {
+        "operationId": "getAnsibleJob",
+        "summary": "Read a job and reconcile available native completion evidence",
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/RequestId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current job, including failed, blocked and unknown outcomes. A non-active interrupted job may be reconciled against matching native completion evidence; GET never dispatches an executor.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "description": "JOB_NOT_FOUND for an absent request. Malformed IDs, query strings, trailing slashes and other unsupported GET/POST paths return NOT_FOUND after authentication.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "JOB_NOT_FOUND"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "API_UNAVAILABLE: a server-side read or reconciliation failure.",
+            "headers": {
+              "Cache-Control": {
+                "$ref": "#/components/headers/NoStore"
+              },
+              "X-Content-Type-Options": {
+                "$ref": "#/components/headers/NoSniff"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPError"
+                },
+                "example": {
+                  "error": {
+                    "code": "API_UNAVAILABLE"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "operatorBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Operator token read from an owner-only local file, 32..512 ASCII characters matching [A-Za-z0-9._~-]. Opaque shared token, not JWT or OAuth. Send exactly one Authorization header with the case-sensitive Bearer prefix; comparison is constant-time."
+      }
+    },
+    "headers": {
+      "NoStore": {
+        "schema": {
+          "type": "string",
+          "const": "no-store"
+        }
+      },
+      "NoSniff": {
+        "schema": {
+          "type": "string",
+          "const": "nosniff"
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "UNAUTHORIZED: exactly one Authorization header with the exact Bearer prefix and matching operator token is required.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          },
+          "X-Content-Type-Options": {
+            "$ref": "#/components/headers/NoSniff"
+          },
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string",
+              "const": "Bearer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPError"
+            },
+            "example": {
+              "error": {
+                "code": "UNAUTHORIZED"
+              }
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "HOST_NOT_ALLOWED or ORIGIN_NOT_ALLOWED. Host and Origin checks run before token authentication.",
+        "headers": {
+          "Cache-Control": {
+            "$ref": "#/components/headers/NoStore"
+          },
+          "X-Content-Type-Options": {
+            "$ref": "#/components/headers/NoSniff"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HTTPError"
+            },
+            "example": {
+              "error": {
+                "code": "HOST_NOT_ALLOWED"
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "RequestId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      },
+      "Operation": {
+        "type": "string",
+        "enum": [
+          "guest.check",
+          "runtime.install"
+        ]
+      },
+      "JobRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "target_id",
+          "operation"
+        ],
+        "properties": {
+          "request_id": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Operator-registered AWS/GCP target alias. Any unregistered string returns 404 TARGET_NOT_REGISTERED."
+          },
+          "operation": {
+            "$ref": "#/components/schemas/Operation"
+          }
+        },
+        "description": "Only these three fields are accepted. The server resolves descriptors, SSH references and timeouts from its private target registry."
+      },
+      "JobError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "outcome_unknown"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z_]{1,64}$"
+          },
+          "outcome_unknown": {
+            "type": "boolean",
+            "description": "True means the remote outcome has not been established; do not blindly retry."
+          }
+        }
+      },
+      "JobResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "guest_ready",
+          "runtime_ready",
+          "application_ready",
+          "public_http_verified",
+          "replayed",
+          "stage"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "invalid",
+              "blocked",
+              "failed"
+            ],
+            "description": "Native executor status. invalid maps to outer job status failed; an uncertain error maps to outer status unknown."
+          },
+          "guest_ready": {
+            "type": "boolean"
+          },
+          "runtime_ready": {
+            "type": "boolean"
+          },
+          "application_ready": {
+            "type": "boolean",
+            "const": false
+          },
+          "public_http_verified": {
+            "type": "boolean",
+            "const": false
+          },
+          "replayed": {
+            "type": "boolean",
+            "description": "Copied from the native executor result. Repeating an HTTP POST returns the stored result and does not automatically set this field to true."
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "validation",
+              "executor_preflight",
+              "guest",
+              "runtime",
+              "unknown"
+            ]
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "target_id",
+          "operation",
+          "status",
+          "created_at",
+          "updated_at",
+          "result",
+          "error"
+        ],
+        "properties": {
+          "request_id": {
+            "$ref": "#/components/schemas/RequestId"
+          },
+          "target_id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/Operation"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "blocked",
+              "unknown"
+            ]
+          },
+          "created_at": {
+            "type": "number",
+            "format": "double",
+            "description": "Unix epoch seconds, including fractional seconds."
+          },
+          "updated_at": {
+            "type": "number",
+            "format": "double",
+            "description": "Unix epoch seconds, including fractional seconds; may change during reconciliation."
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "description": "A successful job proves only the requested guest/runtime readiness, never application deployment or public HTTP availability."
+      },
+      "HTTPError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^[A-Z_]{1,64}$"
+              }
+            }
+          }
+        },
+        "description": "Request-level error, distinct from Job.error. No native logs, credentials or private filesystem paths are exposed."
+      }
+    }
+  }
+}
