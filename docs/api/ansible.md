@@ -162,7 +162,8 @@ runtime 실행 실패·시간 초과·확인 기록 부재에서는 일부 원�
 
 | 검증 | 결과 |
 |---|---|
-| stdlib unittest 25개 | 통과. 기존 receipt·guest/runtime 실패 경계, descriptor 변환·transport/resource 불일치·native argv·터널 종료·영속 중복 방지·잠금·중단 작업 차단을 확인했습니다. HTTP 접수→상태 조회, 인증·등록 target 제한, 재시작 후 증거 대조, 실제 CLI의 SSH 실행 전 차단도 포함합니다. |
+| stdlib unittest 26개 | 통과. 기존 receipt·guest/runtime 실패 경계, descriptor 변환·transport/resource 불일치·native argv·터널 종료·영속 중복 방지·잠금·중단 작업 차단을 확인했습니다. HTTP 접수→상태 조회, 인증·등록 target 제한, 재시작 후 증거 대조, 실제 CLI의 SSH 실행 전 차단, OpenAPI 예제와 실제 HTTP 응답 대조도 포함합니다. |
+| `ansible.openapi.json` | OpenAPI 3.1 구조 검증 통과 (`openapi-spec-validator`). 명세 파일 검증이며 실제 VM 실행 검증은 아님 |
 | `guest.yml`, `runtime.yml`, 기존 `site.yml` | Ansible syntax-check 통과 |
 | 현재 bootstrap/Cilium shell | 6개 `bash -n` 통과 |
 | locale | 초기 syntax-check의 호스트 locale 오류를 UTF-8 locale 명시로 해결. 어댑터도 자식 프로세스에 플랫폼별 UTF-8 locale을 지정 |
@@ -182,6 +183,40 @@ python3 -m unittest discover -s infrastructure/ansible -p 'test_*.py' -v
 
 이 HTTP 구현은 Ansible 준비 작업만 접수합니다. `apps/api`의 사용자 API와 아직 연결하지 않았으며, 외부 ALB에 공개하거나 사용자 로그인·tenant 권한을 대신 처리하지 않습니다. Terraform 생성과 Argo 적용도 여기서 시작하지 않습니다. 상위 제어 서비스는 Terraform이 완료한 descriptor를 운영자 target에 등록한 뒤 이 API를 호출할 수 있습니다.
 
+다음은 신규 작업 접수부터 준비 상태 조회까지의 데이터 흐름입니다.
+
+```mermaid
+%%{init: {'theme': 'default', 'themeVariables': {'fontFamily': 'Arial', 'fontSize': '13px', 'primaryColor': '#dbeafe', 'primaryBorderColor': '#3b82f6', 'primaryTextColor': '#1e293b', 'lineColor': '#6366F1'}}}%%
+sequenceDiagram
+    autonumber
+    participant C as 운영자 호출자
+    participant A as api.py / localhost
+    participant T as 등록 target JSON
+    participant S as 로컬 작업 기록
+    participant R as run.py / CLI
+    participant N as 대상 VM / Ansible
+    C->>A: POST jobs + Bearer<br>request_id, target_id, operation
+    A->>T: target_id 조회
+    T-->>A: descriptor + SSH 참조 + timeout
+    A->>A: CLI 요청 1.0 조립 + 입력 해시
+    A->>S: queued 기록 영속 저장
+    A-->>C: 202 + Location + 작업 문서
+    Note over A,R: 단일 worker가 비동기로 실행
+    A->>R: subprocess stdin JSON<br>target, inventory, timeout_seconds
+    R->>N: 사설 SSH 또는 SSM/IAP 위 SSH<br>guest.yml → 조건부 runtime.yml
+    N-->>R: request/target/node/stage/nonce receipt
+    R->>R: 바인딩·준비 상태 검증
+    R-->>A: stdout 결과 JSON + 종료 코드
+    A->>S: status + 공개 result/error 저장
+    C->>A: GET jobs/request_id + Bearer
+    A->>S: 작업 조회 · 필요 시 CLI 기록 대조
+    S-->>A: 저장된 작업 상태
+    A-->>C: 200 + 작업 문서
+    Note over C,N: succeeded는 guest/runtime 준비<br>앱 배포·공개 HTTPS·DB 준비는 별도
+```
+
+기계가독 명세는 [Ansible OpenAPI 3.1 JSON](ansible.openapi.json)입니다. Swagger 등 OpenAPI 3.1을 지원하는 도구에서 파일을 가져와 확인할 수 있습니다. 기존 [Ansible 요청 JSON Schema](../../contracts/ansible-request.schema.json)는 private CLI 입력용이며, HTTP 요청은 아래 세 필드만 받습니다. 서버는 `/openapi.json`이나 Swagger UI를 제공하지 않고 CORS·OPTIONS도 구현하지 않으므로 외부 문서 화면에서 직접 호출하는 방식은 지원하지 않습니다.
+
 운영자는 [등록 파일 예제](../../examples/ansible/api-targets.json)를 바탕으로 private 파일을 준비합니다. 등록 파일은 `version: 1`과 `targets` 맵을 가지며 각 target에는 `descriptor_file`, `ssh`, 선택적 `timeout_seconds`를 지정합니다. descriptor 파일과 SSH 접속 정보는 서버가 해석합니다. 등록 파일·descriptor·Bearer 파일은 실행기 소유이며 group/other 권한이 없어야 합니다. Bearer 파일은 32–512자의 무작위 ASCII 토큰을 담은 0600 파일로 준비합니다. 토큰·키 내용은 Git이나 요청 본문에 넣지 않습니다.
 
 ```bash
@@ -192,12 +227,14 @@ python3 infrastructure/ansible/api.py \
   --listen 127.0.0.1 --port 4180
 ```
 
-`--listen`은 `127.0.0.1`만 허용합니다. 모든 HTTP 요청은 `Authorization: Bearer …`로 인증하며, 값은 constant-time 방식으로 대조합니다. Host는 실제 포트의 `127.0.0.1` 또는 `localhost`, Origin은 없거나 동일 HTTP origin이어야 합니다. 임의 Proxy/Forwarded 헤더를 신뢰하지 않습니다. 같은 상태 디렉터리에서는 API 프로세스를 하나만 실행할 수 있습니다.
+`--listen`은 `127.0.0.1`만 허용하며 plain HTTP를 사용합니다. TLS/mTLS는 구현하지 않았고 기본 응답 프로토콜은 HTTP/1.0입니다. 구현된 POST/GET 요청은 정확히 하나의 `Authorization: Bearer …`로 인증하며, 값은 constant-time 방식으로 대조합니다. Host는 정확히 하나이며 `127.0.0.1:<실제 포트>` 또는 `localhost:<실제 포트>`여야 합니다. Origin은 없거나 정확히 하나의 `http://127.0.0.1:<실제 포트>` 또는 `http://localhost:<실제 포트>`여야 합니다. 임의 Proxy/Forwarded 헤더를 신뢰하지 않습니다. 같은 상태 디렉터리에서는 API 프로세스를 하나만 실행할 수 있습니다.
 
 | 요청 | 결과 |
 |---|---|
-| `POST /v1/ansible/jobs` | 정확히 `request_id`, `target_id`, `operation` 세 필드만 받음. 신규 접수는 영속 기록 후 202와 `Location` 반환 |
+| `POST /v1/ansible/jobs` | 정확히 `request_id`, `target_id`, `operation` 세 필드만 받음. 신규 접수 또는 동일한 queued/running 작업은 202와 `Location`, 그 외 동일 작업의 저장된 상태는 200 반환 |
 | `GET /v1/ansible/jobs/{request_id}` | 저장한 작업 상태와 검증한 readiness 조회. 설치를 새로 실행하지 않음 |
+
+경로는 정확히 일치해야 하며 query string이나 마지막 `/`를 붙이면 404입니다. 목록·취소·삭제 endpoint는 없습니다. POST/GET 외 메서드는 표준 라이브러리의 501 응답을 사용하며 아래 JSON 오류 형식의 대상이 아닙니다. POST 본문은 `application/json`이며 `Content-Length` 헤더 하나가 필요합니다. 그 값은 1–5자리 ASCII 숫자로 표현한 1–8192바이트여야 합니다. 값이 있는 `Transfer-Encoding`, JSON 중복 키, NaN·Infinity는 거부합니다.
 
 접수 본문 예시입니다.
 
@@ -222,9 +259,11 @@ with urlopen(Request(base + '/v1/ansible/jobs/' + job['request_id'], headers=hea
     print(json.load(response))
 ```
 
-한 번에 한 작업만 접수·실행합니다. 별도 무제한 대기열은 없으며 실행 중 다른 작업은 `409 EXECUTOR_BUSY`입니다. 같은 request ID와 같은 서버 측 입력은 현재 또는 저장된 결과를 반환합니다. 입력이 달라지면 `409 REQUEST_ID_CONFLICT`입니다. 같은 target의 미확정 작업이 남아 있으면 `409 TARGET_RECONCILE_REQUIRED`로 추가 변경을 막습니다.
+한 번에 한 작업만 접수·실행합니다. 별도 무제한 대기열은 없으며 실행 중 다른 작업은 `409 EXECUTOR_BUSY`입니다. 같은 request ID와 같은 서버 측 입력은 현재 또는 저장된 결과를 반환합니다. 비교 대상에는 서버가 확장한 descriptor·SSH 참조·timeout도 포함하며, 입력이 달라지면 `409 REQUEST_ID_CONFLICT`입니다. 같은 target의 미확정 작업이 남아 있으면 `409 TARGET_RECONCILE_REQUIRED`로 추가 변경을 막습니다. 동일한 HTTP 요청을 다시 보내도 CLI를 재실행하거나 저장된 `result.replayed`를 true로 바꾸지 않습니다.
 
-상태는 `queued`, `running`, `succeeded`, `failed`, `blocked`, `unknown`입니다. `succeeded`는 guest/runtime receipt 검증 완료이고 앱 배포 성공이 아닙니다. `result.application_ready`와 `result.public_http_verified`는 항상 false입니다. 인증 실패는 401, Host/Origin 거부는 403, 미등록 target·없는 작업은 404, 입력 오류는 400, 서버 측 등록·상태 저장 문제는 503으로 반환합니다. 접수한 작업이 나중에 실패해도 상태 조회 자체는 200이며 본문의 상태와 error를 확인해야 합니다.
+상태는 `queued`, `running`, `succeeded`, `failed`, `blocked`, `unknown`입니다. `created_at`과 `updated_at`은 소수 부분을 포함하는 Unix 초 숫자입니다. `succeeded`는 guest/runtime receipt 검증 완료이고 앱 배포 성공이 아닙니다. `result.application_ready`와 `result.public_http_verified`는 항상 false입니다. 인증 실패는 401, Host/Origin 거부는 403, 미등록 target·없는 작업은 404, 입력 오류는 400, 서버 측 등록·상태 저장 문제는 503으로 반환합니다. Content-Length 누락·형식 오류는 411, 0바이트 또는 8192바이트 초과는 413, 잘못된 Content-Type·Transfer-Encoding은 415입니다. 접수한 작업이 나중에 실패해도 상태 조회 자체는 200이며 본문의 상태와 error를 확인해야 합니다.
+
+요청 자체의 HTTP 오류는 `{"error":{"code":"UNAUTHORIZED"}}`처럼 코드만 갖습니다. 반면 접수된 작업의 `error`는 null 또는 `{"code":"WORKER_INTERRUPTED","outcome_unknown":true}`이고, `result`는 null 또는 실행기의 상태·readiness·stage·replayed입니다. JSON 응답에는 `Cache-Control: no-store`와 `X-Content-Type-Options: nosniff`, 401에는 `WWW-Authenticate: Bearer`를 함께 반환합니다.
 
 HTTP 작업 기록은 같은 상태 디렉터리의 `http-jobs/`에 저장하고 기존 `run.py`가 target/resource 잠금과 nonce receipt를 관리합니다. HTTP 오류는 코드만 반환하며 원문 예외·SSH 경로·credential·native stdout/stderr는 내보내지 않습니다. subprocess의 stderr는 운영자 전용 0600 로그에만 남깁니다. 기존 `storage.durable_write`를 사용하여 접수와 상태 변경을 영속화합니다.
 

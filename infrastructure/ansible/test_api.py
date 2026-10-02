@@ -146,6 +146,60 @@ class APIJourney(unittest.TestCase):
         finally:
             restarted.close()
 
+    def test_openapi_example_matches_local_http_contract(self):
+        spec = json.loads((api.ansible.ROOT / 'docs/api/ansible.openapi.json').read_text())
+        self.assertEqual(spec['openapi'], '3.1.0')
+        self.assertEqual(set(spec['paths']), {'/v1/ansible/jobs', '/v1/ansible/jobs/{request_id}'})
+        self.assertEqual(spec['security'], [{'operatorBearer': []}])
+        post = spec['paths']['/v1/ansible/jobs']['post']
+        schemas = spec['components']['schemas']
+        body = post['requestBody']['content']['application/json']['example']
+        self.assertEqual(set(body), set(schemas['JobRequest']['required']))
+        server, thread = self.server()
+        try:
+            status, accepted, location = self.request(server, 'POST', '/v1/ansible/jobs', body)
+            self.assertEqual(status, 202)
+            self.assertIn(str(status), post['responses'])
+            self.assertEqual(location, '/v1/ansible/jobs/' + body['request_id'])
+            self.assertEqual(set(accepted), set(schemas['Job']['required']))
+            self.assertIsInstance(accepted['created_at'], float)
+            self.assertIsInstance(accepted['updated_at'], float)
+            self.release.set()
+            deadline = time.monotonic() + 3
+            while True:
+                _, completed, _ = self.request(server, 'GET', location)
+                if completed['status'] not in ('queued', 'running') or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+            self.assertEqual(completed['status'], 'succeeded')
+            self.assertIn(completed['status'], schemas['Job']['properties']['status']['enum'])
+            self.assertEqual(set(completed['result']), set(schemas['JobResult']['required']))
+            for key, rule in schemas['JobResult']['properties'].items():
+                if rule['type'] == 'boolean':
+                    self.assertIs(type(completed['result'][key]), bool)
+                if 'enum' in rule:
+                    self.assertIn(completed['result'][key], rule['enum'])
+                if 'const' in rule:
+                    self.assertEqual(completed['result'][key], rule['const'])
+            repeated_status, repeated, _ = self.request(server, 'POST', '/v1/ansible/jobs', body)
+            self.assertEqual(repeated_status, 200)
+            self.assertEqual(repeated, completed)
+            self.assertFalse(repeated['result']['replayed'])
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(set(schemas['HTTPError']['properties']['error']['required']), {'code'})
+            for path in (location + '/', location + '?poll=1'):
+                self.assertEqual(self.request(server, 'GET', path)[:2], (404, {'error': {'code': 'NOT_FOUND'}}))
+            for headers, expected_status, code in (
+                    ({'Content-Type': 'text/plain'}, 415, 'JSON_BODY_REQUIRED'),
+                    ({'Content-Length': '0'}, 413, 'REQUEST_TOO_LARGE'),
+                    ({'Content-Length': 'invalid'}, 411, 'CONTENT_LENGTH_REQUIRED')):
+                with self.subTest(status=expected_status):
+                    self.assertEqual(self.request(server, 'POST', '/v1/ansible/jobs', body, headers=headers)[:2],
+                                     (expected_status, {'error': {'code': code}}))
+                    self.assertIn(str(expected_status), post['responses'])
+        finally:
+            self.release.set(); server.shutdown(); server.server_close(); thread.join(2)
+
     def test_real_cli_subprocess_blocks_bad_key_permissions_before_cloud_calls(self):
         jobs = api.Jobs(self.root / 'targets.json', self.root / 'state', executor=self.executor)
         try:
