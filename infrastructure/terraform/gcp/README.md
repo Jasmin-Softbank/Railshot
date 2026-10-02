@@ -1,6 +1,6 @@
 # GCP 호스트 준비
 
-이 module은 Ubuntu 24.04 amd64 VM 한 대, 전용 VPC/subnet, 정적 IP, 역할 없는 service account와 별도 데이터 disk를 구성한다. 팀 K3s/Cilium·Ansible·CD·DB 구현은 설치하지 않는다. 현재 역할은 [저장소 README](../../../README.md), 공통 실행·보존 계약은 [infra README](../../README.md)를 따른다.
+이 module은 고객용 Ubuntu 24.04 amd64 VM 한 대, 전용 VPC/subnet, 정적 IP, 역할 없는 service account와 별도 데이터 disk를 구성한다. 팀 K3s/Cilium·Ansible·CD·DB 구현은 설치하지 않는다. 운영 CI/CD 서버와 별개이며 현재 역할은 [저장소 README](../../../README.md), 공통 실행·보존 계약은 [Terraform 도구](../../providers/terraform_tools/README.md)를 따른다.
 
 `project_id`, region/zone, target/owner, 정확한 공개 Ubuntu image를 명시한다. image family는 거부한다. 계정·billing·API 활성화와 quota는 module 외부 관리자 준비 사항이며 credential은 입력이나 metadata에 넣지 않는다. `node_repo`, `node_ref`, public bundle, GitOps 입력은 제거했다. 기존 target 설정에서도 해당 입력을 정리한다.
 
@@ -12,13 +12,16 @@ cloud-init은 Ubuntu apt source를 HTTPS로 바꾸고 디스크 도구를 설치
 
 HTTP/HTTPS ingress는 기본 닫힘이다. IAP SSH도 별도 opt-in이며 `35.235.240.0/20`의 TCP22만 허용하고 OS Login/IAP 권한을 따로 준비한다. host egress는 TCP443 허용 후 나머지를 deny한다. Google metadata DNS/NTP의 플랫폼 예외는 남으므로 tenant 격리는 팀 guest 정책의 책임이다. registry OAuth scope는 기본 없고, opt-in 시 read-only scope만 추가한다. 실제 repository IAM은 별도다. 정적 공인 IP는 egress에 사용되며 정지 후에도 보존 비용이 남는다.
 
+자동 관리용으로 `allow_iap_ssh: true`, `operator_ssh_public_key`에 공개키 한 줄을 지정하면 첫 부팅에 잠긴 암호와 noninteractive sudo를 가진 `railshot-operator`를 만들고 해당 VM의 OS Login을 끈다. 공개키를 지정하지 않으면 기존 OS Login 방식을 유지한다. private key는 입력하지 않는다. IAP 터널 권한과 신뢰한 SSH host key 검증은 별도로 필요하며 `node_descriptor.transport_ref`는 기존 `iap:<project>/<zone>/<name>` 형식이다. 기존 VM의 metadata 변경만으로 사용자·키가 다시 설치되지는 않는다.
+
+AWS 운영 노드와 WireGuard를 연결할 때 `wireguard_peer_public_cidrs: ["<운영 AWS 공인 IP>/32"]`를 지정한다. 명시한 최대 4개 IPv4 endpoint에 대해서만 UDP51820 ingress/egress가 열린다. 기본은 빈 목록이다. 터널 설치, private key, peer AllowedIPs, 전달·라우팅·Cilium 설정은 별도 guest 관리 작업이며 Terraform `wireguard.readiness`는 `unconfigured`다. `allow_http`와 `allow_https`는 계속 false로 두고 외부 앱 경로는 AWS edge와 터널을 통해 구성한다.
+
 `max_run_duration_seconds`는 기본 null이다. 설정하면 매 start마다 지정 기간 후 STOP, `automatic_restart = false`를 적용한다. 작업 drain·절대 예산 cap·disk/IP 삭제는 수행하지 않는다. `desired_status`를 강제하지 않고 `allow_stopping_for_update = false`를 유지한다. cutoff를 다른 reconciler가 다시 시작하지 않도록 운영자가 확인해야 한다. [GCP runtime limits](https://docs.cloud.google.com/compute/docs/instances/limit-vm-runtime).
 
 오프라인 확인:
 
 ```sh
-python3 infra/terraform/gcp/test_bootstrap.py
-python3 -m unittest discover -s infra/terraform -p test_egress.py
+uv run --python 3.13 --with pyyaml python infrastructure/terraform/gcp/test_bootstrap.py
 ```
 
-검사는 임시 source-only 디렉터리의 Terraform console, YAML, `bash -n` 및 임시 apt 파일만 사용한다. 계정·provider·state를 읽거나 guest 명령을 실행하지 않는다. 실제 apply는 [관리자 실행 절차](../../README.md)에 따라 saved plan을 검토한 뒤 별도로 수행한다. 생성 후 project/zone/image/SA/network/disk ID, cloud-init 결과와 실제 mount UUID를 확인해야 하며 team runtime readiness는 별도 증거가 필요하다.
+검사는 임시 source-only 디렉터리의 Terraform console, YAML 및 `bash -n`만 사용한다. 계정·provider·state를 읽거나 guest 명령을 실행하지 않는다. 실제 apply는 [관리자 실행 절차](../../providers/terraform_tools/README.md)에 따라 saved plan을 검토한 뒤 별도로 수행한다. 생성 후 project/zone/image/SA/network/disk ID, cloud-init 결과와 실제 mount UUID를 확인해야 하며 team runtime readiness는 별도 증거가 필요하다.

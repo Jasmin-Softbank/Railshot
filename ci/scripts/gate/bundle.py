@@ -230,7 +230,75 @@ def skopeo_archive(archive, image_id):
         return f'docker-archive:{archive}:@0', image_id, None
 
 
-def publish(bundle, registry_prefix, tag, *, journal_dir=None, reconcile=False, backend="docker", authfile=None):
+def publication_binding(bundle, registry_prefix, tag, backend, release_context=None):
+    binding = {"manifest_sha256": file_hash(Path(bundle) / "manifest.json"),
+               "registry_prefix": registry_prefix, "tag": tag}
+    if backend != "docker":
+        binding["backend"] = backend
+    if release_context is not None:
+        binding["release"] = release_context
+    return binding
+
+
+def github_recovery(bundle, registry_prefix, tag, journal_dir, history_path, journals_dir, env):
+    """Restore this run's journal; incomplete native history can only permit readback.
+
+    History and journals come from authenticated GitHub Actions for this run, never
+    the app checkout. No registry credential is read or written here.
+    """
+    context = {"repository": env["GITHUB_REPOSITORY"], "run_id": int(env["GITHUB_RUN_ID"]),
+               "source_commit": env["SOURCE_COMMIT"], "bundle_artifact_id": int(env["BUNDLE_ARTIFACT_ID"]),
+               "target_id": env["TARGET_ID"], "platform_ref": env["PLATFORM_REF"]}
+    attempt = int(env["GITHUB_RUN_ATTEMPT"])
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", context["repository"]) and
+            re.fullmatch(r"[a-f0-9]{40}", context["source_commit"]) and
+            re.fullmatch(r"[a-f0-9]{40}", context["platform_ref"]) and
+            re.fullmatch(r"[a-z][a-z0-9-]{0,62}", context["target_id"]) and
+            env["GITHUB_SHA"] == context["source_commit"] and
+            min(attempt, context["run_id"], context["bundle_artifact_id"]) > 0,
+            "invalid GitHub release binding")
+    pages = json.loads(Path(history_path).read_bytes())
+    require(isinstance(pages, list) and all(isinstance(p, dict) and isinstance(p.get("jobs"), list)
+                                           for p in pages), "invalid GitHub job history")
+    covered, readback_only = set(), False
+    for job in (job for page in pages for job in page["jobs"]):
+        require(job["run_id"] == context["run_id"] and job["head_sha"] == context["source_commit"],
+                "GitHub job/source binding differs")
+        number = job["run_attempt"]
+        require(type(number) is int and 1 <= number <= attempt, "invalid GitHub job attempt")
+        if number == attempt:
+            continue
+        covered.add(number)
+        if job.get("name") != "release":
+            continue
+        steps = [s for s in job.get("steps", []) if s.get("name") == "Verify bundle and publish tested images"]
+        # Only an explicitly skipped publisher proves that this attempt never pushed.
+        if len(steps) != 1 or steps[0].get("conclusion") != "skipped":
+            readback_only = True
+    readback_only |= covered != set(range(1, attempt))
+    candidates = []
+    for path in Path(journals_dir).iterdir():
+        match = re.fullmatch(r"publish-journal-([1-9][0-9]*)", path.name)
+        require(match and not path.is_symlink() and path.is_dir(), "invalid recovered journal directory")
+        number = int(match[1])
+        require(number < attempt and {p.name for p in path.iterdir()} == {"publish.json"},
+                "invalid recovered journal attempt or files")
+        candidates.append((number, path / "publish.json"))
+    if candidates:
+        _, source = max(candidates)
+        file_hash(source)  # Reject links and special files before reading the trusted artifact.
+        state = json.loads(source.read_bytes())
+        require(state.get("binding") == publication_binding(bundle, registry_prefix, tag, "docker", context),
+                "recovered publish journal binding differs")
+        directory = private_directory(journal_dir)
+        require(not (directory / "publish.json").exists(), "recovery cannot overwrite a local journal")
+        durable_write(directory / "publish.json", source.read_bytes())
+        readback_only = True
+    return context, readback_only
+
+
+def publish(bundle, registry_prefix, tag, *, journal_dir=None, reconcile=False, backend="docker", authfile=None,
+            release_context=None, readback_only=False):
     require(isinstance(registry_prefix, str) and len(registry_prefix) <= 220 and
             re.fullmatch(REPO, registry_prefix) and "/" in registry_prefix and
             ("." in registry_prefix.split("/")[0] or ":" in registry_prefix.split("/")[0] or registry_prefix.startswith("localhost/")),
@@ -256,20 +324,26 @@ def publish(bundle, registry_prefix, tag, *, journal_dir=None, reconcile=False, 
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         journal = directory / "publish.json"
-        binding = {"manifest_sha256": file_hash(Path(bundle) / "manifest.json"),
-                   "registry_prefix": registry_prefix, "tag": tag}
-        if backend != "docker":
-            binding["backend"] = backend
+        binding = publication_binding(bundle, registry_prefix, tag, backend, release_context)
         state = json.loads(journal.read_bytes()) if journal.exists() else {"binding": binding, "images": {}}
-        require(state["binding"] == binding, "publish journal binding differs")
+        require(set(state) == {"binding", "images"} and state["binding"] == binding,
+                "publish journal binding differs")
+        require(isinstance(state["images"], dict) and set(state["images"]) <= set(manifest["images"]),
+                "publish journal services differ")
         for svc, item in manifest["images"].items():
             repository = f"{registry_prefix}-{svc}"
             target = f"{repository}:{tag}"
             previous = state["images"].get(svc, {})
+            if previous:
+                require(previous.get("target") == target and previous.get("image_id") == item["id"] and
+                        previous.get("outcome") in {"PASS", "UNKNOWN"}, "publish journal image binding differs")
             if previous.get("outcome") == "PASS":
+                require(isinstance(previous.get("digest"), str) and
+                        re.fullmatch(re.escape(repository) + "@" + ID, previous["digest"]),
+                        "publish journal digest differs")
                 continue
-            uncertain = bool(previous)
-            if uncertain and not reconcile:
+            uncertain = bool(previous) or readback_only
+            if uncertain and not (reconcile or readback_only):
                 raise OperationError("PUBLISH_OUTCOME_UNKNOWN", component="publish", phase="resume",
                                      outcome="UNKNOWN", retry_policy="after_reconcile", side_effect="unknown")
             state["images"][svc] = {"target": target, "image_id": item["id"], "outcome": "UNKNOWN"}
@@ -328,13 +402,21 @@ def main():
     pub.add_argument("--reconcile", action="store_true", help="read back uncertain remote tags; never re-push them")
     pub.add_argument("--backend", choices=("docker", "skopeo"), default="docker")
     pub.add_argument("--authfile", type=Path, help="private publisher-owned skopeo authfile; never a CI input")
+    pub.add_argument("--github-history", type=Path, help="authenticated same-run paginated GitHub job history")
+    pub.add_argument("--github-journals", type=Path, help="same-run publish-journal artifacts, kept in named directories")
     args = parser.parse_args()
     try:
         if args.command == "publish" and args.output:
             require(not args.output.exists() and not args.output.is_symlink() and args.output.parent.is_dir(), "output receipt path must be new with an existing parent")
+        context, readback_only = None, False
+        if args.command == "publish" and (args.github_history or args.github_journals):
+            require(args.github_history and args.github_journals and args.journal_dir and args.backend == "docker",
+                    "GitHub recovery requires history, journals and an explicit Docker journal directory")
+            context, readback_only = github_recovery(args.bundle, args.registry_prefix, args.tag, args.journal_dir,
+                                                    args.github_history, args.github_journals, os.environ)
         result = export(args.workspace, args.verdict, args.outdir) if args.command == "export" else publish(
             args.bundle, args.registry_prefix, args.tag, journal_dir=args.journal_dir, reconcile=args.reconcile,
-            backend=args.backend, authfile=args.authfile)
+            backend=args.backend, authfile=args.authfile, release_context=context, readback_only=readback_only)
         encoded = json.dumps(result, indent=2) + "\n"
         if args.command == "publish" and args.output:
             durable_write(args.output, encoded.encode())

@@ -15,7 +15,8 @@ locals {
     automatic_restart           = false
   }
   cloud_init = templatefile("${path.module}/cloud-init.yaml.tftpl", {
-    bootstrap_manifest = jsonencode({ method = "host-preparation-only", runtime_status = "not_configured" })
+    operator_ssh_public_key = var.operator_ssh_public_key
+    bootstrap_manifest      = jsonencode({ method = "host-preparation-only", runtime_status = "not_configured" })
     host_config = yamlencode({
       name           = var.name
       node_name      = coalesce(var.node_name, var.name)
@@ -147,7 +148,7 @@ resource "google_compute_instance" "node" {
   }
   metadata = {
     "block-project-ssh-keys" = "true"
-    "enable-oslogin"         = "true"
+    "enable-oslogin"         = var.operator_ssh_public_key == null ? "true" : "false"
     "serial-port-enable"     = "false"
     "user-data"              = local.cloud_init
   }
@@ -191,4 +192,33 @@ resource "google_compute_firewall" "host_deny_other" {
   target_service_accounts = [google_service_account.node.email]
   deny { protocol = "all" }
   log_config { metadata = "EXCLUDE_ALL_METADATA" }
+}
+
+# Only the explicitly registered gateway endpoint(s) may exchange WireGuard UDP.
+# Keys, peer routes and runtime configuration belong to the guest management step.
+resource "google_compute_firewall" "wireguard_ingress" {
+  count                   = length(var.wireguard_peer_public_cidrs) == 0 ? 0 : 1
+  name                    = "${var.name}-wireguard-in"
+  network                 = google_compute_network.node.name
+  direction               = "INGRESS"
+  source_ranges           = var.wireguard_peer_public_cidrs
+  target_service_accounts = [google_service_account.node.email]
+  allow {
+    protocol = "udp"
+    ports    = ["51820"]
+  }
+}
+
+resource "google_compute_firewall" "wireguard_egress" {
+  count                   = length(var.wireguard_peer_public_cidrs) == 0 ? 0 : 1
+  name                    = "${var.name}-wireguard-out"
+  network                 = google_compute_network.node.name
+  direction               = "EGRESS"
+  priority                = 1000
+  destination_ranges      = var.wireguard_peer_public_cidrs
+  target_service_accounts = [google_service_account.node.email]
+  allow {
+    protocol = "udp"
+    ports    = ["51820"]
+  }
 }

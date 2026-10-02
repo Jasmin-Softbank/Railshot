@@ -1,5 +1,7 @@
 """Offline boundary tests: fake receipts are local test fixtures, not deployment evidence."""
 import copy
+import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -8,9 +10,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 spec = importlib.util.spec_from_file_location('railshot_ansible', HERE / 'run.py')
 adapter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter)
@@ -21,6 +24,8 @@ class AdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        state = patch.object(adapter, 'STATE_DIR', Path(self.temp.name) / 'state')
+        state.start(); self.addCleanup(state.stop)
         self.request = json.loads((ROOT / 'examples/ansible/runtime-single-node.json').read_text())
         for name, field in [('identity', 'identity_file'), ('known_hosts', 'known_hosts_file')]:
             p = Path(self.temp.name) / name
@@ -161,6 +166,88 @@ class AdapterTests(unittest.TestCase):
     def test_real_local_process_timeout(self):
         with self.assertRaises(subprocess.TimeoutExpired):
             adapter.execute([sys.executable, '-c', 'import time; time.sleep(30)'], 0.05, adapter.child_env())
+
+    def test_native_cloud_tunnels_preserve_host_identity_and_ignore_shell(self):
+        from transport import tunnel_command, transport_parts
+        aws = tunnel_command('ssm:ap-northeast-2:i-0123456789abcdef0', 50222)
+        self.assertEqual(aws[:3], ['aws', 'ssm', 'start-session'])
+        self.assertEqual(json.loads(aws[-1]), {'portNumber': ['22'], 'localPortNumber': ['50222']})
+        gcp = tunnel_command('iap:railshot-demo/asia-northeast3-a/railshot-gcp', 50223)
+        self.assertEqual(gcp[:3], ['gcloud', 'compute', 'start-iap-tunnel'])
+        self.assertIn('127.0.0.1:50223', gcp)
+        for value in ('ssh:host', 'ssm:ap-northeast-2:i-01234567;echo', 'iap:p/z/host --command x'):
+            with self.assertRaises(ValueError):
+                transport_parts(value)
+        host = adapter.build_inventory(self.request, 50222)['all']['children']['k3s_server']['hosts']['demo-cp']
+        self.assertEqual((host['ansible_host'], host['ansible_port']), ('127.0.0.1', 50222))
+        self.assertIn('HostKeyAlias=10.77.0.10', host['ansible_ssh_common_args'])
+        self.assertIn('ProxyCommand=none', host['ansible_ssh_common_args'])
+
+    def test_cloud_tunnel_is_closed_when_the_playbook_raises(self):
+        import transport
+        process = MagicMock(pid=12345)
+        process.poll.return_value = None
+        with patch.object(transport.shutil, 'which', side_effect=lambda name: '/trusted/' + name), \
+                patch.object(transport.subprocess, 'Popen', return_value=process) as start, \
+                patch.object(transport.socket, 'create_connection'), patch.object(transport.os, 'killpg') as stop:
+            with self.assertRaises(RuntimeError):
+                with transport.forwarded_port('ssm:ap-northeast-2:i-0123456789abcdef0', transport.time.monotonic() + 30) as port:
+                    self.assertGreater(port, 0)
+                    raise RuntimeError('playbook fixture')
+        stop.assert_called_once_with(12345, transport.signal.SIGTERM)
+        self.assertEqual(start.call_args.kwargs['env']['AWS_PAGER'], '')
+
+    def test_terraform_descriptors_only_convert_bound_cloud_references(self):
+        ssh = self.request['inventory']['control_plane'][0]['ssh']
+        for provider in ('aws', 'gcp'):
+            descriptor = json.loads((ROOT / f'examples/ansible/{provider}-node-descriptor.json').read_text())
+            request = adapter.from_descriptor(descriptor, request_id='descriptor-test', operation='runtime.install', ssh=ssh)
+            self.assertEqual(adapter.run(request, validate_only=True)['status'], 'validated')
+            self.assertEqual(request['target']['architecture'], 'amd64')
+            request['inventory']['control_plane'][0]['resource_id'] = 'another-vm'
+            self.assertEqual(adapter.run(request, validate_only=True)['status'], 'invalid')
+            descriptor['transport_ref'] = None
+            with self.assertRaises(ValueError):
+                adapter.from_descriptor(descriptor, request_id='descriptor-test', operation='guest.check', ssh=ssh)
+
+    def test_persistent_request_prevents_reexecution_and_changed_inputs(self):
+        with patch.object(adapter.shutil, 'which', return_value='/trusted/ansible-playbook'):
+            first = adapter.run(self.request, runner=self.runner)
+            second = adapter.run(self.request, runner=lambda *_: self.fail('must not repeat'))
+            self.assertFalse(first['replayed']); self.assertTrue(second['replayed'])
+            self.assertEqual({**first, 'replayed': True}, second)
+            self.assertEqual(first['steps'][1]['receipt']['stage'], 'runtime')
+            self.assertEqual(len(self.commands), 2)
+            self.request['timeout_seconds'] -= 1
+            result = adapter.run(self.request, runner=lambda *_: self.fail('must not run'))
+        self.assertEqual(result['error']['code'], 'REQUEST_ID_CONFLICT')
+
+    def test_incomplete_job_and_busy_target_do_not_start_ssh(self):
+        adapter.STATE_DIR.mkdir(mode=0o700)
+        identity = 'target:' + self.request['target']['id']
+        lock_path = adapter.STATE_DIR / (hashlib.sha256(identity.encode()).hexdigest() + '.lock')
+        with lock_path.open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = adapter.run(self.request, runner=lambda *_: self.fail('must not run'))
+        self.assertEqual(result['error']['code'], 'TARGET_BUSY')
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt()
+        with patch.object(adapter.shutil, 'which', return_value='/trusted/ansible-playbook'):
+            with self.assertRaises(KeyboardInterrupt):
+                adapter.run(self.request, runner=interrupted)
+            result = adapter.run(self.request, runner=lambda *_: self.fail('must not retry'))
+        self.assertEqual(result['error']['code'], 'PREVIOUS_OUTCOME_UNKNOWN')
+        self.assertTrue(result['error']['outcome_unknown'])
+
+    def test_runtime_uses_native_scripts_and_shared_lock_without_application(self):
+        playbook = (HERE / 'runtime.yml').read_text()
+        for path in ('bootstrap/preflight.sh', 'bootstrap/install-k3s.sh', 'cilium/install.sh',
+                     'bootstrap/health.sh', 'cilium/health.sh', '/run/railshot-deployment.lock'):
+            self.assertIn(path, playbook)
+        for old in ('/runtime.sh', 'deploy-sample', 'metadata.name == k3s_node_name'):
+            self.assertNotIn(old, playbook)
+        self.assertIn('InternalIP', playbook)
+        self.assertIn('nodeInfo.architecture', playbook)
 
 
 if __name__ == '__main__':

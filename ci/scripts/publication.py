@@ -12,6 +12,18 @@ import tempfile
 
 
 DNS_LABEL = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+TARGET_ID = r'[a-z][a-z0-9-]{0,62}'
+
+
+def validate_target(env):
+    """Workflow targets come only from the operator allowlist, never app input."""
+    raw = env.get('CONFIGURED_TARGETS', '')
+    targets = json.loads(raw) if raw else [env.get('CONFIGURED_TARGET', '')]
+    if not isinstance(targets, list) or not targets or not all(
+            isinstance(target, str) and re.fullmatch(TARGET_ID, target) for target in targets):
+        raise ValueError('operator target allowlist must contain valid target IDs')
+    if len(targets) != len(set(targets)) or env.get('TARGET_ID') not in targets:
+        raise ValueError('target is not in the operator-configured allowlist')
 
 
 def validate_registry(registry, images_sha256):
@@ -79,7 +91,7 @@ def prepare(bundle, images, output, env):
     bundle, images, output = Path(bundle), Path(images), Path(output)
     fields = {'source_commit': env['SOURCE_COMMIT'], 'target_id': env['TARGET_ID'],
               'tenant': env['TENANT'], 'app': env['APP']}
-    for key, pattern in {'source_commit': r'[a-f0-9]{40}', 'target_id': r'[a-z][a-z0-9-]{0,62}',
+    for key, pattern in {'source_commit': r'[a-f0-9]{40}', 'target_id': TARGET_ID,
                          'tenant': r'[a-z0-9]{1,20}', 'app': r'[a-z][a-z0-9-]{1,28}[a-z0-9]'}.items():
         if not re.fullmatch(pattern, fields[key]):
             raise ValueError('invalid publication identity: ' + key)

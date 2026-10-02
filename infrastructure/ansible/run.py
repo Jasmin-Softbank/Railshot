@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
+import fcntl
+import hashlib
 import ipaddress
 import json
 import os
@@ -16,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from transport import forwarded_port, transport_parts
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -23,6 +27,7 @@ SCHEMA = ROOT / 'contracts/ansible-request.schema.json'
 PLAYBOOKS = {'guest': HERE / 'guest.yml', 'runtime': HERE / 'runtime.yml'}
 PRIVATE = tuple(ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 MAX_BYTES = 1024 * 1024
+STATE_DIR = Path.home() / '.local/state/railshot/ansible'
 
 
 class ContractError(ValueError):
@@ -89,6 +94,23 @@ def validate(request):
             p = Path(node['ssh'][field])
             if '..' in p.parts:
                 raise ContractError('ssh: parent traversal is not allowed')
+        reference = node['ssh'].get('transport_ref')
+        if reference is not None:
+            kind, *parts = transport_parts(reference)
+            if node['ssh']['port'] != 22:
+                raise ContractError('cloud tunnel: only guest SSH port 22 is supported')
+            if kind == 'ssm':
+                region, instance = parts
+                expected = f'arn:aws:ec2:{region}:'
+                if request['target']['provider'] != 'aws' or request['target']['placement'] != region or not (
+                        node['resource_id'] == instance or (node['resource_id'].startswith(expected)
+                        and node['resource_id'].endswith('/' + instance))):
+                    raise ContractError('SSM transport does not match the target resource')
+            else:
+                project, zone, instance = parts
+                if request['target']['provider'] != 'gcp' or request['target']['placement'] != zone or (
+                        node['resource_id'] != f'projects/{project}/zones/{zone}/instances/{instance}'):
+                    raise ContractError('IAP transport does not match the target resource')
     placements = request.get('patroni', {}).get('placements', [])
     seen = set()
     for placement in placements:
@@ -107,7 +129,7 @@ def base_result(request=None):
             'target_id': request.get('target', {}).get('id'), 'operation': request.get('operation'),
             'status': 'failed', 'stage': 'validation', 'guest_ready': False,
             'runtime_ready': False, 'application_ready': False, 'public_http_verified': False,
-            'steps': [], 'error': None}
+            'steps': [], 'replayed': False, 'error': None}
 
 
 def fail(result, status, code, message, *, unknown=False):
@@ -139,18 +161,20 @@ def private_file(path, *, identity=False):
         raise ContractError('SSH reference file permissions are too broad')
 
 
-def build_inventory(request):
+def build_inventory(request, forwarded=None):
     node = request['inventory']['control_plane'][0]
     ssh = node['ssh']
-    # Paths only allow simple absolute path characters. No ProxyCommand/config inheritance.
+    # A controller-owned localhost tunnel does not permit ProxyCommand/config inheritance.
     common = ('-F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none '
               '-o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null '
               '-o ProxyCommand=none -o ProxyJump=none -o ForwardAgent=no '
               '-o ClearAllForwardings=yes -o PasswordAuthentication=no '
               '-o KbdInteractiveAuthentication=no -o GSSAPIAuthentication=no '
               f'-o UserKnownHostsFile={ssh["known_hosts_file"]}')
-    host = {'ansible_host': node['private_ipv4'], 'ansible_user': ssh['user'],
-            'ansible_port': ssh['port'], 'ansible_connection': 'ssh',
+    if forwarded is not None:
+        common += f' -o HostKeyAlias={node["private_ipv4"]}'
+    host = {'ansible_host': '127.0.0.1' if forwarded is not None else node['private_ipv4'], 'ansible_user': ssh['user'],
+            'ansible_port': forwarded or ssh['port'], 'ansible_connection': 'ssh',
             'ansible_ssh_private_key_file': ssh['identity_file'],
             'ansible_ssh_common_args': common,
             'ansible_become_method': 'sudo',
@@ -193,10 +217,10 @@ def read_receipt(path, request, stage, nonce):
                 'stage': stage, 'nonce': nonce}
     if not isinstance(receipt, dict) or any(receipt.get(k) != v for k, v in expected.items()) or receipt.get(stage + '_ready') is not True:
         raise ContractError('Readiness receipt does not match this request and stage')
-    return receipt
+    return {**expected, stage + '_ready': True}
 
 
-def run(request, *, validate_only=False, runner=execute):
+def _run(request, *, validate_only=False, runner=execute):
     try:
         validate(request)
     except (ContractError, OSError, ValueError) as exc:
@@ -219,10 +243,15 @@ def run(request, *, validate_only=False, runner=execute):
     if not executable:
         return fail(result, 'blocked', 'ANSIBLE_UNAVAILABLE', 'ansible-playbook is not installed on the executor')
     deadline = time.monotonic() + request['timeout_seconds']
-    with tempfile.TemporaryDirectory(prefix='railshot-ansible-') as directory:
+    with ExitStack() as stack:
+        try:
+            forwarded = stack.enter_context(forwarded_port(node['ssh'].get('transport_ref'), deadline))
+        except (OSError, ValueError) as exc:
+            return fail(result, 'blocked', 'TRANSPORT_UNAVAILABLE', str(exc))
+        directory = stack.enter_context(tempfile.TemporaryDirectory(prefix='railshot-ansible-'))
         work = Path(directory)
         inventory = work / 'inventory.json'
-        inventory.write_text(json.dumps(build_inventory(request)))
+        inventory.write_text(json.dumps(build_inventory(request, forwarded)))
         inventory.chmod(0o600)
         for stage in ('guest', 'runtime') if request['operation'] == 'runtime.install' else ('guest',):
             result['stage'] = stage
@@ -252,12 +281,95 @@ def run(request, *, validate_only=False, runner=execute):
                 code = 'GUEST_CHECK_FAILED' if stage == 'guest' else 'RUNTIME_INSTALL_FAILED'
                 return fail(result, 'failed', code, 'Playbook failed; readiness was not established', unknown=stage == 'runtime')
             try:
-                read_receipt(receipt_path, request, stage, nonce)
+                result['steps'][-1]['receipt'] = read_receipt(receipt_path, request, stage, nonce)
             except ContractError as exc:
                 return fail(result, 'failed', 'READINESS_UNPROVEN', str(exc), unknown=stage == 'runtime')
             result[stage + '_ready'] = True
     result['status'] = 'succeeded'
     return result
+
+
+def run(request, *, validate_only=False, runner=execute, state_dir=None):
+    """Persist once-only request admission and lock both the logical and physical target."""
+    preview = _run(request, validate_only=True)
+    if validate_only or preview['status'] != 'validated':
+        return preview
+    result = base_result(request)
+    directory = Path(state_dir) if state_dir is not None else STATE_DIR
+    execution_started = False
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ContractError('State directory must be private and owned by the executor')
+        node = request['inventory']['control_plane'][0]
+        identities = ['target:' + request['target']['id'], 'resource:' + node['resource_id']]
+        with ExitStack() as stack:
+            for identity in sorted(identities):
+                path = directory / (hashlib.sha256(identity.encode()).hexdigest() + '.lock')
+                fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                lock = stack.enter_context(os.fdopen(fd, 'r+'))
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return fail(result, 'blocked', 'TARGET_BUSY', 'Another request owns this target')
+            path = directory / (hashlib.sha256(request['request_id'].encode()).hexdigest() + '.json')
+            digest = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            if path.exists() or path.is_symlink():
+                private_file(path, identity=True)
+                prior = json.loads(path.read_text())
+                if not isinstance(prior, dict) or set(prior) != {'request_sha256', 'result'}:
+                    raise ContractError('Invalid saved request record')
+                if prior.get('request_sha256') != digest:
+                    return fail(result, 'blocked', 'REQUEST_ID_CONFLICT', 'Request ID already names different inputs')
+                if prior.get('result') is not None:
+                    saved = prior['result']
+                    if not isinstance(saved, dict) or set(saved) != set(result) or saved.get('status') not in (
+                            'succeeded', 'invalid', 'blocked', 'failed') or saved.get('request_id') != request['request_id']:
+                        raise ContractError('Invalid saved request result')
+                    return {**prior['result'], 'replayed': True}
+                return fail(result, 'blocked', 'PREVIOUS_OUTCOME_UNKNOWN', 'Previous executor did not record completion; inspect target before a new request', unknown=True)
+            with open(path, 'x', encoding='utf-8') as stream:
+                os.chmod(path, 0o600)
+                json.dump({'request_sha256': digest, 'result': None}, stream)
+                stream.flush(); os.fsync(stream.fileno())
+            execution_started = True
+            result = _run(request, runner=runner)
+            temporary = path.with_suffix('.tmp')
+            with open(temporary, 'x', encoding='utf-8') as stream:
+                os.chmod(temporary, 0o600)
+                json.dump({'request_sha256': digest, 'result': result}, stream)
+                stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            return result
+    except (OSError, ValueError):
+        return fail(result, 'failed' if execution_started else 'blocked', 'JOB_RECORD_UNAVAILABLE',
+                    'Unable to read or persist the private job record',
+                    unknown=execution_started and request['operation'] == 'runtime.install')
+
+
+def from_descriptor(descriptor, *, request_id, operation, ssh, timeout_seconds=1200):
+    """Select configured Terraform references; never treat them as readiness observations."""
+    try:
+        if descriptor['schema_version'] != 'v1' or descriptor['execution_driver'] != 'terraform':
+            raise ContractError('Unsupported node descriptor version or execution driver')
+        provider = descriptor['provider_kind']
+        if provider not in ('aws', 'gcp') or descriptor['architecture'] != 'x86_64':
+            raise ContractError('Descriptor adapter supports AWS/GCP amd64 only')
+        reference = descriptor['transport_ref']
+        transport_parts(reference)
+        target = descriptor['target_id']
+        request = {'schema_version': '1.0', 'request_id': request_id, 'operation': operation,
+                   'target': {'id': target, 'provider': provider, 'os': 'linux', 'architecture': 'amd64',
+                              'placement': descriptor['location']['region' if provider == 'aws' else 'zone'],
+                              'initialization': 'cloud-init' if provider == 'aws' else 'preconfigured'},
+                   'inventory': {'control_plane': [{'id': target, 'resource_id': descriptor['resource_id'],
+                                  'private_ipv4': descriptor['addresses']['private'],
+                                  'ssh': {**ssh, 'port': 22, 'transport_ref': reference}}], 'workers': []},
+                   'timeout_seconds': timeout_seconds}
+        return validate(request)
+    except (KeyError, TypeError) as exc:
+        raise ContractError('Incomplete node descriptor or SSH reference') from exc
 
 
 def unique_pairs(pairs):
@@ -271,20 +383,34 @@ def unique_pairs(pairs):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--request', default='-', help='JSON file or - for stdin')
+    inputs = parser.add_mutually_exclusive_group()
+    inputs.add_argument('--request', default='-', help='JSON file or - for stdin')
+    inputs.add_argument('--node-descriptor', help='Terraform output -json node_descriptor file')
+    parser.add_argument('--request-id')
+    parser.add_argument('--operation', choices=('guest.check', 'runtime.install'), default='runtime.install')
+    parser.add_argument('--ssh-user')
+    parser.add_argument('--identity-file')
+    parser.add_argument('--known-hosts-file')
+    parser.add_argument('--timeout-seconds', type=int, default=1200)
+    parser.add_argument('--state-dir', type=Path, default=STATE_DIR)
     parser.add_argument('--validate-only', action='store_true', help='No SSH or file-reference checks; never marks readiness')
     args = parser.parse_args(argv)
     try:
-        if args.request == '-':
+        source = args.node_descriptor or args.request
+        if source == '-':
             raw = sys.stdin.buffer.read(MAX_BYTES + 1)
         else:
-            with open(args.request, 'rb') as stream:
+            with open(source, 'rb') as stream:
                 raw = stream.read(MAX_BYTES + 1)
         if len(raw) > MAX_BYTES:
             raise ContractError('Request exceeds 1 MiB')
         request = json.loads(raw, object_pairs_hook=unique_pairs,
                              parse_constant=lambda _: (_ for _ in ()).throw(ContractError('Non-finite JSON number')))
-        result = run(request, validate_only=args.validate_only)
+        if args.node_descriptor:
+            request = from_descriptor(request, request_id=args.request_id, operation=args.operation,
+                                      ssh={'user': args.ssh_user, 'identity_file': args.identity_file,
+                                           'known_hosts_file': args.known_hosts_file}, timeout_seconds=args.timeout_seconds)
+        result = run(request, validate_only=args.validate_only, state_dir=args.state_dir)
     except (OSError, ValueError, UnicodeError):
         result = fail(base_result(), 'invalid', 'INVALID_JSON', 'Unreadable, duplicate-key or invalid JSON request')
     print(json.dumps(result, separators=(',', ':')))

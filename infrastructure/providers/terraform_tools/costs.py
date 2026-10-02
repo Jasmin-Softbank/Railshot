@@ -10,7 +10,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -69,6 +69,10 @@ def azure_fields(row):
 def verify_source_scope(provider, rows, source_scope):
     if not isinstance(source_scope, str) or not source_scope:
         raise ValueError('source scope required')
+    if provider == 'aws':
+        if rows['account_id'] != source_scope:
+            raise ValueError('billing export source scope mismatch or missing')
+        return
     for row in rows:
         actual = ((row.get('project') or {}).get('id') if provider == 'gcp'
                   else azure_fields(row).get('subscriptionid'))
@@ -76,7 +80,70 @@ def verify_source_scope(provider, rows, source_scope):
             raise ValueError('billing export source scope mismatch or missing')
 
 
+def normalize_aws(snapshot, period):
+    """One account's complete CE query; request metadata is retained by the operator.
+
+    CE totals do not echo the account filter. Do not treat a bare response, a
+    service-filtered total, or an unfinished page as an account-wide snapshot.
+    """
+    if not isinstance(snapshot, dict) or set(snapshot) != {'account_id', 'request', 'response'}:
+        raise ValueError('AWS snapshot requires account_id, request and response')
+    account, request, response = (snapshot[k] for k in ('account_id', 'request', 'response'))
+    if not isinstance(account, str) or not re.fullmatch(r'[0-9]{12}', account):
+        raise ValueError('AWS snapshot requires a 12-digit account')
+    required = {'TimePeriod', 'Granularity', 'Metrics', 'Filter'}
+    if (not isinstance(request, dict) or not required <= set(request)
+            or set(request) - required - {'GroupBy'} or request.get('GroupBy')
+            or request['Granularity'] not in {'DAILY', 'MONTHLY'}
+            or request['Metrics'] != ['UnblendedCost']):
+        raise ValueError('AWS snapshot requires an ungrouped UnblendedCost query')
+    dimensions = request['Filter'].get('Dimensions') if isinstance(request['Filter'], dict) else None
+    if (not isinstance(request['Filter'], dict) or set(request['Filter']) != {'Dimensions'} or not isinstance(dimensions, dict)
+            or set(dimensions) - {'Key', 'Values', 'MatchOptions'}
+            or dimensions.get('Key') != 'LINKED_ACCOUNT' or dimensions.get('Values') != [account]
+            or dimensions.get('MatchOptions', ['EQUALS']) not in (['EQUALS'], ['CASE_SENSITIVE'], ['EQUALS', 'CASE_SENSITIVE'])):
+        raise ValueError('AWS query must filter exactly the registered linked account')
+    interval = request['TimePeriod']
+    try:
+        if set(interval) != {'Start', 'End'}:
+            raise ValueError('AWS time interval requires Start and End')
+        start, end = (date.fromisoformat(interval[k]) for k in ('Start', 'End'))
+        month_start = date.fromisoformat(period + '-01')
+        next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        if start != month_start or not start < end <= next_month:
+            raise ValueError('AWS query must cover this month from its first day')
+        if (not isinstance(response, dict) or response.get('NextPageToken') or response.get('GroupDefinitions')
+                or not isinstance(response.get('ResultsByTime'), list) or not response['ResultsByTime']):
+            raise ValueError('AWS response missing, grouped or incompletely paginated')
+        cursor, total, estimated, currency = start, Decimal(0), False, None
+        for result in response['ResultsByTime']:
+            first = date.fromisoformat(result['TimePeriod']['Start'])
+            last = date.fromisoformat(result['TimePeriod']['End'])
+            if first != cursor or not first < last <= end:
+                raise ValueError('AWS result periods must cover the query without gaps or overlaps')
+            if request['Granularity'] == 'DAILY' and last - first != timedelta(days=1):
+                raise ValueError('AWS daily result must cover exactly one day')
+            if result.get('Groups') or set(result['Total']) != {'UnblendedCost'} or type(result['Estimated']) is not bool:
+                raise ValueError('AWS response must contain explicit total and estimate status')
+            metric = result['Total']['UnblendedCost']
+            unit = metric['Unit']
+            if not isinstance(unit, str) or not re.fullmatch('[A-Z]{3}', unit) or currency not in (None, unit):
+                raise ValueError('AWS currency missing or inconsistent')
+            currency = unit
+            total += amount(metric['Amount'])
+            estimated |= result['Estimated']
+            cursor = last
+        if cursor != end:
+            raise ValueError('AWS result does not cover the complete query')
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError('malformed AWS cost query or response') from exc
+    return [{'resource_id': 'aws-account:' + account, 'currency': currency, 'cost': str(total),
+             'estimated': estimated, 'coverage_end': end.isoformat()}]
+
+
 def normalize(provider, rows, period):
+    if provider == 'aws':
+        return normalize_aws(rows, period)
     if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
         raise ValueError('export must be a complete JSON/CSV row list')
     if not re.fullmatch(r'\d{4}-\d{2}', period):
@@ -119,6 +186,11 @@ def import_snapshot(db, scope, provider, period, observed_at, rows, now=None, *,
     if observed > now:
         raise ValueError('future observation')
     normalized = normalize(provider, rows, period)
+    if provider == 'aws':
+        if source_scope is None:
+            raise ValueError('AWS source scope required')
+        if date.fromisoformat(normalized[0]['coverage_end']) < observed.date():
+            raise ValueError('AWS query coverage is stale at observation time')
     if source_scope is not None:
         verify_source_scope(provider, rows, source_scope)
     payload = json.dumps(normalized, sort_keys=True)
@@ -134,7 +206,8 @@ def import_snapshot(db, scope, provider, period, observed_at, rows, now=None, *,
             raise ValueError('conflicting snapshot at the same observation time')
         db.execute('INSERT OR REPLACE INTO snapshots (scope,provider,period,observed_at,checksum,rows_json,source_scope) VALUES (?,?,?,?,?,?,?)',
                    (scope, provider, period, observed.isoformat(), digest, payload, source_scope))
-    return {'scope': scope, 'basis': 'reported_actual', 'checksum': digest,
+    basis = 'reported_estimate' if any(r.get('estimated') for r in normalized) else 'reported_actual'
+    return {'scope': scope, 'basis': basis, 'checksum': digest,
             'observed_at': observed.isoformat(), 'resource_count': len(normalized), 'source_scope': source_scope}
 
 
@@ -152,10 +225,10 @@ def report(db, scope, *, now=None, max_age_hours=24):
         held[currency] = held.get(currency, Decimal(0)) + amount(value)
     age = ((now or datetime.now(timezone.utc)) - timestamp(row[2])).total_seconds() / 3600
     return {'scope': scope, 'provider': row[0], 'period': row[1], 'observed_at': row[2],
-            'source_scope': row[4], 'scope_binding': 'row_verified' if row[4] else 'operator_asserted',
+            'source_scope': row[4], 'scope_binding': ('query_verified' if row[0] == 'aws' else 'row_verified') if row[4] else 'operator_asserted',
             'freshness': 'fresh' if 0 <= age <= max_age_hours else 'stale',
             'age_hours': age, 'max_age_hours': max_age_hours,
-            'status': 'reported', 'basis': 'reported_actual',
+            'status': 'reported', 'basis': 'reported_estimate' if any(r.get('estimated') for r in resources) else 'reported_actual',
             'totals': {c: str(v) for c, v in totals.items()},
             'reserved_estimate': {c: str(v) for c, v in held.items()}, 'resources': resources}
 
@@ -182,7 +255,7 @@ def reserve(db, *, scope, operation_id, currency, incremental_cost, limit,
         current = report(db, scope, now=now, max_age_hours=max_age_hours)
         if current['status'] == 'unknown':
             raise ValueError('billing snapshot missing')
-        if current['scope_binding'] != 'row_verified':
+        if current['scope_binding'] not in {'row_verified', 'query_verified'}:
             raise ValueError('billing source scope unverified')
         if current['period'] != now.strftime('%Y-%m'):
             raise ValueError('billing snapshot is not the current usage month')
@@ -207,11 +280,11 @@ def main():
     p.add_argument('--db', required=True)
     sub = p.add_subparsers(dest='command', required=True)
     imp = sub.add_parser('import')
-    imp.add_argument('--provider', choices=['gcp', 'azure'], required=True)
+    imp.add_argument('--provider', choices=['aws', 'gcp', 'azure'], required=True)
     imp.add_argument('--scope', required=True)
     imp.add_argument('--period', required=True)
     imp.add_argument('--observed-at', required=True)
-    imp.add_argument('--source-scope', required=True, help='GCP project ID or Azure subscription ID; every export row must match')
+    imp.add_argument('--source-scope', required=True, help='AWS account, GCP project or Azure subscription; the query/export must match')
     imp.add_argument('export')
     rep = sub.add_parser('report'); rep.add_argument('--scope', required=True)
     res = sub.add_parser('reserve')
@@ -221,7 +294,7 @@ def main():
     args = p.parse_args(); db = ledger(args.db)
     if args.command == 'import':
         with Path(args.export).open(encoding='utf-8-sig') as f:
-            rows = json.load(f, parse_float=Decimal) if args.provider == 'gcp' else list(csv.DictReader(f))
+            rows = json.load(f, parse_float=Decimal) if args.provider in {'aws', 'gcp'} else list(csv.DictReader(f))
         result = import_snapshot(db, args.scope, args.provider, args.period, args.observed_at, rows, source_scope=args.source_scope)
     elif args.command == 'report':
         result = report(db, args.scope)

@@ -112,7 +112,27 @@ variable "allow_https" {
 variable "allow_iap_ssh" {
   type        = bool
   default     = false
-  description = "Allow TCP 22 only from Google's IAP forwarding range. Operator IAP/OS Login permissions are managed separately."
+  description = "Allow TCP 22 only from Google's IAP forwarding range. IAP permissions and either OS Login or the explicit operator public key are managed separately."
+}
+
+variable "operator_ssh_public_key" {
+  type        = string
+  default     = null
+  description = "Optional first-boot OpenSSH public key for railshot-operator over IAP. Setting it disables OS Login on this VM; null preserves OS Login. Never pass a private key."
+  validation {
+    condition     = var.operator_ssh_public_key == null ? true : can(regex("^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+={0,3}( [^\\r\\n]+)?$", var.operator_ssh_public_key))
+    error_message = "Supply one supported OpenSSH public key on a single line, or null."
+  }
+}
+
+variable "wireguard_peer_public_cidrs" {
+  type        = list(string)
+  default     = []
+  description = "Registered AWS gateway public endpoint IPv4 /32 addresses. Allows only UDP 51820 in/out; does not install WireGuard, keys, tunnel routes or Kubernetes."
+  validation {
+    condition     = length(var.wireguard_peer_public_cidrs) <= 4 && alltrue([for cidr in var.wireguard_peer_public_cidrs : can(cidrnetmask(cidr)) && endswith(cidr, "/32")])
+    error_message = "Supply at most four exact IPv4 /32 peer endpoints."
+  }
 }
 
 variable "max_run_duration_seconds" {

@@ -1,5 +1,15 @@
 #cloud-config
 # Public configuration only; this content is visible in Terraform state and VM metadata.
+%{ if operator_ssh_public_key != null ~}
+users:
+  - default
+  - name: railshot-operator
+    lock_passwd: true
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ${jsonencode(operator_ssh_public_key)}
+%{ endif ~}
 package_update: true
 packages: [e2fsprogs, util-linux]
 write_files:

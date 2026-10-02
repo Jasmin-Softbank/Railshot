@@ -1,10 +1,12 @@
 """Regression checks for CI publication and the CD handoff; no cloud access."""
 from pathlib import Path
 import json
+import io
 import os
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -12,17 +14,55 @@ HERE = Path(__file__).resolve().parent
 
 
 class WorkflowPolicyTest(unittest.TestCase):
+    def test_pull_credential_delivery_is_write_only_scoped_and_cleans_private_file(self):
+        workflow = yaml.safe_load((HERE.parent / 'workflows/railshot-pull-credential.yml').read_text())
+        job = workflow['jobs']['deliver']; steps = job['steps']
+        self.assertEqual(job['environment'], 'railshot-release')
+        self.assertEqual(job['permissions'], {'id-token': 'write'})
+        self.assertEqual(steps[1]['uses'], 'aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd')
+        policy = json.loads(steps[1]['with']['inline-session-policy'])
+        self.assertEqual(policy['Statement'], [{'Effect': 'Allow', 'Action': 'ssm:PutParameter',
+            'Resource': 'arn:aws:ssm:ap-northeast-2:721622471953:parameter/railshot/registry/ghcr/pull_token'}])
+        self.assertEqual(steps[-1]['env'], {'GHCR_PULL_TOKEN': '${{ secrets.GHCR_PULL_TOKEN }}'})
+        self.assertFalse(any('upload-artifact' in step.get('uses', '') for step in steps))
+        script = steps[-1]['run'].split("<<'PY'\n", 1)[1].rsplit('\nPY', 1)[0]
+        for outcome in ('success', 'failure', 'timeout'):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
+                paths = []; output = io.StringIO(); token = 'synthetic-secret-never-log'
+                def run(args, **kwargs):
+                    self.assertEqual(args[:5], ['aws', 'ssm', 'put-parameter', '--region', 'ap-northeast-2'])
+                    path = Path(args[args.index('--cli-input-json') + 1].removeprefix('file://')); paths.append(path)
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                    document = json.loads(path.read_text())
+                    self.assertEqual(document['Name'], '/railshot/registry/ghcr/pull_token')
+                    self.assertEqual(document['Type'], 'SecureString'); self.assertEqual(document['Value'], token)
+                    self.assertTrue(document['Overwrite']); self.assertNotIn(token, json.dumps(args))
+                    self.assertNotIn('GHCR_PULL_TOKEN', kwargs['env'])
+                    self.assertEqual(kwargs['stdout'], subprocess.DEVNULL); self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
+                    if outcome == 'timeout': raise subprocess.TimeoutExpired(args, 60)
+                    return subprocess.CompletedProcess(args, 1 if outcome == 'failure' else 0)
+                with patch.dict(os.environ, {'RUNNER_TEMP': tmp, 'GHCR_PULL_TOKEN': token}), \
+                        patch('subprocess.run', side_effect=run), patch('sys.stdout', output):
+                    if outcome == 'success': exec(compile(script, '<delivery>', 'exec'), {})
+                    else:
+                        with self.assertRaises((SystemExit, subprocess.TimeoutExpired)) as error:
+                            exec(compile(script, '<delivery>', 'exec'), {})
+                        self.assertNotIn(token, str(error.exception))
+                self.assertEqual(len(paths), 1); self.assertFalse(paths[0].exists())
+                self.assertNotIn(token, output.getvalue())
+
     def test_registry_target_and_credentials_belong_only_to_trusted_release(self):
         jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
         release = jobs['release']
         self.assertEqual(release['environment'], 'railshot-release')
         self.assertEqual(release['env']['REGISTRY_PREFIX'], '${{ vars.REGISTRY_PREFIX }}')
         self.assertEqual(release['env']['REGISTRY_VISIBILITY'], "${{ vars.REGISTRY_VISIBILITY || 'private' }}")
-        self.assertEqual(release['permissions'], {'contents': 'read', 'packages': 'write'})
+        self.assertEqual(release['permissions'], {'contents': 'read', 'actions': 'read', 'packages': 'write'})
         self.assertNotIn('REGISTRY_', json.dumps(jobs['loop']))
         login = next(s for s in release['steps'] if s.get('name') == 'Log in to GHCR')
         self.assertEqual(login['env'], {'GHCR_TOKEN': '${{ secrets.GITHUB_TOKEN }}'})
-        self.assertEqual(sum('secrets.GITHUB_TOKEN' in json.dumps(s) for s in release['steps']), 1)
+        self.assertEqual([s['name'] for s in release['steps'] if 'secrets.GITHUB_TOKEN' in json.dumps(s)],
+                         ['Log in to GHCR', "Recover the same workflow run's publication history"])
         scripts = '\n'.join(s.get('run', '') for s in release['steps'])
         self.assertIn('"$REGISTRY_PREFIX/${TENANT}-${APP}"', scripts)
         self.assertIn('docker login ghcr.io', scripts)
@@ -105,14 +145,22 @@ class WorkflowPolicyTest(unittest.TestCase):
     def test_submitted_commit_and_operator_target_match_before_any_agent_work(self):
         jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
         guard = next(step for step in jobs['loop']['steps'] if step.get('name') == 'Validate inputs')
+        release_guard = next(step for step in jobs['release']['steps'] if step.get('name') == 'Validate inputs')
+        self.assertEqual(guard, release_guard)
+        self.assertEqual(guard['env']['CONFIGURED_TARGETS'], '${{ vars.RAILSHOT_TARGET_IDS }}')
         env = {**os.environ, 'TENANT': 'demo', 'APP': 'my-app', 'SOURCE_COMMIT': 'a' * 40,
-               'GITHUB_SHA': 'a' * 40, 'CHECKOUT_SHA': 'a' * 40, 'TARGET_ID': 'aws-demo', 'CONFIGURED_TARGET': 'aws-demo'}
+               'GITHUB_SHA': 'a' * 40, 'CHECKOUT_SHA': 'a' * 40, 'TARGET_ID': 'aws-demo',
+               'CONFIGURED_TARGET': 'aws-demo', 'CONFIGURED_TARGETS': ''}
         stub = 'git() { test "$*" = "rev-parse HEAD" || return 9; printf "%s\\n" "$CHECKOUT_SHA"; }\n'
-        self.assertEqual(subprocess.run(['bash', '-c', stub + guard['run']], env=env, capture_output=True).returncode, 0)
-        for change in ({'GITHUB_SHA': 'b' * 40}, {'CHECKOUT_SHA': 'b' * 40}, {'SOURCE_COMMIT': 'main'},
-                       {'TARGET_ID': 'onprem-demo'}, {'CONFIGURED_TARGET': ''}, {'APP': 'ab'}, {'TENANT': 'team-demo'}):
-            with self.subTest(change=change):
-                self.assertNotEqual(subprocess.run(['bash', '-c', stub + guard['run']], env={**env, **change}, capture_output=True).returncode, 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, '.railshot').symlink_to(HERE.parents[1], target_is_directory=True)
+            Path(tmp, 'publication.py').write_text('raise RuntimeError("untrusted checkout module imported")')
+            self.assertEqual(subprocess.run(['bash', '-c', stub + guard['run']], cwd=tmp, env=env, capture_output=True).returncode, 0)
+            for change in ({'GITHUB_SHA': 'b' * 40}, {'CHECKOUT_SHA': 'b' * 40}, {'SOURCE_COMMIT': 'main'},
+                           {'TARGET_ID': 'onprem-demo'}, {'CONFIGURED_TARGET': ''}, {'APP': 'ab'}, {'TENANT': 'team-demo'}):
+                with self.subTest(change=change):
+                    self.assertNotEqual(subprocess.run(['bash', '-c', stub + guard['run']], cwd=tmp,
+                                                       env={**env, **change}, capture_output=True).returncode, 0)
 
     def test_publication_handoff_contains_bound_evidence_without_deployment(self):
         text = (HERE.parent / 'workflows/railshot-deploy.yml').read_text()
@@ -136,6 +184,29 @@ class WorkflowPolicyTest(unittest.TestCase):
         for removed in ('GITOPS_', 'RAILSHOT_DOMAIN', 'STORAGE_CLASS', 'render.py', 'render.json', 'kubectl', 'git push', 'KEDA', 'AUTOSCALING_PROFILE'):
             self.assertNotIn(removed, text)
         self.assertIn('exit 1', next(s['run'] for s in jobs['loop']['steps'] if s.get('id') == 'loop').split('passed=false')[1])
+
+    def test_hosted_rerun_restores_same_run_journals_and_always_saves_only_receipt(self):
+        steps = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']['steps']
+        recovery = next(s for s in steps if s.get('name') == "Recover the same workflow run's publication history")
+        publish = next(s for s in steps if s.get('name') == 'Verify bundle and publish tested images')
+        journal = next(s for s in steps if s.get('name') == 'Preserve publication journal without credentials')
+        self.assertLess(steps.index(recovery), steps.index(publish))
+        self.assertLess(steps.index(publish), steps.index(journal))
+        self.assertIn('--github-history release-history.json --github-journals recovered-journals', publish['run'])
+        self.assertEqual(publish['env']['BUNDLE_ARTIFACT_ID'], '${{ needs.loop.outputs.bundle_id }}')
+        self.assertEqual(journal['if'], 'always()')
+        self.assertEqual(journal['with']['path'], 'release-bundle-publish/publish.json')
+        self.assertEqual(journal['with']['name'], 'publish-journal-${{ github.run_attempt }}')
+        # Execute the actual history step with a native CLI stub: a missing artifact
+        # is recoverable, while a failed history query stops before publishing.
+        for api_exit, expected in [(0, 0), (1, 1)]:
+            with tempfile.TemporaryDirectory() as tmp:
+                env = {**os.environ, 'GITHUB_RUN_ATTEMPT': '2', 'GITHUB_RUN_ID': '123',
+                       'GITHUB_REPOSITORY': 'owner/apps', 'API_EXIT': str(api_exit)}
+                stub = 'gh() { if [[ "$1" = api ]]; then printf \'[{"jobs":[]}]\'; return "$API_EXIT"; else return 1; fi; }\n'
+                result = subprocess.run(['bash', '-c', stub + recovery['run']], cwd=tmp, env=env, capture_output=True)
+                self.assertEqual(result.returncode, expected)
+                self.assertEqual(json.loads(Path(tmp, 'release-history.json').read_text()), [{'jobs': []}])
 
 
 if __name__ == '__main__':

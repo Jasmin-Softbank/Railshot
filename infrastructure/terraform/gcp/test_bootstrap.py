@@ -95,6 +95,23 @@ class BootstrapRenderTests(unittest.TestCase):
             "seconds": 7200, "automatic_restart": False, "instance_termination_action": "STOP",
         })
 
+    def test_optional_operator_key_and_wireguard_peer_are_bounded(self):
+        key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyTestNotARealKey offline'
+        self.assertNotIn('users', self.git)
+        configured = yaml.safe_load(evaluate('local.cloud_init', overrides={'operator_ssh_public_key': key}))
+        self.assertEqual(configured['users'][1], {
+            'name': 'railshot-operator', 'lock_passwd': True, 'shell': '/bin/bash',
+            'sudo': 'ALL=(ALL) NOPASSWD:ALL', 'ssh_authorized_keys': [key]})
+        self.assertEqual(evaluate('var.wireguard_peer_public_cidrs'), [])
+        self.assertEqual(evaluate('var.wireguard_peer_public_cidrs', overrides={
+            'wireguard_peer_public_cidrs': ['192.0.2.1/32']}), ['192.0.2.1/32'])
+        for invalid in (['0.0.0.0/0'], ['192.0.2.0/24'], ['::1/128'], ['not-an-ip/32']):
+            with self.subTest(peer=invalid), self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                evaluate('var.wireguard_peer_public_cidrs', overrides={'wireguard_peer_public_cidrs': invalid})
+        for invalid in ('-----BEGIN OPENSSH PRIVATE KEY-----', key + '\nroot: injected'):
+            with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                evaluate('local.cloud_init', overrides={'operator_ssh_public_key': invalid})
+
     def test_node_identity_is_explicit_and_existing_fqdn_can_be_preserved(self):
         config = yaml.safe_load(self.file(self.git, "/etc/railshot/host.yml")["content"])
         self.assertEqual(config["node_name"], "railshot-gcp")

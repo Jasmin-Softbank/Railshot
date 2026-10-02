@@ -287,6 +287,101 @@ class BundleTest(unittest.TestCase):
                 bundle.contract(spec.replace("{dockerfile: Dockerfile}", "{dockerfile: Dockerfile, context: " + path + "}"),
                                 json.dumps(self.verdict))
 
+    def test_hosted_recovery_only_pushes_when_native_history_proves_no_prior_publish(self):
+        self.export()
+        history = self.root / 'history.json'
+        restored = self.root / 'restored'; restored.mkdir()
+        env = {'GITHUB_REPOSITORY': 'owner/apps', 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
+               'SOURCE_COMMIT': 'a' * 40, 'GITHUB_SHA': 'a' * 40, 'BUNDLE_ARTIFACT_ID': '456',
+               'TARGET_ID': 'aws-demo', 'PLATFORM_REF': 'b' * 40}
+        prior = {'run_id': 123, 'run_attempt': 1, 'head_sha': 'a' * 40, 'name': 'release'}
+        cases = [('not-started', [{**prior, 'steps': [{'name': 'Verify bundle and publish tested images',
+                                                     'conclusion': 'skipped'}]}], False),
+                 ('worker-lost', [{**prior, 'steps': [{'name': 'Verify bundle and publish tested images',
+                                                     'conclusion': 'cancelled'}]}], True),
+                 ('history-incomplete', [], True), ('steps-incomplete', [prior], True)]
+        target = 'ghcr.io/owner/tenant-app-web:v1'
+        for name, jobs, readback in cases:
+            with self.subTest(name=name):
+                journal = self.root / name
+                history.write_text(json.dumps([{'jobs': jobs}]))
+                context, mode = bundle.github_recovery(self.out, 'ghcr.io/owner/tenant-app', 'v1', journal,
+                                                       history, restored, env)
+                self.assertEqual(mode, readback)
+                self.tag_ids[target] = IMAGE  # Synthetic remote has the original tested image.
+                self.commands.clear()
+                with patch('bundle.run_bounded', side_effect=self.docker_run):
+                    result = bundle.publish(self.out, 'ghcr.io/owner/tenant-app', 'v1', journal_dir=journal,
+                                            release_context=context, readback_only=mode)
+                operations = [command[2] for command in self.commands]
+                self.assertEqual(operations.count('push'), 0 if readback else 1)
+                self.assertEqual(operations.count('pull'), 1 if readback else 0)
+                self.assertEqual(result['web'], 'ghcr.io/owner/tenant-app-web@' + DIGEST)
+
+    def test_restored_journal_is_bound_to_run_source_target_platform_and_original_bundle(self):
+        self.export()
+        history = self.root / 'history.json'; history.write_text('[]')
+        restored = self.root / 'restored'; restored.mkdir()
+        env = {'GITHUB_REPOSITORY': 'owner/apps', 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1',
+               'SOURCE_COMMIT': 'a' * 40, 'GITHUB_SHA': 'a' * 40, 'BUNDLE_ARTIFACT_ID': '456',
+               'TARGET_ID': 'aws-demo', 'PLATFORM_REF': 'b' * 40}
+        journal = self.root / 'original'
+        context, mode = bundle.github_recovery(self.out, 'ghcr.io/owner/tenant-app', 'v1', journal,
+                                               history, restored, env)
+        self.assertFalse(mode)
+        with patch('bundle.run_bounded', side_effect=self.docker_run):
+            bundle.publish(self.out, 'ghcr.io/owner/tenant-app', 'v1', journal_dir=journal, release_context=context)
+        artifact = restored / 'publish-journal-1'; artifact.mkdir()
+        artifact.joinpath('publish.json').write_bytes(journal.joinpath('publish.json').read_bytes())
+        env['GITHUB_RUN_ATTEMPT'] = '2'
+        resumed = self.root / 'resumed'
+        restored_context, mode = bundle.github_recovery(self.out, 'ghcr.io/owner/tenant-app', 'v1', resumed,
+                                                        history, restored, env)
+        self.assertEqual(context, restored_context)
+        self.assertTrue(mode)
+        self.commands.clear()
+        with patch('bundle.run_bounded', side_effect=self.docker_run):
+            result = bundle.publish(self.out, 'ghcr.io/owner/tenant-app', 'v1', journal_dir=resumed,
+                                    release_context=restored_context, readback_only=mode)
+        self.assertIn('web', result)
+        self.assertNotIn('push', [command[2] for command in self.commands])
+        for field, value in [('GITHUB_REPOSITORY', 'other/apps'), ('GITHUB_RUN_ID', '124'),
+                             ('BUNDLE_ARTIFACT_ID', '457'), ('TARGET_ID', 'gcp-demo'),
+                             ('PLATFORM_REF', 'c' * 40), ('SOURCE_COMMIT', 'c' * 40)]:
+            changed = {**env, field: value}
+            if field == 'SOURCE_COMMIT':
+                changed['GITHUB_SHA'] = value
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'binding differs'):
+                bundle.github_recovery(self.out, 'ghcr.io/owner/tenant-app', 'v1', self.root / field,
+                                       history, restored, changed)
+
+    def test_missing_journal_and_missing_remote_never_repushes(self):
+        self.export()
+        self.commands.clear()
+        def absent(args, **kwargs):
+            if args[2] == 'pull':
+                self.commands.append(args)
+                return subprocess.CompletedProcess(args, 1, '', 'synthetic missing remote')
+            return self.docker_run(args, **kwargs)
+        with patch('bundle.run_bounded', side_effect=absent), self.assertRaises(bundle.OperationError):
+            bundle.publish(self.out, 'ghcr.io/owner/tenant-app', 'v1', readback_only=True)
+        self.assertNotIn('push', [command[2] for command in self.commands])
+        state = json.loads((self.root / 'bundle-publish/publish.json').read_bytes())
+        self.assertEqual(state['images']['web']['outcome'], 'UNKNOWN')
+
+    def test_invalid_restored_service_receipt_is_not_trusted(self):
+        self.export()
+        with patch('bundle.run_bounded', side_effect=self.docker_run):
+            bundle.publish(self.out, 'ghcr.io/owner/tenant-app', 'v1')
+        journal = self.root / 'bundle-publish/publish.json'
+        original = json.loads(journal.read_bytes())
+        for field, value in [('target', 'ghcr.io/other/app:v1'), ('image_id', 'sha256:' + 'c' * 64),
+                             ('digest', 'ghcr.io/other/app@' + DIGEST)]:
+            state = json.loads(json.dumps(original)); state['images']['web'][field] = value
+            journal.write_text(json.dumps(state))
+            with self.subTest(field=field), patch('bundle.run_bounded', side_effect=self.docker_run), self.assertRaises(ValueError):
+                bundle.publish(self.out, 'ghcr.io/owner/tenant-app', 'v1', readback_only=True)
+
 
 if __name__ == "__main__":
     unittest.main()

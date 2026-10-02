@@ -325,17 +325,51 @@ provision.execute('apply',Path(sys.argv[3]),Path(sys.argv[4]),sys.argv[5],mainte
             self.assertEqual(caught.exception.code, 'INFRA_BUDGET_BLOCKED')
         self.assertFalse(any(args[0] == 'apply' for args, _ in self.calls))
 
-    def test_unsupported_aws_billing_has_no_dispatch_or_fake_zero(self):
+    def test_aws_requires_its_own_account_snapshot_before_dispatch(self):
         target = self.budget_target()
         target['provider_kind'] = 'aws'; target['target_id'] = 'aws-test'
-        target['variables'].update(target_id='aws-test', instance_type='reviewed-size')
+        target['variables'].update(target_id='aws-test', instance_type='reviewed-size', account_id='123456789012')
         self.target.write_text(json.dumps(target))
         result = provision.execute('plan', self.target, self.state)
         with self.assertRaises(provision.OperationError) as caught:
             provision.execute('apply', self.target, self.state, result['plan_sha256'], maintenance=self.maintenance(result))
         self.assertEqual(caught.exception.code, 'INFRA_BUDGET_BLOCKED')
-        self.assertFalse(result['capabilities']['billing_reservation_supported'])
+        self.assertTrue(result['capabilities']['billing_reservation_supported'])
         self.assertFalse(any(args[0] == 'apply' for args, _ in self.calls))
+
+    def test_aws_account_bound_reservation_precedes_apply(self):
+        target = self.budget_target()
+        target.update(provider_kind='aws', target_id='aws-test')
+        target['variables'].update(target_id='aws-test', instance_type='reviewed-size', account_id='123456789012')
+        now = datetime.now(timezone.utc)
+        interval = {'Start': now.date().replace(day=1).isoformat(), 'End': (now.date() + timedelta(days=1)).isoformat()}
+        snapshot = {'account_id': '123456789012', 'request': {'TimePeriod': interval, 'Granularity': 'MONTHLY',
+            'Metrics': ['UnblendedCost'], 'Filter': {'Dimensions': {'Key': 'LINKED_ACCOUNT', 'Values': ['123456789012']}}},
+            'response': {'ResultsByTime': [{'TimePeriod': interval, 'Total': {'UnblendedCost': {'Amount': '0', 'Unit': 'USD'}},
+                                          'Estimated': True, 'Groups': []}]}}
+        target['budget']['scope'] = 'aws-scope'
+        with closing(provision.costs.ledger(target['budget']['ledger_path'])) as db:
+            provision.costs.import_snapshot(db, 'aws-scope', 'aws', now.strftime('%Y-%m'), now.isoformat(),
+                                           snapshot, now=now, source_scope='123456789012')
+        wrong = {**target, 'variables': {**target['variables'], 'account_id': '999999999999'}}
+        self.target.write_text(json.dumps(wrong))
+        result = provision.execute('plan', self.target, self.state)
+        with self.assertRaises(provision.OperationError) as caught:
+            provision.execute('apply', self.target, self.state, result['plan_sha256'], maintenance=self.maintenance(result))
+        self.assertEqual(caught.exception.code, 'INFRA_BUDGET_BLOCKED')
+        self.assertFalse(any(args[0] == 'apply' for args, _ in self.calls))
+        self.target.write_text(json.dumps(target))
+        result = provision.execute('plan', self.target, self.state)
+        original = self.command_mock.side_effect
+        def asserted(args, work, log):
+            if args[0] == 'apply':
+                with closing(provision.costs.ledger(target['budget']['ledger_path'])) as db:
+                    self.assertEqual(db.execute('SELECT state FROM reservations WHERE operation_id=?',
+                                               (result['operation_id'],)).fetchone(), ('held',))
+            return original(args, work, log)
+        self.command_mock.side_effect = asserted
+        applied = provision.execute('apply', self.target, self.state, result['plan_sha256'], maintenance=self.maintenance(result))
+        self.assertEqual(applied['budget_reservation']['state'], 'held')
 
     def test_executor_policy_drift_invalidates_saved_plan(self):
         result = self.plan()

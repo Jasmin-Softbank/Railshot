@@ -23,6 +23,17 @@ from jsonschema import ValidationError
 FILES = ('images.json', 'jasmin.yaml', 'verdict.json', 'manifest.json')
 
 
+def document_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def http_path(value):
+    require(isinstance(value, str) and re.fullmatch(r'/[A-Za-z0-9/._~-]*', value) and
+            '//' not in value and not {'.', '..'} & set(value.split('/')),
+            'plain absolute HTTP path required; no rewrite, query, fragment or escaping')
+    return value
+
+
 def read_artifact(directory, target_id):
     directory = Path(directory)
     require(directory.is_dir() and not directory.is_symlink(), 'regular artifact directory required')
@@ -63,6 +74,8 @@ def render(directory, target):
         require(isinstance(target.get(field), str) and re.fullmatch(r'[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?', target[field]),
                 'explicit DNS label required: ' + field)
     require(target['project'] != 'default', 'use a restricted team-owned Argo AppProject')
+    require(target['namespace'] not in {'default', 'kube-system', 'kube-public', 'kube-node-lease',
+                                       target['argocd_namespace']}, 'dedicated workload namespace required')
     require(target.get('architecture') == 'amd64', 'current published images require linux/amd64')
     for field in ('repo_url', 'cluster_server'):
         parsed = urlsplit(target.get(field, ''))
@@ -95,8 +108,10 @@ def render(directory, target):
     require(len(spec['services']) == 1 and not spec.get('resources') and not spec.get('egress'),
             'initial CD handoff supports one stateless service without external egress')
     svc = spec['services'][0]
-    require(svc.get('route') == '/' and not svc.get('migrate') and not svc.get('secrets'),
-            'DB, secret injection and prefix routing require the CD owner contract')
+    require(not svc.get('migrate') and not svc.get('secrets'),
+            'DB and secret injection require the CD owner contract')
+    require(target.get('path_mode', 'preserve') == 'preserve', 'HTTP paths must be forwarded without rewriting')
+    route, health = http_path(svc.get('route')), http_path(svc.get('health'))
     name, namespace = spec['app'], target['namespace']
     labels = {'app.kubernetes.io/name': name, 'railshot.io/target': target['id']}
     container = {'name': svc['name'], 'image': images[svc['name']], 'ports': [{'containerPort': svc['port']}],
@@ -105,8 +120,7 @@ def render(directory, target):
                  'volumeMounts': [{'name': 'tmp', 'mountPath': '/tmp'}]}
     if svc.get('command'):
         container['command'] = svc['command']
-    require(svc.get('health'), 'HTTP health path required for this CD handoff')
-    container['readinessProbe'] = {'httpGet': {'path': svc['health'], 'port': svc['port']}, 'periodSeconds': 5}
+    container['readinessProbe'] = {'httpGet': {'path': health, 'port': svc['port']}, 'periodSeconds': 5}
     workload = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': name, 'namespace': namespace},
                 'spec': {'replicas': svc.get('replicas', 1), 'selector': {'matchLabels': labels},
                          'template': {'metadata': {'labels': labels}, 'spec': {
@@ -124,13 +138,21 @@ def render(directory, target):
                   'podSelector': {'matchLabels': labels}, 'policyTypes': ['Ingress', 'Egress'], 'egress': [],
                   'ingress': [{'from': [{'ipBlock': {'cidr': c}} for c in cidrs],
                                'ports': [{'protocol': 'TCP', 'port': svc['port']}]}]}}
+    app_name = target['id'] + '-' + namespace + '-' + name
+    if len(app_name) > 63:
+        app_name = app_name[:50].rstrip('-') + '-' + hashlib.sha256(app_name.encode()).hexdigest()[:12]
     app = {'apiVersion': 'argoproj.io/v1alpha1', 'kind': 'Application',
-           'metadata': {'name': namespace + '-' + name, 'namespace': target['argocd_namespace']},
+           'metadata': {'name': app_name, 'namespace': target['argocd_namespace'],
+                        'labels': {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/target': target['id']}},
            'spec': {'project': target['project'], 'source': {'repoURL': target['repo_url'],
                      'targetRevision': target['revision'], 'path': str(git_path), 'directory': {'recurse': False}},
                     'destination': {'server': target['cluster_server'], 'namespace': namespace}}}
-    return {'workload': {'apiVersion': 'v1', 'kind': 'List', 'items': [workload, service, policy]},
+    workload_list = {'apiVersion': 'v1', 'kind': 'List', 'items': [workload, service, policy]}
+    return {'workload': workload_list,
             'application': app, 'status': 'rendered_for_review', 'deployed': False,
+            'documents': {'workload': document_hash(workload_list), 'application': document_hash(app)},
+            'http': {'route': route, 'health_path': health, 'path_mode': 'preserve',
+                     'container_port': svc['port'], 'node_port': target['node_port']},
             'source_commit': receipt['source_commit'], 'target_id': target['id'],
             **{k: receipt[k] for k in ('tenant', 'app', 'run_id', 'producer_attempt', 'bundle_artifact_id', 'registry')}}
 

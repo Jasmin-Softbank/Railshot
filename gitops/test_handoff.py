@@ -50,14 +50,34 @@ class HandoffTest(unittest.TestCase):
             self.assertEqual(result['status'], 'rendered_for_review')
             self.assertNotIn('imagePullSecrets', result['workload']['items'][0]['spec']['template']['spec'])
             self.assertEqual(result['registry'], receipt['registry'])
+            self.assertEqual(result['http'], {'route': '/', 'health_path': '/health', 'path_mode': 'preserve',
+                                              'container_port': 8080, 'node_port': 30080})
+            self.assertEqual(result['application']['metadata']['name'], 'aws-demo-tenant-demo-demo')
             self.assertEqual(result['workload']['items'][0]['spec']['template']['spec']['containers'][0]['image'],
                              'ghcr.io/example/web@sha256:' + 'c' * 64)
             for field, value in [('id', 'onprem-demo'), ('architecture', 'arm64'), ('revision', 'main'),
-                                 ('project', 'default'), ('path', '../escape'), ('ingress_cidrs', ['0.0.0.0/0'])]:
+                                 ('project', 'default'), ('path', '../escape'), ('ingress_cidrs', ['0.0.0.0/0']),
+                                 ('namespace', 'argocd'), ('path_mode', 'rewrite')]:
                 bad = copy.deepcopy(target)
                 bad[field] = value
                 with self.subTest(field=field), self.assertRaises(ValueError):
                     render(root, bad)
+
+            spec['services'][0]['route'] = '/health'
+            receipt = prepare()
+            path_result = render(root, target)
+            self.assertEqual(path_result['http']['route'], '/health')
+            self.assertEqual(path_result['workload']['items'][0]['spec']['template']['spec']['containers'][0]
+                             ['readinessProbe']['httpGet']['path'], '/health')
+            for field in ('route', 'health'):
+                for value in ('//outside.example', '/a/../b', '/a%2fb', '/a?token=x', '/a#b', '/a\nb'):
+                    old = spec['services'][0][field]
+                    spec['services'][0][field] = value
+                    prepare()
+                    with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                        render(root, target)
+                    spec['services'][0][field] = old
+            receipt = prepare()
 
             private = copy.deepcopy(receipt)
             private['registry'].update(visibility='private', verification='authenticated_manifest_read',

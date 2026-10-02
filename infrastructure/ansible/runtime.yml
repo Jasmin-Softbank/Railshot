@@ -14,7 +14,7 @@
       architecture: "{{ railshot_expected_arch }}"
       k3s_version: v1.34.11+k3s1
       cilium_version: 1.20.2
-      profile: seungmin-single-node-cilium-v1
+      profile: team-bootstrap-json-0.1
   tasks:
     - name: Inspect runtime ownership and preexisting installation
       ansible.builtin.stat:
@@ -62,35 +62,44 @@
       no_log: true
     - name: Create private runtime script directories
       ansible.builtin.file:
-        path: "{{ item }}"
+        path: "{{ railshot_runtime_dir }}/{{ item }}"
         state: directory
         mode: '0700'
+      loop: ['', scripts, bootstrap, cilium]
+
+    - name: Copy only the team's runtime bootstrap and health scripts
+      ansible.builtin.copy:
+        src: "{{ railshot_deployment_source }}/{{ item }}"
+        dest: "{{ railshot_runtime_dir }}/{{ item }}"
+        mode: '0700'
       loop:
-        - "{{ railshot_runtime_dir }}"
-        - "{{ railshot_runtime_dir }}/scripts"
+        - scripts/common.sh
+        - bootstrap/preflight.sh
+        - bootstrap/install-k3s.sh
+        - bootstrap/health.sh
+        - cilium/install.sh
+        - cilium/health.sh
 
-    - name: Copy the team's runtime-only entrypoint
-      ansible.builtin.copy:
-        src: "{{ railshot_deployment_source }}/runtime.sh"
-        dest: "{{ railshot_runtime_dir }}/runtime.sh"
-        mode: '0700'
-
-    - name: Copy only the required team runtime scripts
-      ansible.builtin.copy:
-        src: "{{ railshot_deployment_source }}/scripts/{{ item }}"
-        dest: "{{ railshot_runtime_dir }}/scripts/{{ item }}"
-        mode: '0700'
-      loop: [common.sh, preflight.sh, install-k3s.sh, install-cilium.sh]
-
-    - name: Install and check K3s and Cilium without the JB Flannel installer
+    - name: Run native bootstrap under the team's node-wide deployment lock
       ansible.builtin.command:
-        argv: [/bin/bash, "{{ railshot_runtime_dir }}/runtime.sh"]
+        argv:
+          - /usr/bin/flock
+          - --nonblock
+          - /run/railshot-deployment.lock
+          - /bin/bash
+          - -ec
+          - >-
+            bash bootstrap/preflight.sh;
+            bash bootstrap/install-k3s.sh;
+            bash cilium/install.sh;
+            bash bootstrap/health.sh;
+            bash cilium/health.sh
+        chdir: "{{ railshot_runtime_dir }}"
       environment:
         K3S_VERSION: v1.34.11+k3s1
         CILIUM_VERSION: 1.20.2
         CILIUM_CLI_VERSION: v0.20.1
         WAIT_TIMEOUT: 300s
-        K3S_NODE_NAME: "{{ k3s_node_name }}"
         NODE_IP: "{{ railshot_node_ip }}"
         K3S_URL: ''
         K3S_TOKEN: ''
@@ -108,7 +117,8 @@
       ansible.builtin.assert:
         that:
           - (railshot_nodes.stdout | from_json)['items'] | length == 1
-          - (railshot_nodes.stdout | from_json)['items'][0].metadata.name == k3s_node_name
+          - (railshot_nodes.stdout | from_json)['items'][0].status.nodeInfo.architecture == railshot_expected_arch
+          - "railshot_node_ip in ((railshot_nodes.stdout | from_json)['items'][0].status.addresses | selectattr('type', 'equalto', 'InternalIP') | map(attribute='address') | list)"
           - (railshot_nodes.stdout | from_json)['items'][0].status.nodeInfo.kubeletVersion == 'v1.34.11+k3s1'
           - "(railshot_nodes.stdout | from_json)['items'][0].status.conditions | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length == 1"
         fail_msg: Runtime node identity, version or readiness differs from the request.

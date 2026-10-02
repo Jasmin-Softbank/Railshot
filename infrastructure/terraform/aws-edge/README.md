@@ -1,15 +1,106 @@
-# AWS 선택형 진입 어댑터
+# AWS 공유 앱 진입점
 
-10/1 허들 3:24:31–3:25:48의 EIP·WireGuard 51820 요청과 Route53/ALB 도면을 코드로 구체화한 **미적용 모듈**이다. 공통 애플리케이션 명세에 AWS 종속 필드를 넣지 않는다.
+`Route53 Alias → 공유 ALB HTTPS443 → 고객 노드 사설 IP:NodePort`를 구성한다. AWS와 GCP에 각각 만든 고객 K3s 한 노드를 여러 앱이 재사용하며, 앱마다 namespace/Application과 NodePort를 별도로 할당한다. 이 모듈은 등록된 NodePort·호스트를 연결한다. K3s/Cilium·Argo·앱 manifest·NodePort 할당·WireGuard guest 설정은 설치하지 않는다.
 
-`Route53 Alias → ALB HTTPS443 → AWS instance private IP:명시한 NodePort`와 `고객 peer → gateway EIP:UDP51820`를 별도로 생성한다. Route53은 DNS 응답이며 HTTP 프록시가 아니다. ALB에 EIP를 붙이지 않는다. 온프레 서비스 공개 경로도 이 ALB에 자동 편입하지 않는다.
+운영 AWS EC2의 기존 primary ENI에 EIP를 연결해 WireGuard gateway로 사용한다. 별도 gateway VM을 만들지 않고 ALB에도 EIP를 붙이지 않는다. GCP 앱 target은 터널로 도달할 수 있는 RFC1918 IPv4만 허용한다. 공개 IP, metadata IP, IPv6 및 RFC6598 범위는 거부한다. GCP target attachment는 VPC 밖 IP에 필요한 `availability_zone = all`을 사용한다.
 
-운영자가 기존 VPC, **다른 두 AZ**의 public subnet, IGW 경로, 타깃 instance/SG, 인증된 ACM 인증서, DNS zone/domain, 실제 Service NodePort, WireGuard gateway ENI/SG와 peer NAT 출구 CIDR을 제공해야 한다. subnet 수만 입력 검증하며 AZ·라우팅·인증서 소유권은 실제 plan과 운영 검토가 필요하다. gateway ENI는 다른 EIP와 연결되지 않아야 하며, 해당 SG가 실제 ENI에 붙어 있어야 한다. 기존 SG에 inline ingress와 별도 rule을 혼용하면 drift가 날 수 있으므로 이 모듈의 규칙을 관리할 전용 SG를 넘긴다.
+이 코드는 기존 single-app 미적용 인터페이스를 대체한다. 저장소 내 실행 caller는 없으며, 종전 `target_instance_ids`, `target_security_group_id`, `target_port`, `health_path`, `app_domain` 입력 대신 아래 `routes`를 사용한다. 기존 state에 적용했던 별도 운영 환경이 있다면 자동 이관하지 말고 먼저 state/plan을 검토한다.
 
-이 모듈은 WireGuard 패키지·키·peer·AllowedIPs·forwarding·경로/MTU를 구성하지 않는다. 51820 ingress만으로 터널이 완성되지 않는다. guest의 WireGuard 설정과 고객 client/API 인증은 화균 담당 지원 레이어와 합쳐 인수한다. 서버가 터널의 return route가 아닌 공용 인터넷으로 peer에 선제 패킷을 보낼 경우 별도 outbound UDP 정책도 필요하다.
+## 입력 예시
 
-웹 타깃은 고객 workload NodePort이며 현재 localhost 전용 RAILSHOT UI를 공개하기 위한 인증 대체물이 아니다. TLS는 ALB에서 종료되고 backend HTTP는 VPC 보안 경계 안에 있다. 운영 API는 별도 인증·Host/Origin 계약이 완료되기 전 공개 대상으로 등록하지 않는다.
+아래 IP/ID는 형식 예제다. 실제 노드 descriptor, 서비스 NodePort와 관리자 조회 결과로 바꾼다. `base_domain`은 구매·위임이 끝난 도메인으로 지정하며, 이 모듈이 도메인 등록을 수행하지는 않는다.
 
-검증은 `terraform fmt -check`, `terraform init -backend=false`, `terraform validate`까지다. apply·계정 조회·배포는 수행하지 않는다. DNS/TLS·ALB target health·실외 HTTP·WireGuard handshake는 별도 인수 증거로 남긴다. ALB가 두 AZ에 있어도 단일 workload 노드의 HA를 보장하지 않는다.
+```hcl
+name       = "railshot-edge"
+account_id = "123456789012"
+region     = "ap-northeast-2"
+vpc_id     = "vpc-0123456789abcdef0"
+public_subnet_ids = ["subnet-0123456789abcdef0", "subnet-0123456789abcdef1"]
+zone_id        = "ZREPLACEWITHPUBLICZONE"
+base_domain    = "railshot.io"
+certificate_arn = null # 기존 regional ACM ARN도 가능
+http_redirect   = true
 
-근거: [Route53 Alias](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-to-elb-load-balancer.html), [ALB 생성](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-application-load-balancer.html), [EIP 지정 가능 LB 유형](https://docs.aws.amazon.com/elasticloadbalancing/latest/APIReference/API_SetSubnets.html), [WireGuard](https://www.wireguard.com/quickstart/).
+routes = {
+  demo-a1b2c3 = {
+    host                     = "demo-a1b2c3.railshot.io"
+    provider_kind            = "aws"
+    target_private_ip        = "172.31.10.20"
+    node_port                = 30080
+    health_path              = "/healthz"
+    priority                 = 100
+    target_security_group_id = "sg-0123456789abcdef1"
+  }
+  demo-d4e5f6 = {
+    host              = "demo-d4e5f6.railshot.io"
+    provider_kind     = "gcp"
+    target_private_ip = "10.66.0.2"
+    node_port         = 30081
+    health_path       = "/ready"
+    priority          = 200
+  }
+}
+wireguard_network_interface_id = "eni-0123456789abcdef0"
+wireguard_security_group_id    = "sg-0123456789abcdef0"
+wireguard_peer_cidrs           = ["192.0.2.20/32"] # 실제 GCP 고정 공인 IP
+wireguard_route_table_ids      = ["rtb-0123456789abcdef0"]
+```
+
+앱 key·host는 서비스명+안정적인 hash 등 호출자가 정한 값을 사용한다. `routes`는 1–50개를 받고 host와 listener priority는 중복될 수 없다. 한 고객 노드에 앱을 더 배포할 때 새 VM 대신 별도 NodePort와 route entry를 추가한다. 같은 IP/포트의 별칭을 등록해도 AWS SG 규칙과 GCP /32 경로를 중복 생성하지 않는다.
+
+ALB는 서로 다른 두 AZ의 지정 VPC subnet을 확인한다. 운영자는 각 subnet의 실제 IGW 경로와 유효 route table을 확인한다. HTTPS 기본 응답은 404이며 등록된 host만 전달한다. `http_redirect`가 true일 때만 80을 열어 HTTPS로 redirect한다. `web_client_cidrs` 기본값은 공개 웹 `0.0.0.0/0`이며 관리 API 공개 여부를 대신 승인하지 않는다.
+
+`zone_id`는 `base_domain`과 같은 기존 **public Route53 zone**이어야 한다. `certificate_arn`이 null이면 `*.base_domain` ACM 인증서, DNS 검증 record와 검증 대기를 만든다. Route host는 base domain 바로 아래 한 label만 허용한다. 기존 ARN을 쓰면 같은 region/account와 모든 host coverage를 운영자가 검증한다. 도메인의 실제 NS 위임이 끝나지 않으면 ACM DNS 검증이 완료되지 않는다. DNS 등록과 TLS 설정은 앱 준비 완료 증거가 아니다.
+
+## 보안 그룹과 WireGuard 소유권
+
+- ALB SG와 그 inline ingress/egress는 이 모듈만 소유한다. egress는 각 target /32와 NodePort에 제한한다.
+- AWS 고객 노드에는 별도 **규칙 전용 SG**를 붙이고 그 ID를 route에 넣는다. 이 모듈은 ALB SG에서 해당 NodePort로 들어오는 규칙만 추가한다. 해당 SG에 다른 writer의 inline ingress를 섞지 않는다. 고객 호스트 기본 SG와 직접 공개 HTTP를 대체하는 별도 그룹이다.
+- 운영 노드에도 별도 규칙 전용 SG를 미리 붙여 `wireguard_security_group_id`로 넘긴다. 지정 ENI에 실제로 붙어 있는지 확인한다. 이 모듈이 추가하는 규칙은 알려진 peer 공인 /32에 대한 UDP51820 양방향, 그리고 ALB subnet에서 GCP NodePort로 들어오는 전달 트래픽이다.
+- 기존 운영 instance/ENI는 원래 Terraform 소유자가 관리한다. 그 소유 모듈에서 `source_dest_check = false`로 설정한다. edge는 primary ENI/소유 계정/VPC와 실제 instance의 false 값을 조회·검증하고 중복 소유하거나 shell로 변경하지 않는다.
+- `wireguard_route_table_ids`에는 **모든 ALB subnet의 유효 route table**을 넣는다. 이 모듈은 등록된 GCP target별 `/32 → 운영 ENI` 경로만 추가한다. 같은 목적지 route를 다른 Terraform inline route block에서 소유하면 안 된다. ID의 VPC는 검사하지만 subnet별 실제 유효 route table 선택은 운영자가 확인한다.
+
+EIP association은 다른 EIP의 재연결을 허용하지 않는다. 운영 ENI의 기존 EIP 사용 여부를 먼저 확인한다. VPC CIDR, 고객 노드 및 WireGuard overlay가 겹치지 않아야 한다. 기존 route를 이 모듈이 자동으로 인수하지 않는다.
+
+GCP 노드가 아직 없으면 AWS 앱 route만 등록하고 `wireguard_peer_cidrs = []`, `wireguard_route_table_ids = []`로 먼저 DNS/TLS/ALB를 검증할 수 있다. 이때 운영 EIP는 배정하지만 UDP ingress/egress 규칙과 GCP route는 만들지 않는다. 가짜 peer IP로 채우지 않는다. GCP route를 추가할 때에는 실제 peer 공인 /32와 ALB route table을 함께 등록해야 한다.
+
+GCP 방화벽에는 이 모듈의 `wireguard_public_ip/32`만 peer endpoint로 등록한다. 운영 guest의 IP forwarding, WireGuard 공개키·private key 주입, peer `AllowedIPs`, GCP target 사설 IP 경로 및 **GCP에서 ALB subnet으로 돌아오는 경로**, MTU와 host firewall은 별도 구성한다. 패킷을 실제 전달할 수 없는 상태에서 EIP·UDP 규칙·AWS route만 생성해도 터널은 완성되지 않는다. SG나 Terraform state에 WireGuard/SSH/registry private credential을 넣지 않는다.
+
+## Guest WireGuard 설정 파일
+
+`render_wireguard.py`는 root가 guest에 별도로 배치한 **0600 private key 파일**과 공개 peer JSON으로 설정 파일만 만든다. 키를 생성하거나 전송하지 않고, 키값을 stdout·명령 인자에 넣지 않는다. 공개 JSON에는 정확히 `address`, `peer`만 받는다.
+
+```json
+{
+  "address": "10.200.0.1/30",
+  "peer": {
+    "public_key": "REPLACE_WITH_PEER_PUBLIC_KEY",
+    "endpoint": "REPLACE_WITH_ACTUAL_PEER_PUBLIC_IPV4:51820",
+    "allowed_ips": ["10.200.0.2/32", "10.66.0.2/32"]
+  }
+}
+```
+
+운영 노드 예시이며 CIDR은 기존 네트워크와 충돌하지 않도록 검토한다. GCP 쪽은 interface 주소와 상대 public key/endpoint를 반대로 지정하고, AllowedIPs에 운영 interface /32와 실제 ALB subnet의 return route를 넣는다. 공개/기본 경로, 자기 interface 주소를 포함하는 peer route, shell hook 추가는 거부한다. Endpoint는 실제 public IPv4:51820만 받는다. 실 endpoint가 없으면 파일을 가짜 값으로 완성하지 않는다.
+
+```sh
+sudo python3 render_wireguard.py \
+  --public-config /etc/railshot/wireguard-peer.json \
+  --private-key-file /etc/railshot/keys/wireguard.key \
+  --output /etc/wireguard/wg-railshot.conf --check
+```
+
+검토 후 `--check`를 제거하면 0700 디렉터리에 0600 파일을 원자적으로 작성한다. 개인키와 출력은 checkout 밖의 절대 경로여야 하고 symlink·개인키 덮어쓰기는 거부한다. Receipt의 `installed`는 계속 false다. 명시적으로 검토한 뒤 guest에서 `wg-quick up wg-railshot`을 실행하고 필요한 IP forwarding·제한된 FORWARD 규칙을 따로 적용한다. Renderer는 패키지 설치, 서비스 시작, iptables 변경이나 모든 트래픽을 허용하는 규칙을 만들지 않는다. `wg show wg-railshot latest-handshakes`와 실제 경로 통신으로 검증하며 private key가 포함된 config 전체를 로그에 출력하지 않는다.
+
+## 검증과 출력
+
+```sh
+python3 -m unittest discover -s infrastructure/terraform/aws-edge -p 'test_*.py'
+terraform -chdir=infrastructure/terraform/aws-edge fmt -check
+```
+
+오프라인 테스트는 임시 source-only Terraform console로 변수 제한과 여러 앱의 SG·route 중복 제거를 확인한다. 실제 provider 검증은 별도 임시 복사본에서 locked provider로 `init -backend=false -lockfile=readonly`, `validate`를 사용한다. 이 검사들은 클라우드 plan/apply, DNS 위임, 인증서 발급 또는 앱 실행을 증명하지 않는다.
+
+출력은 `app_urls`, `target_group_arns`, `alb_dns_name`, `alb_security_group_id`, `wireguard_endpoint`, `wireguard_public_ip`, `gcp_private_routes`, `certificate_arn`이다. `readiness`는 계속 `configured-references-only; runtime, tunnel and public HTTP unverified`다. 실제 인수는 WG handshake·양방향 route, 각 target health, DNS/TLS/host routing, NodePort health path와 외부 HTTPS를 각각 확인한다. ALB health check는 target IP와 포트를 Host로 사용하므로 지정 경로가 기본 virtual host에서도 응답해야 한다. 공유 ALB의 두 AZ가 각 단일 고객 노드의 HA를 보장하지는 않는다.
+
+근거: [ALB IP target 제약](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-target-groups.html), [Terraform IP target attachment](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb_target_group_attachment), [Route53 Alias](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-to-elb-load-balancer.html), [WireGuard](https://www.wireguard.com/quickstart/).

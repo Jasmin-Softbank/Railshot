@@ -18,13 +18,14 @@ def evaluate(expression):
     return json.loads(json.loads(result.stdout))
 
 
-def render():
+def render(operator_ssh_public_key=None):
     args = {'device': '/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol01234567890123456',
             'initialize_empty_data_disk': 'false'}
     script = evaluate('templatefile(' + json.dumps(str(MODULE / 'bootstrap.sh.tftpl')) + ',' + json.dumps(args) + ')')
     config = {'name': 'offline', 'cloud_provider': 'aws', 'region': 'ap-northeast-2',
               'runtime_status': 'not_configured'}
     data = {'host_config': yaml.safe_dump(config), 'bootstrap_script': script,
+            'operator_ssh_public_key': operator_ssh_public_key,
             'bootstrap_manifest': json.dumps({'method': 'host-preparation-only', 'runtime_status': 'not_configured'})}
     return yaml.safe_load(evaluate('templatefile(' + json.dumps(str(MODULE / 'cloud-init.yaml.tftpl')) + ',' + json.dumps(data) + ')'))
 
@@ -44,6 +45,15 @@ class AWSBootstrapTest(unittest.TestCase):
             self.assertNotIn(retired, json.dumps(self.config))
         self.assertFalse(any('/systemd/system/k3s' in path for path in self.files))
         subprocess.run(['bash', '-n'], input=self.script, text=True, check=True)
+
+    def test_public_operator_key_bootstraps_only_a_locked_ssh_user(self):
+        key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOnlyTestNotARealKey offline'
+        self.assertNotIn('users', self.config)
+        configured = render(key)
+        self.assertEqual(configured['users'][1], {
+            'name': 'railshot-operator', 'lock_passwd': True, 'shell': '/bin/bash',
+            'sudo': 'ALL=(ALL) NOPASSWD:ALL', 'ssh_authorized_keys': [key]})
+        self.assertEqual(configured['runcmd'], self.config['runcmd'])
 
     def test_disk_identity_and_fail_closed_mount_precede_completion(self):
         self.assertIn('nvme-Amazon_Elastic_Block_Store_vol01234567890123456', self.script)
@@ -65,7 +75,11 @@ class AWSBootstrapTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'variables.tf').write_text((MODULE / 'variables.tf').read_text())
-            for key, bad in (('ami_id', 'stable/current'), ('instance_type', 'unreviewed-size')):
+            for key, bad in (('ami_id', 'stable/current'), ('instance_type', 'unreviewed-size'),
+                             ('operator_ssh_public_key', '-----BEGIN OPENSSH PRIVATE KEY-----'),
+                             ('operator_ssh_public_key', 'ssh-ed25519 AAAA\nroot: injected'),
+                             ('vpc_id', 'unknown'), ('subnet_id', 'unknown'),
+                             ('additional_security_group_ids', ['0.0.0.0/0'])):
                 with self.subTest(key=key):
                     inputs = root / 'inputs.tfvars.json'; inputs.write_text(json.dumps({**values, key: bad}))
                     result = subprocess.run(['terraform', 'console', '-no-color', '-var-file=' + str(inputs)], cwd=root,
