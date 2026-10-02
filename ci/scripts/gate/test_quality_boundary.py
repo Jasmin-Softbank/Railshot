@@ -2,7 +2,9 @@
 from pathlib import Path
 import hashlib
 import json
+import os
 import shlex
+import stat
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -13,6 +15,81 @@ import quality
 
 
 class QualityBoundaryTest(unittest.TestCase):
+    def test_private_source_is_staged_without_git_or_changing_original_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            previous = os.umask(0o077)
+            try:
+                source = root / "private-source"; source.mkdir()
+                (source / "src").mkdir()
+                (source / "src/app.js").write_text("export const value = 1;\n")
+                (source / ".project-config").write_text("fixture=true")
+                (source / "check.sh").write_text("#!/bin/sh\nexit 0\n")
+                (source / "check.sh").chmod(0o700)
+                (source / ".git").mkdir()
+                (source / ".git/private-metadata").write_text("synthetic private metadata")
+                before = quality.source_digest(source)
+                staged = quality.stage_quality_source(source, root / "staged")
+            finally:
+                os.umask(previous)
+            self.assertEqual(before, quality.source_digest(source))
+            self.assertEqual(0o700, stat.S_IMODE(source.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE((source / "src/app.js").stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE((source / ".git/private-metadata").stat().st_mode))
+            self.assertFalse((staged / ".git").exists())
+            for name, mode in ((".", 0o755), ("src", 0o755), ("src/app.js", 0o644),
+                               (".project-config", 0o644), ("check.sh", 0o755)):
+                self.assertEqual(mode, stat.S_IMODE((staged / name).stat().st_mode))
+            self.assertEqual((source / "src/app.js").read_bytes(), (staged / "src/app.js").read_bytes())
+
+    def test_snapshot_rejects_symlinks_special_files_and_copy_changes_before_launch(self):
+        for kind in ("root-link", "file-link", "directory-link", "fifo", "changed-copy"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source = root / "source"; source.mkdir()
+                (source / "input").write_text("original")
+                if kind == "root-link":
+                    (root / "link").symlink_to(source, target_is_directory=True)
+                    source = root / "link"
+                elif kind.endswith("link"):
+                    (source / "linked").symlink_to(source if kind == "directory-link" else source / "input")
+                elif kind == "fifo":
+                    os.mkfifo(source / "pipe")
+                copytree = quality.shutil.copytree
+                def copy(*args, **kwargs):
+                    result = copytree(*args, **kwargs)
+                    if kind == "changed-copy":
+                        (Path(result) / "input").write_text("changed")
+                    return result
+                with patch.object(quality.shutil, "copytree", side_effect=copy), self.assertRaises(ValueError):
+                    quality.stage_quality_source(source, root / "staged")
+
+    def test_run_quality_mounts_only_temporary_snapshot_and_cleans_it_after_failure(self):
+        mounts = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"; source.mkdir(mode=0o700)
+            (source / "package.json").write_text('{}'); (source / "package.json").chmod(0o600)
+            def execute(command, **kwargs):
+                if command[:2] == ["docker", "rm"]:
+                    self.assertTrue(mounts[0].exists())  # Cleanup happens after the container stops.
+                    return SimpleNamespace(returncode=0)
+                value = command[command.index("--mount") + 1]
+                self.assertTrue(value.endswith(",dst=/source,readonly"))
+                mounted = Path(value.split(",src=", 1)[1].split(",dst=", 1)[0]); mounts.append(mounted)
+                self.assertNotEqual(source, mounted)
+                self.assertEqual(0o700, stat.S_IMODE(mounted.parent.stat().st_mode))
+                self.assertEqual(0o644, stat.S_IMODE((mounted / "package.json").stat().st_mode))
+                self.assertEqual("65532:65532", command[command.index("--user") + 1])
+                kwargs["stdout"].write(b"synthetic lint failure\n")
+                return SimpleNamespace(returncode=202)
+            plan = {"path": ".", "stack": "javascript", "image": "node:22", "commands": ["npm run lint"]}
+            with patch.object(quality, "discover", return_value=[plan]), patch.object(quality.subprocess, "run", side_effect=execute):
+                result = quality.run_quality(source, root / "run", network="trusted-quality")
+            self.assertEqual("FAIL", result["status"])
+            self.assertEqual(0o600, stat.S_IMODE((source / "package.json").stat().st_mode))
+            self.assertFalse(mounts[0].parent.exists())
+
     def test_source_copy_excludes_private_git_but_preserves_application_dotfiles(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -30,7 +30,7 @@ test('original cloud card binds a DB plan, blocks invalid and unknown execution,
     if (path === '/api/v1/targets') return respond(response, 200, { items: [{ id: 'ready-runtime', label: 'Existing runtime',
       capabilities: { ci_submission: true, application_deployment: true } }] });
     if (path === '/api/v1/profiles') return respond(response, 200, { items: activeProfiles });
-    if (path === '/api/v1/deployment-options') return respond(response, 200, { items: [{ id: 'cloud-aws', environment: 'cloud', provider: 'aws', label: 'AWS', available: true }] });
+    if (path === '/api/v1/options') return respond(response, 200, { items: [{ id: 'cloud-aws', environment: 'cloud', provider: 'aws', label: 'AWS', available: true }] });
     if (path === '/api/v1/plans') {
       const input = JSON.parse(bytes); plans.push(input);
       const result = { id: `plan-${plans.length}`, ...input, executable: planMode !== 'budget', blockers: planMode === 'budget' ? ['BUDGET_EXCEEDED'] : [],

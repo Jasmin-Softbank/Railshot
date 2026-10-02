@@ -176,7 +176,7 @@ async function request(path, options = {}, controller = new AbortController()) {
 
 async function checkConnection() {
   try {
-    const [{ data }, { data: catalog }] = await Promise.all([request('/api/v1/deployment-options'), request('/api/v1/profiles?limit=100')]);
+    const [{ data }, { data: catalog }] = await Promise.all([request('/api/v1/options'), request('/api/v1/profiles?limit=100')]);
     if (!Array.isArray(catalog.items) || catalog.next_marker) throw new Error('배포 사양 목록을 확인하지 못했습니다.');
     profiles = catalog.items;
     if (!Array.isArray(data.items)) throw new Error('인프라 연결 상태를 확인하지 못했습니다.');
@@ -372,7 +372,7 @@ deployButton.addEventListener('click', async () => {
   }
 });
 function stopPolling() {
-  clearTimeout(timer); pollController?.abort(); pollController = null;
+  clearTimeout(timer); timer = null; pollController?.abort(); pollController = null;
   document.querySelector('#stop-polling').hidden = true;
   document.querySelector('#refresh-run').hidden = !current;
 }
@@ -391,12 +391,13 @@ async function refreshRun() {
     else stopPolling();
   } catch (cause) {
     if (pollController !== controller) return;
-    stopPolling(); observationError = true; renderRun();
-    timer = setTimeout(refreshRun, 15000);
+    stopPolling(); observationError = true;
+    timer = setTimeout(refreshRun, 15000); renderRun();
+    document.querySelector('#stop-polling').hidden = false;
     document.querySelector('#run-message').textContent = `${cause.name === 'AbortError' ? '상태 조회 시간이 초과되었습니다.' : cause.message} 15초 후 다시 조회합니다.`;
   }
 }
-document.querySelector('#stop-polling').addEventListener('click', () => { stopPolling(); document.querySelector('#run-message').textContent = '상태 조회를 중지했습니다. 서버의 실행은 계속됩니다.'; });
+document.querySelector('#stop-polling').addEventListener('click', () => { stopPolling(); renderMetrics(); document.querySelector('#run-message').textContent = '상태 조회를 중지했습니다. 서버의 실행은 계속됩니다.'; });
 document.querySelector('#refresh-run').addEventListener('click', refreshRun);
 window.addEventListener('pagehide', () => { stopPolling(); for (const controller of requests) controller.abort(); });
 let consoleTab = 'work';
@@ -423,8 +424,8 @@ function renderMetrics() {
       : name === 'pods' ? `${metric.value}개` : `${Number(metric.value).toFixed(1)}%`;
     document.querySelector(`#metric-${name}-time`).textContent = Number.isFinite(time) ? `수집 ${new Date(time).toLocaleString()}` : '수집 시각 없음';
   }
-  document.querySelector('#observation-status').textContent = observationError ? '관측 조회 실패 · 재시도 중'
-    : bound ? `조회 ${new Date(observation.checked_at).toLocaleTimeString()}` : '관측 연결 대기';
+  document.querySelector('#observation-status').textContent = observationError && (pollController || timer) ? '관측 조회 실패 · 재시도 중'
+    : bound ? `${pollController || timer ? '조회' : '조회 중지 · 마지막 조회'} ${new Date(observation.checked_at).toLocaleTimeString()}` : '관측 연결 대기';
   const collector = bound && observation.collector;
   document.querySelector('#collector-note').textContent = collector
     ? `공유 관측 서버 · ${collector.lifecycle === 'acceptance' ? '임시 인수용' : '운영용'} · 만료 ${new Date(collector.expires_at).toLocaleString()}`
