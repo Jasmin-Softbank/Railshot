@@ -575,7 +575,7 @@ document.querySelector('#history-refresh').addEventListener('click', () => loadH
 document.querySelector('#history-prev').addEventListener('click', () => loadHistory(historyMarkers.slice(0, -1)));
 document.querySelector('#history-next').addEventListener('click', () => { if (historyNext) loadHistory([...historyMarkers, historyNext]); });
 
-const metricNames = { node_up: '노드 가동', cpu_percent: 'CPU', memory_percent: '메모리', disk_percent: '디스크',
+const metricNames = { node_up: '노드 수집', cpu_percent: 'CPU', memory_percent: '메모리', disk_percent: '디스크',
   network_receive_bytes_per_second: '네트워크 수신', network_transmit_bytes_per_second: '네트워크 송신', pods: '실행 중 Pod', http: '앱 HTTP' };
 const providerNames = { aws: 'AWS', gcp: 'GCP', openstack: 'OpenStack' };
 function metricState(metric, observation) {
@@ -588,7 +588,7 @@ function metricText(name, observation) {
   const metric = observation?.metrics?.[name], state = metricState(metric, observation);
   if (state !== 'ready') return metricLabels[state] || '확인 불가';
   if (name === 'http') return metric.value === 1 ? '2xx 응답' : '검사 실패';
-  if (name === 'node_up') return metric.value === 1 ? '가동 중' : '수집 실패';
+  if (name === 'node_up') return metric.value === 1 ? '수집 중' : '수집 실패';
   if (name.endsWith('_percent')) return `${metric.value.toFixed(1)}%`;
   if (name.endsWith('_per_second')) return `${(metric.value / 1024).toFixed(1)} KiB/s`;
   return `${metric.value}개`;
@@ -610,7 +610,7 @@ function visibleTargets() {
 function renderEnvironments() {
   const opened = new Set([...document.querySelectorAll('#environment-detail details[open]')].map((item) => item.dataset.target));
   const focused = document.activeElement?.closest('#environment-detail details')?.dataset.target;
-  const rows = visibleTargets(), stateNames = { ready: '정상', failed: '장애', missing: '미수집', stale: '오래된 관측' };
+  const rows = visibleTargets(), stateNames = { ready: '노드 수집 정상', failed: '수집·응답 실패', missing: '미수집', stale: '오래된 관측' };
   document.querySelector('#environment-summary').replaceChildren(...Object.entries(stateNames).map(([state, label]) => {
     const count = rows.filter((row) => environmentState(observations.get(row.id)) === state).length;
     const node = element('span', label); node.append(element('strong', String(count))); return node;
