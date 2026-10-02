@@ -30,6 +30,7 @@ PLATFORM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLATFORM))
 from observability import OperationError, event_record
 from runner.runtime_boundary import effective_auth_route, private_directory
+from runner.native_preflight import check as codex_preflight, sandbox_failure
 
 
 def validate_read_roots(roots, deny):
@@ -67,7 +68,7 @@ def lifecycle(run, role, provider, model):
 
     def emit(kind, *, error=None, **fields):
         nonlocal seq
-        allowed = {"status", "sdk_status", "session_id", "thread_id", "turn_id", "sdk_failure"}
+        allowed = {"status", "sdk_status", "session_id", "thread_id", "turn_id", "sdk_failure", "sandbox_preflight"}
         if set(fields) - allowed:
             raise OperationError("INTERNAL_ERROR", component="runner", phase="observation")
         state.update(fields)
@@ -75,6 +76,7 @@ def lifecycle(run, role, provider, model):
         attributes = {key: state[key] for key in ("role", "provider", "model", "status", "sdk_status",
                       "session_id", "thread_id", "turn_id", "conversation_resume", "resume_reason")}
         if state.get("sdk_failure"): attributes["sdk_failure"] = state["sdk_failure"]
+        if state.get("sandbox_preflight"): attributes["sandbox_preflight"] = state["sandbox_preflight"]
         sdk_finished = kind == "session.finished"
         outcome = error.outcome if error else "PASS" if state["status"] == "completed" or sdk_finished else "RUNNING"
         phase = error.phase if error else "invoke" if kind.startswith(("session.", "turn.")) else "agent"
@@ -143,7 +145,8 @@ def path_ok(rel, allow, deny):
 
 
 def instructions(profile, role_cfg):
-    text = (PLATFORM / profile["instructions_prefix"]).read_text() + "\n\n" + (PLATFORM / role_cfg["instructions"]).read_text()
+    text = "\n\n".join((PLATFORM / path).read_text() for path in
+                       (profile["instructions_prefix"], "agents/DONT.md", role_cfg["instructions"]))
     text += ("\n\n## How to return files\nYou cannot edit files. Return the full content of every file you create or "
              "change in the `files` array of your JSON output, with paths relative to the workspace root. "
              "Files you do not list stay unchanged.\n")
@@ -291,7 +294,7 @@ def codex_permissions(workspace, run, credential_home, read_deny):
     rules["glob_scan_max_depth"] = 32
     rules[str(bundled_codex_path().resolve())] = "read"
     rules[str((bundled_path_dir() / "rg").resolve())] = "read"
-    for name in ("cat", "ls", "sed"):
+    for name in ("cat", "ls", "sed", "rg", "jq"):
         executable = shutil.which(name)
         if executable:
             rules[str(Path(executable).resolve())] = "read"
@@ -330,6 +333,24 @@ def codex_failure_diagnostic(error):
             "message_sha256": hashlib.sha256(message.encode()).hexdigest()}
 
 
+def codex_sandbox_failure(result):
+    """Native tool failures outrank a model's completed/proposed status."""
+    from openai_codex.generated.v2_all import CommandExecutionThreadItem
+    for wrapped in result.items:
+        item = wrapped.root if hasattr(wrapped, "root") else wrapped
+        if (isinstance(item, CommandExecutionThreadItem) and item.exit_code != 0
+                and sandbox_failure(item.aggregated_output)):
+            return {"category": "sandbox_unavailable", "exit_code": item.exit_code,
+                    "output_sha256": hashlib.sha256((item.aggregated_output or "").encode()).hexdigest(),
+                    "command_sha256": hashlib.sha256(item.command.encode()).hexdigest(),
+                    "message": "A native command could not start the required sandbox; repair the runner configuration."}
+    message = getattr(result.error, "message", "") or ""
+    if sandbox_failure(message):
+        return {"category": "sandbox_unavailable", "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+                "message": "The native runtime could not start the required sandbox; repair the runner configuration."}
+    return None
+
+
 def collect_codex_turn(turn):
     """Use public typed stream notifications: run() raises before returning failed turns."""
     from openai_codex import TurnResult
@@ -366,6 +387,7 @@ def collect_codex_turn(turn):
 
 def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=None):
     from importlib.metadata import version
+    from codex_cli_bin import bundled_codex_path
     from openai_codex import ApprovalMode, Codex, CodexConfig
 
     if version("openai-codex") != "0.159.3":
@@ -390,12 +412,15 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
     t = time.time()
     with tempfile.TemporaryDirectory(prefix="railshot-codex-auth-") as temporary:
         auth_home = temporary if mode == "api-key" else home
+        overrides = ('project_doc_max_bytes=0', 'web_search="disabled"',
+                     'shell_environment_policy.inherit="none"',
+                     *codex_permissions(workspace, run, auth_home, read_deny))
+        preflight = codex_preflight(bundled_codex_path(), overrides, workspace, run, auth_home)
+        emit("sandbox.checked", sandbox_preflight=preflight)
         config = CodexConfig(cwd=str(workspace),
             env={"CODEX_HOME": auth_home,
                  "OPENAI_API_KEY": "", "CODEX_API_KEY": ""},
-            config_overrides=('project_doc_max_bytes=0', 'web_search="disabled"',
-                              'shell_environment_policy.inherit="none"',
-                              *codex_permissions(workspace, run, auth_home, read_deny)))
+            config_overrides=overrides)
         with Codex(config) as codex:
             if mode == "api-key":
                 codex.login_api_key(key)
@@ -412,7 +437,11 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
             status = getattr(result.status, "value", result.status)
             failure = OperationError("SDK_EXECUTION_FAILED", component="runner", phase="invoke",
                                      outcome="FAIL", side_effect="completed") if status != "completed" else None
-            diagnostic = codex_failure_diagnostic(result.error) if failure else None
+            sandbox_diagnostic = codex_sandbox_failure(result)
+            if sandbox_diagnostic:
+                failure = OperationError("SDK_SANDBOX_UNAVAILABLE", component="runner", phase="sandbox.command",
+                                         retry_policy="after_configuration", side_effect="completed")
+            diagnostic = sandbox_diagnostic or (codex_failure_diagnostic(result.error) if failure else None)
             emit("session.finished", turn_id=result.id, sdk_status=status, error=failure,
                  **({"sdk_failure": diagnostic} if diagnostic else {}))
             if failure:
@@ -566,6 +595,7 @@ def execute(a):
     meta.update({key: state[key] for key in ("run_id", "attempt_id", "session_id", "thread_id", "turn_id",
                                            "conversation_resume", "resume_reason")})
     if state.get("sdk_failure"): meta["sdk_failure"] = state["sdk_failure"]
+    if state.get("sandbox_preflight"): meta["sandbox_preflight"] = state["sandbox_preflight"]
     meta.update(status=status, sdk_status=state["sdk_status"], events_file=f"{a.role}-events.jsonl",
                 session_file=f"{a.role}-session.json")
     record = {"role": a.role, "repair_scope": a.repair_scope, "provider": provider, "model": profile["providers"][provider].get("model"),

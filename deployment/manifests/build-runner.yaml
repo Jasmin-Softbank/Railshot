@@ -66,7 +66,8 @@ spec:
             privileged: false
             allowPrivilegeEscalation: false
             capabilities: {add: [NET_ADMIN]}
-            seccompProfile: {type: RuntimeDefault}
+            seccompProfile: {type: Localhost, localhostProfile: railshot-codex-bwrap.json}
+            appArmorProfile: {type: Localhost, localhostProfile: railshot-codex-bwrap}
           resources:
             requests: {cpu: 200m, memory: 512Mi}
             limits: {cpu: '1', memory: 2Gi}
