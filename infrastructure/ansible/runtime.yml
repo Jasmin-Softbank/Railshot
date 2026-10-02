@@ -65,9 +65,9 @@
         path: "{{ railshot_runtime_dir }}/{{ item }}"
         state: directory
         mode: '0700'
-      loop: ['', scripts, bootstrap, cilium]
+      loop: ['', scripts, bootstrap, cilium, airgap]
 
-    - name: Copy only the team's runtime bootstrap and health scripts
+    - name: Copy the team's runtime bootstrap scripts and approved image policy
       ansible.builtin.copy:
         src: "{{ railshot_deployment_source }}/{{ item }}"
         dest: "{{ railshot_runtime_dir }}/{{ item }}"
@@ -79,6 +79,7 @@
         - bootstrap/health.sh
         - cilium/install.sh
         - cilium/health.sh
+        - airgap/versions.json
 
     - name: Run native bootstrap under the team's node-wide deployment lock
       ansible.builtin.command:

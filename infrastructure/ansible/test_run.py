@@ -242,8 +242,10 @@ class AdapterTests(unittest.TestCase):
     def test_runtime_uses_native_scripts_and_shared_lock_without_application(self):
         playbook = (HERE / 'runtime.yml').read_text()
         for path in ('bootstrap/preflight.sh', 'bootstrap/install-k3s.sh', 'cilium/install.sh',
-                     'bootstrap/health.sh', 'cilium/health.sh', '/run/railshot-deployment.lock'):
+                     'bootstrap/health.sh', 'cilium/health.sh', 'airgap/versions.json',
+                     '/run/railshot-deployment.lock'):
             self.assertIn(path, playbook)
+        self.assertIn("loop: ['', scripts, bootstrap, cilium, airgap]", playbook)
         for old in ('/runtime.sh', 'deploy-sample', 'metadata.name == k3s_node_name'):
             self.assertNotIn(old, playbook)
         self.assertIn('InternalIP', playbook)
