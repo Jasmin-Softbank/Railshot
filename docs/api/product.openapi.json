@@ -399,7 +399,7 @@
       "get": {
         "operationId": "getDeployment",
         "summary": "Read deployment",
-        "description": "Read-only. Does not dispatch, provision or reconcile external state. Builds only query locally bound runs; deployment/environment details read the persisted operation.",
+        "description": "Read persisted execution state and bounded, read-only observations of the operator-bound target and app. Observer failures do not change deployment outcome. Metrics older than 90 seconds have null values. No dispatch, provision or reconcile.",
         "parameters": [
           {
             "name": "id",
@@ -1115,6 +1115,7 @@
             "enum": [
               "ci",
               "cd",
+              "http",
               "complete"
             ]
           },
@@ -1130,6 +1131,12 @@
               "state": {
                 "type": "string"
               },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
               "publication_artifact_id": {
                 "type": [
                   "string",
@@ -1141,6 +1148,13 @@
                   "integer",
                   "null"
                 ]
+              },
+              "images": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Verified immutable image references from the bound publication receipt."
               }
             },
             "required": [
@@ -1235,6 +1249,14 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "source_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "SHA-256 of the accepted normalized input snapshot; source content is private."
+          },
+          "observation": {
+            "$ref": "#/components/schemas/Observation"
           }
         },
         "required": [
@@ -1742,6 +1764,104 @@
         "required": [
           "items",
           "next_marker"
+        ],
+        "additionalProperties": false
+      },
+      "Metric": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "not_configured",
+              "unsupported",
+              "unavailable",
+              "collection_failed",
+              "no_data",
+              "stale"
+            ]
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "observed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "app_pods",
+              "target_node",
+              "app_probe"
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "value",
+          "observed_at",
+          "scope"
+        ],
+        "additionalProperties": false
+      },
+      "Observation": {
+        "type": "object",
+        "properties": {
+          "deployment_id": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "app": {
+            "type": "string"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stale_after_seconds": {
+            "const": 90
+          },
+          "metrics": {
+            "type": "object",
+            "properties": {
+              "pods": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "cpu_percent": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "memory_percent": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "http": {
+                "$ref": "#/components/schemas/Metric"
+              }
+            },
+            "required": [
+              "pods",
+              "cpu_percent",
+              "memory_percent",
+              "http"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "deployment_id",
+          "target_id",
+          "app",
+          "checked_at",
+          "stale_after_seconds",
+          "metrics"
         ],
         "additionalProperties": false
       }

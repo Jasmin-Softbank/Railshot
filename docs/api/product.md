@@ -26,3 +26,5 @@
 CI는 `GITHUB_TOKEN`, `RAILSHOT_TARGET_ID` 및 기존 GitHub 저장소 설정을 사용한다. CD는 `RAILSHOT_CD_CONFIG`의 비공개 고정 설정과 검증한 publication 파일만 받는다. 환경은 `RAILSHOT_PROFILES_FILE`과 서버의 Python/Terraform/Ansible 도구를 사용한다. 현재 환경 실행 범위는 등록된 AWS/GCP 단일 amd64 runtime과 database.mode=none이다. profile 등록·SSH·네트워크·실행 도구가 준비됐다는 사실과 실제 클라우드 준비 성공은 구분한다.
 
 기존 `POST /api/deploy`와 `GET /api/runs/{run_id}`는 응답 필드와 `x-jasmin-request: deploy` 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·admission·run binding을 공유하므로 이 workspace에서 접수하지 않은 과거 또는 외부 run ID는 조회하지 않는다. v1 배포와 달리 legacy deploy는 CI 제출이다.
+
+현재 운영 메트릭, 수집 시각과 실패 상태는 [제품 관측 계약](observations.md)을 따른다.
