@@ -55,6 +55,19 @@ class BridgeTest(unittest.TestCase):
         return subprocess.run(['git', '-C', str(self.repo), '-c', 'core.hooksPath=/dev/null', *args],
                               check=True, capture_output=True, text=True).stdout.strip()
 
+    def advance_remote(self):
+        writer = self.root / 'other-writer'
+        subprocess.run(['git', 'clone', '-q', '--branch', 'main', str(self.remote), str(writer)],
+                       check=True, capture_output=True)
+        def git(*args):
+            return subprocess.run(['git', '-C', str(writer), '-c', 'core.hooksPath=/dev/null', *args],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        git('config', 'user.name', 'Other writer'); git('config', 'user.email', 'other@example.invalid')
+        (writer / 'other-app.json').write_text('{"owner":"another-application"}\n')
+        git('add', '--', 'other-app.json'); git('commit', '-qm', 'Independent app release')
+        git('push', '-q', 'origin', 'main')
+        return git('rev-parse', 'HEAD')
+
     def test_historical_publication_crosses_bridge_without_renaming_bytes(self):
         request = copy.deepcopy(self.request)
         files = {name: base64.b64decode(value) for name, value in request['files'].items()}
@@ -152,6 +165,59 @@ class BridgeTest(unittest.TestCase):
             bad = copy.deepcopy(self.request); bad['publication']['artifact_id'] = 4
             with self.assertRaisesRegex(ValueError, 'binding conflict'):
                 bridge.execute(self.config, bad)
+
+    def test_clean_behind_checkout_fast_forwards_before_app_commit_without_losing_other_release(self):
+        before = self.git('rev-parse', 'HEAD')
+        remote_revision = self.advance_remote()
+        self.assertNotEqual(before, remote_revision)
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value={'state': 'unverified', 'verified_at': None, 'url': None}):
+            result = bridge.execute(self.config, self.request)
+        self.assertTrue(result['cd']['deployed'])
+        self.assertEqual(self.git('rev-parse', 'HEAD^'), remote_revision)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), result['cd']['revision'])
+        self.assertEqual(json.loads((self.repo / 'other-app.json').read_text()), {'owner': 'another-application'})
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.assertEqual([args[-3:] for args in self.calls if 'merge' in args], [['merge', '--ff-only', remote_revision]])
+        remote_head = subprocess.check_output(['git', '--git-dir', str(self.remote), 'rev-parse', 'main'], text=True).strip()
+        self.assertEqual(remote_head, result['cd']['revision'])
+
+    def test_ahead_or_diverged_checkout_is_not_reset_merged_or_pushed(self):
+        original_remote = self.git('rev-parse', 'HEAD')
+        (self.repo / 'local-only.txt').write_text('preserve unpublished work\n')
+        self.git('add', '--', 'local-only.txt'); self.git('commit', '-qm', 'Unpublished local commit')
+        local_head = self.git('rev-parse', 'HEAD')
+        for state in ('ahead', 'diverged'):
+            expected_remote = self.advance_remote() if state == 'diverged' else original_remote
+            self.calls.clear()
+            with self.subTest(state=state), patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl') as kube:
+                result = bridge.execute(self.config, {**self.request, 'deployment_id': state})
+                self.assertEqual(result['cd']['state'], 'blocked')
+                self.assertEqual(result['error']['code'], 'CD_PREPARATION_FAILED')
+                self.assertFalse(result['error']['outcome_unknown'])
+                kube.assert_not_called()
+            self.assertEqual(self.git('rev-parse', 'HEAD'), local_head)
+            self.assertEqual((self.repo / 'local-only.txt').read_text(), 'preserve unpublished work\n')
+            self.assertFalse(any(command in args for args in self.calls for command in ('merge', 'reset', 'push', 'commit')))
+            remote_head = subprocess.check_output(['git', '--git-dir', str(self.remote), 'rev-parse', 'main'], text=True).strip()
+            self.assertEqual(remote_head, expected_remote)
+
+    def test_fast_forward_does_not_bypass_clean_checkout_or_registered_branch(self):
+        self.advance_remote()
+        before = self.git('rev-parse', 'HEAD')
+        for state in ('dirty', 'wrong-branch'):
+            if state == 'dirty':
+                (self.repo / 'README.md').write_text('local edit\n')
+            else:
+                (self.repo / 'README.md').write_text('fixture\n')
+                self.git('checkout', '-qb', 'another-branch')
+            self.calls.clear()
+            with self.subTest(state=state), patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl') as kube:
+                result = bridge.execute(self.config, {**self.request, 'deployment_id': state})
+                self.assertEqual(result['cd']['state'], 'blocked')
+                kube.assert_not_called()
+            self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+            self.assertFalse(any(command in args for args in self.calls for command in ('fetch', 'merge', 'reset', 'push', 'commit')))
 
     def test_status_health_requires_current_argo_revision_images_and_site_before_url(self):
         self.config['targets']['k3s-aws']['public_http'] = {'url': 'https://app.example/health', 'expected_status': 200}

@@ -61,3 +61,9 @@ terraform -chdir=infrastructure/terraform/control plan -input=false \
 `review-summary.json`에는 변경 resource·action·필드 이름만, `reviewed-plan.json`과 native 로그에는 상세 검토 자료를 비공개로 보존한다. 기대 범위를 벗어난 변경이나 replacement가 있으면 apply하지 않고 먼저 원인을 확인한다. 검토한 saved plan의 apply는 root 운영 작업자가 별도로 수행한다. 2026-10-02 복원 및 제한된 후속 연결 apply는 완료했으며, 새 변경에도 plan 검토가 필요하다.
 
 출력은 기존 `instance_id`, `auth_parameter_name`, `connect`와 추가된 `private_ip`, `primary_network_interface_id`, `edge_security_group_id`, `source_dest_check`다. 이 값은 WireGuard handshake, route, Kubernetes/Argo 또는 외부 앱 준비 완료 증거가 아니다.
+
+## 기존 앱 노드의 실행 권한
+
+`registered_runtime_instance_ids`는 앱 등록에 인계된 기존 runtime EC2 ID 목록이다. 기본값은 빈 목록이며 `enable_product_executor=true`일 때만 이 목록에 SSM StartSession 권한을 부여한다. 기존 노드에 `ProjectOwner` 태그를 덧씌워 신규 생성 자원으로 취급하지 않는다. Session document 권한은 기존 고정 port-forwarding 문서 정책을 재사용하며 SSH host key와 전용 사용자 검증을 유지한다.
+
+2026-10-03 운영 점검에서 API의 IMDSv2 자격 조회가 실패했고 실행자 opt-in이 적용되지 않았음을 확인했다. metadata 사전 검사에서는 `crictl inspectp` 옵션을 Pod ID 앞에 전달해야 했다. 수정 뒤 Argo·dashboard·CoreDNS·local-path의 실제 Cilium policy drop을 확인했다. 이 사전 검사만으로 IAM 활성화 또는 앱 E2E 완료를 주장하지 않는다.
