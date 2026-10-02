@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import quality
+import bundle
 
 
 class QualityBoundaryTest(unittest.TestCase):
@@ -28,11 +29,11 @@ class QualityBoundaryTest(unittest.TestCase):
                 (source / "check.sh").chmod(0o700)
                 (source / ".git").mkdir()
                 (source / ".git/private-metadata").write_text("synthetic private metadata")
-                before = quality.source_digest(source)
-                staged = quality.stage_quality_source(source, root / "staged")
+                before = bundle.source_digest(source)
+                staged = bundle.stage_source(source, root / "staged")
             finally:
                 os.umask(previous)
-            self.assertEqual(before, quality.source_digest(source))
+            self.assertEqual(before, bundle.source_digest(source))
             self.assertEqual(0o700, stat.S_IMODE(source.stat().st_mode))
             self.assertEqual(0o600, stat.S_IMODE((source / "src/app.js").stat().st_mode))
             self.assertEqual(0o600, stat.S_IMODE((source / ".git/private-metadata").stat().st_mode))
@@ -55,14 +56,14 @@ class QualityBoundaryTest(unittest.TestCase):
                     (source / "linked").symlink_to(source if kind == "directory-link" else source / "input")
                 elif kind == "fifo":
                     os.mkfifo(source / "pipe")
-                copytree = quality.shutil.copytree
+                copytree = bundle.shutil.copytree
                 def copy(*args, **kwargs):
                     result = copytree(*args, **kwargs)
                     if kind == "changed-copy":
                         (Path(result) / "input").write_text("changed")
                     return result
-                with patch.object(quality.shutil, "copytree", side_effect=copy), self.assertRaises(ValueError):
-                    quality.stage_quality_source(source, root / "staged")
+                with patch.object(bundle.shutil, "copytree", side_effect=copy), self.assertRaises(ValueError):
+                    bundle.stage_source(source, root / "staged")
 
     def test_run_quality_mounts_only_temporary_snapshot_and_cleans_it_after_failure(self):
         mounts = []

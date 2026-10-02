@@ -34,7 +34,7 @@ sys.path.insert(0, str(PLATFORM / "runner"))
 from observability import OperationError, event_record  # noqa: E402
 from run_agent import path_ok, writable_rules  # noqa: E402
 from quality import run_quality  # noqa: E402
-from bundle import source_digest  # noqa: E402
+from bundle import source_digest, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
 from execution import APP_UID, GATE_ORDER, docker_security, docker_command  # noqa: E402
 from progress import Progress  # noqa: E402
@@ -366,9 +366,14 @@ def l2(ws, spec, run_id, *, network=None):
         # The digest excludes Git metadata. Exclude it physically from every
         # context, including nested contexts and Dockerfile-specific ignore files.
         with tempfile.TemporaryDirectory(prefix="railshot-build-") as staging:
-            clean = Path(staging) / "source"
-            shutil.copytree(ws, clean, ignore=lambda _directory, names:
-                            [name for name in names if name == ".git" or name.startswith(".env")])
+            clean = stage_source(ws, Path(staging) / "source")
+            # Preserve L2's physical secret exclusion regardless of Dockerignore
+            # negations. Filter only the verified private copy, never source.
+            for path in sorted(clean.rglob(".env*"), key=lambda p: len(p.parts), reverse=True):
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
             p = sh(["docker", "buildx", "build", "--builder", builder["name"], "--network", "default",
                     "--platform", "linux/amd64", "--load", "-f", str(clean / df.relative_to(ws)),
                     "-t", tag, str(clean / ctx.relative_to(ws))], timeout=1800)
