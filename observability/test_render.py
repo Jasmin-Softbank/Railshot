@@ -158,5 +158,7 @@ class ConfigurationTests(unittest.TestCase):
             subprocess.run([os.environ['PROMTOOL'], 'check', 'rules', str(path)], check=True)
 
 
+
+
 if __name__ == '__main__':
     unittest.main()

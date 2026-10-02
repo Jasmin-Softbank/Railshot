@@ -153,6 +153,10 @@ class RegistrationTests(unittest.TestCase):
                 self.assertEqual(json.loads((Path(root) / 'product.json').read_text())['targets'][0]['target_id'], 'new-aws')
 
 
+
+
+
+
     def test_network_policy_must_be_imported_and_realized_before_exporters(self):
         for mode in ('cilium_missing', 'stale_policy', 'wait_failed', 'ready'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
