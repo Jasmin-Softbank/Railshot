@@ -121,7 +121,7 @@ export async function createProductService({ service, directory, target, provide
           || environment.runtime_target_id !== id || !environmentId || plan?.environment_id !== environmentId
           || plan.private?.profile?.target?.target_id !== id || !plan.private.profile.deployment
           || !APP_NAME.test(plan.public?.name || '') || (!standalone && operation.app !== plan.public.name)) continue;
-      return { environment_id: environmentId, applicationName: plan.public.name,
+      return { environment_id: environmentId, applicationName: plan.public.name, provider: plan.private.profile.provider ?? null,
         database_configuration: environment.database?.status === 'succeeded' };
     }
     return null;
@@ -256,13 +256,12 @@ export async function createProductService({ service, directory, target, provide
   }
   return {
     dashboard: store.dashboard,
-    list(kind, sessionId) {
-      const state = store.read();
-      if (kind === 'plans') return Object.values(state.plans).filter((row) => owns(row, sessionId)).reverse().map((row) => structuredClone(row.public));
-      return Object.values(state.operations).filter((row) => row.kind === kind && owns(row, sessionId))
-        .reverse().filter((row) => kind !== 'builds' || row.ci?.run_id)
-        .map((row) => ({ id: kind === 'builds' ? String(row.ci.run_id) : row.id, kind, status: row.status,
-          ...Object.fromEntries(['app', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
+    list(kind, sessionId, pagination) {
+      if (kind === 'plans') return Object.values(store.read().plans).filter((row) => owns(row, sessionId)).reverse().map((row) => structuredClone(row.public));
+      const { records, hasMore, total } = store.operationPage(kind, sessionId, pagination);
+      const items = records.map((row) => ({ id: kind === 'builds' ? String(row.ci.run_id) : row.id, kind, status: row.status,
+        ...Object.fromEntries(['app', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
+      return { items, next_marker: hasMore ? items.at(-1).id : null, total };
     },
     deploymentOptions,
     targets(sessionId = null) {
@@ -278,12 +277,21 @@ export async function createProductService({ service, directory, target, provide
         const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id, sessionId);
         const available = staticAvailable || Boolean(registered);
         return { id, label: id === targetId ? target?.label || id : id,
-          provider: [...selections].find(([, selected]) => selected === id)?.[0] || null, environment: 'registered',
+          provider: [...selections].find(([, selected]) => selected === id)?.[0] || registered?.provider || null, environment: 'registered',
+          environment_id: registered?.environment_id || null,
           ...(registered?.applicationName ? { application_name: registered.applicationName, deployment_scope: 'registered_application' } : {}),
           capabilities: { ci_submission: Boolean(service), application_deployment: available,
             database_configuration: !staticAvailable && registered?.database_configuration === true },
           runtime: { status: 'unknown', observed_at: null }, blockers: available ? [] : ['CD_ADAPTER_NOT_CONFIGURED'] };
       });
+    },
+    async getTargetObservation(id, sessionId = null) {
+      const target = TARGET_ID.test(id) && this.targets(sessionId).find((item) => item.id === id);
+      if (!target) throw new ProductError(404, 'NOT_FOUND', '등록된 대상을 찾을 수 없습니다.');
+      const observation = await observeMetrics({ target_id: id, app: target.application_name ?? null });
+      const node = observation.metrics.node_up;
+      return { ...observation, environment_id: target.environment_id,
+        runtime: { status: node.state, observed_at: node.observed_at } };
     },
     async createBuild(input, materialize, sessionId = null) {
       const reserved = await reserve('builds', input, null, materialize, sessionId);
