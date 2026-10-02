@@ -121,14 +121,14 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     if (run.path !== `.github/workflows/${workflow}`) throw new ServiceError('해당 실행은 등록된 CI 워크플로가 아닙니다.', 404);
     if (!Number.isInteger(run.run_attempt) || run.run_attempt < 1 || run.run_attempt > 100) throw new ServiceError('지원 범위에서 실행 attempt를 확인하지 못했습니다.', 502);
     const observed = new Map();
-    // Failed-job reruns can reuse the producer job from an earlier attempt.
+    // GitHub may copy reused jobs into a later attempt; this identifies the observed snapshot.
     for (let attempt = run.run_attempt; attempt >= 1 && observed.size < 2; attempt--) {
       const page = await request(`${repoPath}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`);
       if (!Array.isArray(page.jobs) || page.total_count > 100) throw new ServiceError('CI job 목록이 불완전합니다.', 502);
       for (const key of ['loop', 'release']) {
         const jobs = page.jobs.filter((item) => item.name === key);
         if (jobs.length > 1) throw new ServiceError('CI job 식별자가 중복됩니다.', 502);
-        if (!observed.has(key) && jobs[0]) observed.set(key, { ...jobs[0], producer_attempt: attempt });
+        if (!observed.has(key) && jobs[0]) observed.set(key, { ...jobs[0], observed_attempt: attempt });
       }
       if (run.status !== 'completed') break;
     }
@@ -136,7 +136,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       const job = observed.get(key);
       return { key, status: job?.status || (run.status === 'completed' ? 'completed' : 'queued'),
         conclusion: job?.conclusion || (run.status === 'completed' ? 'skipped' : null),
-        producer_attempt: job?.producer_attempt || null };
+        observed_attempt: job?.observed_attempt || null };
     });
     const completed = run.status === 'completed';
     const conclusion = completed && run.conclusion === 'success' && steps.some((step) => step.conclusion !== 'success')
@@ -144,7 +144,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     let publication = null;
     let artifactError = null;
     if (completed && conclusion === 'success') {
-      try { publication = await published(runId, observed.get('release').producer_attempt, run.head_sha); }
+      try { publication = await published(runId, observed.get('release').observed_attempt, run.head_sha); }
       catch (error) { artifactError = error.message || '게시 산출물을 확인하지 못했습니다.'; }
     }
     const state = publication ? 'published' : artifactError ? 'publication_unverified'

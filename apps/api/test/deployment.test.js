@@ -243,7 +243,7 @@ function publishedFiles({ attempt = 1, sourceCommit = 'a'.repeat(40), targetId =
 }
 
 async function publicationService({ attempt = 1, producer = attempt, files = publishedFiles({ attempt: producer }),
-  expired = false, duplicate = false, release = 'success', headSha = 'a'.repeat(40), artifacts = true } = {}) {
+  expired = false, duplicate = false, release = 'success', headSha = 'a'.repeat(40), artifacts = true, jobRows } = {}) {
   const zip = await zipOf(files);
   const calls = [];
   const fetchImpl = async (url, options = {}) => {
@@ -253,10 +253,10 @@ async function publicationService({ attempt = 1, producer = attempt, files = pub
       status: 'completed', conclusion: 'success', path: '.github/workflows/railshot-deploy.yml',
       html_url: 'https://github.com/org/apps/actions/runs/789' });
     const jobs = /\/attempts\/(\d+)\/jobs$/.exec(path);
-    if (jobs) return Response.json({ jobs: Number(jobs[1]) === producer ? [
+    if (jobs) return Response.json({ jobs: Number(jobs[1]) === producer ? (jobRows || [
       { name: 'loop', status: 'completed', conclusion: 'success' },
       { name: 'release', status: 'completed', conclusion: release },
-    ] : [] });
+    ]) : [] });
     if (path.endsWith('/runs/789/artifacts')) {
       assert.equal(value.searchParams.get('name'), `published-${producer}`);
       const item = { id: 200, name: `published-${producer}`, expired, size_in_bytes: zip.length,
@@ -345,6 +345,25 @@ test('실패 job 재시도는 현재 attempt 별칭 대신 실제 이전 release
   assert.equal(result.publication.artifact_name, 'published-1');
   assert.ok(calls.some((url) => url.includes('/attempts/2/jobs')));
   assert.ok(calls.some((url) => url.includes('/attempts/1/jobs')));
+});
+
+test('재시도에 복제된 loop job의 조회 attempt를 artifact 생산 attempt로 표시하지 않는다', async () => {
+  const { service, calls } = await publicationService({ attempt: 2, jobRows: [
+    { id: 110657805259, name: 'release', run_attempt: 2, status: 'completed', conclusion: 'success',
+      started_at: '2026-10-02T01:03:50Z', completed_at: '2026-10-02T01:04:19Z' },
+    // GitHub assigned a new ID/attempt but retained the original attempt 1 execution times.
+    { id: 110657806684, name: 'loop', run_attempt: 2, status: 'completed', conclusion: 'success',
+      started_at: '2026-10-02T00:51:21Z', completed_at: '2026-10-02T00:52:43Z' },
+  ] });
+  const result = await service.status('789');
+  assert.equal(result.state, 'published');
+  assert.deepEqual(result.steps.map(({ key, observed_attempt }) => ({ key, observed_attempt })),
+    [{ key: 'loop', observed_attempt: 2 }, { key: 'release', observed_attempt: 2 }]);
+  assert.ok(result.steps.every((step) => !Object.hasOwn(step, 'producer_attempt')));
+  assert.equal(result.publication.producer_attempt, 2);
+  assert.equal(result.publication.artifact_name, 'published-2');
+  assert.equal(result.publication.bundle_artifact_id, 100);
+  assert.ok(calls.every((url) => !url.includes('/attempts/1/jobs')));
 });
 
 test('최신 release가 실패하거나 건너뛰면 옛 성공 artifact를 사용하지 않는다', async () => {

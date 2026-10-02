@@ -10,7 +10,7 @@ multipart/form-data와 `x-jasmin-request: deploy` 헤더를 받는다. `app`과 
 
 ## GET /api/runs/:run_id
 
-등록된 `.github/workflows/<workflow>`만 허용한다. loop/release의 상태와 producer_attempt를 반환한다. GitHub completed/success와 별도로 state를 반환한다.
+등록된 `.github/workflows/<workflow>`만 허용한다. `steps`에 loop/release의 상태와 `observed_attempt`를 반환한다. `observed_attempt`는 job을 확인한 GitHub attempt의 번호다. 실패 job만 재실행하면 GitHub가 이전 성공 job을 새 ID와 attempt로 복제해 보여줄 수 있으므로 이 값으로 artifact의 생산 attempt를 판단하지 않는다. GitHub completed/success와 별도로 state를 반환한다.
 
 | state | 의미 |
 | --- | --- |
@@ -19,7 +19,7 @@ multipart/form-data와 `x-jasmin-request: deploy` 헤더를 받는다. `app`과 
 | publication_unverified | Actions는 성공했지만 올바른 게시 artifact를 확인하지 못함 |
 | published | 해당 release producer의 artifact와 evidence 파일·run/source/target 연결 확인 |
 
-published 응답의 publication에는 artifact_id/name, run_id, producer_attempt, bundle_artifact_id, source_commit, target_id, tenant, app, 4개 evidence 파일 SHA256와 service→digest images가 들어간다. 이 API는 `deployed`나 `handed_off` 완료를 만들지 않는다. CD가 아직 소비하지 않았기 때문이다. `url`은 항상 null이며 사용자 화면은 결과 앱 링크를 표시하지 않는다.
+published 응답의 publication에는 artifact_id/name, run_id, producer_attempt, bundle_artifact_id, source_commit, target_id, tenant, app, 4개 evidence 파일 SHA256와 service→digest images가 들어간다. `publication.producer_attempt`는 검증한 게시 handoff의 실제 생산 attempt이며 `steps.observed_attempt`와 의미가 다르다. `bundle_artifact_id`는 release 재시도에서도 원래 gate 산출물의 ID를 유지한다. 이 API는 `deployed`나 `handed_off` 완료를 만들지 않는다. CD가 아직 소비하지 않았기 때문이다. `url`은 항상 null이며 사용자 화면은 결과 앱 링크를 표시하지 않는다.
 
 attempt 조회는 최대 100 attempt, 각 attempt는 최대 100 jobs다. 그 범위를 넘거나 중복 job이면 불완전한 상태로 판단해 실패한다. 동일 artifact 이름이 두 개이거나 만료·해시·source·target이 다르면 게시 확인을 차단한다. 요청한 run의 최신 release 실패를 옛 artifact로 대체하지 않는다.
 
