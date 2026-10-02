@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 import argo
+import edge
 import handoff
 from storage import durable_write
 
@@ -77,6 +78,17 @@ def public_probe(config, health_path):
     return result
 
 
+def site_probe(url):
+    """The generated site path must itself serve HTTPS 200 without a redirect."""
+    try:
+        with build_opener(ProxyHandler({}), NoRedirect()).open(
+                Request(argo.https_url(url), headers={'User-Agent': 'railshot-health/1'}), timeout=10) as response:
+            response.read(1)
+            return response.status == 200
+    except (OSError, ValueError, HTTPError, URLError):
+        return False
+
+
 def output(cd='blocked', *, revision=None, deployed=False, public=None, code=None, unknown=False):
     value = {'cd': {'state': cd, 'revision': revision, 'deployed': deployed},
              'public_http': public or {'state': 'not_run', 'verified_at': None, 'url': None}}
@@ -101,11 +113,14 @@ def validate_request(config, request):
     handoff.require(isinstance(publication, dict) and request['target_id'] == publication.get('target_id'),
                     'publication target mismatch')
     registered = config['targets'].get(request['target_id'])
-    handoff.require(isinstance(registered, dict) and set(registered) == {'target', 'app', 'tenant', 'public_http'},
+    handoff.require(isinstance(registered, dict) and {'target', 'app', 'tenant', 'public_http'} <= set(registered) <=
+                    {'target', 'app', 'tenant', 'public_http', 'edge'},
                     'registered deployment target required')
     handoff.require(registered['target']['id'] == request['target_id'] and
                     publication.get('app') == registered['app'] and publication.get('tenant') == registered['tenant'],
                     'registered application/tenant mismatch')
+    if 'edge' in registered:
+        edge.validate_binding(registered['edge'], registered)
     handoff.require(isinstance(request['files'], dict) and set(request['files']) == set(FILES),
                     'exact trusted publication files required')
     files = {}
@@ -133,7 +148,16 @@ def observe(config, registered, directory, state):
     argo.validate_project(project, app)
     # sync=False is read-only even after an interrupted push or Argo operation.
     observed = argo.deploy(review, config['context'], sync=False, timeout=0)
-    public = public_probe(registered['public_http'], review['receipt']['http']['health_path']) if observed['deployed'] else None
+    public = None
+    if observed['deployed']:
+        if 'edge' in registered:
+            try:
+                public = edge.observe(registered['edge'], state['edge_request'], observed['git_revision'],
+                                      public_probe, site_probe, review['receipt']['http']['route'])
+            except (ValueError, KeyError, TypeError, OSError, RuntimeError):
+                public = {'state': 'unverified', 'verified_at': None, 'url': None}
+        else:
+            public = public_probe(registered['public_http'], review['receipt']['http']['health_path'])
     return output(observed['status'], revision=observed['git_revision'], deployed=observed['deployed'], public=public)
 
 
@@ -164,6 +188,8 @@ def execute(config, request):
             return output(code='DEPLOYMENT_NOT_FOUND')
         directory = private_directory(directory)
         state = {'binding': binding, 'phase': 'preparing', 'revision': None}
+        if 'edge' in registered:
+            state['edge_request'] = {'deployment_id': request['deployment_id'], 'publication': request['publication']}
         def save(phase):
             state['phase'] = phase
             durable_write(state_path, encoded(state))
@@ -234,10 +260,13 @@ def execute(config, request):
                             'remote revision readback differs')
             save('syncing')
             argo.deploy(review, config['context'], sync=True, timeout=0)
+            if 'edge' in registered:
+                save('routing')
+                edge.ensure(registered['edge'])
             save('observing')
             return observe(config, registered, directory, state)
         except (ValueError, KeyError, TypeError, OSError, RuntimeError, handoff.ValidationError):
-            unknown = state['phase'] in ('pushing', 'syncing', 'observing')
+            unknown = state['phase'] in ('pushing', 'syncing', 'routing', 'observing')
             if not unknown:
                 save('blocked')
             return output('unknown' if unknown else 'blocked', revision=state['revision'],
