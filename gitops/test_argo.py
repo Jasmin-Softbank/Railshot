@@ -18,9 +18,15 @@ class ArgoTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        published = self.root / 'published'; published.mkdir()
+        self.prepare()
+
+    def prepare(self, database=False):
+        published = self.root / 'published'; published.mkdir(exist_ok=True)
         spec = {'apiVersion': 'jasmin/v0', 'app': 'demo', 'services': [
             {'name': 'web', 'build': {'dockerfile': 'Dockerfile'}, 'port': 8080, 'route': '/health', 'health': '/health'}]}
+        if database:
+            spec['resources'] = {'postgres': {'size': 'small'}}
+            spec['services'][0].update(migrate={'command': ['python', 'migrate.py']}, secrets=['DATABASE_URL'])
         verdict = {'release_eligible': True, 'ok': True, 'status': 'PASS', 'source_sha256': 'a' * 64,
                    'layers': [{'layer': layer, 'ok': True} for layer in GATE_ORDER],
                    'images': {'web': 'local/web:test'}, 'image_ids': {'web': 'sha256:' + 'b' * 64}}
@@ -44,6 +50,9 @@ class ArgoTest(unittest.TestCase):
                   'cluster_server': 'https://192.0.2.1:6443', 'path': 'targets/k3s-aws/demo',
                   'revision': 'e' * 40, 'node_port': 30080, 'ingress_cidrs': ['10.20.0.0/24'],
                   'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
+        if database:
+            target['database'] = {'host': '10.20.0.10', 'port': 5432, 'runtime_secret': 'demo-runtime',
+                                  'migration_secret': 'demo-migration', 'ca_secret': 'demo-ca'}
         rendered = handoff.render(published, target)
         self.review = {'application': rendered.pop('application'), 'workload': rendered.pop('workload'), 'receipt': rendered}
         self.directory = self.root / 'review'; self.save_review(self.review, self.directory)
@@ -61,12 +70,57 @@ class ArgoTest(unittest.TestCase):
                                  'comparedTo': {'source': copy.deepcopy(spec['source']), 'destination': copy.deepcopy(spec['destination'])}},
                          'health': {'status': 'Healthy'}, 'operationState': {'phase': 'Succeeded',
                          'syncResult': {'revision': spec['source']['targetRevision']}},
-                         'resources': [{'group': kind['group'], 'kind': kind['kind'], 'name': review['receipt']['app'],
+                         'resources': [{'group': item['apiVersion'].split('/')[0] if '/' in item['apiVersion'] else '',
+                                        'kind': item['kind'], 'name': item['metadata']['name'],
                                         'namespace': spec['destination']['namespace'], 'status': 'Synced',
-                                        **({'health': {'status': 'Healthy'}} if kind['kind'] == 'Deployment' else {})}
-                                       for kind in argo.KINDS],
+                                        **({'health': {'status': 'Healthy'}} if item['kind'] in ('Deployment', 'Job') else {})}
+                                       for item in review['workload']['items']],
                          'summary': {'images': ['ghcr.io/example/web@sha256:' + 'c' * 64]}}
+        app['status']['operationState']['syncResult']['resources'] = copy.deepcopy(app['status']['resources'])
         return app
+
+    def test_database_rollout_orders_policy_migration_and_runtime_without_credentials(self):
+        self.prepare(database=True)
+        review = argo.load_review(self.directory)
+        items = {item['kind']: item for item in review['workload']['items']}
+        db = review['receipt']['database']
+        self.assertEqual(items['NetworkPolicy']['metadata']['annotations']['argocd.argoproj.io/sync-wave'], '-2')
+        self.assertEqual(items['NetworkPolicy']['spec']['egress'], [{'to': [{'ipBlock': {'cidr': '10.20.0.10/32'}}],
+                                                                  'ports': [{'protocol': 'TCP', 'port': 5432}]}])
+        self.assertEqual(items['Job']['metadata']['annotations']['argocd.argoproj.io/sync-wave'], '-1')
+        migration = items['Job']['spec']['template']['spec']['containers'][0]
+        runtime = items['Deployment']['spec']['template']['spec']['containers'][0]
+        self.assertEqual(migration['image'], runtime['image'])
+        self.assertEqual(migration['command'], ['python', 'migrate.py'])
+        self.assertNotIn(db['migration_secret'], json.dumps(runtime))
+        self.assertNotIn(db['runtime_secret'], json.dumps(migration))
+        self.assertNotIn('postgresql://', json.dumps(review))
+        self.assertEqual(items['Job']['spec']['backoffLimit'], 0)
+        self.assertEqual(items['Job']['spec']['template']['spec']['restartPolicy'], 'Never')
+        self.assertNotEqual(items['Service']['spec']['selector'], items['Job']['spec']['template']['metadata']['labels'])
+        project = argo.projects([review])['items'][0]
+        self.assertIn(argo.JOB_KIND, project['spec']['namespaceResourceWhitelist'])
+        argo.validate_project(project, review['application'], review['workload'])
+        project['spec']['namespaceResourceWhitelist'].remove(argo.JOB_KIND)
+        with self.assertRaises(ValueError): argo.validate_project(project, review['application'], review['workload'])
+        live = self.healthy()
+        self.assertEqual(argo.observe(review, live)['migration']['state'], 'succeeded')
+        for field in ('missing_job', 'failed_job', 'old_job', 'still_running'):
+            bad = copy.deepcopy(live)
+            if field == 'missing_job': bad['status']['operationState']['syncResult']['resources'].pop()
+            elif field == 'failed_job': bad['status']['resources'][-1]['health']['status'] = 'Degraded'
+            elif field == 'old_job': bad['status']['operationState']['syncResult']['resources'][-1]['name'] += '-old'
+            else: bad['status']['operationState']['phase'] = 'Running'
+            with self.subTest(field=field): self.assertFalse(argo.observe(review, bad)['deployed'])
+        for field in ('retry', 'image', 'secret', 'privileged'):
+            bad = copy.deepcopy(review)
+            job = bad['workload']['items'][-1]
+            if field == 'retry': job['spec']['backoffLimit'] = 1
+            elif field == 'image': job['spec']['template']['spec']['containers'][0]['image'] = 'unreviewed:latest'
+            elif field == 'secret': job['spec']['template']['spec']['containers'][0]['env'][-1]['valueFrom']['secretKeyRef']['name'] = db['runtime_secret']
+            else: job['spec']['template']['spec']['containers'][0]['securityContext']['privileged'] = True
+            self.save_review(bad, self.directory)
+            with self.subTest(field=field), self.assertRaises(ValueError): argo.load_review(self.directory)
 
     def test_actual_rendered_review_hash_and_project_contract(self):
         loaded = argo.load_review(self.directory)
@@ -194,6 +248,7 @@ class ArgoTest(unittest.TestCase):
         second['application']['metadata']['labels']['railshot.io/target'] = 'k3s-gcp'
         second['application']['spec']['destination']['server'] = 'https://192.0.2.2:6443'
         second['receipt']['target_id'] = 'k3s-gcp'
+        second['workload']['items'][0]['spec']['template']['metadata']['labels']['railshot.io/target'] = 'k3s-gcp'
         second_path = self.root / 'gcp'; self.save_review(second, second_path)
         project = argo.projects([self.review, second])['items'][0]
         out = io.StringIO()

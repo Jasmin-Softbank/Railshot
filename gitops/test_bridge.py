@@ -108,6 +108,30 @@ class BridgeTest(unittest.TestCase):
             bridge.execute(changed, self.request)
         native.assert_not_called()
 
+    def test_database_migration_is_retained_on_replay_and_changed_migration_blocks_before_push(self):
+        self.fixture.prepare(database=True)
+        self.config['targets']['k3s-aws']['target']['database'] = self.fixture.review['receipt']['database']
+        directory = self.root / 'published'
+        publication = json.loads((directory / 'handoff.json').read_bytes())
+        publication.update(images=json.loads((directory / 'images.json').read_bytes()), artifact_id=3)
+        self.request.update(publication=publication, files={name: base64.b64encode((directory / name).read_bytes()).decode()
+                                                           for name in bridge.FILES})
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value={'state': 'unverified', 'verified_at': None, 'url': None}):
+            result = bridge.execute(self.config, self.request)
+            self.assertEqual(result['cd']['migration']['state'], 'succeeded')
+            self.calls.clear()
+            self.assertTrue(bridge.execute(self.config, self.request)['cd']['deployed'])
+            self.assertFalse(any('push' in args or 'patch' in args or 'apply' in args for args in self.calls))
+            self.config['targets']['k3s-aws']['target']['database']['host'] = '10.20.0.11'
+            self.config['_sha256'] = 'e' * 64
+            self.request.update(deployment_id='deployment-2', config_sha256='e' * 64)
+            self.calls.clear()
+            result = bridge.execute(self.config, self.request)
+            self.assertEqual(result['cd']['state'], 'blocked')
+            self.assertFalse(any('push' in args or 'patch' in args or 'apply' in args for args in self.calls))
+            self.assertEqual(self.git('status', '--porcelain'), '')
+
     def test_foreign_git_workload_is_not_overwritten_or_pushed(self):
         directory = self.repo / 'targets/k3s-aws/demo'; directory.mkdir(parents=True)
         workload = copy.deepcopy(self.fixture.review['workload'])

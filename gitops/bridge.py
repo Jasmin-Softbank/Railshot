@@ -77,11 +77,13 @@ def public_probe(config, health_path):
     return result
 
 
-def output(cd='blocked', *, revision=None, deployed=False, public=None, code=None, unknown=False):
+def output(cd='blocked', *, revision=None, deployed=False, public=None, code=None, unknown=False, migration=None):
     value = {'cd': {'state': cd, 'revision': revision, 'deployed': deployed},
              'public_http': public or {'state': 'not_run', 'verified_at': None, 'url': None}}
     if code:
         value['error'] = {'code': code, 'retryable': False, 'outcome_unknown': unknown}
+    if migration:
+        value['cd']['migration'] = migration
     return value
 
 
@@ -130,11 +132,12 @@ def observe(config, registered, directory, state):
     app = review['application']
     project = argo.kubectl(config['context'], app['metadata']['namespace'],
                           'get', 'appproject', app['spec']['project'], '-o', 'json')
-    argo.validate_project(project, app)
+    argo.validate_project(project, app, review['workload'])
     # sync=False is read-only even after an interrupted push or Argo operation.
     observed = argo.deploy(review, config['context'], sync=False, timeout=0)
     public = public_probe(registered['public_http'], review['receipt']['http']['health_path']) if observed['deployed'] else None
-    return output(observed['status'], revision=observed['git_revision'], deployed=observed['deployed'], public=public)
+    return output(observed['status'], revision=observed['git_revision'], deployed=observed['deployed'], public=public,
+                  migration=observed.get('migration'))
 
 
 def execute(config, request):
@@ -192,7 +195,7 @@ def execute(config, request):
             app = rendered['application']
             project = argo.kubectl(config['context'], app['metadata']['namespace'],
                                   'get', 'appproject', app['spec']['project'], '-o', 'json')
-            argo.validate_project(project, app)
+            argo.validate_project(project, app, rendered['workload'])
             repository = Path(config['repository']).resolve()
             workload_dir = repository / target['path']
             handoff.require(repository in workload_dir.resolve().parents and
@@ -205,10 +208,11 @@ def execute(config, request):
                 handoff.require(workload_file.is_file() and not workload_file.is_symlink() and
                                 workload_file.stat().st_size < 2_000_000, 'regular owned workload required')
                 prior = json.loads(workload_file.read_bytes())
-                handoff.require(prior.get('kind') == 'List' and len(prior['items']) == 3 and
-                                {item['kind'] for item in prior['items']} == {item['kind'] for item in argo.KINDS} and
-                                all(item['metadata'] == {'name': registered['app'], 'namespace': target['namespace']}
-                                    for item in prior['items']), 'existing Git workload belongs to another application')
+                argo.validate_workload(prior, registered['app'], target['namespace'], target['id'])
+                prior_jobs = [item['metadata']['name'] for item in prior['items'] if item['kind'] == 'Job']
+                next_jobs = [item['metadata']['name'] for item in rendered['workload']['items'] if item['kind'] == 'Job']
+                handoff.require(not prior_jobs or prior_jobs == next_jobs,
+                                'changed migration requires explicit owned-Job cleanup; automatic prune is disabled')
                 prior_deployment = next(item for item in prior['items'] if item['kind'] == 'Deployment')
                 handoff.require(prior_deployment['spec']['template']['metadata']['labels'].get('railshot.io/target') == target['id'],
                                 'existing Git workload target differs')

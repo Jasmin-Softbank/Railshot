@@ -11,12 +11,57 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from handoff import document_hash, http_path, require
+from handoff import database_binding, document_hash, http_path, require, secret_env
 
 KINDS = [{'group': 'apps', 'kind': 'Deployment'}, {'group': '', 'kind': 'Service'},
          {'group': 'networking.k8s.io', 'kind': 'NetworkPolicy'}]
+JOB_KIND = {'group': 'batch', 'kind': 'Job'}
 LABEL = r'[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?'
 SHA = r'[a-f0-9]{40}'
+
+
+def workload_kinds(work):
+    return KINDS + ([JOB_KIND] if any(item['kind'] == 'Job' for item in work['items']) else [])
+
+
+def validate_workload(work, name, namespace, target_id):
+    """Bound owned resources, including the single restricted migration Job."""
+    kinds = workload_kinds(work)
+    require(work.get('apiVersion') == 'v1' and work.get('kind') == 'List' and len(work['items']) == len(kinds) and
+            {item['kind'] for item in work['items']} == {item['kind'] for item in kinds},
+            'reviewed Deployment, Service, NetworkPolicy and optional migration Job required')
+    deployment = next(item for item in work['items'] if item['kind'] == 'Deployment')
+    pod = deployment['spec']['template']['spec']
+    require(deployment['spec']['template']['metadata']['labels'].get('railshot.io/target') == target_id,
+            'workload target differs')
+    for item in work['items']:
+        annotations = {}
+        if item['kind'] == 'NetworkPolicy' and item['metadata'].get('annotations'):
+            annotations = {'annotations': {'argocd.argoproj.io/sync-wave': '-2'}}
+        item_name = name
+        if item['kind'] == 'Job':
+            item_name = item['metadata']['name']
+            require(re.fullmatch(re.escape(name) + r'-migrate-[a-f0-9]{12}', item_name), 'bound migration identity required')
+            annotations = {'annotations': {'argocd.argoproj.io/sync-wave': '-1'}}
+            spec = item['spec']; migration = spec['template']['spec']
+            require(item['apiVersion'] == 'batch/v1' and set(spec) == {'backoffLimit', 'activeDeadlineSeconds', 'template'} and
+                    spec['backoffLimit'] == 0 and spec['activeDeadlineSeconds'] == 300 and
+                    set(migration) == set(pod) | {'restartPolicy'} and migration['restartPolicy'] == 'Never' and
+                    all(migration[key] == value for key, value in pod.items() if key != 'containers') and
+                    len(migration['containers']) == 1, 'restricted same-runtime migration Job required')
+            container = migration['containers'][0]; runtime = pod['containers'][0]
+            require(set(container) == (set(runtime) - {'ports', 'readinessProbe'}) | {'command'} and
+                    all(container[key] == value for key, value in runtime.items()
+                        if key not in {'ports', 'readinessProbe', 'command', 'env'}) and
+                    isinstance(container['command'], list) and 0 < len(container['command']) <= 20 and
+                    all(isinstance(value, str) for value in container['command']),
+                    'migration must use the reviewed image and container restrictions')
+            require(spec['template']['metadata'] == {'labels': {
+                'app.kubernetes.io/name': name, 'railshot.io/target': target_id, 'railshot.io/role': 'migration'}},
+                'migration workload labels differ')
+        require(item['metadata'] == {'name': item_name, 'namespace': namespace, **annotations},
+                'workload namespace/name differs')
+    return kinds
 
 
 def https_url(value):
@@ -59,12 +104,21 @@ def load_review(directory):
     require(set(dest) == {'server', 'namespace'} and re.fullmatch(LABEL, dest['namespace']) and
             dest['namespace'] not in {'default', 'kube-system', 'kube-public', 'kube-node-lease', meta['namespace']},
             'dedicated runtime namespace required')
-    require(work['apiVersion'] == 'v1' and work['kind'] == 'List' and len(work['items']) == 3 and
-            {item['kind'] for item in work['items']} == {item['kind'] for item in KINDS},
-            'reviewed Deployment, Service and NetworkPolicy required')
-    for item in work['items']:
-        require(item['metadata'] == {'name': receipt['app'], 'namespace': dest['namespace']},
-                'workload namespace/name differs')
+    validate_workload(work, receipt['app'], dest['namespace'], receipt['target_id'])
+    job = next((item for item in work['items'] if item['kind'] == 'Job'), None)
+    if 'database' in receipt:
+        database = database_binding(receipt['database'])
+        deployment = next(item for item in work['items'] if item['kind'] == 'Deployment')
+        runtime_env = deployment['spec']['template']['spec']['containers'][0]['env']
+        require(secret_env('DATABASE_URL', database['runtime_secret'], 'DATABASE_URL') in runtime_env,
+                'runtime database Secret differs')
+        if job:
+            container = job['spec']['template']['spec']['containers'][0]
+            require(receipt['migration'] == {'name': job['metadata']['name'], 'image': container['image']} and
+                    [entry for entry in container['env'] if entry['name'] in ('DATABASE_URL', 'MIGRATION_DATABASE_URL')] == [
+                        secret_env(key, database['migration_secret'], 'MIGRATION_DATABASE_URL')
+                        for key in ('DATABASE_URL', 'MIGRATION_DATABASE_URL')], 'migration database Secret differs')
+    require(not job or receipt.get('migration'), 'migration receipt required')
     require(receipt['http']['path_mode'] == 'preserve', 'HTTP path rewriting is unsupported')
     http_path(receipt['http']['route']); http_path(receipt['http']['health_path'])
     return data
@@ -115,15 +169,19 @@ def projects(reviews):
             project['spec']['sourceRepos'].append(spec['source']['repoURL'])
         if spec['destination'] not in project['spec']['destinations']:
             project['spec']['destinations'].append(copy.deepcopy(spec['destination']))
+        if JOB_KIND in workload_kinds(review['workload']) and JOB_KIND not in project['spec']['namespaceResourceWhitelist']:
+            project['spec']['namespaceResourceWhitelist'].append(copy.deepcopy(JOB_KIND))
     return {'apiVersion': 'v1', 'kind': 'List', 'items': list(result.values())}
 
 
-def validate_project(project, app):
+def validate_project(project, app, workload=None):
     spec, desired = project['spec'], app['spec']
     require(project['metadata']['name'] == desired['project'] and
             project['metadata']['namespace'] == app['metadata']['namespace'], 'live project identity differs')
+    permitted = sorted(spec.get('namespaceResourceWhitelist', []), key=lambda x: x['kind'])
+    expected = workload_kinds(workload) if workload else KINDS
     require(spec.get('clusterResourceWhitelist', []) == [] and
-            sorted(spec.get('namespaceResourceWhitelist', []), key=lambda x: x['kind']) == sorted(KINDS, key=lambda x: x['kind']) and
+            permitted in [sorted(kinds, key=lambda x: x['kind']) for kinds in (expected, KINDS + [JOB_KIND])] and
             not spec.get('namespaceResourceBlacklist'), 'project must restrict resources to the reviewed workload kinds')
     require(isinstance(spec.get('sourceRepos'), list) and desired['source']['repoURL'] in spec['sourceRepos'],
             'project does not allow this repository')
@@ -163,7 +221,8 @@ def observe(review, live):
     compared_source = compared.get('source', {})
     binding = (compared.get('destination') == app['spec']['destination'] and all(
         compared_source.get(k) == app['spec']['source'][k] for k in ('repoURL', 'path', 'targetRevision')))
-    expected_resources = {(kind['group'], kind['kind'], app['spec']['destination']['namespace'], receipt['app']) for kind in KINDS}
+    expected_resources = {(item['apiVersion'].split('/')[0] if '/' in item['apiVersion'] else '', item['kind'],
+                           item['metadata']['namespace'], item['metadata']['name']) for item in review['workload']['items']}
     resources = status.get('resources', [])
     resource_keys = {(row.get('group', ''), row.get('kind'), row.get('namespace'), row.get('name')) for row in resources}
     # Argo 3 defaults to aggregate Application health; per-resource health may be absent.
@@ -173,6 +232,11 @@ def observe(review, live):
     deployment = next(item for item in review['workload']['items'] if item['kind'] == 'Deployment')
     images = {c['image'] for c in deployment['spec']['template']['spec']['containers']}
     sync_result = operation.get('syncResult', {})
+    job = next((item for item in review['workload']['items'] if item['kind'] == 'Job'), None)
+    # A successful ordered sync must contain this exact Job, not a previous migration.
+    migration_ok = not job or len([row for row in sync_result.get('resources', []) if
+        (row.get('group'), row.get('kind'), row.get('namespace'), row.get('name'), row.get('status')) ==
+        ('batch', 'Job', job['metadata']['namespace'], job['metadata']['name'], 'Synced')]) == 1
     summary = status.get('summary', {})
     observed_images = summary.get('images', [])
     # Argo 3 may omit summary; bind its sync-result images to this exact Deployment.
@@ -183,7 +247,7 @@ def observe(review, live):
         if len(matches) == 1:
             observed_images = matches[0].get('images', [])
     errors = any(c.get('type', '').endswith('Error') for c in status.get('conditions', []))
-    complete = (not live.get('operation') and not errors and binding and resources_ok and
+    complete = (not live.get('operation') and not errors and binding and resources_ok and migration_ok and
                 sync.get('revision') == revision and sync.get('status') == 'Synced' and
                 status.get('health', {}).get('status') == 'Healthy' and operation.get('phase') == 'Succeeded' and
                 sync_result.get('revision') == revision and images == set(observed_images))
@@ -196,6 +260,7 @@ def observe(review, live):
             'health': status.get('health', {}).get('status'), 'source_commit': receipt['source_commit'],
             'run_id': receipt['run_id'], 'producer_attempt': receipt['producer_attempt'],
             'bundle_artifact_id': receipt['bundle_artifact_id'],
+            **({'migration': {'name': job['metadata']['name'], 'state': 'succeeded' if complete else 'unverified'}} if job else {}),
             'http': receipt['http'], 'public_verified': False, 'url': None}
 
 
@@ -275,7 +340,7 @@ def main():
             for review in reviews:
                 app = review['application']
                 live_project = kubectl(args.context, app['metadata']['namespace'], 'get', 'appproject', app['spec']['project'], '-o', 'json')
-                validate_project(live_project, app)
+                validate_project(live_project, app, review['workload'])
             if args.command == 'register-cluster':
                 raw = sys.stdin.read(131073)
                 require(len(raw) <= 131072, 'cluster credential input is too large')
