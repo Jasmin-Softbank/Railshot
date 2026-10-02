@@ -1,6 +1,6 @@
 # 통합 Ansible 진입점
 
-통합 호출 계약은 [Ansible 실행 인터페이스](../../docs/api/ansible.md)를 기준으로 합니다. `api.py`가 승인된 AWS/GCP/OpenStack 자원을 작업별 입력과 결합하고, `run.py`가 JB guest 검사 후 승민 K3s/Cilium runtime을 실행합니다. 직접 SSH inventory로 실행하는 `site.yml`도 Cilium을 사용하지만, 두 경로는 소유권과 K3s 설치 방식이 다르므로 **같은 노드에서 혼용하지 않습니다**. DB는 K3s 밖의 별도 VM을 기본으로 하며, 현재 HTTP는 배치 검증만 지원하고 담당 HA 플레이북을 이 API에 연결하지 않아 설치를 차단합니다.
+통합 호출 계약은 [Ansible 실행 인터페이스](../../docs/api/ansible.md)를 기준으로 합니다. `api.py`가 승인된 AWS/GCP/OpenStack 자원을 작업별 입력과 결합합니다. `runtime.install`은 JB guest 검사 후 승민 K3s/Cilium runtime을 실행합니다. 직접 SSH inventory로 실행하는 `site.yml`도 Cilium을 사용하지만, 두 경로는 소유권과 K3s 설치 방식이 다르므로 **같은 노드에서 혼용하지 않습니다**. `database.configure`는 운영자 profile로 [화균의 별도 HA DB 클러스터](../../docs/architecture/hybrid-db.md)를 구성하는 `playbooks/site.yml`을 실행합니다. DB 노드는 K3s에 가입하지 않으며 DB 요청에서 K3s를 설치하지 않습니다. 이전 standalone DB 제안은 실행을 지원하지 않습니다.
 
 ```bash
 python3 run.py --request ../../examples/ansible/runtime-single-node.json --validate-only
