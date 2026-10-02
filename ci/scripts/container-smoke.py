@@ -127,9 +127,17 @@ mkdir -p /var/lib/railshot/repository
 git -C /var/lib/railshot/repository init -b deployment/apps >/dev/null
 git -C /var/lib/railshot/repository remote add origin https://github.com/Jasmin-Softbank/Railshot.git
 printf '{"fixture":true}' > /run/config/cd.json
+printf '{"legacy":true}' > /run/config/observer.json
 node /app/apps/api/prepare-state.js
 node /app/apps/api/prepare-state.js
 node -e "const fs=require('node:fs');const p='/var/lib/railshot/config';if((fs.statSync(p).mode&511)!==448||(fs.statSync(p+'/cd.json').mode&511)!==384||!JSON.parse(fs.readFileSync(p+'/cd.json')).fixture)process.exit(1)"
+mkdir -p /var/lib/railshot/state/observer
+printf '{"registered":"kept"}' > /var/lib/railshot/state/observer/product.json
+printf '{"migrated":true}' > /var/lib/railshot/config/observer.json
+export RAILSHOT_OBSERVER_PRODUCT_FILE=/var/lib/railshot/state/observer/product.json
+node /app/apps/api/prepare-state.js
+node /app/apps/api/prepare-state.js
+node -e "const fs=require('node:fs');if(!JSON.parse(fs.readFileSync('/var/lib/railshot/config/observer.json')).migrated||JSON.parse(fs.readFileSync(process.env.RAILSHOT_OBSERVER_PRODUCT_FILE)).registered!=='kept')process.exit(1)"
 git -C /var/lib/railshot/repository symbolic-ref HEAD refs/heads/unregistered
 if node /app/apps/api/prepare-state.js >/dev/null 2>&1; then exit 1; fi
 '''

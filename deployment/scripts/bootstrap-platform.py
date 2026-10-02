@@ -198,6 +198,31 @@ def contains(actual, wanted):
     return actual == wanted
 
 
+def observer_product_file(files):
+    """Bind the API to the registrar output in the verified private import."""
+    entries = {item['path']: item for item in files}
+    def document(path):
+        prefix = '/var/lib/railshot/'
+        require(isinstance(path, str) and path.startswith(prefix), 'OBSERVER_CONFIG_NOT_IMPORTED')
+        item = entries.get(path[len(prefix):])
+        require(item is not None and item['kind'] == 'source', 'OBSERVER_CONFIG_NOT_IMPORTED')
+        return json.loads(base64.b64decode(item['data']))
+    products = set()
+    for profile in document('/var/lib/railshot/config/app-db/profiles.json')['profiles']:
+        if not profile.get('deployment_file'):
+            continue
+        registration = document(profile['deployment_file'])['registration']
+        if not registration.get('observability_config_file'):
+            continue
+        state = document(registration['observability_config_file'])['state_dir']
+        require(isinstance(state, str) and state.startswith('/var/lib/railshot/state/') and
+                PurePosixPath(state).as_posix() == state and '..' not in PurePosixPath(state).parts,
+                'OBSERVER_STATE_PATH_INVALID')
+        products.add(state + '/product.json')
+    require(len(products) <= 1, 'MULTIPLE_OBSERVER_PRODUCT_FILES')
+    return next(iter(products), None)
+
+
 def kube(*args, document=None):
     return json.loads(native(['/usr/local/bin/k3s', 'kubectl', '--request-timeout=20s', *args],
                              body=encoded(document) if document is not None else None, timeout=35) or b'null')
@@ -259,6 +284,19 @@ def ensure_object(document, uids, preserve_existing=False, claim=None):
                     and old['data']['kubeconfig'] == document['data']['kubeconfig'], 'RENEWAL_POLICY_DIFFERS')
         return old['metadata']['uid']  # Do not remove later registrations.
     if old and preserve_existing:
+        if key == 'ConfigMap/railshot-system/railshot-environments':
+            # Add the verified observer path once; never retarget existing bindings or drop other keys.
+            wanted = document['data']; actual = old.get('data', {})
+            require(set(wanted) <= {'profiles_file', 'observer_file'} and
+                    all(k not in actual or actual[k] == v for k, v in wanted.items()), 'ENVIRONMENT_BINDING_CHANGED')
+            if not set(wanted) <= set(actual):
+                data = {**actual, **wanted}
+                kube('patch', 'configmap', meta['name'], '-n', ns, '--type=merge', '-p',
+                     json.dumps({'metadata': {'resourceVersion': old['metadata']['resourceVersion']}, 'data': data}))
+                current = kube_get(document['kind'], meta['name'], ns)
+                require(current and current['metadata']['uid'] == old['metadata']['uid'] and not current['metadata'].get('deletionTimestamp') and
+                        current.get('data') == data, 'ENVIRONMENT_BINDING_READBACK_DIFFERS')
+                return current['metadata']['uid']
         require(all(contains(old.get(field), document[field]) for field in
                     ('spec', 'data', 'rules', 'subjects', 'roleRef', 'automountServiceAccountToken') if field in document), 'REGISTERED_OBJECT_DRIFT')
         return old['metadata']['uid']
@@ -1069,6 +1107,7 @@ class Bootstrap:
                 require(digest(raw) == item['sha256'], 'IMPORT_CHECKSUM_DIFFERS')
                 files.append({**item, 'data': base64.b64encode(raw).decode()})
         require('config/app-db/profiles.json' in names, 'IMPORT_PROFILES_REQUIRED')
+        observer = observer_product_file(files)
         executors = private(self.config['secrets']['executors'])
         for item in files:
             path = PurePosixPath(item['path'])
@@ -1081,8 +1120,11 @@ class Bootstrap:
                             'destination_freeze': destination, 'verify_only': bool(self.record.get('import'))})
         require(result['verified'] and result['package_id'] == package['package_id'], 'IMPORT_RECEIPT_DIFFERS')
         self.record['import'] = {'package_id': package['package_id'], 'manifest_sha256': payload['manifest_sha256'], 'owner': package['destination_owner']}; self.save()
+        bindings = {'profiles_file': '/var/lib/railshot/config/app-db/profiles.json'}
+        if observer:
+            bindings['observer_file'] = observer
         self.objects([{'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'railshot-environments', 'namespace': 'railshot-system'},
-                       'data': {'profiles_file': '/var/lib/railshot/config/app-db/profiles.json'}}], preserve_existing=True)
+                       'data': bindings}], preserve_existing=True)
 
     def release(self, images, verification):
         # The existing publisher requires a clean ephemeral checkout and non-force push.
