@@ -10,7 +10,7 @@
 
 - 기존 OpenStack CI job에서 feature의 `ci/scripts/check-bootstrap.sh`를 Ubuntu 24.04 / Python 3.12로 실행한다. `requirements.lock`을 그대로 읽는다.
 - 고객 설치기·agent 변경을 OpenStack 검사로 연결한다. 이 코드는 고객 Ubuntu 호스트에서 실행하므로 기존 dashboard/API/CI runner 이미지에 추가하지 않는다.
-- 기존 Controller의 Ruff 범위는 `src tests`로 명시한다. 새 feature의 형식을 일괄 변경하지 않는다.
+- 기존 Controller의 Ruff 범위는 `src tests scripts`로 명시한다. 새 feature의 형식을 일괄 변경하지 않는다.
 - feature의 `openstack/__init__.py` 추가로 pytest가 저장소 패키지를 외부 `openstacksdk`의 `openstack`으로 읽는 충돌을 확인했다. integration의 `pyproject.toml`에서 namespace와 importlib 수집을 설정하고, mypy 소스 기준을 `src`에 고정했다. Controller 구현과 feature 구현을 변경하지 않는다.
 
 ## 로컬 검증
@@ -55,7 +55,7 @@ Route53 public zone `Z01500273BKOZ113O8L34`의 `railshot.io`와 AWS 시험 앱 A
 
 플랫폼 HTTP 80은 HTTPS 443으로 301 redirect한다. Route53 alias, ALB host rule, private target health와 실제 HTTP 응답을 각각 확인했다. AWS 대상 경로에는 기존 GCP WireGuard hop이 들어가지 않는다.
 
-control 호스트에서는 별도 0700 임시 디렉터리와 Python 3.12 venv로 원본 설치기·agent 테스트 93개 및 하위 사례 6개를 다시 실행해 통과했다. 네트워크/클라우드 동작은 모의이며 실제 등록·OpenStack 인증을 실행한 것은 아니다. SSM ID: `f73838ed-5c48-4e12-b9ff-0f0c43077fc3`. 테스트 후 venv와 소스를 제거한다.
+control 호스트에서는 별도 0700 임시 디렉터리와 Python 3.12 venv로 원본 설치기·agent 테스트 93개 및 하위 사례 6개를 다시 실행해 통과했다. 네트워크/클라우드 동작은 모의이며 실제 등록·OpenStack 인증을 실행한 것은 아니다. SSM ID: `f73838ed-5c48-4e12-b9ff-0f0c43077fc3`. 테스트 후 venv와 소스 제거를 확인했다. 후속 SSM `8adc4493-2cc7-4ed7-a91d-b80d95c1f79b`에서 노드/Deployment 상태와 NodePort 31080 → Ready endpoint도 재확인했다.
 
 ## 네트워크 전환 방향
 

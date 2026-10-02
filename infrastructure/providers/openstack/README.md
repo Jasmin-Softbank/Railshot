@@ -18,8 +18,8 @@ Python 3.12와 uv(파이썬 실행 환경·의존성 관리 도구)를 사용합
 
 ```sh
 uv sync --python 3.12 --frozen
-uv run --frozen ruff check src tests
-uv run --frozen ruff format --check src tests
+uv run --frozen ruff check src tests scripts
+uv run --frozen ruff format --check src tests scripts
 uv run --frozen mypy
 uv run --frozen pytest -q
 ```
