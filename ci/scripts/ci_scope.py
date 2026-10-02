@@ -22,7 +22,7 @@ API_NATIVE_FILES = {
     'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/guest.yml',
     'infrastructure/ansible/runtime.yml', 'infrastructure/ansible/tasks/guest-checks.yml',
     'infrastructure/ansible/group_vars/all.yml', 'contracts/ansible-request.schema.json',
-    'deployment/scripts/common.sh', 'deployment/bootstrap/preflight.sh',
+    'deployment/scripts/common.sh', 'deployment/scripts/environment.py', 'deployment/bootstrap/preflight.sh',
     'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',

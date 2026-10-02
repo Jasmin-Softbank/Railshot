@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""Register one operator-bound AWS/GCP runtime and application after runtime_ready."""
+import argparse
+import base64
+from contextlib import contextmanager
+import copy
+from datetime import datetime, timezone
+import fcntl
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shlex
+import stat
+import sys
+import time
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode, urlsplit
+from urllib.request import Request, urlopen
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT / 'infrastructure/ansible'), str(ROOT / 'gitops'), str(ROOT / 'ci/scripts')]
+import run as ansible
+import argo
+import bridge
+import credentials
+from storage import durable_write
+from publication import validate_target
+
+SA = 'railshot-argocd'
+MANAGER = 'railshot-registration'
+
+
+def read_private(path, *, raw=False):
+    path = Path(path)
+    info = path.lstat()
+    argo.require(path.is_absolute() and path.resolve() == path and stat.S_ISREG(info.st_mode)
+                 and info.st_uid == os.geteuid() and not info.st_mode & 0o077
+                 and 0 < info.st_size <= 1_000_000, 'private operator file required')
+    data = path.read_bytes()
+    return data if raw else json.loads(data, object_pairs_hook=ansible.unique_pairs)
+
+
+def save(path, value):
+    durable_write(path, bridge.encoded(value))
+
+
+def label(value):
+    return isinstance(value, str) and re.fullmatch(argo.LABEL, value)
+
+
+def load(registry_file, target_id, config_file, binding_file=None):
+    registry, config = read_private(registry_file), read_private(config_file)
+    argo.require(registry.get('version') == 1 and isinstance(registry.get('targets'), dict), 'registry v1 required')
+    selected = registry['targets'][target_id]
+    argo.require(selected['purpose'] == 'runtime', 'registered runtime required')
+    descriptor = read_private(selected['descriptor_file'])
+    argo.require(descriptor['target_id'] == target_id, 'descriptor identity mismatch')
+    request = ansible.from_descriptor(descriptor, request_id='registration.' + target_id,
+        operation='guest.check', ssh=selected['ssh'], timeout_seconds=selected.get('timeout_seconds', 1200))
+    for key in ('identity_file', 'known_hosts_file'):
+        ansible.private_file(selected['ssh'][key], identity=key == 'identity_file')
+    argo.require(set(config) == {'version', 'cd', 'registration'} and config['version'] == 1, 'registration config v1 required')
+    cd, settings = config['cd'], config['registration']
+    argo.require(set(cd) == {'version', 'state_dir', 'repository', 'branch', 'context', 'targets'} and cd['version'] == 1
+                 and isinstance(cd['targets'], dict) and target_id in cd['targets'], 'existing CD base config required')
+    argo.require(set(settings) >= {'state_dir', 'source_repository', 'pull_secret_file'}
+                 and not set(settings) - {'state_dir', 'source_repository', 'pull_secret_file', 'edge_config_file', 'target_security_group_id', 'expires_at'},
+                 'registration settings differ')
+    argo.require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', settings['source_repository']), 'source repository required')
+    if settings.get('edge_config_file'):
+        expiry = settings.get('expires_at')
+        argo.require(isinstance(expiry, str) and expiry.endswith('Z')
+                     and datetime.fromisoformat(expiry.replace('Z', '+00:00')) > datetime.now(timezone.utc),
+                     'future UTC edge expiry required before registration')
+    registered = copy.deepcopy(cd['targets'][target_id]); target = registered['target']
+    argo.require(set(registered) == {'target', 'app', 'tenant', 'public_http'} and target['id'] == target_id,
+                 'one registered application required')
+    argo.require(re.fullmatch(r'[a-z][a-z0-9-]{1,28}[a-z0-9]', registered['app'])
+                 and re.fullmatch(r'[a-z0-9]{1,20}', registered['tenant']), 'application identity differs')
+    for key in ('namespace', 'project', 'argocd_namespace'):
+        argo.require(label(target[key]), 'explicit namespace/project required')
+    argo.require(target['argocd_namespace'] == 'argocd' and target['project'] != 'default'
+                 and target['namespace'] not in {'default', 'argocd', 'kube-system', 'kube-public', 'kube-node-lease'},
+                 'dedicated application namespace required')
+    expected_server = 'https://' + descriptor['addresses']['private'] + ':6443'
+    argo.require(target.get('cluster_server', expected_server) == expected_server and target['architecture'] == 'amd64',
+                 'cluster endpoint must match the provisioned private runtime')
+    target['cluster_server'] = expected_server
+    path = PurePosixPath(target['path'])
+    argo.require(not path.is_absolute() and '..' not in path.parts and str(path) not in ('', '.')
+                 and registered['app'] in path.parts and target_id in path.parts, 'dedicated app/target Git path required')
+    argo.https_url(target['repo_url'])
+    argo.require(type(target['node_port']) is int and 30000 <= target['node_port'] <= 32767, 'allocated NodePort required')
+    argo.require(target['image_pull_secret'] == {'namespace': target['namespace'], 'name': target['image_pull_secret']['name']}
+                 and label(target['image_pull_secret']['name']), 'namespaced pull Secret required')
+    pull = read_private(settings['pull_secret_file'])
+    argo.require(set(pull) == {'auths'} and set(pull['auths']) == {'ghcr.io'}
+                 and set(pull['auths']['ghcr.io']) == {'auth'}
+                 and ':' in base64.b64decode(pull['auths']['ghcr.io']['auth'], validate=True).decode(), 'dedicated GHCR pull config required')
+    binding = read_private(binding_file) if binding_file else None
+    argo.require(bool(binding) == bool(target.get('database')), 'database binding must match the registered target')
+    if binding:
+        db = target['database']
+        db.setdefault('host', binding['host'])
+        db.setdefault('port', binding['port'])
+        argo.require(set(db) == {'host', 'port', 'runtime_secret', 'migration_secret', 'ca_secret'}
+                     and str(ipaddress.IPv4Address(db['host'])) == db['host'] and db['port'] == 5432
+                     and all(label(db[k]) for k in ('runtime_secret', 'migration_secret', 'ca_secret'))
+                     and len({db[k] for k in ('runtime_secret', 'migration_secret', 'ca_secret')}) == 3,
+                     'explicit database Secret references required')
+        argo.require(binding['version'] == 1 and binding['host'] == db['host'] and binding['port'] == db['port']
+                     and binding['sslmode'] == 'verify-full', 'database TLS binding differs')
+        ca = read_private(binding['sslrootcert'], raw=True)
+        argo.require(b'-----BEGIN CERTIFICATE-----' in ca, 'database CA required')
+        binding = {**binding, 'ca': ca.decode('ascii')}
+    public = registered['public_http']
+    if settings.get('edge_config_file') and 'health_path' in public:
+        argo.require(set(public) == {'health_path', 'expected_json'}, 'edge health expectation required')
+        argo.http_path(public['health_path'])
+    else:
+        argo.require(set(public) == {'url', 'expected_json'}, 'HTTP expectation required')
+        argo.http_path(urlsplit(argo.https_url(public['url'])).path)
+    argo.require(isinstance(public['expected_json'], dict), 'HTTP JSON expectation required')
+    cd = {**cd, 'targets': {target_id: registered}}
+    identity = {'descriptor': descriptor, 'cd': cd, 'settings': settings,
+                'ssh_sha256': {key: hashlib.sha256(Path(selected['ssh'][key]).read_bytes()).hexdigest() for key in ('identity_file', 'known_hosts_file')},
+                'pull_sha256': argo.document_hash(pull), 'database_sha256': argo.document_hash(binding)}
+    return request, cd, settings, pull, binding, identity
+
+
+@contextmanager
+def runtime_kubectl(request):
+    node = request['inventory']['control_plane'][0]
+    with ansible.forwarded_port(node['ssh']['transport_ref'], time.monotonic() + 540) as port:
+        host = next(iter(ansible.build_inventory(request, port)['all']['children']['k3s_server']['hosts'].values()))
+        prefix = ['ssh', *shlex.split(host['ansible_ssh_common_args']), '-i', host['ansible_ssh_private_key_file'],
+                  '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15', host['ansible_user'] + '@' + host['ansible_host']]
+        def kubectl(namespace, *args, document=None):
+            remote = shlex.join(['sudo', '-n', 'k3s', 'kubectl', '--request-timeout=20s', '-n', namespace, *args])
+            raw = argo.native([*prefix, remote], document=document)
+            return json.loads(raw) if raw.strip() else None
+        yield kubectl
+
+
+def owned_apply(kube, document):
+    meta = document['metadata']; namespace = meta.get('namespace', 'default')
+    existing = kube(namespace, 'get', document['kind'], meta['name'], '--ignore-not-found', '-o', 'json')
+    if existing:
+        argo.require(not existing['metadata'].get('ownerReferences') and all(
+            existing['metadata'].get('labels', {}).get(k) == v for k, v in meta['labels'].items()), 'existing object belongs to another registration')
+    kube(namespace, 'apply', '--server-side', '--field-manager=' + MANAGER, '-f', '-', '-o', 'json', document=document)
+    observed = kube(namespace, 'get', document['kind'], meta['name'], '-o', 'json')
+    for key in ('rules', 'subjects', 'roleRef', 'data', 'automountServiceAccountToken'):
+        if key in document:
+            argo.require(observed.get(key) == document[key], 'registered object readback differs')
+    return observed
+
+
+def runtime_documents(target, owner, pull, binding):
+    namespace = target['namespace']; labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': owner}
+    def doc(kind, name, **fields):
+        return {'apiVersion': 'rbac.authorization.k8s.io/v1' if kind in ('Role', 'RoleBinding') else 'v1',
+                'kind': kind, 'metadata': {'name': name, **({'namespace': namespace} if kind != 'Namespace' else {}), 'labels': labels}, **fields}
+    verbs = ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
+    rules = [{'apiGroups': [group], 'resources': resources, 'verbs': verbs} for group, resources in (
+        ('apps', ['deployments']), ('', ['services']), ('networking.k8s.io', ['networkpolicies']))]
+    rules.extend([{'apiGroups': [''], 'resources': ['pods', 'events'], 'verbs': ['get', 'list', 'watch']},
+                  {'apiGroups': ['apps'], 'resources': ['replicasets'], 'verbs': ['get', 'list', 'watch']},
+                  {'apiGroups': [''], 'resources': ['serviceaccounts/token'], 'resourceNames': [SA], 'verbs': ['create']}])
+    if binding:
+        rules.append({'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': verbs})
+    result = [doc('Namespace', namespace), doc('ServiceAccount', SA, automountServiceAccountToken=False),
+              doc('Role', SA, rules=rules), doc('RoleBinding', SA,
+                  roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': SA},
+                  subjects=[{'kind': 'ServiceAccount', 'name': SA, 'namespace': namespace}])]
+    def secret(name, values, kind='Opaque'):
+        return doc('Secret', name, type=kind, data={k: base64.b64encode(v.encode()).decode() for k, v in values.items()})
+    result.append(secret(target['image_pull_secret']['name'], {'.dockerconfigjson': json.dumps(pull)}, 'kubernetes.io/dockerconfigjson'))
+    if binding:
+        db = target['database']
+        def url(role):
+            account = binding[role]
+            return ('postgresql://' + quote(account['username'], safe='') + ':' + quote(account['password'], safe='')
+                    + '@' + db['host'] + ':5432/' + quote(binding['database'], safe='') + '?'
+                    + urlencode({'sslmode': 'verify-full', 'sslrootcert': '/etc/railshot/db/ca.crt'}))
+        result.extend([secret(db['runtime_secret'], {'DATABASE_URL': url('runtime')}),
+                       secret(db['migration_secret'], {'MIGRATION_DATABASE_URL': url('migration')}),
+                       secret(db['ca_secret'], {'ca.crt': binding['ca']})])
+    return result
+
+
+def register_argo(kube, cd, registered, target_id, owner, binding):
+    target = registered['target']; namespace = target['namespace']
+    control = lambda ns, *args, **kwargs: argo.kubectl(cd['context'], ns, *args, **kwargs)
+    app = {'metadata': {'namespace': 'argocd', 'name': target_id}, 'spec': {'project': target['project'],
+           'source': {'repoURL': target['repo_url']}, 'destination': {'server': target['cluster_server'], 'namespace': namespace}}}
+    review = {'application': app, 'receipt': {'target_id': target_id}}
+    project = {'apiVersion': 'argoproj.io/v1alpha1', 'kind': 'AppProject',
+               'metadata': {'name': target['project'], 'namespace': 'argocd'},
+               'spec': {'sourceRepos': [target['repo_url']], 'destinations': [app['spec']['destination']],
+                        'clusterResourceWhitelist': [], 'namespaceResourceWhitelist': copy.deepcopy(argo.KINDS)}}
+    if binding:
+        project['spec']['namespaceResourceWhitelist'].append({'group': 'batch', 'kind': 'Job'})
+    project['metadata']['labels'] = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': owner}
+    # Each new runtime gets a dedicated project. Refuse to adopt an existing shared project.
+    owned_apply(control, project)
+    live_project = control('argocd', 'get', 'appproject', target['project'], '-o', 'json')
+    argo.require(live_project['spec'] == project['spec'], 'project scope readback differs')
+    ca_config = kube(namespace, 'config', 'view', '--raw', '--minify', '-o', 'json')
+    ca_data = ca_config['clusters'][0]['cluster']['certificate-authority-data']
+    ca = base64.b64decode(ca_data, validate=True)
+    argo.require(b'-----BEGIN CERTIFICATE-----' in ca, 'runtime CA required')
+    sa = kube(namespace, 'get', 'serviceaccount', SA, '-o', 'json')
+    token_response = kube(namespace, 'create', '--raw', '/api/v1/namespaces/' + namespace + '/serviceaccounts/' + SA + '/token',
+        '-f', '-', document={'apiVersion': 'authentication.k8s.io/v1', 'kind': 'TokenRequest', 'spec': {'expirationSeconds': credentials.LIFETIME}})
+    token = token_response['status']['token']
+    # TokenRequest selected the API server audience; verify this credential through that same TLS API.
+    payload = token.split('.')[1]
+    audiences = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))['aud']
+    renewal = {'secret': 'railshot-' + target_id, 'target_id': target_id, 'server': target['cluster_server'],
+               'project': target['project'], 'namespaces': [namespace], 'service_account': {'name': SA, 'namespace': namespace, 'uid': sa['metadata']['uid']},
+               'ca_sha256': hashlib.sha256(ca).hexdigest(), 'audiences': audiences}
+    credentials.validate_policy({'version': 1, 'targets': [renewal]})
+    credentials.claims(token, renewal, time.time())
+    for ns, resource, group, verb, allowed in [(namespace, 'deployments', 'apps', 'create', True),
+            (namespace, 'secrets', '', 'get', False), ('kube-system', 'deployments', 'apps', 'create', False),
+            ('', 'clusterroles', 'rbac.authorization.k8s.io', 'create', False)]:
+        access = credentials.customer(target['cluster_server'], ca, token, '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews',
+            {'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectAccessReview', 'spec': {
+                'resourceAttributes': {'namespace': ns, 'resource': resource, 'group': group, 'verb': verb}}})
+        argo.require(access['status']['allowed'] is allowed, 'runtime credential scope differs')
+    argo.register_cluster([review], cd['context'], {'bearerToken': token, 'tlsClientConfig': {'caData': ca_data, 'insecure': False}})
+    return renewal, token_response['status']['expirationTimestamp']
+
+
+def install_renewal(cd, renewal):
+    def control(*args, **kwargs):
+        return argo.kubectl(cd['context'], 'argocd', *args, **kwargs)
+    cron = control('get', 'cronjob', 'railshot-credentials', '-o', 'json')
+    pod = cron['spec']['jobTemplate']['spec']['template']['spec']
+    argo.require(not cron['spec'].get('suspend') and pod['serviceAccountName'] == 'railshot-credentials'
+                 and pod['containers'][0]['command'][:2] == ['python3', '/app/gitops/credentials.py'], 'existing token renewal worker required')
+    cm = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
+    policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    previous = next((t for t in policy['targets'] if t['target_id'] == renewal['target_id']), None)
+    argo.require(previous is None or previous == renewal, 'renewal target binding conflict')
+    role = control('get', 'role', 'railshot-credentials', '-o', 'json')
+    argo.require(len(role['rules']) == 1 and role['rules'][0]['apiGroups'] == ['']
+                 and role['rules'][0]['resources'] == ['secrets'] and role['rules'][0]['verbs'] == ['get', 'patch'], 'renewal role differs')
+    names = role['rules'][0]['resourceNames']
+    if renewal['secret'] not in names:
+        names.append(renewal['secret'])
+        control('replace', '-f', '-', '-o', 'json', document=role)  # resourceVersion prevents lost updates.
+    if previous is None:
+        policy['targets'].append(renewal); credentials.validate_policy(policy)
+        cm['data']['policy.json'] = json.dumps(policy)
+        control('replace', '-f', '-', '-o', 'json', document=cm)
+    observed = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
+    argo.require(renewal in json.loads(observed['data']['policy.json'])['targets'], 'renewal policy readback differs')
+    argo.require(renewal['secret'] in control('get', 'role', 'railshot-credentials', '-o', 'json')['rules'][0]['resourceNames'], 'renewal role readback differs')
+
+
+def github_variable(repository, name, document=None, *, create=False):
+    token = os.environ.get('GITHUB_TOKEN') or os.environ.get('GH_TOKEN')
+    argo.require(token, 'operator GitHub token required')
+    path = '/repos/' + repository + '/actions/variables' + ('' if create else '/' + name)
+    headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+    request = Request('https://api.github.com' + path, headers=headers,
+                      data=bridge.encoded(document) if document is not None else None,
+                      method='POST' if create else 'PATCH' if document is not None else 'GET')
+    try:
+        with urlopen(request, timeout=20) as response:
+            raw = response.read(131073)
+            argo.require(len(raw) <= 131072, 'GitHub variable response too large')
+            return json.loads(raw) if raw else None
+    except HTTPError as error:
+        if error.code == 404 and document is None:
+            return None
+        raise RuntimeError('GitHub variable operation unverified') from None
+
+
+def bind_ci(settings, registered, target_id):
+    repository = settings['source_repository']; name = 'RAILSHOT_TARGET_BINDINGS'
+    old = github_variable(repository, name)
+    bindings = json.loads(old['value']) if old else {}
+    selected = {'app': registered['app'], 'tenant': registered['tenant'], 'image_pull_secret': registered['target']['image_pull_secret']}
+    argo.require(isinstance(bindings, dict) and (target_id not in bindings or bindings[target_id] == selected), 'CI target binding conflict')
+    updated = {**bindings, target_id: selected}
+    validate_target({'CONFIGURED_BINDINGS': json.dumps(updated), 'TARGET_ID': target_id,
+                     'APP': registered['app'], 'TENANT': registered['tenant']})
+    if bindings != updated:
+        github_variable(repository, name, {'name': name, 'value': json.dumps(updated)}, create=old is None)
+    observed = github_variable(repository, name)
+    argo.require(observed and json.loads(observed['value']) == updated, 'CI target binding readback differs')
+
+
+def aws_security_group(descriptor, configured=None):
+    _, region, instance = ansible.transport_parts(descriptor['transport_ref'])
+    result = json.loads(argo.native(['aws', 'ec2', 'describe-instances', '--region', region,
+        '--instance-ids', instance, '--output', 'json', '--no-cli-pager']))
+    instances = [item for reservation in result['Reservations'] for item in reservation['Instances']]
+    argo.require(len(instances) == 1 and instances[0]['InstanceId'] == instance
+                 and instances[0]['PrivateIpAddress'] == descriptor['addresses']['private'], 'cloud instance binding differs')
+    groups = [group['GroupId'] for group in instances[0]['SecurityGroups']]
+    argo.require((configured in groups) if configured else len(groups) == 1, 'select one attached runtime security group')
+    selected = configured or groups[0]
+    argo.require(re.fullmatch(r'sg-[a-f0-9]{8,17}', selected), 'AWS security group identity required')
+    return selected
+
+
+def register(registry_file, target_id, config_file, state_dir, binding_file=None):
+    request, cd, settings, pull, binding, identity = load(registry_file, target_id, config_file, binding_file)
+    home = bridge.private_directory(state_dir); shared = bridge.private_directory(settings['state_dir'])
+    identity['environment_id'] = home.name
+    digest = argo.document_hash(identity); owner = digest[:32]
+    record_path = home / 'registration.json'; claim_path = shared / (target_id + '.json')
+    record = {'status': 'running', 'input_sha256': digest, 'target_id': target_id, 'environment_id': home.name,
+              'provider_kind': request['target']['provider'], 'steps': [], 'deployment_supported': False}
+    # ponytail: one writer for GitHub variables and shared renewal policy; shard by control plane if throughput matters.
+    with os.fdopen(os.open(shared / 'registration.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if claim_path.exists():
+            argo.require(read_private(claim_path)['input_sha256'] == digest, 'TARGET_REGISTRATION_CONFLICT')
+        else:
+            for path in shared.glob('*.json'):
+                claim = read_private(path)
+                argo.require(claim.get('resource_id') != identity['descriptor']['resource_id'], 'runtime already registered')
+            save(claim_path, {'input_sha256': digest, 'resource_id': identity['descriptor']['resource_id'], 'environment_id': home.name})
+        if record_path.exists():
+            record = read_private(record_path)
+            argo.require(record['input_sha256'] == digest, 'REGISTRATION_INPUT_CONFLICT')
+            if record['status'] == 'succeeded':
+                argo.require(record['cd_sha256'] == hashlib.sha256(read_private(home / 'cd.json', raw=True)).hexdigest(), 'CD_REGISTRATION_CHANGED')
+                return record
+        registered = cd['targets'][target_id]; target = registered['target']
+        record.update(status='running', app=registered['app'], namespace=target['namespace'], cluster_server=target['cluster_server'])
+        def checkpoint(stage):
+            record['stage'] = stage; save(record_path, record)
+        def complete(stage):
+            if stage not in record['steps']:
+                record['steps'].append(stage)
+            save(record_path, record)
+        try:
+            checkpoint('edge')
+            if settings.get('edge_config_file'):
+                edge_request = {'target_id': target_id, 'tenant': registered['tenant'], 'app': registered['app'],
+                    'environment_id': home.name, 'provider_kind': request['target']['provider'], 'target_private_ip': identity['descriptor']['addresses']['private'],
+                    'namespace': target['namespace'], 'health_path': registered['public_http'].get('health_path') or urlsplit(registered['public_http']['url']).path,
+                    'expected_json': registered['public_http']['expected_json'], 'expires_at': settings['expires_at']}
+                if request['target']['provider'] == 'aws':
+                    edge_request['target_security_group_id'] = aws_security_group(identity['descriptor'], settings.get('target_security_group_id'))
+                save(home / 'edge-request.json', edge_request)
+                argo.native([sys.executable, str(ROOT / 'gitops/edge.py'), 'prepare', '--config', settings['edge_config_file'],
+                    '--request', str(home / 'edge-request.json'), '--out', str(home / 'edge.json')])
+                allocation = read_private(home / 'edge.json')
+                target['node_port'] = allocation['node_port']; registered['public_http'] = allocation['public_http']
+                registered['edge'] = allocation['reference']
+            complete('edge')
+            with runtime_kubectl(request) as kube:
+                checkpoint('namespace')
+                services = kube('default', 'get', 'services', '-A', '-o', 'json')
+                for service in services['items']:
+                    if any(port.get('nodePort') == target['node_port'] for port in service.get('spec', {}).get('ports', [])):
+                        argo.require(service['metadata']['namespace'] == target['namespace']
+                                     and service['metadata']['name'] == registered['app']
+                                     and service.get('spec', {}).get('selector', {}).get('railshot.io/target') == target_id,
+                                     'NodePort is already assigned to another application')
+                for document in runtime_documents(target, owner, pull, binding):
+                    owned_apply(kube, document)
+                complete('namespace')
+                checkpoint('argo')
+                renewal, expiration = register_argo(kube, cd, registered, target_id, owner, binding)
+                save(home / 'renewal.json', renewal); complete('argo')
+            checkpoint('credentials')
+            install_renewal(cd, renewal)
+            record['credentials'] = {'renewal': 'configured', 'expires_at': expiration}; complete('credentials')
+            checkpoint('ci')
+            bind_ci(settings, registered, target_id); complete('ci')
+            save(home / 'cd.json', cd)
+            record.pop('error', None)
+            record.update(status='succeeded', deployment_supported=True, node_port=target['node_port'],
+                          cd_sha256=hashlib.sha256(read_private(home / 'cd.json', raw=True)).hexdigest())
+            checkpoint('registered')
+        except Exception:
+            record.update(status='unknown', deployment_supported=False,
+                          error={'code': 'REGISTRATION_RECONCILE_REQUIRED', 'outcome_unknown': True, 'retryable': False})
+            save(record_path, record)
+        return record
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['register'])
+    for arg in ('registry', 'target-id', 'config', 'state-dir'):
+        parser.add_argument('--' + arg, required=True)
+    parser.add_argument('--binding')
+    args = parser.parse_args(); os.umask(0o077)
+    try:
+        result = register(args.registry, args.target_id, args.config, args.state_dir, args.binding)
+    except Exception:
+        result = {'status': 'blocked', 'target_id': args.target_id, 'deployment_supported': False,
+                  'error': {'code': 'REGISTRATION_INPUT_INVALID', 'outcome_unknown': False, 'retryable': False}}
+    print(json.dumps(result))
+    return 0 if result['status'] == 'succeeded' else 3
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
