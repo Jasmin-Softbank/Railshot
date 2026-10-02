@@ -9,3 +9,19 @@ resource "aws_vpc_security_group_ingress_rule" "release_observer" {
   to_port                      = tonumber(each.key)
   description                  = "Railshot control observer runtime metrics ${each.key}"
 }
+
+# Import the four existing observer rules before applying this bootstrap module.
+resource "aws_vpc_security_group_egress_rule" "release_observer" {
+  for_each = {
+    "aws-31490" = { provider = "aws", cidr = "172.31.13.147/32", port = 31490 }
+    "aws-31491" = { provider = "aws", cidr = "172.31.13.147/32", port = 31491 }
+    "gcp-31490" = { provider = "gcp", cidr = "34.47.68.21/32", port = 31490 }
+    "gcp-31491" = { provider = "gcp", cidr = "34.47.68.21/32", port = 31491 }
+  }
+  security_group_id = "sg-02925a97753d8d3e9"
+  cidr_ipv4         = each.value.cidr
+  ip_protocol       = "tcp"
+  from_port         = each.value.port
+  to_port           = each.value.port
+  description       = "Railshot shared observer ${each.value.provider} metrics ${each.value.port}"
+}

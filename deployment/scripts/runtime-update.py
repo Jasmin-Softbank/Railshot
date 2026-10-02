@@ -17,7 +17,9 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
+import ssl
 import subprocess
 import sys
 import time
@@ -28,6 +30,79 @@ import environment as env
 import runtime_upgrade as upgrade
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def node_only(value):
+    return value.get('version') == 2 and value.get('scope') == 'node-only'
+
+
+def load_node_configuration(registry, target_id, config, binding_file=None):
+    """An explicit app-free contract; legacy v1 never falls back to this path."""
+    env.argo.require(node_only(config) and set(config) == {'version', 'scope', 'registration', 'management'}
+                     and binding_file is None, 'explicit node-only config v2 required')
+    env.argo.require(registry.get('version') == 1 and isinstance(registry.get('targets'), dict), 'registry v1 required')
+    selected = registry['targets'][target_id]
+    env.argo.require(selected['purpose'] == 'runtime', 'registered runtime required')
+    request, descriptor = env.registered_node(selected, target_id, 'registration.' + target_id)
+    settings = config['registration']
+    env.argo.require(set(settings) == {'state_dir', 'observability_config_file'}, 'node-only registration settings differ')
+    for value in settings.values():
+        path = Path(value)
+        env.argo.require(path.is_absolute() and path.resolve() == path and str(path) != '/', 'canonical operator path required')
+    env.read_private(settings['observability_config_file'])
+    management = {'server': descriptor.get('management_endpoint', 'https://' + descriptor['addresses']['private'] + ':6443')}
+    if descriptor.get('management_endpoint'):
+        management['tls_server_name'] = descriptor['addresses']['private']
+    env.argo.require(config['management'] == management and request['target']['architecture'] == 'amd64',
+                     'node management endpoint/TLS binding differs')
+    identity = {'version': 2, 'scope': 'node-only', 'descriptor': descriptor, 'settings': settings, 'management': management,
+                'ssh': selected['ssh'],
+                'ssh_sha256': {key: hashlib.sha256(Path(selected['ssh'][key]).read_bytes()).hexdigest()
+                               for key in ('identity_file', 'known_hosts_file')}}
+    return request, None, settings, None, None, identity
+
+
+def node_identity(identity, observed, management):
+    env.argo.require(observed['node_ip'] == identity['descriptor']['addresses']['private']
+                     and observed['architecture'] == 'amd64' and isinstance(observed['node_uid'], str)
+                     and bool(observed['node_uid']), 'registered node identity differs')
+    ca = base64.b64decode(management['ca_data'], validate=True)
+    env.argo.require(bool(ca) and hashlib.sha256(ca).hexdigest() == management['ca_sha256']
+                     and {k: v for k, v in management.items() if k not in ('ca_data', 'ca_sha256')} == identity['management'],
+                     'registered management CA/endpoint differs')
+    return {**identity, 'node': {key: observed[key] for key in ('node_uid', 'node_ip', 'architecture')},
+            'management': management}
+
+
+def node_management_health(registration, observed):
+    management = registration['management']
+    ca = base64.b64decode(observed['management_ca_data'], validate=True)
+    env.argo.require(observed['node_uid'] == registration['node_uid'] and observed.get('api_ready') is True
+                     and observed['node_ip'] == registration['node_ip'] and observed['architecture'] == registration['architecture']
+                     and observed.get('cilium_ready') is True
+                     and observed['management_ca_data'] == management['ca_data']
+                     and hashlib.sha256(ca).hexdigest() == management['ca_sha256'], 'node UID, health or management CA drifted')
+    endpoint = urlsplit(management['server'])
+    context = ssl.create_default_context(cadata=ca.decode('ascii'))
+    client = env.credentials.RegisteredHTTPSConnection(endpoint.hostname, endpoint.port,
+        server_name=management.get('tls_server_name', endpoint.hostname), context=context, timeout=15)
+    try:
+        client.connect()  # No application service account or fabricated API credential.
+    finally:
+        client.close()
+    return {'server': management['server'], 'tls_verified': True, 'api_ready_via_ssh': True,
+            'ca_sha256': management['ca_sha256']}
+
+
+def runtime_readback(prefix, registration):
+    observed = node_call(prefix, {'action': 'inspect', **({'include_ca': True} if node_only(registration) else {})})
+    if node_only(registration):
+        node_management_health(registration, observed)
+    return observed
+
+
+def public_runtime(observed):
+    return {key: value for key, value in observed.items() if key != 'management_ca_data'}
 
 
 @contextmanager
@@ -78,11 +153,36 @@ def load(args):
     release = env.read_private(args.release)
     upgrade.validate(release, json.loads((ROOT / 'deployment/airgap/versions.json').read_text()))
     record = env.read_private(Path(args.registration_dir) / 'registration.json')
+    configuration = env.read_private(args.config)
+    if node_only(configuration) or node_only(record):
+        env.argo.require(node_only(configuration) and node_only(record) and record['status'] == 'succeeded'
+                         and record['target_id'] == args.target_id
+                         and set(record) == {'version', 'scope', 'status', 'input_sha256', 'target_id', 'environment_id',
+                             'provider_kind', 'resource_id', 'steps', 'adoption_plan_sha256', 'node_uid', 'node_ip',
+                             'architecture', 'management', 'baseline_policy_sha256', 'observability'},
+                         'explicit node-only registration receipt required')
+        request, cd, settings, pull, binding, identity = load_node_configuration(
+            env.read_private(args.registry), args.target_id, configuration, args.binding)
+        identity['environment_id'] = Path(args.registration_dir).name
+        identity = node_identity(identity, record, record['management'])
+        env.argo.require(record['provider_kind'] == request['target']['provider']
+                         and record['resource_id'] == identity['descriptor']['resource_id']
+                         and record['environment_id'] == identity['environment_id']
+                         and record['input_sha256'] == env.argo.document_hash(identity)
+                         and re.fullmatch('[a-f0-9]{64}', record['baseline_policy_sha256']), 'node-only registration binding differs')
+        claim = env.read_private(Path(settings['state_dir']) / (args.target_id + '.json'))
+        env.argo.require(claim == {'input_sha256': record['input_sha256'], 'resource_id': record['resource_id'],
+                                 'environment_id': record['environment_id']}, 'registered node owner differs')
+        adoption = env.read_private(Path(args.registration_dir) / 'adoption-receipt.json')
+        env.argo.require(adoption.get('status') == 'verified' and adoption.get('scope') == 'node-only'
+                         and adoption.get('plan_sha256') == record['adoption_plan_sha256']
+                         and adoption.get('target_id') == args.target_id and adoption.get('provider') == record['provider_kind'],
+                         'node adoption is incomplete; operator recovery required')
+        return release, record, request, cd, settings, pull, binding, identity
     cd_bytes = env.read_private(Path(args.registration_dir) / 'cd.json', raw=True)
     env.argo.require(record['status'] == 'succeeded' and record['target_id'] == args.target_id
                      and record['cd_sha256'] == hashlib.sha256(cd_bytes).hexdigest(), 'existing registration receipt differs')
     cd = json.loads(cd_bytes); registered = cd['targets'][args.target_id]
-    configuration = env.read_private(args.config)
     # Use the saved allocated URL/NodePort. Updating common policies never reallocates an edge.
     configuration['cd'] = cd
     registered.pop('edge', None)
@@ -151,38 +251,46 @@ def collection_query(row):
     def selector(job, instance):
         return '{job=' + json.dumps(job) + ',instance=' + json.dumps(instance) + '}'
     node = selector('node', row['node_instance']); cluster = selector('cluster', row['cluster_instance'])
-    http = selector('http', row['probe_url'])
-    pod = ('kube_pod_status_phase' + cluster[:-1] + ',namespace=' + json.dumps(row['namespace']) + ',phase="Running"}')
-    labels = ('kube_pod_labels' + cluster[:-1] + ',namespace=' + json.dumps(row['namespace'])
-              + ',label_app_kubernetes_io_name=' + json.dumps(row['app'])
-              + ',label_railshot_io_target=' + json.dumps(row['target_id']) + '}')
-    expressions = {**{job + '_up': 'up' + sel for job, sel in (('node', node), ('cluster', cluster), ('http', http))},
-        **{job + '_observed': 'timestamp(up' + sel + ')' for job, sel in (('node', node), ('cluster', cluster), ('http', http))},
+    app_fields = {'app', 'namespace', 'probe_url'} & set(row)
+    env.argo.require(not app_fields or app_fields == {'app', 'namespace', 'probe_url'}, 'partial observer app binding')
+    expressions = {**{job + '_up': 'up' + sel for job, sel in (('node', node), ('cluster', cluster))},
+        **{job + '_observed': 'timestamp(up' + sel + ')' for job, sel in (('node', node), ('cluster', cluster))},
         'cpu_percent': '100 * (1 - avg(rate(node_cpu_seconds_total' + node[:-1] + ',mode="idle"}[2m])))',
         'cpu_observed': 'min(timestamp(node_cpu_seconds_total' + node + '))',
         'memory_percent': '100 * (1 - node_memory_MemAvailable_bytes' + node + ' / node_memory_MemTotal_bytes' + node + ')',
-        'memory_observed': 'min(timestamp(node_memory_MemAvailable_bytes' + node + ') or timestamp(node_memory_MemTotal_bytes' + node + '))',
-        'pods': 'sum(' + pod + ' and on(namespace,pod,uid) ' + labels + ')',
-        'pods_observed': 'min(timestamp(' + pod + ') and on(namespace,pod,uid) ' + labels + ')',
-        'http': 'probe_success' + http, 'probe_observed': 'timestamp(probe_success' + http + ')'}
+        'memory_observed': 'min(timestamp(node_memory_MemAvailable_bytes' + node + ') or timestamp(node_memory_MemTotal_bytes' + node + '))'}
+    if app_fields:
+        http = selector('http', row['probe_url'])
+        pod = ('kube_pod_status_phase' + cluster[:-1] + ',namespace=' + json.dumps(row['namespace']) + ',phase="Running"}')
+        labels = ('kube_pod_labels' + cluster[:-1] + ',namespace=' + json.dumps(row['namespace'])
+                  + ',label_app_kubernetes_io_name=' + json.dumps(row['app'])
+                  + ',label_railshot_io_target=' + json.dumps(row['target_id']) + '}')
+        expressions.update(http_up='up' + http, http_observed='timestamp(up' + http + ')',
+            pods='sum(' + pod + ' and on(namespace,pod,uid) ' + labels + ')',
+            pods_observed='min(timestamp(' + pod + ') and on(namespace,pod,uid) ' + labels + ')',
+            http='probe_success' + http, probe_observed='timestamp(probe_success' + http + ')')
     return ' or '.join('label_replace((' + expression + '), "railshot_metric", "' + name + '", "", "")'
                        for name, expression in expressions.items())
 
 
-def collection_values(document, now):
+def collection_values(document, now, *, application=True):
     env.argo.require(document.get('status') == 'success' and document['data']['resultType'] == 'vector', 'observer query failed')
     values = {}
     for item in document['data']['result']:
         name = item['metric']['railshot_metric']; value = float(item['value'][1])
         env.argo.require(name not in values and math.isfinite(value), 'ambiguous or nonfinite observer sample')
         values[name] = value
-    clocks = ('node_observed', 'cluster_observed', 'http_observed', 'cpu_observed', 'memory_observed', 'pods_observed', 'probe_observed')
-    env.argo.require(all(values.get(name) == 1 for name in ('node_up', 'cluster_up', 'http_up', 'http'))
+    clocks = ('node_observed', 'cluster_observed', 'cpu_observed', 'memory_observed')
+    required_up = ('node_up', 'cluster_up')
+    if application:
+        clocks += ('http_observed', 'pods_observed', 'probe_observed')
+        required_up += ('http_up', 'http')
+    env.argo.require(all(values.get(name) == 1 for name in required_up)
                      and all(name in values and -5 <= now - values[name] <= 90 for name in clocks)
                      and all(name in values and 0 <= values[name] <= 100 for name in ('cpu_percent', 'memory_percent'))
-                     and values.get('pods', 0) >= 1, 'observer samples missing, stale, or unhealthy')
+                     and (not application or values.get('pods', 0) >= 1), 'observer samples missing, stale, or unhealthy')
     return {'collection_state': 'ready', 'cpu_percent': values['cpu_percent'], 'memory_percent': values['memory_percent'],
-            'running_app_pods': values['pods'], 'http_probe_success': True,
+            **({'running_app_pods': values['pods'], 'http_probe_success': True} if application else {}),
             'oldest_observed_at': datetime.fromtimestamp(min(values[name] for name in clocks), timezone.utc).isoformat()}
 
 
@@ -193,15 +301,20 @@ def collection_health(settings, registration, registered, identity, *, wait_seco
     product = env.read_private(Path(config['state_dir']) / 'product.json')
     env.argo.require(product.get('version') == 1 and product.get('collector') ==
         {'id': config['owner'], 'lifecycle': config['lifecycle'], 'expires_at': config['expires_at']}, 'observer collector binding differs')
-    rows = [row for row in product['targets'] if row['target_id'] == registered['target']['id'] and row['app'] == registered['app']]
-    env.argo.require(len(rows) == 1, 'one registered app observation required')
+    application = not node_only(registration)
+    target_id = registered['target']['id'] if application else registration['target_id']
+    rows = [row for row in product['targets'] if row['target_id'] == target_id
+            and (row.get('app') == registered['app'] if application else not {'app', 'namespace', 'probe_url'} & set(row))]
+    env.argo.require(len(rows) == 1, 'one exactly bound observation required')
     row = rows[0]; descriptor = identity['descriptor']
     address = observer.metrics_host(descriptor, descriptor['addresses']['private'])
     env.argo.require(row['resource_id'] == descriptor['resource_id'] and row['environment_id'] == registration['environment_id']
-                     and row['namespace'] == registered['target']['namespace'] and row['probe_url'] == registered['public_http']['url']
                      and row['prometheus_url'] == config['prometheus_url']
                      and row['node_instance'] == address + ':' + str(config['node_metrics_port'])
                      and row['cluster_instance'] == address + ':' + str(config['cluster_metrics_port']), 'observer runtime binding differs')
+    if application:
+        env.argo.require(row['namespace'] == registered['target']['namespace'] and row['probe_url'] == registered['public_http']['url'],
+                         'observer application binding differs')
     url = config['prometheus_url'] + '/api/v1/query?' + urlencode({'query': collection_query(row), 'timeout': '4s'})
     deadline = time.monotonic() + wait_seconds
     while True:
@@ -209,7 +322,7 @@ def collection_health(settings, registration, registered, identity, *, wait_seco
             with build_opener(ProxyHandler({}), env.credentials.NoRedirect()).open(Request(url), timeout=5) as response:
                 raw = response.read(65537)
                 env.argo.require(response.status == 200 and len(raw) <= 65536, 'observer response invalid')
-            return collection_values(json.loads(raw), time.time())
+            return collection_values(json.loads(raw), time.time(), application=application)
         except (OSError, ValueError, KeyError, TypeError):
             env.argo.require(time.monotonic() < deadline, 'actual observer collection unverified')
             time.sleep(3)
@@ -232,32 +345,38 @@ def verify(args):
                          and previous.get('input_sha256') == fingerprint
                          and marker.get('receipt') == str(path), 'verified release/target binding differs')
         with connection(request) as prefix:
-            observed = node_call(prefix, {'action': 'inspect'})
+            observed = runtime_readback(prefix, registration)
         env.argo.require(observed['node_uid'] == previous['after']['node_uid']
                          and observed['node_ip'] == identity['descriptor']['addresses']['private']
                          and observed['architecture'] == 'amd64' and upgrade.matches(observed, release['to_policy']),
                          'live runtime drifted from the verified to-policy')
-        registered = cd['targets'][args.target_id]
+        empty = node_only(registration)
+        registered = None if empty else cd['targets'][args.target_id]
+        application = probe = {'status': 'not_applicable', 'reason': 'node-only'}
         with env.runtime_kubectl(request) as kube:
-            namespace = kube('default', 'get', 'namespace', registered['target']['namespace'], '-o', 'json')
-            env.argo.require(namespace['metadata'].get('labels', {}).get('railshot.io/registration') == registration['input_sha256'][:32],
-                             'registered namespace ownership drifted')
-            application = app_health(kube, registered, args.target_id)
+            if not empty:
+                namespace = kube('default', 'get', 'namespace', registered['target']['namespace'], '-o', 'json')
+                env.argo.require(namespace['metadata'].get('labels', {}).get('railshot.io/registration') == registration['input_sha256'][:32],
+                                 'registered namespace ownership drifted')
+                application = app_health(kube, registered, args.target_id)
             observer = observer_health(kube)
         observer.update(collection_health(settings, registration, registered, identity, wait_seconds=0))
-        management = management_health(cd, args.target_id)
-        public = registered['public_http']
-        probe = env.bridge.public_probe(public, urlsplit(public['url']).path)
-        env.argo.require(probe['state'] == 'succeeded', 'public HTTPS health drifted')
+        management = node_management_health(registration, observed) if empty else management_health(cd, args.target_id)
+        if not empty:
+            public = registered['public_http']
+            probe = env.bridge.public_probe(public, urlsplit(public['url']).path)
+            env.argo.require(probe['state'] == 'succeeded', 'public HTTPS health drifted')
         return {'version': 1, 'status': 'verified', 'verify_only': True, 'source_sha': release['source_sha'],
+                **({'scope': 'node-only'} if empty else {}),
                 'provider': request['target']['provider'], 'target_id': args.target_id,
                 'input_sha256': fingerprint, 'to_policy_sha256': release['to_policy_sha256'],
-                'after': observed, 'application': application, 'observability': observer,
+                'after': public_runtime(observed), 'application': application, 'observability': observer,
                 'management': management, 'public_http': probe, 'checked_at': datetime.now(timezone.utc).isoformat()}
 
 
 def execute(args):
     release, registration, request, cd, settings, pull, binding, identity = load(args)
+    empty = node_only(registration)
     home = env.bridge.private_directory(args.state_dir)
     registration_home = env.bridge.private_directory(args.registration_dir)
     target_marker = registration_home / 'runtime-release.json'
@@ -278,6 +397,7 @@ def execute(args):
         if target_marker.exists():
             env.argo.require(env.read_private(target_marker)['status'] == 'verified', 'previous target release requires operator reconciliation')
         receipt = {'version': 1, 'source_sha': release['source_sha'], 'target_id': args.target_id,
+                   **({'scope': 'node-only'} if empty else {}),
                    'provider': request['target']['provider'], 'input_sha256': fingerprint, 'status': 'checking',
                    'steps': [], 'mutation_started': False, 'from_policy_sha256': release['from_policy_sha256'],
                    'to_policy_sha256': release['to_policy_sha256'], 'automatic_rollback': False}
@@ -293,51 +413,71 @@ def execute(args):
             receipt['steps'].append(name); env.save(path, receipt)
         try:
             stage('runtime_readback')
+            if empty:
+                previous_policy = registration['baseline_policy_sha256']
+                if target_marker.exists():
+                    marker = env.read_private(target_marker)
+                    previous = env.read_private(marker['receipt'])
+                    env.argo.require(previous['status'] == 'verified' and previous['target_id'] == args.target_id
+                                     and previous['source_sha'] == marker['source_sha']
+                                     and previous['provider'] == request['target']['provider']
+                                     and previous['scope'] == 'node-only'
+                                     and previous['after']['node_uid'] == registration['node_uid'], 'previous runtime binding differs')
+                    previous_policy = previous['to_policy_sha256']
+                env.argo.require(previous_policy == release['from_policy_sha256'], 'release from-policy differs from approved node baseline')
             with connection(request) as prefix:
-                observed = node_call(prefix, {'action': 'inspect'})
+                observed = runtime_readback(prefix, registration)
                 expected = {'node_uid': observed['node_uid'], 'node_ip': identity['descriptor']['addresses']['private'],
                             'target_id': args.target_id, 'resource_id': identity['descriptor']['resource_id']}
                 env.argo.require(observed['node_ip'] == expected['node_ip'] and observed['architecture'] == 'amd64'
                                  and upgrade.matches(observed, release['from_policy']), 'live runtime differs from registered from-policy')
-                receipt['before'] = observed; done('runtime_readback')
+                receipt['before'] = public_runtime(observed); done('runtime_readback')
                 stage('runtime_apply', mutation=True)
                 source = stage_source(prefix, release['source_sha'])
                 receipt['runtime'] = node_call(prefix, {'action': 'apply', 'release': release, 'expected': expected, 'source': source})
                 env.argo.require(receipt['runtime']['status'] == 'verified', 'runtime apply was not verified')
                 done('runtime_apply')
-            registered = cd['targets'][args.target_id]
-            stage('common_policy', mutation=True)
-            with env.runtime_kubectl(request) as kube:
-                namespace = kube('default', 'get', 'namespace', registered['target']['namespace'], '-o', 'json')
-                env.argo.require(namespace['metadata'].get('labels', {}).get('railshot.io/registration') == registration['input_sha256'][:32],
-                                 'registered namespace owner missing; refusing adoption')
-                for document in env.runtime_documents(registered['target'], registration['input_sha256'][:32], pull, binding):
-                    env.owned_apply(kube, document)
-            done('common_policy')
+            registered = None if empty else cd['targets'][args.target_id]
+            if not empty:
+                stage('common_policy', mutation=True)
+                with env.runtime_kubectl(request) as kube:
+                    namespace = kube('default', 'get', 'namespace', registered['target']['namespace'], '-o', 'json')
+                    env.argo.require(namespace['metadata'].get('labels', {}).get('railshot.io/registration') == registration['input_sha256'][:32],
+                                     'registered namespace owner missing; refusing adoption')
+                    for document in env.runtime_documents(registered['target'], registration['input_sha256'][:32], pull, binding):
+                        env.owned_apply(kube, document)
+                done('common_policy')
             stage('observability', mutation=True)
             env.argo.require(settings.get('observability_config_file'), 'registered observer required for common release')
             spec = importlib.util.spec_from_file_location('runtime_release_observer', ROOT / 'observability/register.py')
             observer = importlib.util.module_from_spec(spec); spec.loader.exec_module(observer)
             observation = {'version': 1, 'target_id': args.target_id, 'environment_id': registration['environment_id'],
-                           'app': registered['app'], 'namespace': registered['target']['namespace'],
-                           'node_ip': expected['node_ip'], 'probe_url': registered['public_http']['url'],
-                           'registry_file': str(args.registry), 'context': cd['context']}
+                           'node_ip': expected['node_ip'], 'registry_file': str(args.registry)}
+            if not empty:
+                observation.update(app=registered['app'], namespace=registered['target']['namespace'],
+                                   probe_url=registered['public_http']['url'], context=cd['context'])
             result = observer.register(env.read_private(settings['observability_config_file']), observation, home / 'observability.json')
             env.argo.require(result.get('registered') is True and result.get('status') == 'succeeded', 'observer reconciliation unverified')
             done('observability')
             stage('health')
             with env.runtime_kubectl(request) as kube:
-                receipt['application'] = app_health(kube, registered, args.target_id)
+                receipt['application'] = ({'status': 'not_applicable', 'reason': 'node-only'} if empty
+                                          else app_health(kube, registered, args.target_id))
                 receipt['observability'] = observer_health(kube)
             receipt['observability'].update(collection_health(settings, registration, registered, identity))
-            receipt['management'] = management_health(cd, args.target_id)
-            public = registered['public_http']
-            receipt['public_http'] = env.bridge.public_probe(public, urlsplit(public['url']).path)
-            env.argo.require(receipt['public_http']['state'] == 'succeeded', 'public HTTPS health unverified')
+            if empty:
+                receipt['public_http'] = {'status': 'not_applicable', 'reason': 'node-only'}
+            else:
+                receipt['management'] = management_health(cd, args.target_id)
+                public = registered['public_http']
+                receipt['public_http'] = env.bridge.public_probe(public, urlsplit(public['url']).path)
+                env.argo.require(receipt['public_http']['state'] == 'succeeded', 'public HTTPS health unverified')
             with connection(request) as prefix:
-                after = node_call(prefix, {'action': 'inspect'})
+                after = runtime_readback(prefix, registration)
+            if empty:
+                receipt['management'] = node_management_health(registration, after)
             env.argo.require(after['node_uid'] == expected['node_uid'] and upgrade.matches(after, release['to_policy']), 'final runtime readback differs')
-            receipt.update(status='verified', after=after, verified_at=datetime.now(timezone.utc).isoformat())
+            receipt.update(status='verified', after=public_runtime(after), verified_at=datetime.now(timezone.utc).isoformat())
             done('health')
             env.save(target_marker, {'status': 'verified', 'source_sha': release['source_sha'], 'receipt': str(path)})
         except Exception as error:

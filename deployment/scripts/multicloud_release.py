@@ -61,9 +61,8 @@ def validate(manifest, config):
             and manifest['version'] == 1, 'RELEASE_MANIFEST_INVALID')
     for key in ('source_sha', 'platform_revision'):
         require(isinstance(manifest[key], str) and re.fullmatch('[a-f0-9]{40}', manifest[key]), 'RELEASE_SHA_INVALID')
-    require(manifest['edge_kinds'] in ({'aws': 'native', 'gcp': 'native', 'openstack': 'native'},
-                                       {'aws': 'native', 'gcp': 'native', 'openstack': 'aws-relay'}), 'EDGE_KINDS_INVALID')
-    require(set(manifest['edge_modules']) == PROVIDERS and all(re.fullmatch('[a-f0-9]{64}', v) for v in manifest['edge_modules'].values()), 'EDGE_MODULE_PINS_REQUIRED')
+    require(set(manifest['edge_kinds']) == PROVIDERS, 'EDGE_KINDS_INVALID')
+    require(set(manifest['edge_modules']) == PROVIDERS, 'EDGE_MODULE_PINS_REQUIRED')
     require(set(manifest['images']) == COMPONENTS, 'ALL_PLATFORM_IMAGES_REQUIRED')
     for name, image in manifest['images'].items():
         require(isinstance(image, str) and re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-' + name + r'@sha256:[a-f0-9]{64}', image),
@@ -79,11 +78,20 @@ def validate(manifest, config):
     targets = config['targets']
     require(isinstance(targets, list) and len(targets) == 3 and {t['provider'] for t in targets} == PROVIDERS,
             'THREE_PROVIDER_INVENTORY_REQUIRED')
-    required = {'provider', 'target_id', 'registry_file', 'config_file', 'registration_state', 'from_policy_file', 'edge_config_file'}
+    common = {'provider', 'target_id', 'registry_file', 'config_file', 'registration_state', 'from_policy_file'}
     for target in targets:
-        require(required <= set(target) <= required | {'binding_file', 'upgrade'}, 'TARGET_CONFIG_INVALID')
+        node_only = target.get('scope') == 'node-only'
+        required = common | ({'scope'} if node_only else {'edge_config_file'})
+        optional = {'upgrade'} | (set() if node_only else {'binding_file'})
+        require(required <= set(target) <= required | optional, 'TARGET_CONFIG_INVALID')
+        kind, pin = manifest['edge_kinds'][target['provider']], manifest['edge_modules'][target['provider']]
+        if node_only:
+            require(kind == 'none' and pin is None, 'NODE_ONLY_EDGE_BINDING_INVALID')
+        else:
+            require(kind in ({'native', 'aws-relay'} if target['provider'] == 'openstack' else {'native'}), 'EDGE_KINDS_INVALID')
+            require(isinstance(pin, str) and re.fullmatch('[a-f0-9]{64}', pin), 'EDGE_MODULE_PINS_REQUIRED')
         require(manifest['provider_targets'][target['provider']] == target['target_id'], 'TARGET_BINDING_MISMATCH')
-        for key in required - {'provider', 'target_id'} | ({'binding_file'} if 'binding_file' in target else set()):
+        for key in required - {'provider', 'target_id', 'scope'} | ({'binding_file'} if 'binding_file' in target else set()):
             value = target[key]
             require(isinstance(value, str) and value.startswith(OPERATOR_STATE) and '..' not in Path(value).parts,
                     'REGISTERED_RUNTIME_PATH_REQUIRED')
@@ -109,7 +117,6 @@ sys.path.insert(0,str(source/'ci/scripts'))
 from storage import durable_write
 verify_only=payload.get('verify_only',False)
 root=Path('/home/railshot-operator/.local/share/railshot/multicloud-releases')/release['source_sha']/target['target_id']
-if not verify_only: root.mkdir(parents=True,exist_ok=True,mode=0o700)
 def read(path):
  p=Path(path); s=p.lstat()
  assert p.resolve()==p and p.is_file() and s.st_uid==os.geteuid() and not s.st_mode&0o077 and s.st_size<2000000
@@ -117,6 +124,12 @@ def read(path):
 def write(path,value):
  durable_write(path,json.dumps(value,sort_keys=True,separators=(',',':')).encode())
 def hash(value): return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+runtime_config=read(target['config_file']); node_only=target.get('scope')=='node-only'
+assert (runtime_config.get('version')==2 and runtime_config.get('scope')=='node-only')==node_only, 'runtime scope differs'
+assert target.get('scope') in (None,'node-only'), 'target scope differs'
+if node_only:
+ assert 'edge_config_file' not in target and 'binding_file' not in target and release['edge_kinds'][target['provider']]=='none' and release['edge_modules'][target['provider']] is None, 'node-only edge binding differs'
+if not verify_only: root.mkdir(parents=True,exist_ok=True,mode=0o700)
 before=read(target['from_policy_file']); after=release['runtime_policy']
 plan={'version':1,'source_sha':release['source_sha'],'from_policy':before,'to_policy':after,'from_policy_sha256':hash(before),'to_policy_sha256':hash(after)}
 if 'upgrade' in target: plan['upgrade']=target['upgrade']
@@ -129,19 +142,21 @@ else: write(plan_path,plan)
 command=[sys.executable,str(source/'deployment/scripts/runtime-update.py'),'--registry',target['registry_file'],'--target-id',target['target_id'],'--config',target['config_file'],'--registration-dir',target['registration_state'],'--state-dir',str(root/'runtime'),'--release',str(plan_path)]
 if 'binding_file' in target: command+=['--binding',target['binding_file']]
 if verify_only: command+=['--verify-only']
-edge_config=read(target['edge_config_file'])
-assert edge_config.get('edge_kind','native')==release['edge_kinds'][target['provider']]
-edge=[sys.executable,str(source/'deployment/scripts/edge_update.py'),'--source-root',str(source),'--release-sha',release['source_sha'],'--config',target['edge_config_file'],'--module-sha256',release['edge_modules'][target['provider']]]
-if verify_only: edge+=['--verify-only']
-edge_run=subprocess.run(edge,capture_output=True,text=True,timeout=1800)
-try: edge_proof=json.loads(edge_run.stdout)
-except (ValueError,TypeError): edge_proof={'phase':'unknown'}
-if edge_run.returncode!=0 or edge_proof.get('phase')!='succeeded' or edge_proof.get('provider')!=target['provider'] or edge_proof.get('release_sha')!=release['source_sha']:
- print(json.dumps({'status':'failed','code':'EDGE_UPDATE_NOT_VERIFIED','provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha']})); sys.exit(1)
+if node_only: edge_proof={'status':'not_applicable','reason':'node-only'}
+else:
+ edge_config=read(target['edge_config_file'])
+ assert edge_config.get('edge_kind','native')==release['edge_kinds'][target['provider']]
+ edge=[sys.executable,str(source/'deployment/scripts/edge_update.py'),'--source-root',str(source),'--release-sha',release['source_sha'],'--config',target['edge_config_file'],'--module-sha256',release['edge_modules'][target['provider']]]
+ if verify_only: edge+=['--verify-only']
+ edge_run=subprocess.run(edge,capture_output=True,text=True,timeout=1800)
+ try: edge_proof=json.loads(edge_run.stdout)
+ except (ValueError,TypeError): edge_proof={'phase':'unknown'}
+ if edge_run.returncode!=0 or edge_proof.get('phase')!='succeeded' or edge_proof.get('provider')!=target['provider'] or edge_proof.get('release_sha')!=release['source_sha']:
+  print(json.dumps({'status':'failed','code':'EDGE_UPDATE_NOT_VERIFIED','provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha']})); sys.exit(1)
 run=subprocess.run(command,capture_output=True,text=True,timeout=1800)
 try: proof=json.loads(run.stdout)
 except (ValueError,TypeError): proof={'status':'failed','code':'RUNTIME_RECEIPT_UNAVAILABLE'}
-if not isinstance(proof,dict) or any(proof.get(key)!=value for key,value in {'provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha']}.items()):
+if not isinstance(proof,dict) or any(proof.get(key)!=value for key,value in {'provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha'],'scope':target.get('scope')}.items()):
  proof={'status':'failed','code':'RUNTIME_RECEIPT_BINDING_MISMATCH','provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha']}
 proof.update(release_sha=release['source_sha'],edge=edge_proof)
 if run.returncode!=0 or proof.get('status')!='verified': proof['status']='failed'
@@ -173,6 +188,7 @@ def update_target(target, manifest, config, verify_only=False):
         proof = {'status': 'unknown', 'code': 'TARGET_RECEIPT_UNAVAILABLE'}
     require(isinstance(proof, dict) and proof.get('provider') == target['provider']
             and proof.get('target_id') == target['target_id']
+            and proof.get('scope') == target.get('scope')
             and proof.get('source_sha') == manifest['source_sha'], 'TARGET_RECEIPT_BINDING_MISMATCH')
     if result.returncode and proof.get('status') == 'verified':
         proof['status'] = 'unknown'
@@ -210,6 +226,7 @@ def execute(config, manifest, *, workers=None, target_runner=None, target_verifi
                 checked = list(pool.map(lambda target: target_verifier(target, manifest), targets))
             require(all(proof.get('status') == 'verified' and proof.get('source_sha') == manifest['source_sha']
                         and proof.get('provider') == target['provider'] and proof.get('target_id') == target['target_id']
+                        and proof.get('scope') == target.get('scope')
                         for target, proof in zip(targets, checked)), 'RELEASE_LIVE_READBACK_FAILED')
             worker_module.verify_apps(state / 'apps.json')
             return {**previous, 'targets': checked, 'reverified_at': datetime.now(timezone.utc).isoformat()}
@@ -241,6 +258,7 @@ def execute(config, manifest, *, workers=None, target_runner=None, target_verifi
                     try:
                         proof = future.result()
                         require(isinstance(proof, dict) and proof.get('provider') == target['provider'] and proof.get('target_id') == target['target_id']
+                                and proof.get('scope') == target.get('scope')
                                 and proof.get('source_sha') == manifest['source_sha'], 'TARGET_PROOF_MISMATCH')
                     except Exception:
                         proof = {'provider': target['provider'], 'target_id': target['target_id'], 'source_sha': manifest['source_sha'],

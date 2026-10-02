@@ -9,8 +9,9 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'deployment/scripts'))
@@ -225,6 +226,182 @@ class AdoptionTests(unittest.TestCase):
         registration = adopt.env.read_private(self.home / 'registration.json')
         self.assertIs(registration['observability']['registered'], False)
         self.assertTrue(registration['observability']['reconciliation_required'])
+
+
+class NodeOnlyAdoptionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.target_id = 'empty-node'; self.home = self.root / 'registration'; self.shared = self.root / 'claims'
+        self.policy = json.loads((ROOT / 'deployment/airgap/versions.json').read_text())
+        self.registry_file = self.root / 'registry.json'; self.config_file = self.root / 'config.json'
+        self.observer_file = self.root / 'observer.json'; self.policy_file = self.root / 'policy.json'
+        self.refs = {'registry': str(self.registry_file), 'target_id': self.target_id, 'config': str(self.config_file),
+                     'registration_dir': str(self.home), 'policy_file': str(self.policy_file), 'binding': None}
+        self.ssh = {'identity_file': str(self.root / 'key'), 'known_hosts_file': str(self.root / 'known-hosts'), 'user': 'operator'}
+        for path in self.ssh['identity_file'], self.ssh['known_hosts_file']:
+            Path(path).write_text('test public binding'); Path(path).chmod(0o600)
+        self.node = {**{k: self.policy[k] for k in ('runtime', 'cilium_images')}, 'node_uid': 'node-uid',
+                     'node_name': 'node', 'node_ip': '10.66.0.2', 'architecture': 'amd64', 'helm_revision': 2,
+                     'ready': True, 'api_ready': True, 'cilium_ready': True,
+                     'management_ca_data': base64.b64encode(b'public-ca').decode()}
+        self.observation = {'version': 1, 'owner': 'collector'}
+        adopt.env.save(self.observer_file, self.observation); adopt.env.save(self.policy_file, self.policy)
+        self.enterContext(patch.object(adopt.observer, 'settings', side_effect=lambda config: config))
+        self.enterContext(patch.object(adopt.env, 'registered_node', side_effect=lambda *a: (copy.deepcopy(self.request), copy.deepcopy(self.descriptor))))
+        @contextmanager
+        def connection(_):
+            yield []
+        self.enterContext(patch.object(adopt.update, 'connection', connection))
+        def inspect(prefix, payload):
+            self.assertEqual(payload, {'action': 'inspect', 'include_ca': True})
+            return copy.deepcopy(self.node)
+        self.node_call = self.enterContext(patch.object(adopt.update, 'node_call', side_effect=inspect))
+        self.tls = self.enterContext(patch.object(adopt.env.credentials, 'RegisteredHTTPSConnection'))
+        self.enterContext(patch.object(adopt.update.ssl, 'create_default_context'))
+        self.kube = self.enterContext(patch.object(adopt.env, 'runtime_kubectl', side_effect=AssertionError('adoption must not access app/observer objects')))
+        self.control = self.enterContext(patch.object(adopt.env.argo, 'kubectl', side_effect=AssertionError('node-only must not access Argo')))
+        self.app = self.enterContext(patch.object(adopt.update, 'app_health', side_effect=AssertionError('node-only has no app')))
+        self.public = self.enterContext(patch.object(adopt.env.bridge, 'public_probe', side_effect=AssertionError('node-only has no HTTP probe')))
+        self.documents = self.enterContext(patch.object(adopt.env, 'runtime_documents', side_effect=AssertionError('node-only has no application policy')))
+        self.plan_file = self.root / 'plan.json'
+        self.configure('aws')
+
+    def configure(self, provider):
+        self.request = {'target': {'provider': provider, 'architecture': 'amd64'}}
+        self.descriptor = {'target_id': self.target_id, 'provider_kind': provider, 'resource_id': provider + '-resource',
+                           'addresses': {'private': '10.66.0.2'}}
+        management = {'server': 'https://10.66.0.2:6443'}
+        if provider in ('gcp', 'openstack'):
+            management = {'server': 'https://34.47.68.21:6443', 'tls_server_name': '10.66.0.2'}
+            self.descriptor['management_endpoint'] = management['server']
+        self.registry = {'version': 1, 'targets': {self.target_id: {'purpose': 'runtime', 'ssh': self.ssh}}}
+        self.configuration = {'version': 2, 'scope': 'node-only', 'management': management,
+                              'registration': {'state_dir': str(self.shared), 'observability_config_file': str(self.observer_file)}}
+        adopt.env.save(self.registry_file, self.registry); adopt.env.save(self.config_file, self.configuration)
+
+    def test_three_provider_empty_nodes_pin_identity_then_update_without_app_objects(self):
+        # Run the real plan/apply/load/execute/verify control flow for each provider.
+        # All node/network boundaries are fakes; all operator writes remain in TemporaryDirectory.
+        for provider in ('aws', 'gcp', 'openstack'):
+            with self.subTest(provider=provider):
+                self.configure(provider)
+                self.home = self.root / provider / 'registration'; self.shared = self.root / provider / 'claims'
+                self.refs['registration_dir'] = str(self.home)
+                self.configuration['registration']['state_dir'] = str(self.shared)
+                adopt.env.save(self.config_file, self.configuration)
+                plan_file = self.root / (provider + '-plan.json')
+                planned = adopt.plan(self.refs, plan_file)
+                self.assertEqual(planned['object_count'], 0)
+                self.assertFalse(self.home.exists()); self.assertFalse(self.shared.exists())
+                snapshot = adopt.env.read_private(plan_file)['snapshot']
+                self.assertEqual(snapshot['runtime']['node_uid'], 'node-uid')
+                self.assertEqual(snapshot['management']['ca_sha256'], hashlib.sha256(b'public-ca').hexdigest())
+                self.assertEqual(adopt.apply(plan_file, planned['plan_sha256'])['status'], 'verified')
+                self.assertEqual(self.tls.call_args.args[:2], ('34.47.68.21' if provider in ('gcp', 'openstack') else '10.66.0.2', 6443))
+                self.assertEqual(self.tls.call_args.kwargs['server_name'], '10.66.0.2')
+                record = adopt.env.read_private(self.home / 'registration.json')
+                self.assertEqual((record['version'], record['scope'], record['status']), (2, 'node-only', 'succeeded'))
+                self.assertFalse((self.home / 'cd.json').exists())
+                self.assertFalse({'app', 'namespace', 'deployment_supported'} & set(record))
+                self.assertFalse(record['observability']['registered'])
+                source = {'version': 1, 'source_sha': 'a' * 40, 'from_policy': copy.deepcopy(self.policy), 'to_policy': copy.deepcopy(self.policy),
+                          'from_policy_sha256': adopt.runtime.digest(self.policy), 'to_policy_sha256': adopt.runtime.digest(self.policy)}
+                release_file = self.root / 'release.json'; adopt.env.save(release_file, source)
+                args = SimpleNamespace(**self.refs, release=str(release_file), state_dir=str(self.home.parent / 'release'))
+                loaded = adopt.update.load(args)
+                self.assertIsNone(loaded[3]); self.assertEqual(loaded[-1]['node']['node_uid'], 'node-uid')
+                adoption_path = self.home / 'adoption-receipt.json'; adoption = adopt.env.read_private(adoption_path)
+                adopt.env.save(adoption_path, {**adoption, 'status': 'recovery_required'})
+                with self.assertRaisesRegex(ValueError, 'adoption is incomplete'):
+                    adopt.update.load(args)
+                adopt.env.save(adoption_path, adoption)
+                def node_call(prefix, payload):
+                    if payload['action'] == 'apply':
+                        return {'status': 'verified', 'changed': False}
+                    return copy.deepcopy(self.node)
+                @contextmanager
+                def kubectl(_):
+                    yield Mock(side_effect=AssertionError('only mocked observer-health may read Kubernetes'))
+                observer = SimpleNamespace(register=Mock(return_value={'status': 'succeeded', 'registered': True}))
+                with patch.object(adopt.update, 'node_call', side_effect=node_call), patch.object(adopt.update, 'stage_source', return_value='/source'), \
+                        patch.object(adopt.env, 'runtime_kubectl', kubectl), patch.object(adopt.update, 'observer_health', return_value={'exporters_ready': True}), \
+                        patch.object(adopt.update, 'collection_health', return_value={'collection_state': 'ready'}), \
+                        patch.object(adopt.update.importlib.util, 'module_from_spec', return_value=observer), \
+                        patch.object(adopt.update.importlib.util, 'spec_from_file_location', return_value=SimpleNamespace(loader=SimpleNamespace(exec_module=lambda x: None))):
+                    result = adopt.update.execute(args)
+                    self.assertEqual(result['status'], 'verified'); self.assertEqual(result['scope'], 'node-only')
+                    self.assertEqual(result['application']['status'], 'not_applicable')
+                    self.assertEqual(result['public_http']['status'], 'not_applicable')
+                    self.assertNotIn('management_ca_data', json.dumps(result))
+                    observation = observer.register.call_args.args[1]
+                    self.assertEqual(set(observation), {'version', 'target_id', 'environment_id', 'node_ip', 'registry_file'})
+                    original_files = {str(p): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+                    with patch.object(adopt.env, 'save', side_effect=AssertionError('verify-only wrote state')):
+                        self.assertTrue(adopt.update.verify(args)['verify_only'])
+                        for key, value in (('node_uid', 'recreated'), ('management_ca_data', base64.b64encode(b'wrong-ca').decode()),
+                                           ('cilium_ready', False), ('api_ready', False)):
+                            original = self.node[key]; self.node[key] = value
+                            with self.subTest(drift=key), self.assertRaisesRegex(ValueError, 'drifted'):
+                                adopt.update.verify(args)
+                            self.node[key] = original
+                    self.assertEqual(original_files, {str(p): p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+                    if provider == 'aws':
+                        next_args = SimpleNamespace(**{**vars(args), 'state_dir': str(self.home.parent / 'wrong-baseline')})
+                        changed = copy.deepcopy(source); changed['source_sha'] = 'b' * 40
+                        changed['from_policy']['runtime']['k3s_version'] = 'v1.34.10+k3s1'
+                        changed['from_policy_sha256'] = adopt.runtime.digest(changed['from_policy'])
+                        changed['upgrade'] = {'recovery_ack': True, 'k3s_binary_sha256': 'c' * 64}
+                        adopt.env.save(release_file, changed)
+                        result = adopt.update.execute(next_args)
+                        self.assertEqual(result['status'], 'blocked'); self.assertFalse(result['mutation_started'])
+                        # A later uncertain observer mutation is durable and cannot replay.
+                        next_args.state_dir = str(self.home.parent / 'uncertain')
+                        source['source_sha'] = 'c' * 40; adopt.env.save(release_file, source)
+                        observer.register.side_effect = TimeoutError('unknown observer result')
+                        result = adopt.update.execute(next_args)
+                        self.assertEqual(result['status'], 'recovery_required')
+                        count = observer.register.call_count
+                        with self.assertRaisesRegex(ValueError, 'automatic retry forbidden'):
+                            adopt.update.execute(next_args)
+                        self.assertEqual(observer.register.call_count, count)
+                self.kube.assert_not_called(); self.control.assert_not_called()
+                self.app.assert_not_called(); self.public.assert_not_called(); self.documents.assert_not_called()
+
+    def test_node_only_never_falls_back_from_legacy_or_mixed_config(self):
+        for mutation in ({'version': 1}, {'scope': 'application'}, {'cd': {}}, {'management': {'server': 'https://other:6443'}}):
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                adopt.update.load_node_configuration(self.registry, self.target_id, {**self.configuration, **mutation})
+        with self.assertRaises(ValueError):
+            adopt.update.load_node_configuration(self.registry, self.target_id, self.configuration, '/private/database.json')
+
+    def test_node_uid_ca_route_ssh_or_baseline_drift_invalidates_approved_plan(self):
+        digest = adopt.plan(self.refs, self.plan_file)['plan_sha256']
+        original = copy.deepcopy(self.node)
+        for key, value in (('node_uid', 'another'), ('management_ca_data', base64.b64encode(b'another-ca').decode()),
+                           ('node_ip', '10.66.0.3')):
+            self.node[key] = value
+            with self.subTest(drift=key), self.assertRaises(ValueError):
+                adopt.apply(self.plan_file, digest)
+            self.node = copy.deepcopy(original)
+            self.assertFalse((self.home / 'registration.json').exists())
+        Path(self.ssh['known_hosts_file']).write_text('changed trusted key')
+        with self.assertRaisesRegex(ValueError, 'changed'):
+            adopt.apply(self.plan_file, digest)
+        self.assertFalse((self.shared / (self.target_id + '.json')).exists())
+        self.kube.assert_not_called(); self.control.assert_not_called()
+
+    def test_uncertain_node_claim_requires_recovery_and_cannot_be_replayed(self):
+        digest = adopt.plan(self.refs, self.plan_file)['plan_sha256']
+        self.node_call.side_effect = [copy.deepcopy(self.node), TimeoutError('node readback became unavailable')]
+        self.assertEqual(adopt.apply(self.plan_file, digest)['status'], 'recovery_required')
+        self.assertEqual(adopt.env.read_private(self.home / 'registration.json')['status'], 'unknown')
+        self.assertTrue((self.shared / (self.target_id + '.json')).exists())
+        count = self.node_call.call_count
+        with self.assertRaisesRegex(ValueError, 'operator recovery'):
+            adopt.apply(self.plan_file, digest)
+        self.assertEqual(self.node_call.call_count, count)
+        self.kube.assert_not_called(); self.control.assert_not_called()
 
 
 if __name__ == '__main__':

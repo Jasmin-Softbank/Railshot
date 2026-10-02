@@ -33,6 +33,44 @@ def observation(policy=POLICY):
 
 
 class RuntimeReleaseTests(unittest.TestCase):
+    def test_inspection_requires_cilium_ready_even_without_upgrade(self):
+        state = observation()
+        helm = {'chart': {'metadata': {'version': state['runtime']['cilium_version']}}, 'version': 2}
+        secret = {'data': {'release': base64.b64encode(base64.b64encode(gzip.compress(json.dumps(helm).encode()))).decode()}}
+        def kube(*args):
+            if args[:2] == ('get', 'nodes'):
+                return {'items': [{'metadata': {'uid': 'node-uid', 'name': 'node'}, 'status': {
+                    'conditions': [{'type': 'Ready', 'status': 'True'}],
+                    'nodeInfo': {'kubeletVersion': state['runtime']['k3s_version'], 'architecture': 'amd64'},
+                    'addresses': [{'type': 'InternalIP', 'address': '10.66.0.2'}]}}]}
+            if 'secret' in args:
+                return {'items': [secret]}
+            key, name = {'cilium': ('agent', 'cilium-agent'), 'cilium-operator': ('operator', 'cilium-operator'),
+                         'cilium-envoy': ('envoy', 'cilium-envoy')}[args[4]]
+            return {'spec': {'template': {'spec': {'containers': [{'name': name, 'image': state['cilium_images'][key]}]}}}}
+        def command(*args, **kwargs):
+            if args == (node.K3S, '--version'):
+                return 'k3s version ' + state['runtime']['k3s_version']
+            if args[:2] == (node.CILIUM, 'version'):
+                return 'cilium-cli: ' + state['runtime']['cilium_cli_version']
+            if '--raw=/readyz' in args:
+                return 'ok'
+            if 'jsonpath={.clusters[0].cluster.certificate-authority-data}' in args:
+                return base64.b64encode(b'public-ca').decode()
+            return ''
+        with patch.object(node, 'kube', side_effect=kube), patch.object(node, 'run', side_effect=command) as run:
+            result = node.inspect(include_ca=True)
+            self.assertTrue(result['cilium_ready']); self.assertTrue(result['api_ready'])
+            run.assert_any_call(node.CILIUM, 'status', '--wait', '--wait-duration', '60s', timeout=75)
+            self.assertIn('management_ca_data', result)
+            def unhealthy(*args, **kwargs):
+                if args[:2] == (node.CILIUM, 'status'):
+                    raise ValueError('Cilium is not ready')
+                return command(*args, **kwargs)
+            run.side_effect = unhealthy
+            with self.assertRaisesRegex(ValueError, 'Cilium is not ready'):
+                node.inspect()
+
     def test_pins_explicit_forward_patch_and_source_policy(self):
         item = release(); self.assertFalse(node.validate(item, POLICY))
         item['from_policy']['runtime']['k3s_version'] = 'v1.34.10+k3s1'
@@ -186,6 +224,56 @@ class RuntimeReleaseTests(unittest.TestCase):
         missing = {key: value for key, value in values.items() if key != 'memory_percent'}
         with self.assertRaises(ValueError):
             update.collection_values(response(missing), now)
+
+    def test_node_observation_has_no_application_or_http_requirement(self):
+        row = {'target_id': 'gcp', 'node_instance': '10.66.0.2:31490', 'cluster_instance': '10.66.0.2:31491'}
+        query = update.collection_query(row)
+        self.assertNotIn('probe_success', query); self.assertNotIn('kube_pod_status_phase', query)
+        with self.assertRaisesRegex(ValueError, 'partial'):
+            update.collection_query({**row, 'app': 'incomplete'})
+        now = 1000
+        values = {'node_up': 1, 'cluster_up': 1, 'cpu_percent': 20, 'memory_percent': 40,
+                  **{key: now - 10 for key in ('node_observed', 'cluster_observed', 'cpu_observed', 'memory_observed')}}
+        def response(source):
+            return {'status': 'success', 'data': {'resultType': 'vector', 'result': [
+                {'metric': {'railshot_metric': key}, 'value': [now, str(value)]} for key, value in source.items()]}}
+        result = update.collection_values(response(values), now, application=False)
+        self.assertEqual(result['collection_state'], 'ready')
+        self.assertNotIn('running_app_pods', result); self.assertNotIn('http_probe_success', result)
+        for drift in ({'node_up': 0}, {'cluster_up': 0}, {'cpu_observed': 800}, {'memory_percent': 'NaN'}):
+            with self.subTest(drift=drift), self.assertRaises(ValueError):
+                update.collection_values(response({**values, **drift}), now, application=False)
+
+    def test_node_collection_requires_exact_target_resource_and_environment(self):
+        config = {'owner': 'collector', 'lifecycle': 'shared', 'expires_at': 'future', 'state_dir': '/private/observer',
+                  'prometheus_url': 'http://172.31.0.172:9090', 'node_metrics_port': 31490, 'cluster_metrics_port': 31491}
+        row = {'target_id': 'gcp', 'environment_id': 'node-registration', 'resource_id': 'vm',
+               'node_instance': '10.66.0.2:31490', 'cluster_instance': '10.66.0.2:31491', 'prometheus_url': config['prometheus_url']}
+        product = {'version': 1, 'collector': {k: config[k] for k in ('lifecycle', 'expires_at')}, 'targets': [row]}
+        product['collector']['id'] = config['owner']
+        registration = {'version': 2, 'scope': 'node-only', 'target_id': 'gcp', 'environment_id': 'node-registration'}
+        identity = {'descriptor': {'resource_id': 'vm', 'addresses': {'private': '10.66.0.2'}}}
+        observer = SimpleNamespace(settings=lambda value: value, metrics_host=lambda descriptor, ip: ip)
+        response = Mock(status=200); response.read.return_value = b'{}'
+        response.__enter__ = Mock(return_value=response); response.__exit__ = Mock(return_value=False)
+        with patch.object(update.importlib.util, 'module_from_spec', return_value=observer), \
+                patch.object(update.importlib.util, 'spec_from_file_location', return_value=SimpleNamespace(loader=SimpleNamespace(exec_module=lambda x: None))), \
+                patch.object(update.env, 'read_private', side_effect=lambda p: product if str(p).endswith('product.json') else config), \
+                patch.object(update, 'build_opener') as opener, patch.object(update, 'collection_values', return_value={'collection_state': 'ready'}) as values:
+            opener.return_value.open.return_value = response
+            settings = {'observability_config_file': '/private/config'}
+            self.assertEqual(update.collection_health(settings, registration, None, identity, wait_seconds=0)['collection_state'], 'ready')
+            self.assertIs(values.call_args.kwargs['application'], False)
+            for key in ('target_id', 'resource_id', 'environment_id', 'node_instance', 'prometheus_url'):
+                original = row[key]; row[key] = 'different'
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    update.collection_health(settings, registration, None, identity, wait_seconds=0)
+                row[key] = original
+            for key in ('app', 'namespace', 'probe_url'):
+                row[key] = 'partial'
+                with self.subTest(partial=key), self.assertRaises(ValueError):
+                    update.collection_health(settings, registration, None, identity, wait_seconds=0)
+                del row[key]
 
 
 if __name__ == '__main__':

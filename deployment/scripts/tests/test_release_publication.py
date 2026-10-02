@@ -169,6 +169,24 @@ class PublicationTests(unittest.TestCase):
 
 
 class HostPublicationGateTests(unittest.TestCase):
+    def test_node_only_edge_kind_reads_runtime_config_and_requires_v2_scope(self):
+        target = {'provider': 'aws', 'scope': 'node-only', 'config_file': '/private/runtime.json'}
+        with mock.patch.object(host.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps({'version': 2, 'scope': 'node-only'}))) as run:
+            self.assertEqual(host.target_edge_kind(target), 'none')
+            self.assertEqual(run.call_args.args[0][-1], target['config_file'])
+            self.assertEqual(run.call_args.args[0][:4], ['sudo', '-n', '-u', 'railshot-operator'])
+            for invalid in ({'version': 1}, {'version': 2, 'scope': 'application'}):
+                run.return_value.stdout = json.dumps(invalid)
+                with self.assertRaisesRegex(ValueError, 'RUNTIME_SCOPE_MISMATCH'):
+                    host.target_edge_kind(target)
+            run.reset_mock()
+            with self.assertRaisesRegex(ValueError, 'TARGET_SCOPE_INVALID'):
+                host.target_edge_kind({**target, 'edge_config_file': '/private/edge.json'})
+            run.assert_not_called()
+            run.return_value.stdout = json.dumps({'edge_kind': 'aws-relay'})
+            self.assertEqual(host.target_edge_kind({'edge_config_file': '/private/edge.json'}), 'aws-relay')
+            self.assertEqual(run.call_args.args[0][-1], '/private/edge.json')
+
     def test_failed_publication_blocks_config_workers_and_targets_and_clears_token(self):
         with tempfile.TemporaryDirectory() as directory:
             source_home = mock.Mock()

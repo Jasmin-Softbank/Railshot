@@ -49,7 +49,9 @@ def load(refs):
         canonical_path(refs[key])
     if refs['binding']:
         canonical_path(refs['binding'])
-    data = env.load(refs['registry'], refs['target_id'], refs['config'], refs['binding'])
+    configuration = env.read_private(refs['config'])
+    data = (update.load_node_configuration(env.read_private(refs['registry']), refs['target_id'], configuration, refs['binding'])
+            if update.node_only(configuration) else env.load(refs['registry'], refs['target_id'], refs['config'], refs['binding']))
     request, cd, settings, pull, binding, identity = data
     env.argo.require(not settings.get('edge_config_file'), 'adoption requires the existing allocated public URL without edge allocation')
     env.argo.require(settings.get('observability_config_file'), 'existing observer configuration required')
@@ -102,6 +104,25 @@ def snapshot(kube, scope, kind, namespace, name, desired=None, allow_absent=Fals
 
 def capture(refs, loaded):
     (request, cd, settings, pull, binding, identity), observation, policy = loaded
+    if update.node_only(identity):
+        with update.connection(request) as prefix:
+            observed = update.node_call(prefix, {'action': 'inspect', 'include_ca': True})
+        env.argo.require(runtime.matches(observed, policy), 'live runtime differs from adoption baseline')
+        management = {**identity['management'], 'ca_data': observed['management_ca_data'],
+                      'ca_sha256': hashlib.sha256(base64.b64decode(observed['management_ca_data'], validate=True)).hexdigest()}
+        bound = update.node_identity(identity, observed, management)
+        health = update.node_management_health({'management': management,
+            **{key: observed[key] for key in ('node_uid', 'node_ip', 'architecture')}}, observed)
+        # No application/observer object is claimed or created by node-only adoption.
+        # The common release separately reconciles observer ownership and real collection.
+        return {'version': 2, 'scope': 'node-only', 'input_sha256': env.argo.document_hash(bound),
+                'target_id': refs['target_id'], 'provider': request['target']['provider'],
+                'resource_id': identity['descriptor']['resource_id'], 'environment_id': identity['environment_id'],
+                'policy_sha256': runtime.digest(policy), 'observer_config_sha256': runtime.digest(observation),
+                'management': management, 'runtime': update.public_runtime(observed), 'objects': []}, {
+                'management': health, 'observability': {'registered': False, 'collection_state': 'pending', 'reconciliation_required': True},
+                'application': {'status': 'not_applicable', 'reason': 'node-only'},
+                'public_http': {'status': 'not_applicable', 'reason': 'node-only'}}
     target_id = refs['target_id']; registered = cd['targets'][target_id]; target = registered['target']
     input_sha = env.argo.document_hash(identity); owner = input_sha[:32]
     labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': owner}
@@ -264,6 +285,23 @@ def apply(plan_file, expected_digest):
         env.save(shared / (refs['target_id'] + '.json'), {'input_sha256': fresh['input_sha256'],
             'resource_id': fresh['resource_id'], 'environment_id': fresh['environment_id']})
         env.save(record_path, record); env.save(receipt_path, receipt)
+        if update.node_only(fresh):
+            try:
+                # Local claims only: repeat identity/TLS readback after reservation.
+                after, checked_health = capture(refs, loaded)
+                env.argo.require(after == fresh, 'node identity or management CA changed during adoption')
+                record.pop('deployment_supported')
+                record.update(version=2, scope='node-only', status='succeeded', resource_id=fresh['resource_id'],
+                    **{key: fresh['runtime'][key] for key in ('node_uid', 'node_ip', 'architecture')},
+                    management=fresh['management'], baseline_policy_sha256=fresh['policy_sha256'],
+                    observability=checked_health['observability'], steps=['existing_node_identity_verified', 'local_ownership_claimed', 'management_tls_verified'])
+                env.save(record_path, record)
+                receipt.update(status='verified', scope='node-only', health=checked_health, verified_at=datetime.now(timezone.utc).isoformat())
+                env.save(receipt_path, receipt)
+            except Exception as error:
+                receipt.update(status='recovery_required', error_type=type(error).__name__)
+                env.save(receipt_path, receipt)
+            return {key: receipt[key] for key in ('status', 'target_id', 'provider', 'plan_sha256')}
         control = lambda namespace, *args, **kwargs: env.argo.kubectl(cd['context'], namespace, *args, **kwargs)
         try:
             with env.runtime_kubectl(request) as kube:

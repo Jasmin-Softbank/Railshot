@@ -80,7 +80,7 @@ def kube(*args):
     return json.loads(run(K3S, 'kubectl', '--request-timeout=20s', *args))
 
 
-def inspect():
+def inspect(*, include_ca=False):
     nodes = kube('get', 'nodes', '-o', 'json')['items']
     require(len(nodes) == 1, 'single-node runtime required')
     node = nodes[0]
@@ -100,11 +100,20 @@ def inspect():
         images[key] = rows[0]
     cli = re.search(r'cilium-cli:\s*(v\d+\.\d+\.\d+)', run(CILIUM, 'version', '--client'))
     require(cli, 'installed Cilium CLI version unavailable')
-    return {'runtime': {'k3s_version': binary, 'cilium_version': release['chart']['metadata']['version'],
+    require(run(K3S, 'kubectl', '--request-timeout=20s', 'get', '--raw=/readyz').strip() == 'ok', 'K3s API is not ready')
+    run(CILIUM, 'status', '--wait', '--wait-duration', '60s', timeout=75)
+    result = {'runtime': {'k3s_version': binary, 'cilium_version': release['chart']['metadata']['version'],
                         'cilium_cli_version': cli[1]}, 'cilium_images': images,
             'node_uid': node['metadata']['uid'], 'node_name': node['metadata']['name'],
             'node_ip': next(a['address'] for a in node['status']['addresses'] if a['type'] == 'InternalIP'),
-            'architecture': node['status']['nodeInfo']['architecture'], 'helm_revision': release['version'], 'ready': True}
+            'architecture': node['status']['nodeInfo']['architecture'], 'helm_revision': release['version'],
+            'ready': True, 'api_ready': True, 'cilium_ready': True}
+    if include_ca:
+        # Export only the public server CA, never the kubeconfig/client key.
+        result['management_ca_data'] = run(K3S, 'kubectl', 'config', 'view', '--raw', '--minify',
+            '-o', 'jsonpath={.clusters[0].cluster.certificate-authority-data}').strip()
+        require(bool(base64.b64decode(result['management_ca_data'], validate=True)), 'runtime management CA missing')
+    return result
 
 
 def matches(observed, policy):
@@ -236,7 +245,8 @@ def main():
     payload = json.load(sys.stdin)
     require(payload['action'] in ('inspect', 'apply'), 'unsupported runtime action')
     if payload['action'] == 'inspect':
-        result = inspect()
+        require(set(payload) <= {'action', 'include_ca'} and type(payload.get('include_ca', False)) is bool, 'inspect fields differ')
+        result = inspect(include_ca=payload.get('include_ca', False))
     else:
         with open('/run/railshot-deployment.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -50,7 +50,15 @@ class ReleaseTests(unittest.TestCase):
                                target_verifier=lambda row, manifest: self.proof(row))
 
     def proof(self, target, status='verified'):
-        return {'provider': target['provider'], 'target_id': target['target_id'], 'source_sha': self.manifest['source_sha'], 'release_sha': self.manifest['source_sha'], 'status': status}
+        return {'provider': target['provider'], 'target_id': target['target_id'], 'source_sha': self.manifest['source_sha'], 'release_sha': self.manifest['source_sha'], 'status': status,
+                **({'scope': target['scope']} if 'scope' in target else {})}
+
+    def node_target(self):
+        target = self.config['targets'][0]
+        target['scope'] = 'node-only'; target.pop('edge_config_file')
+        self.manifest['edge_kinds'][target['provider']] = 'none'
+        self.manifest['edge_modules'][target['provider']] = None
+        return target
 
     def test_parallel_three_target_success_promotes_once_and_replay_is_read_only(self):
         barrier = threading.Barrier(3)
@@ -80,9 +88,11 @@ class ReleaseTests(unittest.TestCase):
         target = copy.deepcopy(self.config['targets'][0])
         target['from_policy_file'] = str(temporary / 'from-policy.json')
         target['edge_config_file'] = str(temporary / 'edge-config.json')
+        target['config_file'] = str(temporary / 'runtime-config.json')
         before = {'previous_policy': True}
         release.save(Path(target['from_policy_file']), before)
         release.save(Path(target['edge_config_file']), {'edge_kind': 'native'})
+        release.save(Path(target['config_file']), {'version': 1})
         edge_proof = {'phase': 'succeeded', 'provider': target['provider'], 'release_sha': self.manifest['source_sha']}
         runtime_proof = {**self.proof(target), 'provider': 'gcp'}
         replies = [SimpleNamespace(returncode=0, stdout=json.dumps(edge_proof)),
@@ -110,6 +120,77 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertEqual(real_path(run.call_args_list[0].args[0][1]).name, 'edge_update.py')
         self.assertEqual(real_path(run.call_args_list[1].args[0][1]).name, 'runtime-update.py')
+
+    def test_node_only_scope_and_edge_omission_require_explicit_matching_bindings(self):
+        target = self.node_target()
+        release.validate(self.manifest, self.config)
+        for change in ('implicit', 'edge-file', 'binding-file', 'wrong-scope', 'native-kind', 'module-pin'):
+            with self.subTest(change=change):
+                config, manifest = copy.deepcopy(self.config), copy.deepcopy(self.manifest)
+                row = config['targets'][0]
+                if change == 'implicit': row.pop('scope')
+                elif change == 'edge-file': row['edge_config_file'] = release.OPERATOR_STATE + 'edge.json'
+                elif change == 'binding-file': row['binding_file'] = release.OPERATOR_STATE + 'binding.json'
+                elif change == 'wrong-scope': row['scope'] = 'node'
+                elif change == 'native-kind': manifest['edge_kinds'][target['provider']] = 'native'
+                else: manifest['edge_modules'][target['provider']] = 'd' * 64
+                with self.assertRaises(ValueError): release.validate(manifest, config)
+        result = self.run_release(lambda row, _: self.proof(row))
+        self.assertEqual(result['status'], 'verified')
+        with self.assertRaisesRegex(ValueError, 'LIVE_READBACK_FAILED'):
+            release.execute(self.config, self.manifest, workers=self.workers, platform_verify=lambda *args: {},
+                target_verifier=lambda row, _: {k: v for k, v in self.proof(row).items() if k != 'scope'})
+
+    def test_node_only_receipt_scope_mismatch_blocks_promotion(self):
+        self.node_target()
+        result = self.run_release(lambda row, _: {k: v for k, v in self.proof(row).items() if k != 'scope'})
+        self.assertEqual(result['status'], 'incomplete')
+        self.assertFalse(self.promotions)
+
+    def test_actual_node_only_program_runs_runtime_without_edge_and_rejects_scope_mismatch(self):
+        target = copy.deepcopy(self.node_target())
+        temporary = Path(self.directory.name).resolve()
+        target['from_policy_file'] = str(temporary / 'from-policy.json')
+        target['config_file'] = str(temporary / 'runtime-config.json')
+        baseline = {'previous_policy': True}
+        runtime_config = {'version': 2, 'scope': 'node-only'}
+        real_path = Path
+        def redirected_path(value, *parts):
+            fixed = '/home/railshot-operator/.local/share/railshot/multicloud-releases'
+            return real_path(temporary / 'target-state' if str(value) == fixed else value, *parts)
+        def execute(config, proof, verify_only=False):
+            release.save(real_path(target['config_file']), config)
+            output = io.StringIO()
+            payload = {'target': target, 'release': self.manifest, 'source_root': str(ROOT), 'verify_only': verify_only}
+            with mock.patch.dict(sys.modules, {'pathlib': SimpleNamespace(Path=redirected_path)}), \
+                    mock.patch.object(sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                    mock.patch.object(sys, 'stdout', output), mock.patch.object(sys, 'path', list(sys.path)), \
+                    mock.patch('subprocess.run', return_value=SimpleNamespace(returncode=0, stdout=json.dumps(proof))) as run:
+                try:
+                    exec(compile(release.TARGET_PROGRAM, '<target-program>', 'exec'), {})
+                except AssertionError:
+                    run.assert_not_called()
+                    raise
+                except SystemExit as stopped:
+                    return stopped.code, json.loads(output.getvalue()), run
+        release.save(real_path(target['from_policy_file']), baseline)
+        for invalid in ({'version': 1}, {'version': 1, 'scope': 'node-only'}, {'version': 2, 'scope': 'application'}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(AssertionError, 'runtime scope differs'):
+                execute(invalid, self.proof(target))
+        bad_proof = self.proof(target); bad_proof.pop('scope')
+        code, proof, run = execute(runtime_config, bad_proof)
+        self.assertEqual(code, 1)
+        self.assertEqual(proof['code'], 'RUNTIME_RECEIPT_BINDING_MISMATCH')
+        self.assertEqual(json.loads(real_path(target['from_policy_file']).read_text()), baseline)
+        code, proof, run = execute(runtime_config, self.proof(target))
+        self.assertEqual(code, 0)
+        self.assertEqual(proof['edge'], {'status': 'not_applicable', 'reason': 'node-only'})
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(real_path(run.call_args.args[0][1]).name, 'runtime-update.py')
+        self.assertEqual(json.loads(real_path(target['from_policy_file']).read_text()), self.manifest['runtime_policy'])
+        code, proof, run = execute(runtime_config, self.proof(target), verify_only=True)
+        self.assertEqual(code, 0); self.assertEqual(run.call_count, 1)
+        self.assertIn('--verify-only', run.call_args.args[0])
 
     def test_new_source_cannot_bypass_prior_uncertain_release(self):
         self.assertEqual(self.run_release(lambda row, _: self.proof(row, 'unknown'))['status'], 'incomplete')

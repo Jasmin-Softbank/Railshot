@@ -5,7 +5,7 @@
 1. dashboard/API/ci-runner를 시험하고 같은 실행에서 얻은 GHCR digest를 고정한다.
 2. 기존 `deployment/platform` 브랜치에 플랫폼 선언을 반영하고 실제 Argo 상태·파드 digest·공개 HTTPS를 검증한다.
 3. 고정된 SSM 문서가 제어 서버에서 현재 승인 브랜치와 CI gate를 다시 확인한다. 기존 build-controller와 credential-renewer를 UID/CAS로 갱신하고 새 digest로 실행된 Job을 검증한다. 진행 중인 고객 runner Job은 보존한다.
-4. AWS/GCP/OpenStack을 병렬 실행한다. 각 환경의 기존 Terraform state에서 소유권·drift·saved plan을 확인한 뒤 허용된 기존 리소스 갱신만 적용한다. 등록된 런타임의 공통 RBAC·pull Secret·관측 구성을 적용하고 노드·앱·관리 TLS·실제 관측값·공개 HTTPS를 확인한다.
+4. AWS/GCP/OpenStack을 병렬 실행한다. 앱이 등록된 환경은 기존 Terraform state의 소유권·drift·saved plan을 확인한 뒤 허용된 기존 리소스와 공통 RBAC·pull Secret·관측 구성을 갱신하고 앱·공개 HTTPS까지 검증한다. 명시적인 `node-only` 환경은 edge와 앱 단계를 건너뛰고 K3s·Cilium·관리 TLS·노드 UID·실제 CPU/메모리 수집을 검증한다. 두 경로 모두 공통 런타임 정책에 묶인다.
 5. **세 환경 모두 같은 source SHA로 검증된 경우에만** 앱 저장소의 실행 workflow와 `PLATFORM_REF`를 승격한다. 하나라도 실패하거나 상태가 불확실하면 전체 결과는 `incomplete`이고 앱 버전을 승격하지 않는다.
 
 서로 독립적인 세 클라우드의 반영은 병렬로 시작하며 완료 시각은 다를 수 있다. 공통 버전 완료 여부는 세 환경의 receipt를 묶어서 판단한다.
@@ -26,9 +26,25 @@
 | `gcp_credentials_file` | 제어 EC2 identity에 바인딩된 GCP external-account 설정 |
 | `workers` | `platform_workers.py discover`가 읽은 runner URL·build 노드·기존 객체 UID |
 | `apps` | `{"repository":"Jasmin-Softbank/railshot-apps","branch":"main"}` |
-| `targets` | `provider`, `target_id`, `registry_file`, `config_file`, `registration_state`, `from_policy_file`, `edge_config_file`가 있는 세 항목 |
+| `targets` | `provider`, `target_id`, `registry_file`, `config_file`, `registration_state`, `from_policy_file`, `edge_config_file`가 있는 세 항목. 앱이 없는 대상은 `scope="node-only"`를 명시하고 `edge_config_file`·`binding_file`을 생략한다 |
 
 Target 파일 경로는 `/home/railshot-operator/.local/share/railshot/` 아래에 두며 operator 소유 `0600`을 유지한다. 기존 OpenStack 등록 파일·개인키·관측 collector를 재사용한다. AWS/GCP의 과거 수동 등록은 `environment-adopt.py plan`으로 현재 노드 UID·리소스 UID/RV·관리 CA·HTTPS·기존 라벨을 고정하고, 계획 digest를 검토한 후 `apply --expected-plan-sha256`로 명시적으로 인수한다. 이 작업은 기존 객체의 소유 라벨만 변경한다. 아직 없는 관측 수집기를 성공한 것으로 기록하지 않는다.
+
+앱이 없는 기존 노드는 config와 registration 모두 명시적인 v2 `node-only` 계약을 사용한다. v1에서 앱 필드가 빠졌다고 이 경로로 전환하지 않는다. config 예시는 다음과 같다.
+
+```json
+{
+  "version": 2,
+  "scope": "node-only",
+  "registration": {
+    "state_dir": "/home/railshot-operator/.local/share/railshot/registration-claims",
+    "observability_config_file": "/home/railshot-operator/.local/share/railshot/observer-config.json"
+  },
+  "management": {"server": "https://REGISTERED_PRIVATE_IP:6443"}
+}
+```
+
+관리 endpoint override가 등록된 대상만 registry의 private IP와 일치하는 `tls_server_name`을 추가한다. `environment-adopt.py plan`은 현재 버전·노드 UID/IP·CA·SSH 설정을 고정하고 관리 TLS를 검증한다. 검토된 digest의 `apply`는 private claim과 registration receipt만 저장한다. 이 경로는 앱·namespace·Argo Application을 생성하지 않는다. 첫 릴리스의 from-policy는 인수 시 검증한 baseline과 같아야 하며, 이후에는 직전 검증된 to-policy와 이어져야 한다. `application`·`public_http`·`edge`는 성공 대신 `not_applicable`로 기록한다. 관측 등록과 90초 이내 실제 수집 검증은 생략하지 않는다.
 
 각 provider의 `edge_config_file`은 `edge_update.py`의 v1 입력이다. 원본 local Terraform writer를 중지하고 최신 lineage·serial·파일 hash·fresh no-op plan을 확인한 뒤 단 하나의 실행 권위를 옮긴다. state 복사만으로 권위 인수가 완료되지는 않는다. GCP native LB와 OpenStack AWS relay의 source 모듈은 다르다. OpenStack의 `edge_kind="aws-relay"`는 기존 TG·listener·Route53 alias 세 리소스만 소유하며, 제어 SG ingress와 ALB SG egress는 기존 소유자에게 남긴다. 기존 target tuple·ingress rule·healthy 상태도 매번 검사한다. Octavia로 전환할 때는 별도 인수 절차가 필요하다.
 

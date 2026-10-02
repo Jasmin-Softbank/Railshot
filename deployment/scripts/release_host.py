@@ -12,6 +12,23 @@ import tempfile
 REPOSITORY = 'https://github.com/Jasmin-Softbank/Railshot.git'
 
 
+def target_edge_kind(target):
+    node_only = target.get('scope') == 'node-only'
+    if target.get('scope') not in (None, 'node-only') or node_only and ('edge_config_file' in target or 'binding_file' in target):
+        raise ValueError('TARGET_SCOPE_INVALID')
+    # Read private configuration only under its existing operator identity.
+    result = subprocess.run(['sudo', '-n', '-u', 'railshot-operator', 'python3', '-c',
+        'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))',
+        target['config_file'] if node_only else target['edge_config_file']],
+        capture_output=True, text=True, timeout=10, check=True)
+    config = json.loads(result.stdout)
+    if node_only:
+        if config.get('version') != 2 or config.get('scope') != 'node-only':
+            raise ValueError('RUNTIME_SCOPE_MISMATCH')
+        return 'none'
+    return config.get('edge_kind', 'native')
+
+
 def execute(trusted_ref):
     names = ('SourceSha', 'Revision', 'DashboardDigest', 'ApiDigest', 'RunnerDigest')
     values = {name: os.environ.get('SSM_' + name, '') for name in names}
@@ -57,18 +74,12 @@ def execute(trusted_ref):
             publication = release_admission.publication(values['SourceSha'], trusted_ref,
                 values['PublicationRunId'], values['PublicationRunAttempt'], images)
             config = multicloud_release.private('/etc/railshot/release.json')
-            edge_kinds = {}
-            for target in config['targets']:
-                # Configuration is owned by the operator; read it under that identity.
-                result = subprocess.run(['sudo', '-n', '-u', 'railshot-operator', 'python3', '-c',
-                    'import json,sys; print(json.load(open(sys.argv[1])).get("edge_kind","native"))', target['edge_config_file']],
-                    capture_output=True, text=True, timeout=10, check=True)
-                edge_kinds[target['provider']] = result.stdout.strip()
+            edge_kinds = {target['provider']: target_edge_kind(target) for target in config['targets']}
             manifest = {'version': 1, 'source_sha': values['SourceSha'], 'platform_revision': values['Revision'], 'images': images,
                         'runtime_policy': json.loads((root / 'deployment/airgap/versions.json').read_bytes()),
                         'provider_targets': {t['provider']: t['target_id'] for t in config['targets']},
                         'edge_kinds': edge_kinds,
-                        'edge_modules': {provider: edge_update.module_digest(root, provider, edge_kinds[provider]) for provider in ('aws', 'gcp', 'openstack')}}
+                        'edge_modules': {provider: None if edge_kinds[provider] == 'none' else edge_update.module_digest(root, provider, edge_kinds[provider]) for provider in ('aws', 'gcp', 'openstack')}}
             return {**multicloud_release.execute(config, manifest), 'publication': publication}
         finally:
             os.environ.pop('GITHUB_TOKEN', None)

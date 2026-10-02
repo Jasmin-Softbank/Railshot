@@ -88,6 +88,19 @@ run "exact_instance_and_read_update_authority" {
 
   assert {
     condition = (
+      toset(keys(aws_vpc_security_group_egress_rule.release_observer)) == toset(["aws-31490", "aws-31491", "gcp-31490", "gcp-31491"]) &&
+      alltrue([for key, rule in aws_vpc_security_group_egress_rule.release_observer :
+        rule.security_group_id == "sg-02925a97753d8d3e9" &&
+        rule.cidr_ipv4 == (startswith(key, "aws-") ? "172.31.13.147/32" : "34.47.68.21/32") &&
+        rule.ip_protocol == "tcp" && rule.from_port == tonumber(split("-", key)[1]) && rule.to_port == rule.from_port &&
+        rule.description == "Railshot shared observer ${split("-", key)[0]} metrics ${split("-", key)[1]}"
+      ])
+    )
+    error_message = "Observer egress must preserve exactly the four existing provider/metric-port tuples on the control rules-only SG."
+  }
+
+  assert {
+    condition = (
       jsondecode(output.gcp_external_account_json).type == "external_account" &&
       jsondecode(output.gcp_external_account_json).audience == "//iam.googleapis.com/projects/359201781699/locations/global/workloadIdentityPools/railshot-aws-release/providers/aws-control" &&
       jsondecode(output.gcp_external_account_json).service_account_impersonation_url == "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/railshot-gcp-edge-release@railshot-poc-20261001.iam.gserviceaccount.com:generateAccessToken" &&
