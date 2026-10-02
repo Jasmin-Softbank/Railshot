@@ -1,6 +1,6 @@
 # CI 실가동과 담당 작업 인계
 
-2026-10-02 · 실제 CI 검사·구독 AI 수정 통과 · private pull 관리자 인증 대기
+2026-10-02 · 정상/AI 수정 CI, private 이미지 게시, 인증된 manifest 조회, API published 확인 완료
 
 ## 작업 기준
 
@@ -25,22 +25,24 @@
 
 ## 현재 진행 결과
 
-- 새 저장소에 담당 feature와 테스트 통합본을 게시하고 GitHub ref·파일 목록을 다시 읽었습니다. 플랫폼 `main`의 기존 `Agents.md`·`README.md`는 유지합니다.
-- apps workflow는 새 저장소의 CI 전용 템플릿으로 교체했습니다. 구문 오류였던 job-level `runner.temp` 참조를 step의 임시 인증 경로 설정으로 고쳤습니다. actionlint와 workflow 검사 7개를 통과했습니다.
-- 사용자는 `gpt-5.6-sol`, `xhigh`, Codex 구독 인증과 AWS CI worker 준비를 지시했습니다. 모델·effort를 SDK에 전달하고 실행 metadata로 기록하며 runner 검사 21개를 통과했습니다.
-- `railshot-ci-k3s-aws` 전용 VM 한 대(t3.xlarge, 4 vCPU/16 GiB, 암호화 60 GiB)를 서울 리전에 생성했습니다. 외부 inbound는 없으며 SSM으로 접속합니다. 실제 격리 probe, cloud-init 완료, repository runner online을 확인했습니다. 자동 STOP은 2026-10-02 17:12:05 KST이며 디스크는 보존됩니다.
-- `k3s-aws`는 CI가 CD에 넘길 운영자 target ID입니다. 고객 K3s 클러스터나 별도 검토 중인 9노드 구성을 생성했다는 뜻이 아닙니다.
-- 기존 공개 `node-test-js` fixture를 CI VM에서 native npm lockfile과 함께 준비해 apps의 `demo/fixture-npm-js`에 게시했습니다. 정상 baseline run `36945621450`의 전체 gate가 통과했습니다.
-- 별도 `ci/fixture-packaging-repair` 브랜치에서 Dockerfile의 `USER`만 제거했습니다. run `36945951198`은 L1 실패 → 요청한 모델·effort·구독 인증으로 Dockerfile만 수정 → 전체 gate PASS를 기록했습니다. 테스트·manifest·lockfile은 바꾸지 않았습니다.
-- 두 초기 run의 release는 다른 Docker image store의 ID 조회에서 실패했습니다. producer와 hosted release에 같은 containerd image store를 명시해 수정했습니다. 이후 run `36946340727`은 정상 gate와 GHCR push가 성공했습니다. 이미지 `ghcr.io/jasmin-softbank/demo-fixture-npm-js-web:706b8207f97b`의 digest는 `sha256:48cf1c0ab9c4251cf60c41256f96a45bf6a9430a1e7e42bdbbf396a26fde5b86`입니다.
-- 해당 package는 private이며 조직 정책은 public 전환을 금지합니다. 사용자는 private 유지를 선택했습니다. 익명 조회에서 차단된 run의 API readback은 `failed`, `url: null`, `publication: null`입니다. push 성공만으로 `published`를 주장하지 않습니다.
-- private 연결 코드는 별도 읽기 자격의 digest manifest 조회와 v2 인계 계약을 추가합니다. 대상 참조는 `k3s-aws` / `tenant-demo` / `ghcr-pull`로 준비했으며 아직 실제 Secret은 없습니다. release 환경 허용 branch를 `main`, `ci/fixture-packaging-repair`로 제한했습니다.
-- 사용자 지시로 관리자 설정을 진행했으나 PAT 발급은 GitHub sudo-mode 본인 인증에서 대기 중입니다. 토큰 등록·실제 private 접근 검증은 아직 완료되지 않았습니다.
-- private 계약을 반영한 run `36948066574`(apps source `e04c620e130abcecd6da86184b5601fdec452a0f`, platform `b77d53b514ef0f6896e5178fab804c679e7b1014`)도 전체 gate를 통과했습니다. pull 자격 누락 때문에 release가 registry 로그인 전에 차단됐으며 API는 `failed / url: null / publication: null`로 다시 확인했습니다. 실제 private 조회 성공은 아직 없습니다.
-- private 변경 검사는 CI 9개, GitOps 1개, API 18개와 actionlint를 통과했습니다.
-- 최초 apps workflow 구문 검사 실패 `36943634074`와 샘플 등록 전 경로 검사 실패 `36945479367`도 보존합니다. 후자는 모델 호출 전 차단됐습니다.
+새 저장소에 개인 feature와 테스트 통합본을 게시하고 원격 ref·파일 목록을 확인했습니다. 플랫폼 `main`은 원래 문서 2개를 유지합니다. 아래 두 실제 실행은 CI source `b77d53b514ef0f6896e5178fab804c679e7b1014`를 사용했습니다.
 
-실제 자원 ID·Terraform state·plan·원격 검사 기록은 Git에서 제외한 `.local/ci-k3s-aws-20261002/`에 보관합니다. 인증 파일과 토큰은 저장소·문서에 포함하지 않습니다.
+| 사례 | GitHub run / apps source | 결과 | 인계 artifact ID |
+|---|---|---|---|
+| 정상 앱 | [36948066574](https://github.com/Jasmin-Softbank/railshot-apps/actions/runs/36948066574) / `e04c620e130abcecd6da86184b5601fdec452a0f` | baseline 전체 gate PASS → release 재시도 2에서 private 게시·인증 조회 → API `published` | 원래 bundle `11202502763`, `published-2` = `11202763783` |
+| AI 수정 앱 | [36949207283](https://github.com/Jasmin-Softbank/railshot-apps/actions/runs/36949207283) / `fb1cc2bd43a9947e8e4baf552ded13d2f2855c3c` | L1 실패 → Dockerfile만 수정 → 전체 gate PASS → private 게시·인증 조회 → API `published` | bundle `11202179693`, `published-1` = `11202564427` |
+
+게시 위치는 `ghcr.io/jasmin-softbank/demo-fixture-npm-js-web`입니다. 정상 digest는 `sha256:48cf1c0ab9c4251cf60c41256f96a45bf6a9430a1e7e42bdbbf396a26fde5b86`, AI 수정 digest는 `sha256:8ded0180c728ae5a6d2e359a7313ec1fbf0d1fa1ca4569bdd75e68243333e54d`입니다. 두 artifact의 파일 해시·source·target·registry 계약을 확인했고 API의 `url`은 모두 `null`입니다. 이는 이미지 게시 완료이며 고객 앱 배포 완료는 아닙니다.
+
+- **Worker:** `railshot-ci-k3s-aws` 전용 VM 한 대, 서울 리전 t3.xlarge(4 vCPU/16 GiB), 암호화 60 GiB. 외부 inbound 없이 SSM으로 접속하며 cloud-init·실제 격리 probe·runner online을 확인했습니다. 자동 STOP은 **2026-10-02 17:12:05 KST**, 디스크는 보존됩니다. 고객 K3s나 검토 중인 다중 노드 클러스터를 생성한 것은 아닙니다.
+- **AI:** `gpt-5.6-sol` / `xhigh` / 구독 인증을 SDK metadata로 확인했습니다. 최종 AI 실행은 SDK 1회, Dockerfile만 작성, 거부된 변경 없음, 수정 후 전체 gate PASS입니다. 테스트·manifest·lockfile은 바꾸지 않았습니다.
+- **Private 자격:** 관리자 본인 인증 후 PAT classic의 `read:packages`만 부여하고 `railshot-release`의 암호화 Secret에 등록했습니다. 만료는 **2026-10-09**이며 release 환경 허용 branch는 `main`, `ci/fixture-packaging-repair`입니다. 비밀값은 Git·문서·artifact에 넣지 않았습니다. 조직 공개 정책은 변경하지 않았습니다.
+- **대상 참조:** `k3s-aws` / `tenant-demo` / `ghcr-pull`은 운영자 설정입니다. 실제 대상 Secret 설치·노드 pull은 아직 수행하지 않았습니다. CI가 확인한 것은 별도 읽기 자격의 digest manifest 접근입니다.
+- **검사:** private 계약 관련 CI 9개, GitOps 1개, API 19개와 actionlint를 통과했습니다. API는 재실행 시 GitHub가 복제한 job의 조회 회차를 `steps.observed_attempt`로, 실제 게시 생산 회차를 `publication.producer_attempt`로 구분합니다. 원래 bundle ID도 유지합니다.
+
+실패 기록도 보존합니다. `36943634074`는 Actions context 구문 오류, `36945479367`은 모델 호출 전 샘플 경로 차단입니다. 초기 baseline `36945621450`과 AI `36945951198`은 gate가 통과했지만 Docker image store 차이로 push 전에 release가 실패했습니다. store를 맞춘 `36946340727`은 private push 후 익명 조회에서 차단됐습니다. 최종 정상 run의 attempt 1도 pull 자격 누락 시 로그인 전에 차단되고 API `failed / url: null / publication: null`을 반환했습니다. 이들을 최종 성공과 합쳐 세지 않습니다.
+
+자원 ID·Terraform state·plan·실제 artifact와 API 응답은 Git에서 제외한 `.local/ci-k3s-aws-20261002/`에 보관합니다. SDK 관리자 인증은 전용 CI worker의 보호된 경로를 사용하며 인증 파일과 토큰은 저장소·공유 산출물에 포함하지 않습니다.
 
 ## 코드 변경 규모
 
@@ -62,14 +64,14 @@ CI 엔진 재작성은 필요하지 않습니다. 기존 경로는 앱 source �
 
 ## 네트워크 안 이후 이어갈 지환 작업
 
-- AWS 실행 환경과 앱 공개 경로의 실제 입력을 확정하고 DNS/TLS/ALB/NodePort를 인수합니다.
+- AWS 실행 환경과 고정 앱 도메인→승인된 target/origin 연결을 확정하고 DNS/TLS/ingress를 인수합니다. ALB·공통 edge·Tunnel은 네트워크 안에서 선택한 경로만 적용합니다.
 - 화균 담당 관리 client와 EIP·WireGuard peer·왕복 경로를 연결합니다.
 - 정빈·승민 담당에게 게시 artifact/digest와 준비된 target 정보를 전달해 Argo 적용·실제 앱 응답을 연결합니다.
 - 진기 담당과 API의 단일 운영자 target 제약, 게시/적용/공개 URL 상태 표시를 맞춥니다.
 - 팀 공유·Notion·Slack 제출은 별도 작업으로 진행합니다.
 
-3노드 cloud cluster와 공통 ALB/원격 target은 다른 채팅에서 검토하는 확장안입니다. 현재 single-node 통합 코드나 실제 배포 완료로 표시하지 않습니다.
+다중 노드 cloud cluster와 공개 앱 경로는 다른 채팅에서 검토 중입니다. WireGuard 관리 경로와 앱 HTTP 경로의 인수를 구분하며 검토안을 실제 배포 완료로 표시하지 않습니다.
 
 ## 남은 확인
 
-worker·모델·구독 인증, 정상 gate, AI 수정 후 gate, 동일 검증 이미지의 private GHCR push를 실제 실행으로 확인했습니다. 관리자 본인 인증 후 read-only pull 자격 등록 → 정상/AI 경로 재실행 → private manifest 접근 → API `published` readback을 이어갑니다. 고객 target Secret 설치·노드 pull·CD·공개 URL은 아직 수행하지 않았습니다.
+CI 실가동과 private 게시·조회까지 완료했습니다. 네트워크 안 확정 후 고객 target 준비 → 같은 namespace에 pull Secret 설치 → 대상 노드의 실제 digest pull → CD 적용·Ready → 고정 앱 도메인의 HTTP를 확인합니다. 현재 fixture route는 `/health`이며 기존 검토용 CD CLI는 `/`만 지원하므로 CD 인수 시 이 입력도 맞춰야 합니다. 자격 만료 전 GitHub 환경과 실제 대상 Secret을 함께 갱신합니다.
