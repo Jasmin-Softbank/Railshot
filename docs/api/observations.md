@@ -1,5 +1,21 @@
 # 제품 배포 관측
 
+`GET /api/v1/targets/{id}/observations`는 배포 이력 없이 등록 환경을 관측한다.
+`GET /api/v1/targets`의 공용 또는 현재 세션 소유 대상만 허용하며 다른 세션·미등록 대상은
+Prometheus 접속 전에 404다. `deployment_id=null`, `environment_id`는 세션 환경 ID 또는 공용 대상의 null이다.
+`app`은 등록 앱이며 앱 바인딩이 없으면 null이다. 이때 노드만 조회하고 Pod·HTTP는 unsupported다.
+provider는 운영자 매핑이나 저장된 환경 profile에서 읽으며 ID 문자열로 추측하지 않는다.
+대상 목록의 `runtime=unknown`은 정적 메타데이터다. observation의 `runtime.status/observed_at`은
+`metrics.node_up.state/observed_at`과 같으며 node exporter 수집 상태를 뜻한다. 앱 준비 상태나 배포 성공을 뜻하지 않는다.
+
+노드 지표는 `node_up`, `cpu_percent`, `memory_percent`, `disk_percent`,
+`network_receive_bytes_per_second`, `network_transmit_bytes_per_second`다.
+CPU·메모리는 노드 전체 사용률, 디스크는 루트 `/` 파일시스템의 사용률이다(여러 series면 최대 사용률).
+네트워크는 lo를 제외한 인터페이스의 2분 평균 bytes/s 합계다. 가상 인터페이스도 포함될 수 있어
+외부 회선 트래픽으로 해석하지 않는다. 기존 exporter 기본 설정에는 netdev가 없으므로 해당
+collector가 실제 활성화되어 샘플을 수집하기 전에는 `no_data/null`이다. 정상 0 또는 시계열을 합성하지 않는다.
+노드·Pod·HTTP 질의의 부분 실패는 다른 질의의 현재 값을 지우지 않는다.
+
 `GET /api/v1/deployments/{id}`는 영속 배포 기록과 `observation`을 함께 반환한다.
 `observation.deployment_id/target_id/app`은 조회한 기록과 동일하다. 새로운 실행이나
 배포 재시도는 하지 않는다. `ci.images`는 해당 run의 검증된 게시 receipt에서 읽은
@@ -48,7 +64,7 @@ instant query 평가 시각을 수집 시각으로 사용하지 않는다.
 
 ready 이외에는 value=null이다. 실패 응답으로 이전 정상값을 재사용하지 않는다.
 브라우저도 90초 후 표시값을 만료시키며, API 조회 실패 시 마지막 기록임을 표시한다.
-쿼리는 고정된 세 묶음만 사용하며 각각 5초 timeout/64KiB 응답 한도를 가진다.
+쿼리는 최대 세 묶음만 사용하며 각각 5초 timeout/64KiB 응답 한도를 가진다.
 CPU rate에는 두 번 이상의 scrape가 필요하다. namespace 삭제 후 무자료를 0 Pod로 추정하지 않는다.
 
 `작업 단계`, `환경 상태`, `HTTP 검증 기록`은 구조화된 기록이며 raw 앱 로그가 아니다.
