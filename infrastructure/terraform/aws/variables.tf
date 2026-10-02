@@ -93,6 +93,16 @@ variable "create_ci_plan_role" {
   description = "Legacy account-level GitHub OIDC/read-only role. Set false for customer app hosts; reuse the existing platform identity separately."
 }
 
+variable "existing_instance_profile" {
+  type        = string
+  default     = null
+  description = "Existing operator-reviewed EC2 instance profile name. Reuse avoids creating node IAM resources; its SSM permissions and Parameter Store deny remain the profile owner's responsibility. Null preserves managed node IAM resources."
+  validation {
+    condition     = var.existing_instance_profile == null ? true : can(regex("^[A-Za-z0-9_+=,.@-]{1,128}$", var.existing_instance_profile))
+    error_message = "existing_instance_profile must be null or an IAM instance profile name, not an ARN or path."
+  }
+}
+
 variable "operator_ssh_public_key" {
   type        = string
   default     = null

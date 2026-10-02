@@ -15,10 +15,15 @@ export function createDeploymentService(config, fetchImpl = fetch) {
   if (typeof tenant !== 'string' || !TENANT_NAME.test(tenant)) throw new Error('JASMIN_TENANT가 잘못되었습니다.');
   if (typeof targetId !== 'string' || !TARGET_ID.test(targetId)) throw new Error('RAILSHOT_TARGET_ID에 운영자가 준비할 대상 ID를 설정하세요.');
   if (config.targetIds !== undefined && !Array.isArray(config.targetIds)) throw new Error('등록된 CI target 목록이 잘못되었습니다.');
-  const targetIds = [...new Set(config.targetIds || [targetId])];
-  if (!targetIds.includes(targetId) || targetIds.length > 100 || targetIds.some((id) => typeof id !== 'string' || !TARGET_ID.test(id)))
+  const targetIds = new Set(config.targetIds || [targetId]);
+  if (!targetIds.has(targetId) || targetIds.size > 100 || [...targetIds].some((id) => typeof id !== 'string' || !TARGET_ID.test(id)))
     throw new Error('등록된 CI target 목록이 잘못되었습니다.');
-  const permittedTarget = (id) => { if (!targetIds.includes(id)) throw new ServiceError('등록된 배포 대상과 일치하지 않습니다.', 400); };
+  const permittedTarget = (id) => { if (!targetIds.has(id)) throw new ServiceError('등록된 배포 대상과 일치하지 않습니다.', 400); };
+  // Called only by the trusted product worker after durable environment registration.
+  function allowTarget(id) {
+    if (typeof id !== 'string' || !TARGET_ID.test(id)) throw new ServiceError('등록된 CI target ID가 잘못되었습니다.', 400);
+    targetIds.add(id);
+  }
   const repoPath = `/repos/${owner}/${repo}`;
 
   async function request(path, options = {}) {
@@ -188,5 +193,5 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return verified.files;
   }
 
-  return { deploy, status, publishedFiles, targetId, targetIds: Object.freeze(targetIds) };
+  return { deploy, status, publishedFiles, allowTarget, targetId, get targetIds() { return Object.freeze([...targetIds]); } };
 }

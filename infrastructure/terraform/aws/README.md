@@ -11,11 +11,14 @@ For a new customer node behind the separately managed ALB, set:
 | `http_enabled`, `https_enabled` | Both `false`; no direct public web ingress |
 | `additional_security_group_ids` | Reviewed groups for ALB NodePort and management/cluster traffic; same VPC |
 | `create_ci_plan_role` | `false`; avoid recreating the account-level GitHub OIDC identity on each customer host |
+| `existing_instance_profile` | Optional reviewed EC2 instance profile name; reuse skips node IAM role, policies and instance profile creation. The executor needs PassRole for its exact role. |
 | `allocate_eip` | `false` when a subnet-assigned public IP provides egress; routes and public-IP policy remain operator prerequisites |
 | `operator_ssh_public_key` | One OpenSSH public key; creates `railshot-operator` with locked password and noninteractive sudo at first boot |
 | `initialize_empty_data_disk` | `true` only for a reviewed new blank module-created disk |
 
-`node_security_group_id`, `vpc_id`, `subnet_id` and `instance_id` outputs support the separately owned edge rules. `node_descriptor.transport_ref` remains `ssm:<region>:<instance-id>`. It does not open TCP22; the operator uses authenticated SSM forwarding and a separately verified SSH host key. The node SSM role retains its explicit Parameter Store deny. Private SSH credentials and WireGuard keys are never Terraform inputs.
+`node_security_group_id`, `vpc_id`, `subnet_id` and `instance_id` outputs support the separately owned edge rules. `node_descriptor.transport_ref` remains `ssm:<region>:<instance-id>`. It does not open TCP22; the operator uses authenticated SSM forwarding and a separately verified SSH host key. The managed node SSM role retains its explicit Parameter Store deny. When reusing an existing instance profile, its owner must verify the account, SSM permissions and equivalent Parameter Store deny; this module does not modify its IAM policies. Private SSH credentials and WireGuard keys are never Terraform inputs.
+
+`existing_instance_profile=null` preserves the managed IAM defaults through moved blocks. Setting it on an existing managed target would remove that target's IAM resources from this configuration and requires separate lifecycle review. Use reuse for new targets; do not switch existing targets merely to adopt this option.
 
 Legacy defaults remain: default VPC/subnet selection, public HTTP, EIP and read-only GitHub CI role. Moved blocks preserve their Terraform resource identities when these defaults stay enabled. Disabling resources on an existing target can destroy them and must be reviewed; this configuration is intended for a new customer target. Public IP addresses are egress references, not proof that an application URL exists. The legacy `app_domain` output is null when no EIP is requested.
 

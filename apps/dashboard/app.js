@@ -124,6 +124,10 @@ function activeRun() { return current && !terminal.has(current.status); }
 function selectedTarget() { return targets.find((item) => item.id === targetSelect.value); }
 function selectedProfile() { return profiles.find((item) => `profile:${item.id}` === targetSelect.value); }
 function supported(target, kind) { return Boolean(target?.capabilities?.[kind === 'builds' ? 'ci_submission' : 'application_deployment']); }
+function planCost(plan) {
+  return plan.cost ? ` 추가 비용 예상 ${plan.cost.incremental_estimate} ${plan.cost.currency} · 기존 사용·예약을 포함한 예상 ${plan.cost.projected_total} / 한도 ${plan.cost.limit} ${plan.cost.currency}.` : '';
+}
+
 function databaseSummary(profile, mode) {
   const database = profile?.database;
   return mode === 'patroni' && database ? `PostgreSQL ${database.database_nodes}대 · DCS 투표 노드 ${database.dcs_voters}대 · 프록시 ${database.proxy_nodes}대` : 'DB 없음';
@@ -160,11 +164,12 @@ function updateTarget() {
     databaseChoice(deploymentDatabase, profile);
     for (const option of operation.options) option.disabled = option.value !== 'deployments' || !profile.supported || !profile.deployment_supported;
     operation.value = profile.supported && profile.deployment_supported ? 'deployments' : '';
-    if (profile.application_name) appName.value = profile.application_name;
-    appName.readOnly = Boolean(profile.application_name);
+    const fixedName = !profile.create_per_request && profile.application_name;
+    if (fixedName) appName.value = fixedName;
+    appName.readOnly = Boolean(fixedName);
     document.querySelector('#deployment-database-note').textContent = databaseSummary(profile, deploymentDatabase.value);
     document.querySelector('#target-note').textContent = '계획을 확인한 뒤 환경 준비부터 앱 배포까지 한 번에 시작합니다.'
-      + (profile.application_name ? ` 이 환경의 앱 이름은 ${profile.application_name}입니다.` : '');
+      + (fixedName ? ` 이 환경의 앱 이름은 ${fixedName}입니다.` : '');
     invalidateReview();
     return;
   }
@@ -219,7 +224,8 @@ async function createPlan(name, profile, mode) {
   const { data } = await request('/api/v1/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, runtime: { profile_id: profile.id, node_count: 1 }, database }) });
   if (typeof data.id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(data.id) || data.name !== name || data.runtime?.profile_id !== profile.id
-      || data.database?.mode !== mode || !Number.isFinite(Date.parse(data.expires_at))) throw new Error('환경 계획 응답이 선택 내용과 일치하지 않습니다.');
+      || data.database?.mode !== mode || !Number.isFinite(Date.parse(data.expires_at))
+      || (data.runtime_target_id !== undefined && (typeof data.runtime_target_id !== 'string' || !/^[a-z][a-z0-9-]{2,39}$/.test(data.runtime_target_id)))) throw new Error('환경 계획 응답이 선택 내용과 일치하지 않습니다.');
   return data;
 }
 
@@ -248,19 +254,19 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
       if (profile) {
         plan = await createPlan(app, profile, deploymentDatabase.value);
         if (generation !== reviewGeneration) return;
-        if (!plan.executable) throw new Error(`현재 실행할 수 없는 계획입니다: ${(plan.blockers || []).join(', ')}`);
+        if (!plan.executable) throw new Error(`현재 실행할 수 없는 계획입니다: ${(plan.blockers || []).join(', ')}${planCost(plan)}`);
         if (Date.parse(plan.expires_at) <= Date.now()) throw new Error('환경 계획이 만료됐습니다. 선택 내용을 다시 확인하세요.');
       }
     } catch (cause) {
       if (generation === reviewGeneration) { error.textContent = cause.message; error.hidden = false; }
       return;
     } finally { reviewing = false; reviewButton.disabled = false; }
-    reviewed = { app, source: selectedSource, targetId: profile?.target_id || target.id, kind: operation.value, key: crypto.randomUUID(), plan };
+    reviewed = { app: plan?.name || app, source: selectedSource, targetId: plan?.runtime_target_id || profile?.target_id || target.id, kind: operation.value, key: crypto.randomUUID(), plan };
     document.querySelector('#review-source').textContent = selectedSource.label;
     document.querySelector('#review-app').textContent = app;
     document.querySelector('#review-target').textContent = profile ? `새 환경 · ${profile.label || profile.id} · ${databaseSummary(profile, plan.database.mode)}` : target.label || target.id;
     document.querySelector('#review-note').textContent = plan
-      ? `새 클라우드 자원을 생성하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.`
+      ? `새 클라우드 자원을 생성하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.${planCost(plan)}`
       : operation.value === 'deployments'
       ? '소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다.' : '소스 검사와 이미지 게시를 시작합니다. 앱 배포는 수행하지 않습니다.';
     deployButton.textContent = plan ? '환경 준비부터 앱 배포까지 시작' : operation.selectedOptions[0].textContent;
@@ -485,8 +491,9 @@ function clearPlan() {
 function updateEnvironmentProfile() {
   const profile = profiles.find((item) => item.id === profileSelect.value);
   databaseChoice(environmentDatabase, profile, true);
-  if (profile?.application_name) environmentName.value = profile.application_name;
-  environmentName.readOnly = Boolean(profile?.application_name);
+  const fixedName = !profile?.create_per_request && profile?.application_name;
+  if (fixedName) environmentName.value = fixedName;
+  environmentName.readOnly = Boolean(fixedName);
   document.querySelector('#environment-database-note').textContent = databaseSummary(profile, environmentDatabase.value);
   clearPlan();
 }
@@ -509,6 +516,7 @@ document.querySelector('#environment-form').addEventListener('submit', async (ev
     environmentMessage.textContent = data.executable
       ? `${data.name} · runtime 노드 1대 · ${databaseSummary(profile, data.database.mode)}. 계획을 실행하면 클라우드 자원이 생성됩니다.`
       : `현재 실행할 수 없는 계획입니다: ${(data.blockers || []).join(', ')}`;
+    environmentMessage.textContent += planCost(data);
     environmentButton.hidden = false; environmentButton.disabled = !data.executable;
   } catch (cause) { if (generation === environmentGeneration) environmentMessage.textContent = cause.message; }
   finally { environmentBusy = false; }

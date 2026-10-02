@@ -56,6 +56,25 @@ test('ZIP 검사 후 앱을 Git 트리에 등록하고 Actions 실행 ID를 반�
   const secondary = await service.deploy({ app: 'my-app', target_id: 'stack-aws-1002', files: await inspectArchive(archive) });
   assert.equal(secondary.target_id, 'stack-aws-1002');
   assert.equal(calls.at(-1).body.inputs.target_id, 'stack-aws-1002');
+  const beforeRegistration = calls.length;
+  await assert.rejects(service.deploy({ app: 'my-app', target_id: 'request-aws-new', files: await inspectArchive(archive) }), { status: 400 });
+  assert.equal(calls.length, beforeRegistration);
+  service.allowTarget('request-aws-new');
+  const dynamic = await service.deploy({ app: 'my-app', target_id: 'request-aws-new', files: await inspectArchive(archive) });
+  assert.equal(dynamic.target_id, 'request-aws-new');
+  assert.equal(calls.at(-1).body.inputs.target_id, 'request-aws-new');
+});
+
+test('internal target registration validates IDs and exposes a read-only target snapshot', async () => {
+  const service = createDeploymentService({ token: 'test', targetId: 'aws-demo' }, async () => assert.fail('Registration must not call GitHub'));
+  const before = service.targetIds;
+  for (const invalid of [undefined, null, 123, '', '../target', 'UPPER', 'a'.repeat(64)]) assert.throws(() => service.allowTarget(invalid), { status: 400 });
+  assert.throws(() => before.push('untrusted-target'), TypeError);
+  assert.deepEqual(service.targetIds, ['aws-demo']);
+  service.allowTarget('request-aws-new'); service.allowTarget('request-aws-new');
+  assert.deepEqual(service.targetIds, ['aws-demo', 'request-aws-new']);
+  assert.deepEqual(before, ['aws-demo']);
+  await assert.rejects(service.status('123', 'untrusted-target'), { status: 400 });
 });
 
 test('재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에서 제외한다', async () => {

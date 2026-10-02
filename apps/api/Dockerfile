@@ -30,6 +30,7 @@ COPY ci/scripts/runner/runtime_boundary.py /app/ci/scripts/runner/
 COPY ci/scripts/runner/replenish.py /app/ci/scripts/runner/
 COPY ci/scripts/schemas/jasmin.schema.json /app/ci/scripts/schemas/
 COPY infrastructure/providers/terraform_tools/provision.py infrastructure/providers/terraform_tools/capabilities.py infrastructure/providers/terraform_tools/costs.py infrastructure/providers/terraform_tools/access.py /app/infrastructure/providers/terraform_tools/
+COPY infrastructure/providers/terraform_tools/budget.py /app/infrastructure/providers/terraform_tools/
 COPY infrastructure/terraform/aws/ /app/infrastructure/terraform/aws/
 COPY infrastructure/terraform/gcp/ /app/infrastructure/terraform/gcp/
 COPY infrastructure/ansible/run.py infrastructure/ansible/transport.py infrastructure/ansible/ansible.cfg infrastructure/ansible/guest.yml infrastructure/ansible/runtime.yml /app/infrastructure/ansible/

@@ -96,7 +96,8 @@ resource "aws_security_group" "node" {
 }
 
 resource "aws_iam_role" "node" {
-  name = "${var.name}-node"
+  count = var.existing_instance_profile == null ? 1 : 0
+  name  = "${var.name}-node"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }]
@@ -104,19 +105,22 @@ resource "aws_iam_role" "node" {
 }
 
 resource "aws_iam_role_policy_attachment" "ssm" {
-  role       = aws_iam_role.node.name
+  count      = var.existing_instance_profile == null ? 1 : 0
+  role       = aws_iam_role.node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 resource "aws_iam_role_policy" "node_params" {
+  count  = var.existing_instance_profile == null ? 1 : 0
   name   = "read-railshot-params"
-  role   = aws_iam_role.node.id
+  role   = aws_iam_role.node[0].id
   policy = jsonencode(local.node_parameter_policy)
 }
 
 resource "aws_iam_instance_profile" "node" {
-  name = "${var.name}-node"
-  role = aws_iam_role.node.name
+  count = var.existing_instance_profile == null ? 1 : 0
+  name  = "${var.name}-node"
+  role  = aws_iam_role.node[0].name
 }
 
 resource "aws_instance" "node" {
@@ -124,7 +128,7 @@ resource "aws_instance" "node" {
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnet.selected.id
   vpc_security_group_ids = concat([aws_security_group.node.id], var.additional_security_group_ids)
-  iam_instance_profile   = aws_iam_instance_profile.node.name
+  iam_instance_profile   = var.existing_instance_profile == null ? aws_iam_instance_profile.node[0].name : var.existing_instance_profile
 
   metadata_options {
     http_tokens                 = "required"
@@ -241,6 +245,22 @@ locals {
 }
 
 # Preserve existing resource identities when the legacy defaults remain enabled.
+moved {
+  from = aws_iam_role.node
+  to   = aws_iam_role.node[0]
+}
+moved {
+  from = aws_iam_role_policy_attachment.ssm
+  to   = aws_iam_role_policy_attachment.ssm[0]
+}
+moved {
+  from = aws_iam_role_policy.node_params
+  to   = aws_iam_role_policy.node_params[0]
+}
+moved {
+  from = aws_iam_instance_profile.node
+  to   = aws_iam_instance_profile.node[0]
+}
 moved {
   from = aws_eip.node
   to   = aws_eip.node[0]

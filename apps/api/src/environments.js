@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = fileURLToPath(new URL('../../../', import.meta.url));
 const PROVISION = join(REPO, 'infrastructure/providers/terraform_tools/provision.py');
+const BUDGET = join(REPO, 'infrastructure/providers/terraform_tools/budget.py');
 const CLUSTER = join(REPO, 'infrastructure/ansible/cluster.py');
 const STACK = join(REPO, 'deployment/scripts/environment.py');
 const ANSIBLE = join(REPO, 'infrastructure/ansible/run.py');
@@ -86,7 +87,7 @@ export function runEnvironmentCommand(python, args, { timeout = 120000, mutation
   });
 }
 
-/** Operator profiles authorize one fixed runtime target each; HTTP never supplies paths, SSH or provider variables. */
+/** Operator profiles authorize fixed targets or creation templates; HTTP never supplies paths, SSH or provider variables. */
 export async function createEnvironmentAdapter({ profilesFile, stateDir, python = 'python3', runner = runEnvironmentCommand,
   now = () => Date.now(), loadPublished } = {}) {
   if (!profilesFile) return {
@@ -106,7 +107,7 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
     const ids = new Set(), targets = new Set();
     for (const profile of config.profiles) {
-      if (!exact(profile, ['id', 'label', 'provider', 'site', 'purposes', 'target_file', 'state_root', 'ssh', 'allow_apply'], ['timeout_seconds', 'database', 'deployment_file', 'enroll_ssh'])
+      if (!exact(profile, ['id', 'label', 'provider', 'site', 'purposes', 'target_file', 'state_root', 'ssh', 'allow_apply'], ['timeout_seconds', 'database', 'deployment_file', 'enroll_ssh', 'create_per_request', 'registration_max_age_seconds', 'budget_refresh'])
           || !validId(profile.id) || ids.has(profile.id) || typeof profile.label !== 'string' || !profile.label.trim()
           || typeof profile.site !== 'string' || !profile.site || !Array.isArray(profile.purposes)
           || profile.purposes.some((purpose) => !['runtime', 'database'].includes(purpose)) || typeof profile.allow_apply !== 'boolean'
@@ -124,7 +125,16 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       profile.target = target;
       if (profile.enroll_ssh !== undefined && typeof profile.enroll_ssh !== 'boolean')
         throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
+      if (profile.create_per_request !== undefined && typeof profile.create_per_request !== 'boolean')
+        throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
+      if (profile.budget_refresh !== undefined && (profile.provider !== 'aws' || !exact(profile.budget_refresh, [], ['retained_storage_hours'])
+          || (profile.budget_refresh.retained_storage_hours !== undefined && profile.budget_refresh.retained_storage_hours !== 24)))
+        throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
       if (profile.deployment_file !== undefined) profile.deployment = await privateJson(profile.deployment_file);
+      if (profile.registration_max_age_seconds !== undefined && (!Number.isInteger(profile.registration_max_age_seconds)
+          || profile.registration_max_age_seconds < 1800 || profile.registration_max_age_seconds > 604800
+          || !profile.create_per_request || !object(profile.deployment?.registration)))
+        throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
       if (profile.database !== undefined) {
         if (!exact(profile.database, ['nodes']) || !Array.isArray(profile.database.nodes)
             || profile.database.nodes.length < 3 || profile.database.nodes.length > 16)
@@ -159,7 +169,8 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
     profiles: () => listed.profiles.map((profile) => ({
       ...Object.fromEntries(['id', 'label', 'provider', 'site', 'purposes'].map((key) => [key, profile[key]])),
       target_id: profile.target.target_id,
-      application_name: profile.deployment?.cd?.targets?.[profile.target.target_id]?.app || null,
+      create_per_request: profile.create_per_request === true,
+      application_name: profile.create_per_request ? null : profile.deployment?.cd?.targets?.[profile.target.target_id]?.app || null,
       deployment_supported: Boolean(profile.deployment),
       database: profile.database ? { mode: 'patroni', required: Boolean(profile.deployment?.cd?.targets?.[profile.target.target_id]?.target?.database), database_nodes: profile.database.nodes.filter((node) => node.roles.includes('database')).length, dcs_voters: profile.database.nodes.filter((node) => node.roles.includes('dcs')).length, proxy_nodes: profile.database.nodes.filter((node) => node.roles.includes('proxy')).length } : null,
       supported: blockersFor(profile).length === 0, blockers: blockersFor(profile),
@@ -189,7 +200,7 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       const blockers = blockersFor(profile);
       if (profile.deployment) {
         const registered = profile.deployment.cd?.targets?.[profile.target.target_id];
-        if (!registered || registered.app !== input.name || registered.target?.id !== profile.target.target_id
+        if (!registered || !APP_NAME.test(registered.app) || (!profile.create_per_request && registered.app !== input.name) || registered.target?.id !== profile.target.target_id
             || typeof registered.tenant !== 'string' || !TENANT_NAME.test(registered.tenant))
           blockers.push('DEPLOYMENT_PROFILE_MISMATCH');
         if (Boolean(registered?.target?.database) !== (input.database.mode === 'patroni'))
@@ -217,6 +228,36 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
         if (count('database') < 2 || count('dcs') < 3 || count('dcs') % 2 !== 1 || count('proxy') < 1)
           blockers.push('DATABASE_TOPOLOGY_UNSUPPORTED');
       }
+      // Keep selected[*].profile unchanged for live policy verification; only execution targets are derived.
+      const executionProfile = structuredClone(profile);
+      if (profile.create_per_request) {
+        // GCP VM names allow 25 characters; leave room for the largest database suffix (-dbNN).
+        const prefixLength = selected.some((node) => node.profile.provider === 'gcp')
+          ? Math.min(11, 25 - 9 - 3 - String(selected.length - 1).length) : 24;
+        const runtimeId = `${profile.target.target_id.slice(0, prefixLength).replace(/-+$/, '')}-${createHash('sha256').update(id).digest('hex').slice(0, 8)}`;
+        for (const [index, node] of selected.entries()) {
+          const targetId = index === 0 ? runtimeId : `${runtimeId}-db${index}`;
+          node.target = { ...structuredClone(node.target), target_id: targetId,
+            variables: { ...structuredClone(node.target.variables), target_id: targetId, name: targetId } };
+        }
+        executionProfile.target = selected[0].target;
+        if (executionProfile.deployment) {
+          const targets = executionProfile.deployment.cd?.targets;
+          const registered = targets?.[profile.target.target_id];
+          const segments = typeof registered?.target?.path === 'string' ? registered.target.path.split('/') : null;
+          if (!segments || segments.length < 3 || segments.some((segment) => !segment || segment === '.' || segment === '..')
+              || segments.at(-2) !== registered.app || segments.at(-1) !== profile.target.target_id) {
+            blockers.push('DEPLOYMENT_PROFILE_MISMATCH');
+          } else {
+            registered.app = input.name;
+            Object.assign(registered.target, { id: runtimeId, namespace: `app-${input.name}`,
+              project: `railshot-${runtimeId}`, path: [...segments.slice(0, -2), input.name, runtimeId].join('/') });
+            if (registered.target.image_pull_secret) registered.target.image_pull_secret.namespace = registered.target.namespace;
+            delete targets[profile.target.target_id];
+            targets[runtimeId] = registered;
+          }
+        }
+      }
       try {
         for (const selectedProfile of new Set(selected.map((node) => node.profile))) for (const [key, mask] of [['identity_file', 0o077], ['known_hosts_file', 0o022]]) {
           if (key === 'known_hosts_file' && selectedProfile.enroll_ssh) continue;
@@ -226,6 +267,41 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       } catch { blockers.push('SSH_REFERENCES_UNAVAILABLE'); }
       const home = join(stateDir, id);
       await mkdir(home, { mode: 0o700 }); // A plan ID and its input snapshot are never overwritten.
+      let cost = null;
+      if (selected.some((node) => node.profile.budget_refresh !== undefined)) {
+        const policy = profile.budget_refresh;
+        if (!policy || selected.some((node) => node.profile.provider !== 'aws'
+            || hash(node.profile.budget_refresh ?? null) !== hash(policy))) blockers.push('BUDGET_REFRESH_POLICY_MISMATCH');
+        if (!blockers.length) {
+          try {
+            const inputFile = join(home, 'budget-input.json'), outputFile = join(home, 'budget-output.json');
+            await savePrivate(inputFile, { version: 1, targets: selected.map((node) => node.target), ...policy });
+            const summary = await runner(python, [BUDGET, '--input', inputFile, '--evidence-dir', join(home, 'budget-evidence'), '--output', outputFile], { timeout: 120000 });
+            const refreshed = await privateJson(outputFile);
+            const money = (value) => typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value));
+            if (!exact(refreshed, ['version', 'targets', 'summary', 'evidence']) || refreshed.version !== 1
+                || !Array.isArray(refreshed.targets) || refreshed.targets.length !== selected.length || !Array.isArray(refreshed.evidence)
+                || !exact(summary, ['currency', 'incremental_estimate', 'projected_total', 'limit', 'within_budget']) || summary.currency !== 'USD'
+                || !['incremental_estimate', 'projected_total', 'limit'].every((key) => money(summary[key]))
+                || typeof summary.within_budget !== 'boolean' || hash(summary) !== hash(refreshed.summary))
+              throw new EnvironmentError('BUDGET_REFRESH_INVALID', 502);
+            for (const [index, target] of refreshed.targets.entries()) {
+              const original = selected[index].target;
+              const quote = target?.budget;
+              if (!object(target) || !exact(quote, ['ledger_path', 'scope', 'currency', 'incremental_cost', 'limit', 'unreported_cost', 'quoted_at', 'expires_at'])
+                  || hash({ ...target, budget: original.budget }) !== hash(original)
+                  || hash(quote) !== hash({ ...original.budget, ...Object.fromEntries(['scope', 'incremental_cost', 'quoted_at', 'expires_at'].map((key) => [key, quote[key]])) })
+                  || !money(quote.incremental_cost) || !Number.isFinite(Date.parse(quote.quoted_at)) || Date.parse(quote.quoted_at) > now()
+                  || !Number.isFinite(Date.parse(quote.expires_at)) || Date.parse(quote.expires_at) <= now())
+                throw new EnvironmentError('BUDGET_REFRESH_INVALID', 502);
+            }
+            for (const [index, target] of refreshed.targets.entries()) selected[index].target = target;
+            executionProfile.target = selected[0].target;
+            cost = summary;
+            if (!cost.within_budget) blockers.push('INFRA_BUDGET_BLOCKED');
+          } catch (error) { blockers.push(error instanceof EnvironmentError ? error.code : 'BUDGET_REFRESH_FAILED'); }
+        }
+      }
       const nodes = [];
       for (const [index, selectedNode] of selected.entries()) {
         const targetFile = join(home, index === 0 ? 'target.json' : `target-${index}.json`);
@@ -244,12 +320,21 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
         }
         nodes.push({ ...selectedNode, target_file: targetFile, plan_sha256: review?.plan_sha256 ?? null });
       }
+      const readyAt = now();
+      let expiresAt = readyAt + 15 * 60 * 1000;
+      for (const node of nodes) if (node.target.budget?.expires_at !== undefined) {
+        const quoteExpiry = Date.parse(node.target.budget.expires_at);
+        if (!Number.isFinite(quoteExpiry) || quoteExpiry <= readyAt) blockers.push('BUDGET_QUOTE_EXPIRED');
+        if (Number.isFinite(quoteExpiry)) expiresAt = Math.min(expiresAt, quoteExpiry);
+      }
+      if (profile.registration_max_age_seconds !== undefined)
+        executionProfile.deployment.registration.expires_at = new Date(readyAt + profile.registration_max_age_seconds * 1000).toISOString();
       const planDigest = nodes.length === 1 ? nodes[0].plan_sha256 : hash(nodes.map((node) => [node.target.target_id, node.plan_sha256]));
-      const snapshot = { profile, policy_revision: listed.policy_revision, nodes, input_sha256: hash(input) };
+      const snapshot = { profile: executionProfile, policy_revision: listed.policy_revision, nodes, input_sha256: hash(input) };
       return {
-        public: { id, ...structuredClone(input), policy_revision: listed.policy_revision,
-          expires_at: new Date(now() + 15 * 60 * 1000).toISOString(), executable: blockers.length === 0,
-          blockers: [...new Set(blockers)], cost: null, steps: ['resources', 'guest', 'runtime', ...(input.database.mode === 'none' ? [] : ['database', 'binding']), ...(profile.deployment ? ['registration'] : [])], plan_sha256: planDigest },
+        public: { id, ...structuredClone(input), runtime_target_id: executionProfile.target.target_id, policy_revision: listed.policy_revision,
+          expires_at: new Date(expiresAt).toISOString(), executable: blockers.length === 0,
+          blockers: [...new Set(blockers)], cost, steps: ['resources', 'guest', 'runtime', ...(input.database.mode === 'none' ? [] : ['database', 'binding']), ...(profile.deployment ? ['registration'] : [])], plan_sha256: planDigest },
         private: { ...snapshot, snapshot_sha256: hash(snapshot) },
       };
     },
@@ -259,7 +344,9 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       if (!plan?.executable || !SHA.test(plan.plan_sha256)) throw new EnvironmentError('PLAN_NOT_EXECUTABLE', 409);
       if (!Number.isFinite(Date.parse(plan.expires_at)) || Date.parse(plan.expires_at) <= now()) throw new EnvironmentError('PLAN_EXPIRED', 409);
       const { snapshot_sha256: checksum, ...original } = snapshot;
-      if (checksum !== hash(original) || snapshot.input_sha256 !== hash({ name: plan.name, runtime: plan.runtime, database: plan.database }))
+      if (checksum !== hash(original) || snapshot.input_sha256 !== hash({ name: plan.name, runtime: plan.runtime, database: plan.database })
+          || snapshot.profile.target.target_id !== snapshot.nodes[0].target.target_id
+          || (plan.runtime_target_id !== undefined && plan.runtime_target_id !== snapshot.profile.target.target_id))
         throw new EnvironmentError('PLAN_SNAPSHOT_CHANGED', 409);
       const current = await configuration();
       for (const node of snapshot.nodes) {

@@ -1,6 +1,7 @@
 """Offline Terraform template rendering and fail-closed mount contract. No cloud or formatting."""
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -97,6 +98,9 @@ class AWSBootstrapTest(unittest.TestCase):
             for key, bad in (('ami_id', 'stable/current'), ('instance_type', 'unreviewed-size'),
                              ('operator_ssh_public_key', '-----BEGIN OPENSSH PRIVATE KEY-----'),
                              ('operator_ssh_public_key', 'ssh-ed25519 AAAA\nroot: injected'),
+                             ('existing_instance_profile', ''), ('existing_instance_profile', 'node/role'),
+                             ('existing_instance_profile', 'arn:aws:iam::000000000000:instance-profile/node'),
+                             ('existing_instance_profile', 'n' * 129),
                              ('vpc_id', 'unknown'), ('subnet_id', 'unknown'),
                              ('additional_security_group_ids', ['0.0.0.0/0']),
                              ('purpose', 'arbitrary'), ('max_run_duration_seconds', 1799),
@@ -109,6 +113,30 @@ class AWSBootstrapTest(unittest.TestCase):
                     result = subprocess.run(['terraform', 'console', '-no-color', '-var-file=' + str(inputs)], cwd=root,
                                             input='jsonencode(var.' + key + ')\n', capture_output=True, text=True)
                     self.assertIn('Error:', result.stderr)
+
+    def test_reused_profile_skips_all_node_iam_and_preserves_default_addresses(self):
+        source = (MODULE / 'main.tf').read_text()
+        expressions = []
+        for resource_type, name in (('aws_iam_role', 'node'), ('aws_iam_role_policy_attachment', 'ssm'),
+                                    ('aws_iam_role_policy', 'node_params'), ('aws_iam_instance_profile', 'node')):
+            block = source.split(f'resource "{resource_type}" "{name}" {{', 1)[1].split('\n}', 1)[0]
+            expressions.append(re.search(r'\bcount\s*=\s*([^\n]+)', block).group(1).strip())
+            address = resource_type + '.' + name
+            self.assertRegex(source, rf'moved\s*\{{\s*from\s*=\s*{re.escape(address)}\s+to\s*=\s*{re.escape(address)}\[0\]\s*\}}')
+        # Evaluate the actual four count expressions, without a provider, backend or real state.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'variables.tf').write_text((MODULE / 'variables.tf').read_text())
+            base = {'target_id': 'aws-offline', 'owner_ref': 'terraform:offline:test',
+                    'account_id': '000000000000', 'ami_id': 'ami-' + '0' * 17}
+            for existing, expected in ((None, [1] * 4), ('railshot-user-aws-node', [0] * 4)):
+                inputs = root / 'inputs.tfvars.json'
+                inputs.write_text(json.dumps({**base, 'existing_instance_profile': existing}))
+                result = subprocess.run(['terraform', 'console', '-no-color', '-var-file=' + str(inputs)], cwd=root,
+                    input='jsonencode([' + ','.join(expressions) + '])\n', capture_output=True, text=True, check=True)
+                self.assertNotIn('Error:', result.stderr)
+                self.assertEqual(json.loads(json.loads(result.stdout)), expected)
+        self.assertRegex(source, r'iam_instance_profile\s*=\s*var\.existing_instance_profile == null \? aws_iam_instance_profile\.node\[0\]\.name : var\.existing_instance_profile')
 
     def test_managed_ssm_policy_cannot_restore_parameter_access(self):
         # Actual pure locals are evaluated in a fresh directory: no backend, provider, or real state.

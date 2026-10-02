@@ -36,6 +36,23 @@ An explicit API amount of zero is accepted; absent/empty data is not zero. Any `
 
 ## Registered app-host input
 
+`budget.py` provides the server-side AWS refresh used before a product plan. It takes
+`--input /private/input.json --evidence-dir /private/evidence --output /private/output.json`.
+Input is `{ "version": 1, "targets": [registered_target] }`; stdout is the public cost
+summary and the private output contains refreshed targets plus evidence hashes.
+It authenticates the account with STS, retrieves complete account-wide Cost Explorer
+pages and current EC2/gp3/public-IPv4 Price List results, then imports the observation
+through `costs.py`. The existing ledger must already exist and bind the account.
+Missing observations, changed policy, ambiguous prices and incomplete pagination fail closed.
+
+Quotes preserve the operator's monthly limit and unreported-cost allowance, include
+existing held reservations, and expire after two hours. Compute uses the configured
+guest-stop duration; retained storage is estimated through month end. Optional
+`retained_storage_hours: 24` is only an explicit synthetic-test cleanup assumption,
+not an automatic deletion feature. The guest timer and estimates are not spending caps;
+retained disks and EIPs continue to require cleanup. GCP automatic collection is not
+implemented. Only apply reserves money; plan refresh never releases existing holds.
+
 Target JSON retains this existing shape; use a real private ledger and reviewed quote times, not the example values as an approval:
 
 ```json

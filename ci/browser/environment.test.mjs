@@ -9,7 +9,7 @@ test('environment form keeps one plan through DB and app deployment and preserve
   const plans = [], deployments = [], environments = [], errors = [];
   const profiles = [
     { id: 'ha-profile', label: 'AWS with PostgreSQL', provider: 'aws', supported: true, deployment_supported: true,
-      target_id: 'ha-runtime', application_name: 'database-app', database: { mode: 'patroni', required: true, database_nodes: 2, dcs_voters: 3, proxy_nodes: 1 } },
+      target_id: 'ha-runtime', create_per_request: true, application_name: null, database: { mode: 'patroni', required: true, database_nodes: 2, dcs_voters: 3, proxy_nodes: 1 } },
     { id: 'plain-profile', label: 'AWS runtime', provider: 'aws', supported: true, deployment_supported: true,
       target_id: 'plain-runtime', application_name: 'plain-app', database: null },
     { id: 'optional-profile', label: 'Optional database environment', provider: 'aws', supported: true, deployment_supported: false,
@@ -32,6 +32,7 @@ test('environment form keeps one plan through DB and app deployment and preserve
       const input = JSON.parse(bytes); plans.push(input);
       const result = { id: `plan-${plans.length}`, ...input, executable: true,
         expires_at: new Date(Date.now() + (planMode === 'expired' ? -1000 : 900000)).toISOString() };
+      if (profiles.find((profile) => profile.id === input.runtime.profile_id)?.create_per_request) result.runtime_target_id = `ha-runtime-${String(plans.length).padStart(8, '0')}`;
       if (planMode === 'wrong-name') result.name = 'another-app';
       return respond(response, 200, result);
     }
@@ -79,21 +80,23 @@ test('environment form keeps one plan through DB and app deployment and preserve
   await page.waitForFunction(() => document.querySelector('#target option[value="profile:ha-profile"]'));
   await page.locator('#repository-url').fill('https://github.com/example/other-source-name');
   await page.locator('#target').selectOption('profile:ha-profile');
-  assert.equal(await page.locator('#app-name').inputValue(), 'database-app');
-  assert.equal(await page.locator('#app-name').getAttribute('readonly'), '');
+  assert.equal(await page.locator('#app-name').inputValue(), 'other-source-name');
+  assert.equal(await page.locator('#app-name').getAttribute('readonly'), null);
+  await page.locator('#app-name').fill('my-new-app');
   assert.equal(await page.locator('#deployment-database').inputValue(), 'patroni');
   assert.equal(await page.locator('#deployment-database option[value="none"]').isDisabled(), true);
   assert.match(await page.locator('#deployment-database-note').innerText(), /PostgreSQL 2대.*DCS.*3대.*프록시 1대/);
   const review = () => page.locator('#deploy-form button[type="submit"]').click();
   await review();
   await page.waitForFunction(() => !document.querySelector('#review-panel').hidden);
-  assert.deepEqual(plans[0], { name: 'database-app', runtime: { profile_id: 'ha-profile', node_count: 1 },
+  assert.deepEqual(plans[0], { name: 'my-new-app', runtime: { profile_id: 'ha-profile', node_count: 1 },
     database: { mode: 'patroni', placements: [{ profile_id: 'ha-profile', database_nodes: 2, dcs_voters: 3, proxy_nodes: 1 }] } });
   assert.equal(deployments.length, 0, 'review must not create resources or submit source');
   await page.locator('#deploy-button').click();
   await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
-  assert.deepEqual(deployments[0], { path: '/api/v1/deployments', input: { app: 'database-app', target_id: 'ha-runtime',
+  assert.deepEqual(deployments[0], { path: '/api/v1/deployments', input: { app: 'my-new-app', target_id: 'ha-runtime-00000001',
     plan_id: 'plan-1', repository_url: 'https://github.com/example/other-source-name' } });
+  assert.equal(deployments.length, 1, 'one approved plan must produce one final deployment request');
   assert.equal(environments.length, 0, 'combined deployment delegates environment execution to the product API');
   const timeouts = await page.evaluate(() => window.railshotTestTimeouts);
   assert.ok(timeouts.includes(600000), 'environment planning gets ten minutes');
@@ -101,6 +104,8 @@ test('environment form keeps one plan through DB and app deployment and preserve
   assert.ok(timeouts.includes(15000), 'GET requests retain their fifteen-second deadline');
 
   await page.locator('#target').selectOption('profile:plain-profile');
+  assert.equal(await page.locator('#app-name').inputValue(), 'plain-app');
+  assert.equal(await page.locator('#app-name').getAttribute('readonly'), '');
   assert.equal(await page.locator('#deployment-database').inputValue(), 'none');
   assert.equal(await page.locator('#deployment-database option[value="patroni"]').isDisabled(), true);
   await review();
@@ -110,9 +115,11 @@ test('environment form keeps one plan through DB and app deployment and preserve
   await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('execution-2') && document.querySelector('#run-state').textContent === '앱 배포 완료');
   assert.equal(deployments[1].input.plan_id, 'plan-2');
   assert.equal(deployments[1].input.app, 'plain-app');
+  assert.equal(deployments[1].input.target_id, 'plain-runtime', 'legacy plans without runtime_target_id use the fixed profile target');
 
   await page.locator('#environment-panel summary').click();
   await page.locator('#profile').selectOption('ha-profile');
+  await page.locator('#environment-name').fill('database-env');
   assert.equal(await page.locator('#environment-database option[value="none"]').isDisabled(), true);
   await page.locator('#plan-button').click();
   await page.waitForFunction(() => !document.querySelector('#environment-button').disabled);

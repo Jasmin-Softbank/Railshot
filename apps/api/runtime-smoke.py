@@ -92,6 +92,7 @@ def installed(rows):
         run('openssl', 'version')
         for script in ['gitops/bridge.py', 'gitops/credentials.py', 'ci/scripts/runner/replenish.py',
                        'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py',
+                       'infrastructure/providers/terraform_tools/budget.py',
                        'infrastructure/ansible/cluster.py', 'infrastructure/providers/terraform_tools/access.py']:
             run(sys.executable, script, '--help')
         # Ansible builtin task imports and all runtime copy sources must actually be packaged.

@@ -86,7 +86,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "List the CI service target IDs and each target's registered application deployment capability. An unknown runtime status is not a readiness observation."
+        "description": "List configured CI targets and successfully registered environment targets, including application and DB capability. Successful environment bindings restore after API restart; runtime unknown is not a readiness observation."
       }
     },
     "/api/v1/profiles": {
@@ -1002,14 +1002,14 @@
           },
           "target_id": {
             "type": "string",
-            "description": "Fixed runtime target authorized by this profile."
+            "description": "Operator target ID, or the naming template when create_per_request is true."
           },
           "application_name": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Application from the optional deployment configuration; null when no application is configured."
+            "description": "Configured fixed application, or null when requests may choose an application name or no application is configured."
           },
           "deployment_supported": {
             "type": "boolean",
@@ -1057,6 +1057,10 @@
               }
             ],
             "description": "Configured Patroni role counts, or null. One VM may have both database and DCS roles, so the counts are not necessarily distinct VM counts. Plan validation checks the requested topology."
+          },
+          "create_per_request": {
+            "type": "boolean",
+            "description": "Derive a new runtime and database target set per plan from this operator template. This is capability, not a completed allocation."
           }
         },
         "required": [
@@ -1070,7 +1074,8 @@
           "target_id",
           "application_name",
           "deployment_supported",
-          "database"
+          "database",
+          "create_per_request"
         ],
         "additionalProperties": false
       },
@@ -1608,7 +1613,8 @@
           },
           "expires_at": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Plan-ready time plus 15 minutes, capped by the earliest provider cost quote expiry. Verification and replay do not extend it."
           },
           "executable": {
             "type": "boolean"
@@ -1620,7 +1626,43 @@
             }
           },
           "cost": {
-            "type": "null"
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "incremental_estimate": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "projected_total": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "limit": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "currency": {
+                    "const": "USD"
+                  },
+                  "within_budget": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "currency",
+                  "incremental_estimate",
+                  "projected_total",
+                  "limit",
+                  "within_budget"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fresh AWS billing and price estimate when automatic budget refresh is configured; null otherwise. Includes existing held reservations and unreported-cost allowance. This is admission estimation, not a hard spending cap."
           },
           "steps": {
             "type": "array",
@@ -1634,6 +1676,10 @@
               "string",
               "null"
             ]
+          },
+          "runtime_target_id": {
+            "type": "string",
+            "description": "Exact runtime target derived and fixed by this plan. Use this ID with plan_id when submitting a deployment."
           }
         },
         "required": [
@@ -1647,7 +1693,8 @@
           "blockers",
           "cost",
           "steps",
-          "plan_sha256"
+          "plan_sha256",
+          "runtime_target_id"
         ],
         "additionalProperties": false
       },
@@ -1852,7 +1899,7 @@
               "plan_id": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
-                "description": "Optional only for POST /api/v1/deployments. The plan name and fixed runtime target must match app and target_id, and its profile must support deployment registration."
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
               }
             },
             "required": [
@@ -1884,7 +1931,7 @@
               "plan_id": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
-                "description": "Optional only for POST /api/v1/deployments. The plan name and fixed runtime target must match app and target_id, and its profile must support deployment registration."
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
               }
             },
             "required": [
@@ -1923,7 +1970,7 @@
               "plan_id": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
-                "description": "Optional only for POST /api/v1/deployments. The plan name and fixed runtime target must match app and target_id, and its profile must support deployment registration."
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
               }
             },
             "required": [
