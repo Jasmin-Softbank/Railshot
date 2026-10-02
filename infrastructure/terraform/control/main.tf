@@ -30,6 +30,15 @@ variable "enable_product_executor" {
   default     = false
   description = "Operator opt-in for the reviewed product executor. Bootstrap must verify the fixed Cilium metadata deny policy before applying this setting."
 }
+variable "product_metadata_hop_limit" {
+  type        = number
+  default     = 2
+  description = "Verified control-node pod return path. Use 3 only for an extra Cilium routing hop; the metadata deny policy remains required."
+  validation {
+    condition     = contains([2, 3], var.product_metadata_hop_limit)
+    error_message = "Use only the verified two- or three-hop control path."
+  }
+}
 variable "vpc_id" { type = string }
 variable "registered_runtime_instance_ids" {
   type        = set(string)
@@ -235,7 +244,7 @@ resource "aws_instance" "control" {
   credit_specification { cpu_credits = "standard" }
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = var.enable_product_executor ? 2 : 1
+    http_put_response_hop_limit = var.enable_product_executor ? var.product_metadata_hop_limit : 1
   }
   root_block_device {
     volume_type           = "gp3"

@@ -29,11 +29,16 @@ run "instance_ids_do_not_enable_executor" {
   command = plan
   variables {
     enable_product_executor         = false
+    product_metadata_hop_limit      = 3
     registered_runtime_instance_ids = ["i-0123456789abcdef0"]
   }
   assert {
     condition     = length(aws_iam_role_policy.registered_runtimes) == 0
     error_message = "Explicit instance IDs must not bypass the executor opt-in."
+  }
+  assert {
+    condition     = aws_instance.control.metadata_options[0].http_put_response_hop_limit == 1
+    error_message = "An opted-out executor must retain hop limit 1 even when the product setting is 3."
   }
 }
 
@@ -44,6 +49,31 @@ run "enabled_executor_without_instances_has_no_permission" {
     condition     = length(aws_iam_role_policy.registered_runtimes) == 0
     error_message = "An empty registration must not expand to wildcard runtime access."
   }
+  assert {
+    condition     = aws_instance.control.metadata_options[0].http_put_response_hop_limit == 2
+    error_message = "An enabled executor must default to hop limit 2."
+  }
+}
+
+run "enabled_executor_can_select_three_hops" {
+  command = plan
+  variables {
+    enable_product_executor    = true
+    product_metadata_hop_limit = 3
+  }
+  assert {
+    condition     = aws_instance.control.metadata_options[0].http_put_response_hop_limit == 3
+    error_message = "An enabled executor must honor the explicit three-hop setting."
+  }
+}
+
+run "reject_unreviewed_metadata_hop_limit" {
+  command = plan
+  variables {
+    enable_product_executor    = true
+    product_metadata_hop_limit = 4
+  }
+  expect_failures = [var.product_metadata_hop_limit]
 }
 
 run "enabled_executor_grants_exact_instances_and_document_check" {
