@@ -322,7 +322,7 @@ function renderRun() {
   document.querySelector('#run-binding').textContent = binding;
   const stageStates = ['접수 완료', steps.find((step) => step.key === 'loop')?.conclusion || steps.find((step) => step.key === 'loop')?.status,
     steps.find((step) => step.key === 'release')?.conclusion || steps.find((step) => step.key === 'release')?.status, current.cd?.state, current.public_http?.state];
-  document.querySelector('#monitor-steps').replaceChildren(...['소스 접수', '앱 검사 및 수정', '이미지 빌드', 'GitOps 반영', 'URL 및 앱 상태 확인'].map((label, index) => {
+  document.querySelector('#monitor-steps').replaceChildren(...['소스 접수', '앱 검사 및 수정', '검증 이미지 게시', 'GitOps 반영', 'URL 및 앱 상태 확인'].map((label, index) => {
     const item = document.createElement('li'); item.textContent = `${label} · ${stageStates[index] || '대기'}`; return item;
   }));
   renderHistory();

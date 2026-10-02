@@ -36,6 +36,40 @@ def imported_workspace(tmp, files):
 
 
 class PipelineTest(unittest.TestCase):
+    def test_trusted_app_identity_fails_at_l1_then_all_gates_accept_corrected_spec(self):
+        spec = {"apiVersion": "railshot/v0", "app": "calculator", "services": [
+            {"name": "web", "build": {"dockerfile": "Dockerfile"}, "port": 8080, "health": "/", "route": "/"}]}
+        files = {".railshot/railshot.yaml": gate.yaml.safe_dump(spec), ".dockerignore": ".git\n.env*\n",
+                 "Dockerfile": 'FROM node:22.23.3-bookworm-slim\nUSER 65532\nEXPOSE 8080\nCMD ["node", "app.js"]\n'}
+        image_id = "sha256:" + "c" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = imported_workspace(tmp, files)
+            with patch.object(gate, "run_quality") as quality_check:
+                failed = gate.run_gate(ws, Path(tmp) / "failed", list(gate.ORDER), app_id="fixture-npm-js")
+                quality_check.assert_not_called()
+            self.assertEqual([r["layer"] for r in failed["layers"]], ["L0", "L1"])
+            self.assertEqual((failed["status"], failed["failure"]["class"]), ("FAIL", "F5"))
+            self.assertIn("trusted app identity is fixture-npm-js", failed["failure"]["excerpt"])
+            self.assertIsNone(loop.decide(failed, None, set()))
+            self.assertEqual("calculator", gate.yaml.safe_load((ws / ".railshot/railshot.yaml").read_text())["app"])
+            spec["app"] = "fixture-npm-js"
+            (ws / ".railshot/railshot.yaml").write_text(gate.yaml.safe_dump(spec))
+            original_shell = gate.sh
+            def shell(cmd, **kwargs):
+                return SimpleNamespace(stdout=image_id) if cmd[:3] == ["docker", "image", "inspect"] else original_shell(cmd, **kwargs)
+            with patch.object(gate, "run_quality", return_value={"ok": True}), patch.object(gate, "require_ci_network"), \
+                    patch.object(gate, "docker_ok", return_value=True), \
+                    patch.object(gate, "l2", return_value=([], {"web": "test:identity"})), \
+                    patch.object(gate, "sh", side_effect=shell), \
+                    patch.object(gate, "l4", return_value=[]), patch.object(gate, "l3", return_value=[]):
+                passed = gate.run_gate(ws, Path(tmp) / "passed", list(gate.ORDER), app_id="fixture-npm-js")
+            self.assertTrue(passed["release_eligible"])
+            self.assertEqual(passed["app_id"], "fixture-npm-js")
+            self.assertEqual([r["layer"] for r in passed["layers"]], list(gate.ORDER))
+            invalid = gate.run_gate(ws, Path(tmp) / "invalid", list(gate.ORDER), app_id="../other")
+            self.assertEqual(invalid["status"], "BLOCKED")
+            self.assertEqual(invalid["layers"][0]["blocked"], "INVALID_APP_ID")
+
     def test_imported_ignored_source_is_tracked_and_policy_checked(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = imported_workspace(tmp, {".gitignore": "app.py\n", "app.py": "print('before')\n"})

@@ -13,7 +13,7 @@ import quality
 import repair
 from test_pipeline import imported_workspace
 import loop
-from runner.run_agent import apply_files, source_change_allowed, writable_rules, record_plan
+from runner.run_agent import apply_files, source_change_allowed, writable_rules, record_plan, proposal_rejection, instructions, load_yaml
 
 TEST = """import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -33,6 +33,43 @@ SOURCE = """export function calculate(a, b, operator) {
 
 
 class SourceRepairTest(unittest.TestCase):
+    def test_native_behavior_tests_and_prompt_match_writer_contract(self):
+        profile = load_yaml(gate.PLATFORM / "runner/profiles.yaml")
+        for role in ("adapter", "fixer"):
+            prompt = instructions(profile, profile["roles"][role])
+            for rule in ("node --test", "--experimental-strip-types", "ssrLoadModule", "assert.strictEqual", "20,000"):
+                self.assertIn(rule, prompt)
+        variants = [TEST.replace("import assert from 'node:assert/strict';", "import { strictEqual, throws } from 'node:assert/strict';")
+                    .replace("assert.strictEqual", "strictEqual").replace("assert.throws", "throws"),
+                    TEST.replace("import { calculate } from '../src/calculator.mjs';",
+                                 "const { calculate } = await import(new URL('../src/calculator.mjs', import.meta.url));")]
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp); (ws / "src").mkdir(); (ws / "tests").mkdir()
+            app, test = ws / "src/calculator.mjs", ws / "tests/calculator.test.mjs"
+            for content in variants:
+                source_change_allowed("tests/calculator.test.mjs", content, None)
+                test.write_text(content)
+                for source, passed in ((SOURCE, True), (SOURCE.replace("a + b", "a - b"), False)):
+                    app.write_text(source)
+                    result = subprocess.run(["node", "--test", str(test)], capture_output=True, timeout=10)
+                    self.assertEqual(passed, result.returncode == 0)
+        vite = TEST.replace("import { calculate } from '../src/calculator.mjs';",
+                            "const { calculate } = await server.ssrLoadModule('/src/calculator.ts');")
+        source_change_allowed("tests/calculator.test.mjs", vite, None)
+        for invalid in (vite.replace("/src/calculator.ts", "https://example.com/fake.ts"),
+                        "import {strictEqual} from 'node:assert/strict'; import '../src/calculator.mjs'; strictEqual(true,true);"):
+            with self.assertRaises(ValueError):
+                source_change_allowed("tests/calculator.test.mjs", invalid, None)
+        before = json.dumps({"scripts": {}})
+        for script in ("node --test", "node --test tests/calculator.test.mjs", "vitest --environment node", "vitest run --environment jsdom", "jest"):
+            source_change_allowed("package.json", json.dumps({"scripts": {"test": script}}), before)
+        with self.assertRaises(ValueError) as rejected:
+            source_change_allowed("package.json", json.dumps({"scripts": {"test": "node --experimental-strip-types --test"}}), before)
+        detail = proposal_rejection(rejected.exception)
+        self.assertEqual("TEST_SCRIPT_UNSUPPORTED", detail["reason"])
+        self.assertIn("node --test", detail["guidance"])
+        self.assertIn("ssrLoadModule", detail["guidance"])
+
     def test_zero_collected_is_repairable_but_missing_report_and_custom_runner_are_not(self):
         collected = quality.quality_failure("No tests found", 204, repair_scope="source")
         self.assertTrue(collected["source_repair_eligible"])
