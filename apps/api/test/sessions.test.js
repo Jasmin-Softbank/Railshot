@@ -164,3 +164,86 @@ test('legacy state migrates once without assigning old jobs; expired or forged c
     assert.equal(store.read().operations.old.status, 'unknown');
   } finally { await store.close(); }
 });
+
+test('SQLite history keysets retain deterministic pages across ties, inserts and restart without disclosing owners', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-history-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let store = await createProductStore(directory);
+  const a = store.dashboard.session(null), b = store.dashboard.session(null);
+  const add = (state, id, sessionId, kind = 'deployments', created_at = '2026-10-03T00:00:00.000Z') => {
+    state.operations[id] = { id, session_id: sessionId, kind, status: 'failed', created_at, ci: { run_id: `10${id.slice(-1)}` } };
+  };
+  await store.transaction((state) => {
+    for (const id of ['d3', 'd1', 'd5', 'd2', 'd4']) add(state, id, a.id);
+    add(state, 'foreign', b.id); add(state, 'legacy', null);
+    for (const id of ['b2', 'b1', 'b3']) add(state, id, a.id, 'builds');
+  });
+  const page = (kind, marker = null, sessionId = a.id) => store.operationPage(kind, sessionId, { limit: 2, marker });
+  try {
+    const first = page('deployments');
+    assert.deepEqual(first.records.map((row) => row.id), ['d5', 'd4']); assert.equal(first.total, 5); assert.equal(first.hasMore, true);
+    await store.transaction((state) => add(state, 'new', a.id, 'deployments', '2026-10-03T01:00:00.000Z'));
+    const second = page('deployments', 'd4');
+    assert.deepEqual(second.records.map((row) => row.id), ['d3', 'd2']); assert.equal(second.total, 6);
+    await store.close(); store = await createProductStore(directory);
+    assert.deepEqual(page('deployments').records.map((row) => row.id), ['new', 'd5']);
+    assert.deepEqual(page('deployments', 'd4').records.map((row) => row.id), ['d3', 'd2']);
+    const last = page('deployments', 'd2'); assert.deepEqual(last.records.map((row) => row.id), ['d1']); assert.equal(last.hasMore, false);
+    assert.deepEqual(page('deployments', 'd1').records, []);
+    for (const marker of ['foreign', 'legacy', 'b1', '__proto__']) assert.throws(() => page('deployments', marker), { status: 422 });
+    assert.throws(() => page('deployments', 'd4', b.id), { status: 422 });
+    assert.deepEqual(page('deployments', null, b.id).records.map((row) => row.id), ['foreign']);
+    const builds = page('builds'); assert.deepEqual(builds.records.map((row) => row.id), ['b3', 'b2']);
+    assert.deepEqual(page('builds', '102').records.map((row) => row.id), ['b1']);
+    assert.throws(() => page('builds', 'b2'), { status: 422 }, 'build markers are public run IDs, not internal operation IDs');
+  } finally { await store.close(); }
+});
+
+test('HTTP histories page persisted summaries, reject invalid bounds and keep new admissions off following pages', async (t) => {
+  const f = await fixture(t), a = f.client(), b = f.client();
+  const admitted = [];
+  const deploy = async (client, key) => {
+    const { body } = await client.request('/api/v1/deployments', { method: 'POST', headers: { 'Idempotency-Key': key }, body: source() });
+    await completed(client, body.resource_id); return body.resource_id;
+  };
+  for (let index = 0; index < 5; index++) admitted.push(await deploy(a, `page-${index}`));
+  const foreign = await deploy(b, 'foreign');
+  const first = await a.request('/api/v1/deployments?limit=2');
+  assert.equal(first.response.status, 200); assert.equal(first.response.headers.get('cache-control'), 'no-store');
+  assert.ok(first.response.headers.get('x-request-id')); assert.equal(first.body.total, 5); assert.equal(first.body.items.length, 2);
+  assert.equal(JSON.stringify(first.body).includes('session_id'), false);
+  const newer = await deploy(a, 'newer'), seen = first.body.items.map((row) => row.id);
+  let marker = first.body.next_marker;
+  while (marker) {
+    const result = await a.request(`/api/v1/deployments?limit=2&marker=${marker}`);
+    assert.equal(result.body.total, 6); seen.push(...result.body.items.map((row) => row.id)); marker = result.body.next_marker;
+  }
+  assert.equal(new Set(seen).size, 5); assert.deepEqual([...seen].sort(), [...admitted].sort()); assert.ok(!seen.includes(newer));
+  await f.restart();
+  assert.equal((await a.request('/api/v1/deployments?limit=1')).body.items[0].id, newer);
+  for (const query of ['limit=0', 'limit=101', 'limit=-1', 'limit=2.5', 'limit=2&limit=3', 'marker=', 'marker=x&marker=y', `marker=${foreign}`, 'status=failed', 'marker=not-found']) {
+    const rejected = await a.request(`/api/v1/deployments?${query}`);
+    assert.equal(rejected.response.status, 422, query); assert.equal(rejected.body.error.code, 'INVALID_INPUT');
+  }
+  assert.equal((await b.request(`/api/v1/deployments?marker=${first.body.next_marker}`)).response.status, 422);
+  assert.equal((await f.client().request('/api/v1/deployments')).body.total, 0);
+  assert.deepEqual((await a.request('/api/v1/builds?limit=1')).body, { items: [], next_marker: null, total: 0 });
+  const builds = [];
+  for (let index = 0; index < 3; index++) {
+    const accepted = await a.request('/api/v1/builds', { method: 'POST', body: source() });
+    assert.equal(accepted.response.status, 202); builds.push(accepted.body.resource_id);
+    for (let count = 0; count < 100; count++) {
+      const list = (await a.request('/api/v1/builds')).body;
+      if (list.items.every((row) => !['queued', 'running'].includes(row.status))) break;
+      await pause(10);
+    }
+  }
+  const buildPage = (await a.request('/api/v1/builds?limit=2')).body;
+  assert.equal(buildPage.total, 3); assert.equal(buildPage.items.length, 2);
+  const buildLast = (await a.request(`/api/v1/builds?limit=2&marker=${buildPage.next_marker}`)).body;
+  assert.equal(buildLast.items.length, 1); assert.equal(buildLast.next_marker, null);
+  assert.deepEqual([...buildPage.items, ...buildLast.items].map((row) => row.id).sort(), builds.sort());
+  assert.equal((await a.request(`/api/v1/builds/${buildLast.items[0].id}`)).response.status, 200);
+  assert.equal((await b.request('/api/v1/builds')).body.total, 0);
+
+});

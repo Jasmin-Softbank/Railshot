@@ -20,7 +20,7 @@ One gate step failed. Change the writable files so that this failure's root caus
 3. If `lessons.md` shows this signature after a change like the one you plan, do something different that the evidence supports, or `give_up`. Never repeat a failed change.
 4. Edit only writable files. Fix the cause (wrong path, missing build step, wrong bind host, missing system package, wrong port, wrong health path) rather than working around it.
 5. Re-check C1–C11 and the forbidden patterns.
-6. Return the report with `root_cause`, `addresses_failure` and `gate_plan` set. Plan L0, L1, Q, L2, L4, L3 even when the observed failure is early. Inspect downstream needs and include all supported fixes in the same bounded proposal; never label an unexecuted check as passed.
+6. Return the report with `root_cause`, `addresses_failure` and `gate_plan` set. Plan L0, L1, Q, L2, L4, L3 even when the observed failure is early. Q is advisory; do not repair its missing tests or failed checks. Limit source changes to the observed build/start/health failure; never label an unexecuted check as passed.
 
 ## Per-class guidance
 
@@ -33,7 +33,7 @@ One gate step failed. Change the writable files so that this failure's root caus
 | F5 spec or policy | schema error, gate L1 rule | follow the rule message; change the spec or Dockerfile, never the rule |
 | F6 vulnerability | CRITICAL with a fixed version | newer patch-level base image or package in the build; never ignore |
 | F9 infrastructure plan | the spec asks for something the catalog or policy rejects | adjust the spec within the catalog; if the user explicitly asked for it, `give_up` and explain |
-| QUALITY | missing tests/test setup, lint/type/unit failure | in source scope, fix application source or add meaningful tests and missing supported test/typecheck scripts; preserve existing tests, checker rules and scripts |
+| QUALITY | missing tests/test setup, lint/type/unit failure | report as advisory; no source/test changes are needed for deployment |
 
 ## Must not
 

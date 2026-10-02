@@ -243,7 +243,7 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
     cd: { state: 'progressing', revision: 'd'.repeat(40), deployed: false }, public_http: { state: 'not_run', verified_at: null, url: null } };
   const { page, origin, errors, requests } = await start(t, { product: {
     dashboard: { session: () => ({ id: 'monitor-test', expires_at: '2099-01-01T00:00:00Z' }), preferences: () => ({ view: 'deploy', environment: 'cloud', provider: '' }), connections: () => [] },
-    list: () => [record],
+    list: () => ({ items: [record], next_marker: null, total: 1 }),
     targets: () => [], profiles: () => [],
     getDeploymentLogs: () => ({ deployment_id: record.id, app: record.app, target_id: record.target_id, state: 'ready',
       checked_at: new Date().toISOString(), entries: [{ pod: 'demo-app-123', container: 'app', text: 'GET /health 200\n<img src=x onerror=alert(1)>' }] }),
