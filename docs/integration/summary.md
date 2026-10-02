@@ -2,6 +2,8 @@
 
 2026-10-02, `integration/team-assembly-20261002`, base `e100373528352f1b9594311c643e9ad30ba87580`에서 담당자 소스 254개, 1,409,119 bytes를 조립했다. 이것은 원격 merge·배포·통합 E2E 완료 기록이 아니다. 원본 Jasmin의 미커밋 변경과 다른 worktree는 변경하지 않았다.
 
+이 문서는 최초 소스 조립 당시의 기록입니다. 아래 설치 경로와 CI/CD 미연결 설명도 당시 상태를 보존합니다. 현재 구조와 후속 검증 범위는 [루트 README](../../README.md), [공통 아키텍처](../architecture/README.md), [Ansible 인터페이스](../api/ansible.md), [AWS/GCP 배포 기록](cloud-e2e-progress.md)을 확인하세요.
+
 | 담당 | 선택 파일 수 | 배치 |
 | --- | ---: | --- |
 | 홍진기 | 16 | `apps/api`, `apps/dashboard` |
@@ -16,7 +18,7 @@
 
 운영 UI/API와 고객 runtime은 별도 책임이다. API는 진기의 localhost 서비스이며 Provider API는 화균의 project-scoped OpenStack 서비스다. CI는 원본 검사·제한된 AI 수정·재검사·동일 이미지 게시까지만 수행한다. `deployment/install.sh`는 승민의 단일 노드 runtime 및 nginx sample 설치다. 정빈의 `site.yml`도 K3s를 설치하므로 두 설치기를 연속 실행하면 안 된다. 통합 실행 경로는 새 `infrastructure/ansible/run.py`가 guest 검사 후 승민 `deployment/runtime.sh`를 한 번 호출한다.
 
-현재 CI workflow는 `ci/workflows`의 소스 템플릿으로만 보관했다. 업로드용 private apps 저장소에 설치하고 신뢰할 수 있는 integration commit을 PLATFORM_REF로 고정하기 전에는 remote CI 실행 경로가 연결된 상태가 아니다. CodeBuild publisher와 Azure Terraform는 보존된 선택 실험이며 첫 통합 경로의 기본값이 아니다.
+초기 조립 당시 CI workflow는 `ci/workflows`의 소스 템플릿으로만 보관했다. 업로드용 private apps 저장소에 설치하고 신뢰할 수 있는 integration commit을 PLATFORM_REF로 고정하기 전에는 remote CI 실행 경로가 연결된 상태가 아니다. CodeBuild publisher와 Azure Terraform는 보존된 선택 실험이며 첫 통합 경로의 기본값이 아니다.
 
 기존 연구·실행기록은 원격 고정 SHA에 보존되어 있다. [승민 검증 기록](https://github.com/Jasmin-Softbank/Jasmin/blob/fb503fd609161dc94cd167f75da0eef456d148e2/deployment-poc/reports/VALIDATION-2026-10-01.md)과 [화균 검증 기록](https://github.com/Jasmin-Softbank/Jasmin/blob/e308749cc78408c3d933ea76aa06ab982045450b/docs/validation.md)은 해당 부품의 과거 결과이며 이 통합본의 결과가 아니다. 원격 로그를 다시 실행하거나 cloud에 접속하지 않았다.
 

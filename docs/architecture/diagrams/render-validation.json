@@ -1,51 +1,80 @@
-[
-  {
-    "name": "system-overview",
-    "width": 668.96875,
-    "height": 1119.375,
-    "viewBox": "0 21 668.97265625 1119.3837890625",
-    "clipped": [],
-    "cluster_label_overlaps": [],
-    "source_sha256": "c52182efe8acd13fb1ec142a9afd806ea644847fcb2f59f3af5122c7c12b978b"
-  },
-  {
-    "name": "cluster-structure",
-    "width": 1440,
-    "height": 1031.5625,
-    "viewBox": "0 -21 1483.234375 1062.5352783203125",
-    "clipped": [],
-    "source_sha256": "fd69686e376ba465327679347aee8d2db35ab1369f0348f223c1991992eb15f5"
-  },
-  {
-    "name": "network-topology",
-    "width": 1440,
-    "height": 994.703125,
-    "viewBox": "0 21 1502.65625 1038",
-    "clipped": [],
-    "source_sha256": "d4bbbd98e6fca53e7174ae52be06e2639b8a6a333ad49564ebe16bbbf0d96f01"
-  },
-  {
-    "name": "user-flow",
-    "width": 565.375,
-    "height": 1313,
-    "viewBox": "0 21 565.3828125 1313.03125",
-    "clipped": [],
-    "source_sha256": "fc4ff72026a23b7d8831d30470ea6e011ea8d75f48a940de7a4dead1abfee7c7"
-  },
-  {
-    "name": "data-flow",
-    "width": 422.40625,
-    "height": 1467.140625,
-    "viewBox": "0 21.00000762939453 422.40625 1467.147705078125",
-    "clipped": [],
-    "source_sha256": "72fa1c030503094ebdfedff18a0c4e4a7a2b0206b8fbea19536b7ca729fdf9ee"
-  },
-  {
-    "name": "deployment-sequence",
-    "width": 1226,
-    "height": 1314,
-    "viewBox": "-50 -10 1226 1314",
-    "clipped": [],
-    "source_sha256": "f6dbfe01740f61e727ac13cbb18bd1d69a757fc175ab21192670d3118c4be0a5"
-  }
-]
+{
+  "source_basis": "bc61a5a2e00873191d3fee710d391ca6a8c57020",
+  "review_date": "2026-10-02",
+  "scope": "Diagram syntax, body/source identity, output hashes, local link existence and rendered pixels only; not cloud deployment validation.",
+  "relative_links": "passed",
+  "figures": [
+    {
+      "name": "system-overview",
+      "source_sha256": "66d4ecd390cbf218a161753811d00c1e0682003663dfd00ee06d6eaef942fd00",
+      "svg_sha256": "84a1fccb8148821631ce329c5bed2daeea69e023b177063a653071dc534c444b",
+      "png_sha256": "0004c9cec8c880788cd033fb7301e0b248adb0a0703f39bd3b1c4a4534aaac34",
+      "svg_viewbox": "0 0 781.109375 1376",
+      "png_width": 1564,
+      "png_height": 2752,
+      "body_source_match": true,
+      "syntax_render": "passed",
+      "visual_review": "Labels, containment, edge targets and clipping inspected in rendered PNG; no overlap or clipping observed after revision."
+    },
+    {
+      "name": "cluster-structure",
+      "source_sha256": "40a94f93922cb922532c0d95b581e452bc28ddd42b6339d92e95dd36c2a235db",
+      "svg_sha256": "5a59f113d968bca0ac10423c600204e0eee5abb9ab95a3e87012f68a958ae49f",
+      "png_sha256": "c23bea475f1da4990a0cafa7a9e0ede4662fcd9df4670f68ef676dd2f1967d2a",
+      "svg_viewbox": "0 0 910.75 1129.209716796875",
+      "png_width": 1822,
+      "png_height": 2260,
+      "body_source_match": true,
+      "syntax_render": "passed",
+      "visual_review": "Labels, containment, edge targets and clipping inspected in rendered PNG; no overlap or clipping observed after revision."
+    },
+    {
+      "name": "network-topology",
+      "source_sha256": "6d749bdf61699b277a3dc0d7ac25769b30cc0003664ccdf4f9362cb35ea8942c",
+      "svg_sha256": "0fe4f1783de86c9416476ac0223f0c76d88630fab09e19b8a3305a26eb99a153",
+      "png_sha256": "f25e7c17b5de00bf41e2ba176683e331bcb45e0d9b930b589dbdfa4ae7befb78",
+      "svg_viewbox": "4 4 1023.3572998046875 1374.683837890625",
+      "png_width": 2048,
+      "png_height": 2750,
+      "body_source_match": true,
+      "syntax_render": "passed",
+      "visual_review": "Labels, containment, edge targets and clipping inspected in rendered PNG; no overlap or clipping observed after revision."
+    },
+    {
+      "name": "data-flow",
+      "source_sha256": "e664e81aeec4e03bb49b32911bd1d58732365e9f098ab40b48924fd90e06fa89",
+      "svg_sha256": "d3dbf4f9b7b246f6ac41fda0662cf5fb1cb66b3bc388cc61ddaaada7eec6f163",
+      "png_sha256": "a92603204c10a9894b27d99738d3e4d7ed3b6dc97254b2aebaab1984e8605647",
+      "svg_viewbox": "4 4 758.9817504882812 1863.131103515625",
+      "png_width": 1518,
+      "png_height": 3728,
+      "body_source_match": true,
+      "syntax_render": "passed",
+      "visual_review": "Labels, containment, edge targets and clipping inspected in rendered PNG; no overlap or clipping observed after revision."
+    },
+    {
+      "name": "user-flow",
+      "source_sha256": "e7168d8ad2e5ef23688ef8a0980295338d4a48fc14293080df6f7e56302f2f3f",
+      "svg_sha256": "32d93d2906c32067e7d631849c2c338c80ba4eb58387a3fc0bdfed5945da5cc6",
+      "png_sha256": "b627ba8cf964dea2768431c537dc2a3797a3efe970ea53dc1bc5bb31b3822ba2",
+      "svg_viewbox": "4 4 683.875 1487.71875",
+      "png_width": 1368,
+      "png_height": 2976,
+      "body_source_match": true,
+      "syntax_render": "passed",
+      "visual_review": "Labels, containment, edge targets and clipping inspected in rendered PNG; no overlap or clipping observed after revision."
+    },
+    {
+      "name": "deployment-sequence",
+      "source_sha256": "2f22937ae107a1e55c472580e4f7f74dbec57e0f21d0dddc94b57aebe79440e5",
+      "svg_sha256": "cfa543680544e48b8e8173142949a8ddb6801303884fb44314602e2073995ed7",
+      "png_sha256": "872f728b678705c15b90cca00ba42985f22258787f5031b943559978a5cf0eb8",
+      "svg_viewbox": "-50 -10 1323 1164",
+      "png_width": 2646,
+      "png_height": 2328,
+      "body_source_match": true,
+      "syntax_render": "passed",
+      "visual_review": "Labels, containment, edge targets and clipping inspected in rendered PNG; no overlap or clipping observed after revision."
+    }
+  ]
+}
