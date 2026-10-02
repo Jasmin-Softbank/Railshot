@@ -66,7 +66,8 @@ def check_cluster(pod_cidr, service_cidr, wait_seconds=300, profile='customer'):
     pod_pool, service_pool = ipaddress.ip_network(pod_cidr), ipaddress.ip_network(service_cidr)
     if pod_pool.version != 4 or service_pool.version != 4 or pod_pool.overlaps(service_pool):
         raise ValueError('profile requires non-overlapping IPv4 Pod and Service CIDRs')
-    # /readyz can precede kubelet registration and controller CIDR allocation.
+    # /readyz can precede kubelet registration, the K3s server-role label patch,
+    # and controller CIDR allocation.
     # Wait for those API objects only; NodeReady itself needs Cilium.
     deadline = time.monotonic() + wait_seconds
     while True:
@@ -77,26 +78,29 @@ def check_cluster(pod_cidr, service_cidr, wait_seconds=300, profile='customer'):
         if profile == 'control' and nodes:
             server_roles = {'node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master'}
             servers = [node for node in nodes if server_roles & set(node.get('metadata', {}).get('labels', {}))]
-            if len(nodes) > 2 or len(servers) != 1:
+            if len(nodes) > 2 or len(servers) > 1:
                 raise ValueError('control requires one server and at most one approved build agent')
-            selected = servers[0]
-            if (selected['metadata']['labels'].get('railshot.io/node-role') == 'build'
-                    or any(t.get('key') == 'railshot.io/dedicated' and t.get('value') == 'build'
-                           for t in selected.get('spec', {}).get('taints', []))):
-                raise ValueError('control-plane server cannot also be the dedicated build worker')
-            for node in nodes:
-                if node is selected:
-                    continue
-                labels = node.get('metadata', {}).get('labels', {})
-                dedicated = {'key': 'railshot.io/dedicated', 'value': 'build', 'effect': 'NoSchedule'}
-                taints = [t for t in node.get('spec', {}).get('taints', []) if t.get('key') == dedicated['key']]
-                if (labels.get('railshot.io/node-role') != 'build'
-                        or 'node-role.kubernetes.io/etcd' in labels or taints != [dedicated]):
-                    raise ValueError('additional control node must be the approved tainted build agent')
-        if nodes and all(node.get('spec', {}).get('podCIDR') for node in nodes):
+            # A newly registered server can have a PodCIDR before K3s patches
+            # its role label. Missing identity is pending, never authorization.
+            selected = servers[0] if servers else None
+            if selected is not None:
+                if (selected['metadata']['labels'].get('railshot.io/node-role') == 'build'
+                        or any(t.get('key') == 'railshot.io/dedicated' and t.get('value') == 'build'
+                               for t in selected.get('spec', {}).get('taints', []))):
+                    raise ValueError('control-plane server cannot also be the dedicated build worker')
+                for node in nodes:
+                    if node is selected:
+                        continue
+                    labels = node.get('metadata', {}).get('labels', {})
+                    dedicated = {'key': 'railshot.io/dedicated', 'value': 'build', 'effect': 'NoSchedule'}
+                    taints = [t for t in node.get('spec', {}).get('taints', []) if t.get('key') == dedicated['key']]
+                    if (labels.get('railshot.io/node-role') != 'build'
+                            or 'node-role.kubernetes.io/etcd' in labels or taints != [dedicated]):
+                        raise ValueError('additional control node must be the approved tainted build agent')
+        if selected is not None and all(node.get('spec', {}).get('podCIDR') for node in nodes):
             break
         if time.monotonic() >= deadline:
-            raise ValueError('timed out waiting for node registration/PodCIDR')
+            raise ValueError('timed out waiting for node registration/PodCIDR or confirmed server role')
         time.sleep(3)
     allocations = []
     for node in nodes:
