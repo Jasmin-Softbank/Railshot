@@ -235,11 +235,11 @@ jobs:
       - name: Validate without credentials, backend or apply
         run: |
           terraform fmt -check -recursive infrastructure/terraform
-          for module in aws aws-edge ci control gcp azure platform-verification; do
+          for module in aws aws-edge openstack-edge ci control gcp azure platform-verification; do
             terraform -chdir="infrastructure/terraform/$module" init -backend=false -input=false
             terraform -chdir="infrastructure/terraform/$module" validate
           done
-          for suite in infrastructure/terraform/aws infrastructure/terraform/aws-edge infrastructure/terraform/ci infrastructure/terraform/gcp infrastructure/terraform/azure/tests; do
+          for suite in infrastructure/terraform/aws infrastructure/terraform/aws-edge infrastructure/terraform/openstack-edge infrastructure/terraform/ci infrastructure/terraform/gcp infrastructure/terraform/azure/tests; do
             python -m unittest discover -s "$suite" -p 'test_*.py' -v
           done
 

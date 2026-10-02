@@ -1,5 +1,7 @@
 # RAILSHOT 공통 아키텍처
 
+**네트워크 후속 결정(2026-10-02):** AWS·GCP·OpenStack 모두 self-managed K3s를 사용하고, 선택한 공급자 안에서 앱 공개 경로를 완성합니다. 새 목표와 Octavia L7 구현 범위는 [self-managed K3s 공개 경로](self-managed-ingress.md)를 따릅니다. 아래 Route53·중앙 ALB·WireGuard 그림은 명시된 기준 커밋의 구현 이력이며 새 목표의 완료 증거가 아닙니다.
+
 **구현 기준: integration `bc61a5a2e00873191d3fee710d391ca6a8c57020` (2026-10-02).** AI 보조 검사·수정·이미지 게시, 운영자 GitOps/Argo 배포 도구, AWS/GCP 관리자 배포 인수 기록을 반영합니다. 작업 중인 제품 API 브랜치와 실시간 운영 상태를 이 기준에 합치지 않습니다.
 
 RAILSHOT은 앱 소스를 검사하고, 필요한 경우 AI가 제한된 범위를 수정한 뒤 같은 검사를 다시 통과시켜 배포 가능한 이미지를 만듭니다. 운영 서비스와 전용 빌드 노드는 하나의 운영 K3s에 배치하고, 고객 앱은 AWS·GCP·온프레미스의 독립 K3s에서 실행합니다. DB는 모든 K3s 밖의 별도 VM 영역입니다.
