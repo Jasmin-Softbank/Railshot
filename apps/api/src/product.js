@@ -27,23 +27,39 @@ function checkFree(state) {
   if (Object.values(state.operations).some(active)) throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
 }
 
-export async function createProductService({ service, directory, target, deployPublished, environmentAdapter, observeMetrics = createMetricsObserver(), pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, observeMetrics = createMetricsObserver(), pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+  const targetId = target?.id || service?.targetId;
+  if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
+  const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
+  if (providerTargets !== undefined) {
+    if (!providerTargets || Array.isArray(providerTargets) || typeof providerTargets !== 'object') throw invalid('공급자별 대상 설정이 잘못되었습니다.');
+    for (const [provider, id] of Object.entries(providerTargets)) {
+      if (!['aws', 'openstack', 'proxmox'].includes(provider) || typeof id !== 'string' || !TARGET_ID.test(id)
+          || selections.has(provider) && selections.get(provider) !== id
+          || [...selections].some(([other, value]) => other !== provider && value === id)) throw invalid('공급자별 대상 설정이 잘못되었습니다.');
+      selections.set(provider, id);
+    }
+  }
   const store = await createProductStore(directory);
   const abort = new AbortController();
   function checkCapacity(state, sourceBytes = 0) {
     if (Object.keys(state.operations).length >= maxOperations || store.snapshotBytes() + sourceBytes > maxSourceBytes) throw new ProductError(409, 'CAPACITY_EXCEEDED', 'workspace 보관 한도에 도달했습니다. 운영자가 저장소를 확인해야 합니다.');
   }
   const workers = new Set();
-  const targetId = target?.id || service?.targetId;
-  const sharedTargets = new Set(service?.targetIds || (targetId ? [targetId] : []));
+  const sharedTargets = new Set(service?.targetIds || (service?.targetId ? [service.targetId] : []));
   const scopeKey = (kind, key, sessionId) => `${sessionId ? sessionId + ':' : ''}${kind}:${key}`;
   const owns = (value, sessionId) => value && (!sessionId || value.session_id === sessionId);
-  const cdTarget = deployPublished?.targets?.[targetId];
-  const cdAvailable = Boolean(deployPublished && (!deployPublished.targets || cdTarget));
-  if (targetId && !TARGET_ID.test(targetId)) { await store.close(); throw invalid('등록된 대상 ID가 잘못되었습니다.'); }
+  function providerSelection(provider) {
+    const id = selections.get(provider);
+    const cdTarget = id && deployPublished?.targets && Object.hasOwn(deployPublished.targets, id) ? deployPublished.targets[id] : null;
+    // Older single-target adapters have no registry; they authorize only the existing default.
+    const available = Boolean(service && id && sharedTargets.has(id) && deployPublished
+      && (cdTarget || !deployPublished.targets && id === targetId));
+    return { id, cdTarget, available };
+  }
   function deploymentOptions() {
     return [['cloud', 'aws', '클라우드 · RailShot AWS'], ['onprem', 'openstack', '온프레미스 · OpenStack'], ['onprem', 'proxmox', '온프레미스 · Proxmox']].map(([environment, provider, label]) => {
-      const available = Boolean(service && cdAvailable && targetId && target?.provider === provider);
+      const { cdTarget, available } = providerSelection(provider);
       return { id: `${environment}-${provider}`, environment, provider, label, available,
         message: available ? `소스 검사부터 앱 배포와 URL 확인까지 진행합니다.${cdTarget?.applicationName ? ` 등록된 앱 ${cdTarget.applicationName}의 소스를 갱신합니다.` : ''}`
           : `${label}에 배포할 인프라가 아직 연결되지 않았습니다. 운영자의 대상 연결이 필요합니다.` };
@@ -56,11 +72,12 @@ export async function createProductService({ service, directory, target, deployP
     const option = deploymentOptions().find((item) => item.environment === environment && item.provider === provider);
     if (!option) throw invalid('배포 환경과 인프라 종류를 확인하세요.');
     if (!option.available) throw new ProductError(409, 'CAPABILITY_UNAVAILABLE', option.message);
+    const { id, cdTarget } = providerSelection(provider);
     const name = input.source_name || input.repository_url?.split('/').at(-1) || 'my-app';
     const normalized = name.normalize('NFKD').toLowerCase().replace(/\.zip$/i, '').replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
     let app = normalized.replace(/^[^a-z]+/, '').slice(0, 30).replace(/-+$/g, '');
     if (!APP_NAME.test(app)) app = `app-${digest(name).slice(0, 10)}`;
-    return { ...input, app: cdTarget?.applicationName || app, target_id: targetId };
+    return { ...input, app: cdTarget?.applicationName || app, target_id: id };
   }
   async function update(id, patch) {
     await store.transaction((state) => { Object.assign(state.operations[id], patch, { updated_at: new Date().toISOString() }); });
@@ -248,7 +265,7 @@ export async function createProductService({ service, directory, target, deployP
         const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id, sessionId);
         const available = staticAvailable || Boolean(registered);
         return { id, label: id === targetId ? target?.label || id : id,
-          provider: id === targetId ? target?.provider || null : null, environment: 'registered',
+          provider: [...selections].find(([, selected]) => selected === id)?.[0] || null, environment: 'registered',
           ...(registered?.applicationName ? { application_name: registered.applicationName, deployment_scope: 'registered_application' } : {}),
           capabilities: { ci_submission: Boolean(service), application_deployment: available,
             database_configuration: !staticAvailable && registered?.database_configuration === true },
