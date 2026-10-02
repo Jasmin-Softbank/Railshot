@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "targets": {
+    "demo-aws": {
+      "descriptor_file": "/secure/railshot/terraform/demo-aws/node-descriptor.json",
+      "ssh": {
+        "user": "railshot-operator",
+        "identity_file": "/secure/railshot/identity_ed25519",
+        "known_hosts_file": "/secure/railshot/known_hosts"
+      },
+      "timeout_seconds": 1200
+    },
+    "demo-gcp": {
+      "descriptor_file": "/secure/railshot/terraform/demo-gcp/node-descriptor.json",
+      "ssh": {
+        "user": "railshot-operator",
+        "identity_file": "/secure/railshot/identity_ed25519",
+        "known_hosts_file": "/secure/railshot/known_hosts"
+      },
+      "timeout_seconds": 1200
+    }
+  }
+}

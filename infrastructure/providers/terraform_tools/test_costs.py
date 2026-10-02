@@ -1,4 +1,4 @@
-"""Run: python3 -m unittest discover -s platform/infra -p test_costs.py"""
+"""Run: python3 -m unittest discover -s infrastructure/providers/terraform_tools -p test_costs.py"""
 import tempfile
 import unittest
 import json
@@ -14,6 +14,124 @@ from costs import import_snapshot, ledger, normalize, report, reserve
 
 
 class CostsTest(unittest.TestCase):
+    def console_snapshot(self, now=None):
+        now = now or datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+        first = now.date().replace(day=1)
+        last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+        return {'format': 'gcp_console_report_v1', 'billing_account_id': 'ABCDEF-123456-789ABC',
+            'project_billing_info': {'billingAccountName': 'billingAccounts/ABCDEF-123456-789ABC',
+                'billingEnabled': True, 'name': 'projects/test-project/billingInfo', 'projectId': 'test-project'},
+            'observed_at': now.isoformat(), 'browser_evidence': 'Synthetic test: all projects; usage dates cover the month.',
+            'report': {'url': 'https://console.cloud.google.com/billing/ABCDEF-123456-789ABC/reports;grouping=GROUP_BY_PROJECT?project=test-project',
+                'start': first.isoformat(), 'end': last.isoformat(), 'time_basis': 'usage_date',
+                'group_by': 'project', 'filters': {}, 'currency': 'KRW'},
+            'csv': ('프로젝트 이름,프로젝트 ID,프로젝트 번호,비용(₩),절감 프로그램(₩),기타 절감(₩),반올림되지 않은 소계(₩),소계(₩),이전 기간 대비 소계 변동률\n'
+                    'Other,other-project,123456789012,1444,0,-33,1411.358781,1411,398%\n'
+                    ',,,,,소계,1384.430534,1384\n,,,,,세금,0.000000,0\n,,,,,합계,1384.430534,1384\n\n')}
+
+    def test_console_account_estimate_keeps_discrepancy_binding_and_budget_holds(self):
+        now = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+        value = self.console_snapshot(now)
+        with closing(ledger(':memory:')) as db:
+            imported = import_snapshot(db, 'console', 'gcp', '2026-10', now.isoformat(), value,
+                                       now=now, source_scope='test-project')
+            self.assertEqual(imported['basis'], 'account_wide_reported_estimate')
+            current = report(db, 'console', now=now)
+            self.assertEqual(current['totals'], {'KRW': '1411.358781'})
+            self.assertEqual(current['source_scope'], 'test-project')
+            self.assertEqual(current['scope_binding'], 'billing_account_link_verified')
+            resource = current['resources'][0]
+            self.assertEqual(resource['project_cost_attribution'], 'not_project_attributed')
+            self.assertEqual(resource['rows_subtotal_difference'], '26.928247')
+            self.assertTrue(resource['discrepancy'])
+            self.assertEqual(len(resource['csv_sha256']), 64)
+            self.assertNotIn('browser_evidence', resource)
+            args = dict(scope='console', currency='KRW', incremental_cost='100', limit='1650', unreported_cost='50', now=now)
+            self.assertEqual(reserve(db, operation_id='first', **args)['projected'], '1561.358781')
+            self.assertTrue(reserve(db, operation_id='first', **args)['duplicate'])
+            with self.assertRaisesRegex(ValueError, 'budget exceeded'):
+                reserve(db, operation_id='second', **args)
+            with self.assertRaisesRegex(ValueError, 'currency'):
+                reserve(db, operation_id='usd', **{**args, 'currency': 'USD'})
+            with self.assertRaisesRegex(ValueError, 'stale'):
+                reserve(db, operation_id='late', **{**args, 'now': now + timedelta(hours=25)})
+            with self.assertRaisesRegex(ValueError, 'conflicting snapshot'):
+                import_snapshot(db, 'console', 'gcp', '2026-10', now.isoformat(),
+                                {**value, 'browser_evidence': 'changed'}, now=now, source_scope='test-project')
+            changed = copy.deepcopy(value)
+            changed['observed_at'] = (now + timedelta(minutes=1)).isoformat()
+            changed['billing_account_id'] = 'BBBBBB-123456-789ABC'
+            changed['project_billing_info']['billingAccountName'] = 'billingAccounts/BBBBBB-123456-789ABC'
+            changed['report']['url'] = changed['report']['url'].replace('ABCDEF', 'BBBBBB', 1)
+            with self.assertRaisesRegex(ValueError, 'account binding cannot change'):
+                import_snapshot(db, 'console', 'gcp', '2026-10', changed['observed_at'], changed,
+                                now=now + timedelta(minutes=1), source_scope='test-project')
+
+    def test_console_uses_larger_footer_and_does_not_offset_other_project_credits(self):
+        value = self.console_snapshot()
+        value['csv'] = value['csv'].replace('1384.430534,1384', '1600.000000,1600')
+        self.assertEqual(normalize('gcp', value, '2026-10')[0]['cost'], '1600.000000')
+        value = self.console_snapshot()
+        value['csv'] = value['csv'].replace(',,,,,소계', 'Credit,credit-project,234567890123,0,0,-1000,-1000.000000,-1000,0%\n,,,,,소계')
+        row = normalize('gcp', value, '2026-10')[0]
+        self.assertEqual(row['reported_project_rows_sum'], '411.358781')
+        self.assertEqual(row['cost'], '1411.358781')
+
+    def test_console_rejects_unbound_filtered_partial_and_ambiguous_evidence(self):
+        now = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
+        mutations = {
+            'missing_browser': lambda v: v.pop('browser_evidence'),
+            'empty_browser': lambda v: v.update(browser_evidence=''),
+            'filtered': lambda v: v['report'].update(filters={'project': ['other-project']}),
+            'wrong_currency': lambda v: v['report'].update(currency='USD'),
+            'partial_month': lambda v: v['report'].update(start='2026-10-02'),
+            'wrong_month': lambda v: v['report'].update(end='2026-09-30'),
+            'invoice_basis': lambda v: v['report'].update(time_basis='invoice_date'),
+            'foreign_url': lambda v: v['report'].update(url='https://example.com/'),
+            'disabled_billing': lambda v: v['project_billing_info'].update(billingEnabled=False),
+            'wrong_account': lambda v: v['project_billing_info'].update(billingAccountName='billingAccounts/000000-000000-000000'),
+            'wrong_binding_name': lambda v: v['project_billing_info'].update(name='projects/other-project/billingInfo'),
+            'unknown_field': lambda v: v.update(untrusted_override=True),
+            'empty_rows': lambda v: v.update(csv='\n'.join(r for r in v['csv'].splitlines() if not r.startswith('Other,'))),
+            'missing_footer': lambda v: v.update(csv=v['csv'].replace(',,,,,합계,1384.430534,1384\n', '')),
+            'duplicate_footer': lambda v: v.update(csv=v['csv'] + ',,,,,합계,1384.430534,1384\n'),
+            'currency_header': lambda v: v.update(csv=v['csv'].replace('₩', '$')),
+            'nonfinite': lambda v: v.update(csv=v['csv'].replace('1411.358781', 'NaN')),
+            'duplicate_project': lambda v: v.update(csv=v['csv'].replace(',,,,,소계', v['csv'].splitlines()[1] + '\n,,,,,소계')),
+            'wrong_observation_month': lambda v: v.update(observed_at='2026-09-30T12:00:00Z'),
+            'observation_mismatch': lambda v: v.update(observed_at='2026-10-02T11:00:00Z'),
+        }
+        with closing(ledger(':memory:')) as db:
+            for name, change in mutations.items():
+                value = self.console_snapshot(now)
+                change(value)
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    import_snapshot(db, name, 'gcp', '2026-10', now.isoformat(), value,
+                                    now=now, source_scope='test-project')
+            for source in (None, 'another-project'):
+                with self.subTest(source=source), self.assertRaises(ValueError):
+                    import_snapshot(db, 'unbound', 'gcp', '2026-10', now.isoformat(), self.console_snapshot(now),
+                                    now=now, source_scope=source)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM snapshots').fetchone()[0], 0)
+
+    def test_console_native_json_cli_import_and_reserve(self):
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / 'console.json').write_text(json.dumps(self.console_snapshot(now)))
+            command = [sys.executable, str(Path(__file__).with_name('costs.py')), '--db', str(path / 'cost.sqlite')]
+            def cli(*args):
+                return json.loads(subprocess.run(command + list(args), capture_output=True, text=True, check=True).stdout)
+            imported = cli('import', '--provider', 'gcp', '--scope', 'console-current', '--period', now.strftime('%Y-%m'),
+                           '--observed-at', now.isoformat(), '--source-scope', 'test-project', str(path / 'console.json'))
+            self.assertEqual(imported['basis'], 'account_wide_reported_estimate')
+            current = cli('report', '--scope', 'console-current')
+            self.assertEqual(current['scope_binding'], 'billing_account_link_verified')
+            self.assertEqual(current['totals'], {'KRW': '1411.358781'})
+            held = cli('reserve', '--scope', 'console-current', '--operation-id', 'console-cli', '--currency', 'KRW',
+                       '--incremental-cost', '100', '--limit', '2000', '--unreported-cost', '50')
+            self.assertEqual(held['projected'], '1561.358781')
+
     def aws_snapshot(self):
         return {'account_id': '123456789012', 'request': {
             'TimePeriod': {'Start': '2026-10-01', 'End': '2026-10-02'},

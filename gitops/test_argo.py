@@ -110,6 +110,25 @@ class ArgoTest(unittest.TestCase):
         bad = copy.deepcopy(live); bad['spec']['ignoreDifferences'] = [{'kind': '*'}]
         with self.assertRaises(ValueError): argo.observe(self.review, bad)
 
+    def test_missing_summary_uses_only_exact_revision_deployment_sync_images(self):
+        live = self.healthy()
+        images = live['status'].pop('summary')['images']
+        synced = {'group': 'apps', 'kind': 'Deployment', 'namespace': 'tenant-demo', 'name': 'demo',
+                  'status': 'Synced', 'images': images}
+        live['status']['operationState']['syncResult']['resources'] = [synced]
+        self.assertTrue(argo.observe(self.review, live)['deployed'])
+        for field in ('revision', 'group', 'kind', 'namespace', 'name', 'images', 'missing_images', 'duplicate', 'summary'):
+            bad = copy.deepcopy(live)
+            result = bad['status']['operationState']['syncResult']; row = result['resources'][0]
+            if field == 'revision': result['revision'] = 'f' * 40
+            elif field in ('group', 'kind', 'namespace', 'name'): row[field] = 'other'
+            elif field == 'images': row['images'] = ['ghcr.io/example/other@sha256:' + 'a' * 64]
+            elif field == 'missing_images': row.pop('images')
+            elif field == 'duplicate': result['resources'].append(copy.deepcopy(row))
+            else: bad['status']['summary'] = {'images': []}
+            with self.subTest(field=field):
+                self.assertFalse(argo.observe(self.review, bad)['deployed'])
+
     def test_sync_requests_exact_revision_and_resume_does_not_start_a_second_operation(self):
         calls = []
         def client(context, namespace, *args, document=None):
