@@ -52,7 +52,7 @@ let submitting = false;
 let current = null;
 let sessionReady = false, preferenceTimer;
 let history = [], connections = [], editingConnection = null;
-let historyMarkers = [null], historyNext = null, historyTotal = null, historyController;
+let historyMarkers = [null], historyNext = null, historyTotal = null, historyController, historyError = null;
 const savedHistory = window.history.state?.railshotHistory;
 let historyKind = savedHistory?.kind === 'builds' ? 'builds' : 'deployments';
 if (Array.isArray(savedHistory?.markers) && savedHistory.markers.length <= 100 && savedHistory.markers[0] === null
@@ -512,7 +512,7 @@ function element(tag, text, className) {
   if (className) node.className = className;
   return node;
 }
-function showHistoryError(cause) { document.querySelector('#history-detail').textContent = `내역 조회 실패: ${cause.message} 최신 내역을 눌러 다시 확인하세요.`; }
+function showHistoryError(cause) { historyError = cause.message; document.querySelector('#history-detail').textContent = `내역 조회 실패: ${cause.message} 최신 내역을 눌러 다시 확인하세요.`; }
 function openExecution(row, tab = 'work') {
   stopPolling(); logController?.abort(); logSnapshot = null;
   current = row; lastReadAt = null; observationError = false; consoleTab = tab;
@@ -522,7 +522,7 @@ function openExecution(row, tab = 'work') {
 }
 function renderHistory() {
   const kindLabel = historyKind === 'builds' ? '빌드' : '배포';
-  document.querySelector('#history-summary').textContent = history.length
+  document.querySelector('#history-summary').textContent = historyError ? '실행 내역을 확인하지 못했습니다' : history.length
     ? `이 세션의 ${kindLabel}${Number.isInteger(historyTotal) ? ` · 전체 ${historyTotal}건` : ''}` : `아직 ${kindLabel} 내역이 없습니다`;
   document.querySelector('#history-page').textContent = `${historyMarkers.length}페이지 · ${history.length}건`;
   document.querySelector('#history-prev').disabled = Boolean(historyController) || historyMarkers.length < 2;
@@ -545,11 +545,10 @@ function renderHistory() {
 async function loadHistory(markers = historyMarkers) {
   historyController?.abort();
   const controller = new AbortController(), kind = historyKind; historyController = controller;
-  history = []; historyNext = null; renderHistory();
+  history = []; historyNext = null; historyError = null; renderHistory();
   document.querySelector('#history-summary').textContent = '실행 내역을 불러오는 중입니다';
   document.querySelector('#history-detail').textContent = '이 브라우저 세션의 기록을 서버에서 조회합니다.';
   document.querySelector('#history-list').setAttribute('aria-busy', 'true');
-  let failed = false;
   const query = new URLSearchParams({ limit: '10' });
   if (markers.at(-1)) query.set('marker', markers.at(-1));
   try {
@@ -563,11 +562,10 @@ async function loadHistory(markers = historyMarkers) {
     document.querySelector('#history-detail').textContent = '최신 접수 순 · 페이지 이동 중 새 실행이 생기면 최신 내역에서 확인하세요.';
   } catch (cause) {
     if (historyController !== controller) return;
-    failed = true; showHistoryError(cause);
+    showHistoryError(cause);
   } finally {
     if (historyController === controller) {
       historyController = null; renderHistory();
-      if (failed) document.querySelector('#history-summary').textContent = '실행 내역을 확인하지 못했습니다';
       document.querySelector('#history-list').setAttribute('aria-busy', 'false');
     }
   }
