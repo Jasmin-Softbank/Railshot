@@ -224,10 +224,6 @@
       delay: 5
       changed_when: false
 
-    - name: Run the optional smoke test
-      ansible.builtin.include_tasks: tasks/smoke.yml
-      when: smoke_test_enabled | bool
-
     - name: Read cluster admin kubeconfig
       ansible.builtin.slurp:
         src: /etc/rancher/k3s/k3s.yaml
@@ -256,8 +252,6 @@
         msg:
           - "Kubeconfig: {{ k3s_artifacts_dir }}/kubeconfig.yaml (cluster admin; keep private)"
           - "Cilium status passed; Node is Ready; CoreDNS rollout passed."
-          - "Smoke enabled: {{ smoke_test_enabled }}; controller HTTP verification: {{ smoke_test_from_controller }}"
-          - "{{ ('Candidate demo URL: http://' ~ smoke_public_host ~ ':' ~ (smoke_node_port | string) ~ ' (routing/firewall required)') if smoke_test_enabled | bool else 'Smoke workload skipped; no application URL verified.' }}"
 
   handlers:
     - name: Restart k3s

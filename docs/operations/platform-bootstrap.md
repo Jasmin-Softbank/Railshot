@@ -36,7 +36,7 @@ python3 deployment/scripts/bootstrap-platform.py --config /private/bootstrap.jso
     "node_name": "railshot-build-worker-aws-01", "node_uid": "EXISTING_NODE_UID_OR_NULL_BEFORE_FIRST_JOIN", "stop_at": "2026-10-05T14:59:00Z",
     "ssh": {"identity_file": "/private/operator-key", "known_hosts_file": "/private/known_hosts"}
   },
-  "github": {"ref": "integration/team-assembly-20261002", "target_id": "k3s-aws", "node_port": 31080, "application": "k3s-aws-tenant-demo-fixture-npm-js"},
+  "github": {"ref": "integration/team-assembly-20261002", "target_id": "k3s-aws", "node_port": 31080, "application": "USER_APP_ARGO_APPLICATION"},
   "secrets": {
     "api_token": "/private/api-token", "github_token": "/private/github-token", "pull_config": "/private/ghcr-pull.json",
     "executors": "/private/executors.json", "controller_github_token": "/private/runner-controller-token"
