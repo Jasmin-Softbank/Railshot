@@ -6,6 +6,7 @@ import { createDeploymentService, ServiceError } from './github.js';
 import { archiveLimits, inspectArchive, validateFiles } from './archive.js';
 import { fetchPublicGithubSource } from './public-github.js';
 import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
+import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
 const assets = new Map([
@@ -75,7 +76,7 @@ async function uploadedSource(request, sourceLoader) {
   return { app, target_id, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
 }
 
-export function createAppServer({ sourceLoader = fetchPublicGithubSource, service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({
+export function createAppServer({ access = apiAccessConfig(), sourceLoader = fetchPublicGithubSource, service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({
   token: process.env.GITHUB_TOKEN,
   owner: process.env.GITHUB_OWNER,
   repo: process.env.GITHUB_REPO,
@@ -85,17 +86,20 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, servic
   targetId: process.env.RAILSHOT_TARGET_ID,
 }) : null } = {}) {
   return createServer(async (request, response) => {
-    const host = request.headers.host?.split(':')[0];
-    if (host !== 'localhost' && host !== '127.0.0.1') { response.writeHead(403).end('Local access only'); return; }
+    if (!allowsHost(request.headers.host, access)) { response.writeHead(403).end('Host not allowed'); return; }
     const origin = request.headers.origin;
-    if (origin && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    if (!allowsOrigin(origin, access)) {
       json(response, 403, { error: '다른 사이트에서는 접근할 수 없습니다.' }); return;
     }
     const url = new URL(request.url, 'http://localhost');
     if (request.method === 'GET' && url.pathname === '/healthz') {
-      json(response, 200, { ok: true, configured: Boolean(service), target_id: service?.targetId || null }); return;
+      json(response, 200, { ok: true, configured: Boolean(service), ...(!access.remote && { target_id: service?.targetId || null }) }); return;
     }
     if (url.pathname.startsWith('/api/')) {
+      if (!allowsToken(request.headers.authorization, access.token)) {
+        response.setHeader('www-authenticate', 'Bearer');
+        json(response, 401, { error: 'API authentication required' }); return;
+      }
       if (!service) { json(response, 503, { error: 'GITHUB_TOKEN과 RAILSHOT_TARGET_ID를 설정하세요.' }); return; }
       try {
         if (request.method === 'POST' && url.pathname === '/api/deploy') {
@@ -126,7 +130,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, servic
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 4173);
-  createAppServer().listen(port, '127.0.0.1', () => {
-    console.log(`RAILSHOT PoC: http://127.0.0.1:${port}`);
+  const access = apiAccessConfig();
+  createAppServer({ access }).listen(port, access.bindHost, () => {
+    console.log(`RAILSHOT API: http://${access.bindHost}:${port}`);
   });
 }

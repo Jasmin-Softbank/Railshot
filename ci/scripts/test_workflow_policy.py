@@ -14,6 +14,25 @@ HERE = Path(__file__).resolve().parent
 
 
 class WorkflowPolicyTest(unittest.TestCase):
+    def test_repository_scope_outputs_and_required_gate_cover_every_job(self):
+        import ci_scope
+        workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())
+        jobs = workflow['jobs']
+        self.assertEqual(set(jobs), set(ci_scope.JOBS) | {'changes', 'gate'})
+        self.assertEqual(set(jobs['gate']['needs']), set(ci_scope.JOBS) | {'changes'})
+        self.assertEqual(jobs['gate']['if'], 'always()')
+        self.assertEqual(set(jobs['changes']['outputs']),
+                         set(ci_scope.JOBS) | {'selected', 'container_components'})
+        events = workflow.get('on', workflow.get(True))  # PyYAML's YAML 1.1 "on" key.
+        for event in ('pull_request', 'push'):
+            self.assertFalse({'paths', 'paths-ignore'} & set(events[event] or {}))
+        for job in ci_scope.JOBS:
+            self.assertEqual(jobs[job]['needs'], 'changes')
+            output = f"['{job}']" if '-' in job else f'.{job}'
+            self.assertEqual(jobs[job]['if'], f"needs.changes.outputs{output} == 'true'")
+        self.assertEqual(jobs['containers']['uses'], './.github/workflows/platform-containers.yml')
+        self.assertEqual(jobs['containers']['permissions'], {'contents': 'read'})
+
     def test_pull_credential_delivery_is_write_only_scoped_and_cleans_private_file(self):
         workflow = yaml.safe_load((HERE.parent / 'workflows/railshot-pull-credential.yml').read_text())
         job = workflow['jobs']['deliver']; steps = job['steps']

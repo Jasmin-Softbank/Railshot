@@ -1,0 +1,65 @@
+# Local process smoke only. The CI worker belongs on a separate, dedicated Linux VM.
+name: railshot-platform
+services:
+  dashboard:
+    image: railshot/dashboard:local
+    build:
+      context: ..
+      dockerfile: apps/dashboard/Dockerfile
+      target: dashboard
+    ports: ["127.0.0.1:4181:8080"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.5
+  api:
+    image: railshot/api:local
+    user: "${RAILSHOT_LOCAL_UID:-1000}:${RAILSHOT_LOCAL_GID:-1000}"
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+      target: api
+    ports: ["127.0.0.1:4173:4173"]
+    environment:
+      RAILSHOT_BIND_HOST: 0.0.0.0
+      RAILSHOT_ALLOWED_HOSTS: localhost,127.0.0.1,api
+      RAILSHOT_API_TOKEN_FILE: /run/secrets/api_token
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_OWNER: ${GITHUB_OWNER:-Jasmin-Softbank}
+      GITHUB_REPO: ${GITHUB_REPO:-railshot-apps}
+      GITHUB_REF: ${GITHUB_REF:-main}
+      GITHUB_WORKFLOW: ${GITHUB_WORKFLOW:-railshot-deploy.yml}
+      JASMIN_TENANT: ${JASMIN_TENANT:-demo}
+      RAILSHOT_TARGET_ID: ${RAILSHOT_TARGET_ID:-}
+    secrets: [api_token]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1
+  mcp:
+    profiles: [mcp]
+    image: railshot/mcp:local
+    user: "${RAILSHOT_LOCAL_UID:-1000}:${RAILSHOT_LOCAL_GID:-1000}"
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+      target: mcp
+    environment:
+      JASMIN_API_URL: http://api:4173
+      RAILSHOT_API_TOKEN_FILE: /run/secrets/api_token
+    secrets: [api_token]
+    stdin_open: true
+    tty: false
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+secrets:
+  api_token:
+    file: ${RAILSHOT_API_TOKEN_PATH:?Set an absolute path to a private API token file}

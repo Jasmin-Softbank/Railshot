@@ -1,4 +1,10 @@
-# Dedicated, disposable Ubuntu CI VM only. No app cluster, SDK auth, or runner registration.
+# Dedicated, disposable Ubuntu CI worker. No SDK auth or runner registration.
+# Standalone is the default. An operations K3s agent requires explicit
+# -e railshot_ci_k3s_build_worker=true, a dedicated build node, and an already
+# Ready node/CNI dataplane verified by the operator before this bootstrap.
+# Never run on the operations server, another Kubernetes distribution, or a
+# customer runtime node. The local config guard does not prove live scheduling
+# or CNI health; those checks must pass before this bootstrap changes Docker.
 # Run: sudo ansible-playbook -i localhost, -c local infrastructure/ansible/ci.yml
 - name: Credential-free CI runtime and bounded dependency network
   hosts: localhost
@@ -10,20 +16,75 @@
         that:
           - ansible_distribution == 'Ubuntu'
           - ansible_distribution_version == '24.04'
-        fail_msg: This bootstrap is only for a dedicated Ubuntu 24.04 CI VM.
+        fail_msg: This bootstrap is only for a dedicated Ubuntu 24.04 CI worker.
 
-    - name: Check that this is not an app cluster node
-      ansible.builtin.stat:
-        path: /etc/rancher/k3s
-      register: ci_k3s
+    - name: Accept only standalone hosts or explicitly approved K3s build agents
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - -c
+          - |
+            set -euo pipefail
+            if [ "$RAILSHOT_ALLOW_K3S_BUILD_WORKER" = true ]; then
+              # A flag alone never permits an ordinary agent, a control-plane,
+              # or a standard kubelet. Require the reviewed isolated node config.
+              test -d /var/lib/rancher/k3s/agent
+              test ! -L /var/lib/rancher/k3s/agent
+              for path in /var/lib/rancher/k3s/server /etc/rancher/k3s/k3s.yaml /etc/kubernetes; do
+                if [ -e "$path" ] || [ -L "$path" ]; then
+                  echo "Refusing a Kubernetes control-plane/standard kube host: $path" >&2; exit 2
+                fi
+              done
+              systemctl is-active --quiet k3s-agent
+              if systemctl is-active --quiet k3s || systemctl is-active --quiet kubelet; then
+                echo 'Refusing a server or standalone kubelet service.' >&2; exit 2
+              fi
+              config=/etc/rancher/k3s/config.yaml
+              test -f "$config"
+              test ! -L "$config"
+              test "$(stat -c '%u:%a' "$config")" = '0:600'
+              # Drop-ins can override or append node configuration; ambiguity is
+              # rejected even for an empty directory or dangling symlink.
+              test ! -e /etc/rancher/k3s/config.yaml.d
+              test ! -L /etc/rancher/k3s/config.yaml.d
+              "$RAILSHOT_ANSIBLE_PYTHON" - "$config" <<'PYRAILSHOT_AGENT'
+            from pathlib import Path
+            import sys, yaml
 
-    - name: Refuse to alter an app cluster Docker or firewall
-      ansible.builtin.assert:
-        that: not ci_k3s.stat.exists
+            try:
+                config = yaml.safe_load(Path(sys.argv[1]).read_text())
+            except (OSError, yaml.YAMLError):
+                raise SystemExit('Cannot read a valid K3s build-agent config')
+            if not isinstance(config, dict):
+                raise SystemExit('K3s build-agent config must be a mapping')
+            for field, key, required in (
+                ('node-label', 'railshot.io/node-role', 'railshot.io/node-role=build'),
+                ('node-taint', 'railshot.io/dedicated', 'railshot.io/dedicated=build:NoSchedule'),
+            ):
+                values = config.get(field)
+                if (not isinstance(values, list) or not all(isinstance(value, str) for value in values)
+                        or [value for value in values if value.split('=', 1)[0].split(':', 1)[0] == key] != [required]
+                        or field + '+' in config):
+                    raise SystemExit('K3s build-agent config requires its exact isolated ' + field)
+            if config.get('docker', False) is not False:
+                raise SystemExit('K3s must use containerd; CI owns a separate Docker daemon')
+            PYRAILSHOT_AGENT
+            else
+              for path in /etc/rancher/k3s /var/lib/rancher/k3s /etc/kubernetes /var/lib/kubelet; do
+                if [ -e "$path" ] || [ -L "$path" ]; then
+                  echo "Kubernetes host requires the explicit dedicated K3s build-agent profile: $path" >&2; exit 2
+                fi
+              done
+            fi
+      environment:
+        RAILSHOT_ALLOW_K3S_BUILD_WORKER: "{{ 'true' if (railshot_ci_k3s_build_worker | default(false) | bool) else 'false' }}"
+        # This local playbook's interpreter already has the Ansible YAML parser.
+        RAILSHOT_ANSIBLE_PYTHON: "{{ ansible_playbook_python }}"
+      changed_when: false
 
     - name: Install distro runtime packages
       ansible.builtin.apt:
-        name: [docker.io, docker-buildx, python3-venv, git, jq, iptables, iproute2, ca-certificates]
+        name: [docker.io, docker-buildx, python3-venv, python3-yaml, git, jq, iptables, iproute2, ca-certificates]
         state: present
         update_cache: true
         cache_valid_time: 3600
@@ -75,11 +136,55 @@
           ip6t() { ip6tables -w 10 "$@"; }
           case "${1:-install}" in
             --check|--fingerprint)
-              # Hash only stable policy/binding state, not dynamic container lists.
+              # Shared INPUT/FORWARD chains also belong to kube-proxy/Cilium.
+              # Validate our earliest reachable hooks before hashing only their
+              # stable policy. An unrelated rule *before* a hook fails closed:
+              # it could ACCEPT CI traffic before our drop/egress restrictions.
+              # We do not reorder or flush Kubernetes/Cilium chains to pass.
+              policy_state=$(python3 - <<'PYRAILSHOT_POLICY'
+          import json, shlex, subprocess
+
+          def rules(binary, chain):
+              output = subprocess.check_output([binary, '-w', '10', '-S', chain], text=True)
+              result = []
+              for line in output.splitlines():
+                  tokens = shlex.split(line)
+                  if tokens[:1] == ['-A']:
+                      if '--ctstate' in tokens:
+                          index = tokens.index('--ctstate') + 1
+                          tokens[index] = ','.join(sorted(tokens[index].split(',')))
+                      result.append(tokens)
+              return result
+
+          expected = {
+              ('iptables', 'FORWARD'): ['-A FORWARD -j DOCKER-USER'],
+              ('iptables', 'DOCKER-USER'): ['-A DOCKER-USER -i br-railshot -j RAILSHOT-CI-EGRESS'],
+              ('iptables', 'INPUT'): [
+                  '-A INPUT -i rsrun+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT',
+                  '-A INPUT -i rsrun+ -m comment --comment railshot-runtime-host-block -j DROP',
+                  '-A INPUT -i br-railshot -m comment --comment railshot-ci-host-block -j DROP'],
+              ('ip6tables', 'INPUT'): ['-A INPUT -i rsrun+ -j DROP', '-A INPUT -i br-railshot -j DROP'],
+              ('ip6tables', 'FORWARD'): ['-A FORWARD -i rsrun+ -j DROP', '-A FORWARD -i br-railshot -j DROP'],
+          }
+          policy = {}
+          for (binary, chain), lines in expected.items():
+              prefix = [shlex.split(line) for line in lines]
+              actual = rules(binary, chain)
+              if actual[:len(prefix)] != prefix:
+                  raise SystemExit('CI policy hook missing or preceded by another rule: ' + binary + ' ' + chain)
+              policy[binary + ':' + chain] = prefix
+          egress = rules('iptables', 'RAILSHOT-CI-EGRESS')
+          if not egress or egress[-1][-2:] != ['-j', 'DROP']:
+              raise SystemExit('CI egress policy must end in DROP')
+          policy['iptables:RAILSHOT-CI-EGRESS'] = egress
+          print(json.dumps(policy, sort_keys=True, separators=(',', ':')))
+          PYRAILSHOT_POLICY
+              ) || exit 1
+              # CNI-managed rules after the verified hooks and dynamic container
+              # lists are excluded. Native probes still bind all CI egress rules.
               fingerprint=$({
                 sha256sum "$profile"
-                ipt -S DOCKER-USER; ipt -S RAILSHOT-CI-EGRESS; ipt -S INPUT
-                ip6t -S INPUT; ip6t -S FORWARD
+                printf '%s\n' "$policy_state"
                 sysctl -n net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables
                 docker network inspect railshot-quality | jq -S '.[0] | {Id,Driver,EnableIPv6,Internal,IPAM,Options}'
               } | sha256sum | cut -d' ' -f1)

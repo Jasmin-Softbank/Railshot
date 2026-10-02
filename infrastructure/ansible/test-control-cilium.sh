@@ -19,18 +19,21 @@ exec 8>/run/railshot-deployment.lock
 flock -n 8 || die 'Another runtime operation is running'
 [[ $(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}') == https://127.0.0.1:6443 ]] || die 'Expected local K3s API'
 
-# Check the observed cluster, not only the installation configuration.
-identity=$(kubectl get nodes -o json | python3 -c '
+# This is a platform-node smoke, not cross-node/Docker isolation acceptance.
+kubectl wait --for=condition=Ready nodes --all --timeout="$WAIT_TIMEOUT"
+# Reuse the installer guard and its unique server selection, including when
+# the approved build agent appears first in the API NodeList.
+identity=$(python3 - "$ROOT_DIR/cilium" <<'PY'
 import ipaddress, json, sys
-nodes = json.load(sys.stdin)["items"]
-assert len(nodes) == 1, "Expected one control node"
-node = nodes[0]
+sys.path.insert(0, sys.argv[1])
+from preflight import check_cluster, check_host
+node = check_cluster(*check_host('control'), profile='control')
 assert any(c["type"] == "Ready" and c["status"] == "True" for c in node["status"]["conditions"]), "Node is not Ready"
-assert ipaddress.ip_network(node["spec"]["podCIDR"]).subnet_of(ipaddress.ip_network("10.52.0.0/16")), "Wrong control pod CIDR"
 address = next(a["address"] for a in node["status"]["addresses"] if a["type"] == "InternalIP")
 assert ipaddress.ip_address(address).version == 4
 print(node["metadata"]["name"], address)
-')
+PY
+)
 read -r node node_ip <<< "$identity"
 [[ $(kubectl -n default get service kubernetes -o jsonpath='{.spec.clusterIP}') == 10.53.0.1 ]] || die 'Wrong control service CIDR'
 kubectl get ciliumnode "$node" -o json | python3 -c '
@@ -78,7 +81,7 @@ WORKLOAD_NAMESPACE=$namespace
 log "Testing in owned namespace $namespace"
 
 # Reuse the version policy; no package installation or tool download.
-python3 - "$ROOT_DIR/airgap/versions.json" "$namespace" <<'PY' | kubectl -n "$namespace" apply -f -
+python3 - "$ROOT_DIR/airgap/versions.json" "$namespace" "$node" <<'PY' | kubectl -n "$namespace" apply -f -
 import json, sys
 policy = json.load(open(sys.argv[1]))
 ns = sys.argv[2]
@@ -102,6 +105,10 @@ for name in ("allowed", "denied"):
                 "resources": {"requests": {"cpu": "5m", "memory": "8Mi"}, "limits": {"cpu": "100m", "memory": "32Mi"}},
                 "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "allowPrivilegeEscalation": False,
                     "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "seccompProfile": {"type": "RuntimeDefault"}}}]}})
+for item in items:
+    if item['kind'] == 'Pod':
+        item['spec']['affinity'] = {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {
+            'nodeSelectorTerms': [{'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': [sys.argv[3]]}]}]}}}
 print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items}))
 PY
 kubectl -n "$namespace" wait pod --all --for=condition=Ready --timeout="$WAIT_TIMEOUT"
@@ -160,4 +167,4 @@ node = json.load(sys.stdin)["node"]
 memory = node["memory"]
 print(json.dumps({"node": node["nodeName"], "measured_at": memory["time"], "working_set_bytes": memory["workingSetBytes"], "available_bytes": memory["availableBytes"]}))
 '
-log 'PASS: Cilium/CoreDNS/Argo rollouts and local regression; Argo registered-cluster API, ALB/WireGuard and sustained memory headroom require runbook acceptance'
+log 'PASS: Cilium/CoreDNS/Argo rollouts and platform-node regression; cross-node/Docker isolation, Argo registered-cluster API, ALB/WireGuard and sustained memory headroom require runbook acceptance'
