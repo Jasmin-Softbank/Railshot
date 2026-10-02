@@ -354,3 +354,39 @@ test('build POST preserves string run IDs and plan/environment HTTP use 201 then
   assert.equal(complete.status, 'succeeded');
   assert.equal(complete.deployment_supported, false);
 });
+
+test('original UI environment selection is resolved server-side and never falls back to a different provider', async (t) => {
+  const submitted = [];
+  const deployPublished = async () => deployed;
+  deployPublished.targets = { demo: { applicationName: 'demo-app' } };
+  const { base } = await httpFixture(t, { target: { provider: 'aws' }, deployPublished,
+    service: { targetId: 'demo', deploy: async (value) => { submitted.push(value); return { run_id: '123', source_commit: publication.source_commit }; },
+      status: async () => ({ run_id: 123, state: 'published', publication }) } });
+  const options = await (await fetch(`${base}/api/v1/deployment-options`)).json();
+  assert.deepEqual(options.items.map(({ provider, available }) => [provider, available]), [['aws', true], ['openstack', false], ['proxmox', false]]);
+  const selection = () => { const value = form(); value.delete('app'); value.delete('target_id'); value.set('environment', 'cloud'); value.set('provider', 'aws'); value.set('source_name', 'different-source'); return value; };
+  for (const [mutate, status] of [
+    [(value) => { value.set('environment', 'onprem'); value.set('provider', 'openstack'); }, 409],
+    [(value) => { value.set('environment', 'onprem'); value.set('provider', 'proxmox'); }, 409],
+    [(value) => value.set('provider', 'gcp'), 422],
+    [(value) => value.set('target_id', 'foreign'), 422],
+    [(value) => value.set('app', 'foreign-app'), 422],
+    [(value) => value.append('provider', 'proxmox'), 422],
+    [(value) => value.set('source_name', 'x'.repeat(256)), 422],
+  ]) {
+    const body = selection(); mutate(body);
+    const response = await fetch(`${base}/api/v1/deployments`, { method: 'POST', body, headers: { 'Idempotency-Key': 'selection' } });
+    assert.equal(response.status, status, await response.text());
+  }
+  assert.equal(submitted.length, 0);
+  const post = () => fetch(`${base}/api/v1/deployments`, { method: 'POST', body: selection(), headers: { 'Idempotency-Key': 'selection' } });
+  const accepted = await post(); assert.equal(accepted.status, 202);
+  const completed = await settle(async () => (await fetch(`${base}${accepted.headers.get('location')}`)).json());
+  assert.equal(completed.status, 'succeeded'); assert.equal(completed.app, 'demo-app'); assert.equal(completed.target_id, 'demo');
+  assert.equal((await post()).status, 200); assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].app, 'demo-app'); assert.equal(submitted[0].target_id, 'demo');
+  const unregistered = await fixture(t);
+  assert.ok(unregistered.product.deploymentOptions().every((option) => !option.available), 'unknown provider never becomes AWS');
+  const onprem = await fixture(t, { target: { provider: 'openstack' } });
+  assert.deepEqual(onprem.product.deploymentOptions().filter((option) => option.available).map((option) => option.provider), ['openstack']);
+});
