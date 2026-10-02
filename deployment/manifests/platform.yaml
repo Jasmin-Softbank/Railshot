@@ -111,6 +111,7 @@ spec:
             - {name: GITHUB_WORKFLOW, value: railshot-deploy.yml}
             - {name: JASMIN_TENANT, value: demo}
             - {name: RAILSHOT_TARGET_ID, value: TARGET_REQUIRED}
+            - {name: RAILSHOT_TARGET_PROVIDER, value: aws}
           resources:
             requests: {cpu: 100m, memory: 256Mi}
             limits: {cpu: '1', memory: 1Gi}

@@ -29,14 +29,14 @@ const repositoryUrl = document.querySelector('#repository-url');
 const selection = document.querySelector('#source-selection');
 const sourceBox = document.querySelector('#source-box');
 const error = document.querySelector('#form-error');
-const appName = document.querySelector('#app-name');
-const targetSelect = document.querySelector('#target');
-const operation = document.querySelector('#operation');
+const provider = document.querySelector('#provider');
+const providerField = document.querySelector('#provider-field');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
 let selectedSource = null;
 let reviewed = null;
-let targets = [];
+let deploymentOptions = [];
+let connectionError = null;
 let submitting = false;
 // ponytail: remember one resource locator per browser; server owns durable execution records.
 let current = null;
@@ -59,12 +59,7 @@ function setSource(source) {
   selectedSource = source;
   selection.textContent = source ? source.label : '';
   selection.hidden = !source;
-  const name = source?.kind === 'repository' ? source.label.split('/').filter(Boolean).at(-1)?.replace(/\.git$/, '')
-    : source?.kind === 'archive' ? archive.files[0].name.replace(/\.zip$/i, '')
-    : source ? (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0] : '';
-  appName.value = (name || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9-]+/g, '-')
-    .replace(/^-+|-+$/g, '').slice(0, 30).replace(/-+$/g, '');
-  updateTarget();
+  invalidateReview();
 }
 
 document.querySelector('#choose-file').addEventListener('click', () => archive.click());
@@ -116,26 +111,23 @@ const terminal = new Set(['succeeded', 'failed', 'blocked', 'unknown', 'publishe
 const labels = { queued: '실행 대기 중', running: '실행 중', succeeded: '앱 배포 완료', published: '이미지 게시 완료',
   failed: '실행 실패', blocked: '실행 조건 확인 필요', unknown: '실행 결과 확인 필요', publication_unverified: '게시 결과 확인 필요' };
 function activeRun() { return current && !terminal.has(current.status); }
-function selectedTarget() { return targets.find((item) => item.id === targetSelect.value); }
-function supported(target, kind) { return Boolean(target?.capabilities?.[kind === 'builds' ? 'ci_submission' : 'application_deployment']); }
-function updateTarget() {
-  const target = selectedTarget();
-  if (operation.value === 'deployments' && target?.application_name) appName.value = target.application_name;
-  appName.readOnly = operation.value === 'deployments' && Boolean(target?.application_name);
-  for (const option of operation.options) option.disabled = !supported(target, option.value);
-  if (!supported(target, operation.value)) operation.value = [...operation.options].find((item) => !item.disabled)?.value || '';
-  document.querySelector('#target-note').textContent = !target ? '사용할 수 있는 실행 대상이 없습니다.'
-    : target.capabilities.application_deployment ? '이미지 게시 후 앱 적용과 공개 URL까지 확인합니다.'
-    : '이 대상은 검사와 이미지 게시를 지원합니다. 앱 적용 연결은 아직 준비되지 않았습니다.';
-  if (operation.value === 'deployments' && target?.application_name) {
-    appName.value = target.application_name; appName.readOnly = true;
-    document.querySelector('#target-note').textContent += ` 이 대상의 앱 이름은 ${target.application_name}입니다. 소스는 새로 올릴 수 있습니다.`;
-  } else appName.readOnly = false;
+function deploymentSelection() {
+  const environment = document.querySelector('[name="environment"]:checked').value;
+  return { environment, provider: environment === 'cloud' ? 'aws' : provider.value };
+}
+function selectedOption() {
+  const selected = deploymentSelection();
+  return deploymentOptions.find((item) => item.environment === selected.environment && item.provider === selected.provider);
+}
+function updateSelection() {
+  const selected = deploymentSelection();
+  providerField.hidden = selected.environment !== 'onprem';
+  document.querySelector('#connection-status').textContent = connectionError || selectedOption()?.message
+    || (selected.environment === 'onprem' && !selected.provider ? '온프레미스 인프라 종류를 선택하세요.' : '실행 가능한 인프라 연결을 준비 중입니다.');
   invalidateReview();
 }
-targetSelect.addEventListener('change', updateTarget);
-operation.addEventListener('change', updateTarget);
-appName.addEventListener('input', invalidateReview);
+document.querySelectorAll('[name="environment"]').forEach((input) => input.addEventListener('change', updateSelection));
+provider.addEventListener('change', updateSelection);
 
 async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
@@ -150,42 +142,33 @@ async function request(path, options = {}, controller = new AbortController()) {
 
 async function checkConnection() {
   try {
-    const { data } = await request('/api/v1/targets');
-    if (!Array.isArray(data.items)) throw new Error('실행 대상 응답을 확인하지 못했습니다.');
-    const before = targetSelect.value;
-    targets = data.items;
-    targetSelect.replaceChildren(...targets.map((target) => new Option(target.label || target.id, target.id)));
-    if (!targets.length) targetSelect.append(new Option('실행 대상 준비 중', ''));
-    else if (targets.some((target) => target.id === before)) targetSelect.value = before;
-    document.querySelector('#connection-status').textContent = targets.length ? 'API 연결됨 · 실행 대상을 선택하세요.' : 'API 연결됨 · 실행 대상 준비 중';
-    updateTarget();
+    const { data } = await request('/api/v1/deployment-options');
+    if (!Array.isArray(data.items)) throw new Error('인프라 연결 상태를 확인하지 못했습니다.');
+    deploymentOptions = data.items;
+    connectionError = null;
   } catch (cause) {
-    targets = [];
-    targetSelect.replaceChildren(new Option('실행 대상 연결 확인 필요', ''));
-    document.querySelector('#connection-status').textContent = cause.message;
-    updateTarget();
+    deploymentOptions = [];
+    connectionError = cause.message;
   }
+  updateSelection();
 }
 
 document.querySelector('#deploy-form').addEventListener('submit', (event) => {
   event.preventDefault();
   if (submitting) return;
-  const target = selectedTarget();
-  const app = appName.value.trim();
+  const selected = deploymentSelection();
+  const option = selectedOption();
   if (!selectedSource) error.textContent = '배포할 소스를 선택하세요.';
   else if (selectedSource.kind === 'repository' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s?#]+\/?$/.test(selectedSource.label)) error.textContent = '공개 GitHub 저장소 URL을 입력하세요.';
   else if (selectedSource.kind === 'archive' && !archive.files[0].name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
-  else if (!/^[a-z][a-z0-9-]{1,28}[a-z0-9]$/.test(app)) error.textContent = '앱 이름은 영문 소문자로 시작하고 소문자나 숫자로 끝나는 3~30자여야 합니다.';
-  else if (!supported(target, operation.value)) error.textContent = '실행 가능한 대상을 선택하세요.';
+  else if (selected.environment === 'onprem' && !selected.provider) error.textContent = '온프레미스 인프라 종류를 선택하세요.';
+  else if (!option?.available) error.textContent = connectionError || option?.message || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
   else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
-    reviewed = { app, source: selectedSource, targetId: target.id, kind: operation.value, key: crypto.randomUUID() };
+    reviewed = { ...selected, source: selectedSource, kind: 'deployments', key: crypto.randomUUID() };
     document.querySelector('#review-source').textContent = selectedSource.label;
-    document.querySelector('#review-app').textContent = app;
-    document.querySelector('#review-target').textContent = target.label || target.id;
-    document.querySelector('#review-note').textContent = operation.value === 'deployments'
-      ? '소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다.' : '소스 검사와 이미지 게시를 시작합니다. 앱 배포는 수행하지 않습니다.';
-    deployButton.textContent = operation.selectedOptions[0].textContent;
+    document.querySelector('#review-target').textContent = option.label;
+    document.querySelector('#review-note').textContent = option.message;
     deployButton.disabled = false;
     requestError.hidden = true;
     error.hidden = true;
@@ -244,8 +227,11 @@ function renderRun() {
     `이미지: ${Object.values(current.ci?.images || current.publication?.images || {}).join(', ') || '게시 대기'}`,
     `배포 revision: ${current.cd?.revision || '대기'}`].join('\n');
   document.querySelector('#run-binding').textContent = binding;
-  document.querySelector('#monitor-binding').textContent = binding;
-  document.querySelector('#monitor-steps').replaceChildren(...[...document.querySelector('#run-steps').children].map((item) => item.cloneNode(true)));
+  const stageStates = ['접수 완료', steps.find((step) => step.key === 'loop')?.conclusion || steps.find((step) => step.key === 'loop')?.status,
+    steps.find((step) => step.key === 'release')?.conclusion || steps.find((step) => step.key === 'release')?.status, current.cd?.state, current.public_http?.state];
+  document.querySelector('#monitor-steps').replaceChildren(...['소스 접수', '앱 검사 및 수정', '이미지 빌드', 'GitOps 반영', 'URL 및 앱 상태 확인'].map((label, index) => {
+    const item = document.createElement('li'); item.textContent = `${label} · ${stageStates[index] || '대기'}`; return item;
+  }));
   document.querySelector('#history-summary').textContent = `${current.app || '앱'} · ${current.id}`;
   document.querySelector('#history-detail').textContent = label;
   document.querySelector('#monitor-state').textContent = observationError ? `${label} · 상태 조회 실패` : label;
@@ -263,7 +249,8 @@ deployButton.addEventListener('click', async () => {
   controls.forEach((control) => { control.disabled = true; });
   try {
     const payload = new FormData();
-    payload.set('app', draft.app); payload.set('target_id', draft.targetId);
+    payload.set('environment', draft.environment); payload.set('provider', draft.provider);
+    if (draft.source.kind === 'folder') payload.set('source_name', (folder.files[0].webkitRelativePath || folder.files[0].name).split('/')[0]);
     if (draft.source.kind === 'repository') payload.set('repository_url', draft.source.label);
     else if (draft.source.kind === 'archive') payload.set('archive', archive.files[0]);
     else {
@@ -281,7 +268,7 @@ deployButton.addEventListener('click', async () => {
     });
     const id = data.resource_id || data.id;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(id) || location !== `/api/v1/${draft.kind}/${encodeURIComponent(id)}`) throw new Error('실행 조회 주소를 확인하지 못했습니다.');
-    current = { ...data, id, kind: draft.kind, app: draft.app, target_id: draft.targetId, status: data.status === 'accepted' ? 'queued' : data.status };
+    current = { ...data, id, kind: draft.kind, status: data.status === 'accepted' ? 'queued' : data.status };
     lastReadAt = null; observationError = false; remember(); renderRun();
     reviewed = null;
     document.querySelector('#run-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -329,8 +316,8 @@ window.addEventListener('pagehide', () => { stopPolling(); for (const controller
 let consoleTab = 'work';
 function renderConsole() {
   const data = !current ? '실행을 시작하면 확인된 상태가 여기에 표시됩니다.'
-    : consoleTab === 'app' ? { description: '배포 시점의 HTTP 검증 기록입니다. 현재 HTTP 상태는 위 probe를 확인하세요.', ...(current.public_http || {}) }
-    : consoleTab === 'environment' ? { target_id: current.target_id, environment: current.environment || null, cd: current.cd || null, observation: current.observation || null }
+    : consoleTab === 'app' ? '앱 로그 수집은 아직 연결되지 않았습니다. 배포 작업 기록은 작업 로그에서, 앱 응답 확인 결과는 환경 상태에서 확인하세요.'
+    : consoleTab === 'environment' ? { target_id: current.target_id, environment: current.environment || null, cd: current.cd || null, public_http: current.public_http || null, observation: current.observation || null }
     : { status: current.status, stage: current.stage || 'ci', steps: current.steps || current.ci?.steps || [], error: current.error || null };
   document.querySelector('#console-output').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
@@ -367,83 +354,3 @@ document.querySelectorAll('[data-console]').forEach((button) => button.addEventL
 }));
 checkConnection();
 if (current) { renderRun(); refreshRun(); }
-
-const profileSelect = document.querySelector('#profile');
-const environmentMessage = document.querySelector('#environment-message');
-const environmentButton = document.querySelector('#environment-button');
-const environmentRefresh = document.querySelector('#environment-refresh');
-let environmentPlan = null, environmentKey = null, environmentId = null, environmentTimer;
-try { environmentId = localStorage.getItem('railshot.lastEnvironment'); } catch { /* Optional browser locator. */ }
-if (environmentId && !/^[a-zA-Z0-9._-]{1,128}$/.test(environmentId)) environmentId = null;
-let environmentBusy = false;
-async function loadProfiles() {
-  try {
-    const { data } = await request('/api/v1/profiles');
-    if (!Array.isArray(data.items)) throw new Error('환경 사양 응답을 확인하지 못했습니다.');
-    profileSelect.replaceChildren(...data.items.map((profile) => {
-      const option = new Option(`${profile.label || profile.id} · ${profile.provider}`, profile.id);
-      option.disabled = !profile.supported;
-      return option;
-    }));
-    if (data.items.some((profile) => profile.supported)) profileSelect.value = data.items.find((profile) => profile.supported).id;
-    else {
-      profileSelect.replaceChildren(new Option('준비된 환경 사양이 없습니다', ''));
-      environmentMessage.textContent = '새 환경을 생성할 수 있는 사양이 아직 등록되지 않았습니다. 준비된 대상에는 바로 배포할 수 있습니다.';
-    }
-    document.querySelector('#plan-button').disabled = !profileSelect.value;
-  } catch (cause) { environmentMessage.textContent = cause.message; }
-}
-function clearPlan() {
-  environmentPlan = null; environmentKey = null;
-  environmentButton.disabled = true; environmentButton.hidden = true;
-}
-profileSelect.addEventListener('change', clearPlan);
-document.querySelector('#environment-name').addEventListener('input', clearPlan);
-document.querySelector('#environment-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  if (environmentBusy || !profileSelect.value) return;
-  environmentBusy = true; clearPlan();
-  try {
-    const { data } = await request('/api/v1/plans', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: document.querySelector('#environment-name').value.trim(), runtime: { profile_id: profileSelect.value, node_count: 1 }, database: { mode: 'none' } }) });
-    environmentPlan = data; environmentKey = crypto.randomUUID();
-    environmentMessage.textContent = data.executable
-      ? `${data.name} · runtime 노드 1대 · DB 없음. 계획을 실행하면 클라우드 자원이 생성됩니다.`
-      : `현재 실행할 수 없는 계획입니다: ${(data.blockers || []).join(', ')}`;
-    environmentButton.hidden = false; environmentButton.disabled = !data.executable;
-  } catch (cause) { environmentMessage.textContent = cause.message; }
-  finally { environmentBusy = false; }
-});
-environmentButton.addEventListener('click', async () => {
-  if (environmentBusy || !environmentPlan?.executable) return;
-  environmentBusy = true; environmentButton.disabled = true;
-  try {
-    const { data, location } = await request('/api/v1/environments', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': environmentKey }, body: JSON.stringify({ plan_id: environmentPlan.id }) });
-    const id = data.resource_id || data.id;
-    if (typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(id) || location !== `/api/v1/environments/${encodeURIComponent(id)}`) throw new Error('환경 조회 주소를 확인하지 못했습니다.');
-    environmentId = id;
-    try { localStorage.setItem('railshot.lastEnvironment', id); } catch { /* Optional browser locator. */ }
-    clearPlan(); refreshEnvironment();
-  } catch (cause) {
-    environmentMessage.textContent = `${cause.message} 재요청은 같은 계획과 요청 키를 사용합니다.`;
-    environmentButton.disabled = false;
-  } finally { environmentBusy = false; }
-});
-async function refreshEnvironment() {
-  clearTimeout(environmentTimer);
-  if (!environmentId) return;
-  environmentRefresh.hidden = false;
-  try {
-    const { data } = await request(`/api/v1/environments/${encodeURIComponent(environmentId)}`);
-    if (data.id !== environmentId) throw new Error('환경 조회 결과가 요청과 일치하지 않습니다.');
-    environmentMessage.textContent = data.status === 'succeeded'
-      ? `${data.runtime_target_id || data.id}: runtime 준비 완료. ${data.deployment_supported ? '앱 배포 대상으로 연결됐습니다.' : '앱 배포에는 CI·Argo·공개 경로 연결이 추가로 필요합니다.'}`
-      : `${data.stage || '환경 준비'}: ${labels[data.status] || data.status}${data.error?.message ? ` · ${data.error.message}` : ''}`;
-    if (!terminal.has(data.status)) environmentTimer = setTimeout(refreshEnvironment, 15000);
-    if (data.status === 'succeeded' && data.deployment_supported) checkConnection();
-  } catch (cause) { environmentMessage.textContent = `${cause.message} 환경 상태를 다시 조회하세요.`; }
-}
-environmentRefresh.addEventListener('click', refreshEnvironment);
-window.addEventListener('pagehide', () => clearTimeout(environmentTimer));
-loadProfiles();
-if (environmentId) refreshEnvironment();

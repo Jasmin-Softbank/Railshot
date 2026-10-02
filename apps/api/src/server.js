@@ -39,7 +39,7 @@ function normalizedRepository(value) {
   return `https://github.com/${match[1].toLowerCase()}/${match[2].toLowerCase()}`;
 }
 // Parse without fetching GitHub: an idempotency replay must retain its first source snapshot.
-async function uploadedSource(request, strict = false) {
+async function uploadedSource(request, strict = false, allowSelection = false) {
   const contentType = request.headers['content-type'] || '';
   if (!/^multipart\/form-data\s*;/i.test(contentType)) throw new ServiceError('multipart/form-data 요청이 필요합니다.', 415);
   const body = await readLimited(request, archiveLimits.maxBytes + 1024 * 1024);
@@ -48,15 +48,26 @@ async function uploadedSource(request, strict = false) {
   catch { throw new ServiceError('multipart 요청 형식이 잘못되었습니다.', 400); }
   const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
   const allowed = new Set(['app', 'target_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
+  if (allowSelection) for (const name of ['environment', 'provider', 'source_name']) allowed.add(name);
   for (const key of form.keys()) {
     if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
     if (key !== 'files' && form.getAll(key).length !== 1) fail('단일 입력 필드를 중복해서 보낼 수 없습니다.');
   }
-  const app = form.get('app');
-  if (typeof app !== 'string' || !APP_NAME.test(app)) fail(APP_NAME_MESSAGE);
+  const selecting = allowSelection && (form.has('environment') || form.has('provider'));
+  const app = form.has('app') ? form.get('app') : undefined;
+  if (!selecting && (typeof app !== 'string' || !APP_NAME.test(app))) fail(APP_NAME_MESSAGE);
   const target_id = form.has('target_id') ? form.get('target_id') : undefined;
   if (target_id !== undefined && (typeof target_id !== 'string' || !target_id)) fail('대상 ID가 잘못되었습니다.');
-  if (strict && !target_id) fail('대상 ID가 필요합니다.');
+  if (strict && !selecting && !target_id) fail('대상 ID가 필요합니다.');
+  let selected = {};
+  if (selecting) {
+    const environment = form.get('environment'), provider = form.get('provider');
+    if (form.has('app') || form.has('target_id')) fail('환경 선택과 직접 대상 지정을 함께 사용할 수 없습니다.');
+    if (!(environment === 'cloud' && provider === 'aws' || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
+    const source_name = form.has('source_name') ? form.get('source_name') : undefined;
+    if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
+    selected = { deployment_selection: { environment, provider }, source_name };
+  } else if (form.has('source_name')) fail('소스 이름은 환경 선택과 함께 입력하세요.');
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
   if (supplied.length !== 1) fail('배포 소스 하나만 입력하세요.');
@@ -67,7 +78,7 @@ async function uploadedSource(request, strict = false) {
     if (typeof form.get('repository_url') !== 'string') fail('공개 GitHub 저장소 URL이 필요합니다.');
     let repository_url;
     try { repository_url = normalizedRepository(form.get('repository_url')); } catch { fail('공개 GitHub 저장소 기본 URL이 필요합니다.'); }
-    return { app, target_id, source_type, repository_url };
+    return { app, target_id, ...selected, source_type, repository_url };
   }
   try {
     if (source_type === 'folder') {
@@ -77,11 +88,11 @@ async function uploadedSource(request, strict = false) {
         if (!file || typeof file.arrayBuffer !== 'function') fail('폴더 파일이 잘못되었습니다.');
         return { path: paths[index], content: Buffer.from(await file.arrayBuffer()) };
       }));
-      return { app, target_id, source_type, files: validateFiles(files) };
+      return { app, target_id, ...selected, source_type, files: validateFiles(files) };
     }
     const file = form.get('archive');
     if (!file || typeof file.arrayBuffer !== 'function' || !file.name?.toLowerCase().endsWith('.zip')) fail('ZIP 파일이 필요합니다.');
-    return { app, target_id, source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
+    return { app, target_id, ...selected, ...(selecting && !selected.source_name ? { source_name: file.name } : {}), source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
   } catch { fail('소스 파일 목록·경로·크기를 확인하세요. 비밀 파일은 보낼 수 없습니다.'); }
 }
 async function jsonInput(request) {
@@ -141,6 +152,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
   deployPublished, environmentAdapter, observeMetrics, product, pollInterval,
+  target = { provider: process.env.RAILSHOT_TARGET_PROVIDER },
 } = {}) {
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
@@ -154,7 +166,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments') }) : undefined);
     const { createMetricsObserver } = await import('./metrics.js');
     const observer = observeMetrics || createMetricsObserver({ configPath: process.env.RAILSHOT_OBSERVER_CONFIG });
-    return createProductService({ observeMetrics: observer, service, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
+    return createProductService({ observeMetrics: observer, service, target, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
@@ -180,6 +192,10 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
         if (versioned) {
+          if (url.pathname === '/api/v1/deployment-options') {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
+          }
           const routes = /^(?:\/api\/v1\/(targets|builds|deployments|profiles|plans|environments))(?:\/([A-Za-z0-9._-]+))?$/.exec(url.pathname);
           if (!routes) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
           const [, kind, id] = routes;
@@ -201,7 +217,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           }
           if (kind === 'deployments') {
             const key = requestKey(request);
-            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true), key, sourceLoader), requestId); return;
+            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true, true), key, sourceLoader), requestId); return;
           }
           if (kind === 'plans') {
             const plan = await products.createPlan(await jsonInput(request));

@@ -38,6 +38,27 @@ export async function createProductService({ service, directory, target, deployP
   const cdTarget = deployPublished?.targets?.[targetId];
   const cdAvailable = Boolean(deployPublished && (!deployPublished.targets || cdTarget));
   if (targetId && !TARGET_ID.test(targetId)) { await store.close(); throw invalid('등록된 대상 ID가 잘못되었습니다.'); }
+  function deploymentOptions() {
+    return [['cloud', 'aws', '클라우드 · RailShot AWS'], ['onprem', 'openstack', '온프레미스 · OpenStack'], ['onprem', 'proxmox', '온프레미스 · Proxmox']].map(([environment, provider, label]) => {
+      const available = Boolean(service && cdAvailable && targetId && target?.provider === provider);
+      return { id: `${environment}-${provider}`, environment, provider, label, available,
+        message: available ? `소스 검사부터 앱 배포와 URL 확인까지 진행합니다.${cdTarget?.applicationName ? ` 등록된 앱 ${cdTarget.applicationName}의 소스를 갱신합니다.` : ''}`
+          : `${label}에 배포할 인프라가 아직 연결되지 않았습니다. 운영자의 대상 연결이 필요합니다.` };
+    });
+  }
+  function resolveSelection(input) {
+    if (!input.deployment_selection) return input;
+    if (input.app !== undefined || input.target_id !== undefined) throw invalid('환경 선택과 직접 대상 지정을 함께 사용할 수 없습니다.');
+    const { environment, provider } = input.deployment_selection;
+    const option = deploymentOptions().find((item) => item.environment === environment && item.provider === provider);
+    if (!option) throw invalid('배포 환경과 인프라 종류를 확인하세요.');
+    if (!option.available) throw new ProductError(409, 'CAPABILITY_UNAVAILABLE', option.message);
+    const name = input.source_name || input.repository_url?.split('/').at(-1) || 'my-app';
+    const normalized = name.normalize('NFKD').toLowerCase().replace(/\.zip$/i, '').replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+    let app = normalized.replace(/^[^a-z]+/, '').slice(0, 30).replace(/-+$/g, '');
+    if (!APP_NAME.test(app)) app = `app-${digest(name).slice(0, 10)}`;
+    return { ...input, app: cdTarget?.applicationName || app, target_id: targetId };
+  }
   async function update(id, patch) {
     await store.transaction((state) => { Object.assign(state.operations[id], patch, { updated_at: new Date().toISOString() }); });
   }
@@ -57,6 +78,7 @@ export async function createProductService({ service, directory, target, deployP
   }
   function inputFingerprint(input) {
     return digest({ app: input.app, target_id: input.target_id, type: input.source_type,
+      ...(input.deployment_selection ? { selection: input.deployment_selection } : {}),
       ...(input.repository_url ? { repository_url: input.repository_url } : {
         files: input.files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort(([a], [b]) => a.localeCompare(b)),
       }) });
@@ -153,6 +175,7 @@ export async function createProductService({ service, directory, target, deployP
     }
   }
   return {
+    deploymentOptions,
     targets() {
       return targetId ? [{ id: targetId, label: target?.label || targetId, provider: target?.provider || null, environment: target?.environment || 'registered',
         ...(cdTarget?.applicationName ? { application_name: cdTarget.applicationName, deployment_scope: 'registered_application' } : {}),
@@ -168,6 +191,7 @@ export async function createProductService({ service, directory, target, deployP
     getBuild: readBuild,
     async legacyStatus(id) { if (!Object.hasOwn(store.read().bindings, id)) throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.'); return service.status(id); },
     async createDeployment(input, key, materialize) {
+      input = resolveSelection(input);
       const reserved = await reserve('deployments', input, idempotencyKey(key), materialize);
       if (!reserved.replay) launch(async () => {
         try { const result = await submit(reserved.record, reserved.input); await observe(reserved.record, String(result.run_id)); } catch { /* submit persists unknown */ }
