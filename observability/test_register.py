@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 from pathlib import Path
 import subprocess
@@ -75,6 +76,35 @@ class RegistrationTests(unittest.TestCase):
                 self.fail('unregistered observer address accepted')
         with self.assertRaises(ValueError):
             settings({**direct, 'observer_transport': 'arbitrary'})
+
+    def test_public_gcp_metrics_use_only_provisioned_address_and_explicit_nat_source(self):
+        descriptor = {**self.descriptor, 'provider_kind': 'gcp', 'management_endpoint': 'https://34.47.68.21:6443',
+            'addresses': {**self.descriptor['addresses'], 'public': '34.47.68.21', 'metrics': '34.47.68.21'}}
+        config = {**self.config, 'observer_source_cidr': '52.78.97.236/32'}
+        settings(config)
+        row, rendered = registration_row(config, self.request, descriptor)
+        self.assertEqual(row['node_instance'], '34.47.68.21:30910')
+        self.assertEqual(row['cluster_instance'], '34.47.68.21:30911')
+        self.assertEqual(row['node_ip'], self.request['node_ip'])
+        self.assertEqual(rendered['observer_source_cidr'], '52.78.97.236/32')
+        self.assertEqual(row['prometheus_url'], self.config['prometheus_url'])
+        for changed in ({'metrics': '8.8.8.8'}, {'public': '8.8.8.8'}, {'public': '224.0.0.1', 'metrics': '224.0.0.1'}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                registration_row(config, self.request, {**descriptor, 'addresses': {**descriptor['addresses'], **changed}})
+        with self.assertRaises(ValueError):
+            registration_row(config, self.request, {**descriptor, 'management_endpoint': 'https://34.47.68.21:443'})
+        private = copy.deepcopy(descriptor); del private['addresses']['metrics']; private.pop('management_endpoint')
+        default, rendering = registration_row(self.config, self.request, private)
+        self.assertEqual(default['node_instance'], self.request['node_ip'] + ':30910')
+        self.assertEqual(rendering['observer_source_cidr'], self.config['observer_ip'] + '/32')
+
+    def test_observer_source_override_is_one_rfc1918_or_global_nonmulticast_ipv4(self):
+        for value in ('52.78.97.236/32', '172.31.0.172/32', '10.1.2.3/32', '192.168.1.2/32'):
+            self.assertEqual(settings({**self.config, 'observer_source_cidr': value})['observer_source_cidr'], value)
+        for value in ('0.0.0.0/0', '52.78.97.0/24', '224.0.0.1/32', '239.1.2.3/32', '127.0.0.1/32',
+                      '169.254.169.254/32', '192.0.2.20/32', '::1/128', '52.78.97.236'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                settings({**self.config, 'observer_source_cidr': value})
 
     def test_bootstrap_is_empty_and_idempotent_without_rotating_password_or_promoting_acceptance(self):
         with tempfile.TemporaryDirectory() as root:

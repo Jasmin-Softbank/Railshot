@@ -32,7 +32,7 @@ def require(ok):
 
 
 def settings(config):
-    require(set(config) - {'observer_transport'} == {'version', 'owner', 'lifecycle', 'expires_at', 'state_dir', 'prometheus_url', 'observer_ip',
+    require(set(config) - {'observer_transport', 'observer_source_cidr'} == {'version', 'owner', 'lifecycle', 'expires_at', 'state_dir', 'prometheus_url', 'observer_ip',
                            'observer_registry_file', 'observer_target_id', 'observer_directory',
                            'node_metrics_port', 'cluster_metrics_port'} and config['version'] == 1)
     require(config.get('observer_transport', 'registered') in ('registered', 'direct'))
@@ -41,6 +41,12 @@ def settings(config):
     require(isinstance(config['owner'], str) and re.fullmatch(r'[a-z][a-z0-9-]{2,39}', config['owner']))
     require(str(ipaddress.IPv4Address(config['observer_ip'])) == config['observer_ip'])
     require(config['prometheus_url'] == 'http://' + config['observer_ip'] + ':9090')
+    if 'observer_source_cidr' in config:
+        source = ipaddress.IPv4Network(config['observer_source_cidr'], strict=True)
+        address = source.network_address
+        private = any(address in ipaddress.IPv4Network(value) for value in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+        require(source.prefixlen == 32 and str(source) == config['observer_source_cidr']
+                and (private or address.is_global and not address.is_multicast))
     for key in ('state_dir', 'observer_registry_file', 'observer_directory'):
         path = Path(config[key])
         require(path.is_absolute() and '..' not in path.parts and str(path) != '/')
@@ -51,6 +57,18 @@ def settings(config):
     return config
 
 
+def metrics_host(descriptor, node_ip):
+    address = descriptor['addresses'].get('metrics', node_ip)
+    if descriptor.get('provider_kind') == 'openstack':
+        return address
+    if descriptor.get('provider_kind') == 'gcp' and ('metrics' in descriptor['addresses'] or descriptor.get('management_endpoint')):
+        public = ipaddress.IPv4Address(descriptor['addresses'].get('public', ''))
+        require(public.is_global and not public.is_multicast and address == str(public)
+                and descriptor.get('management_endpoint') == f'https://{public}:6443')
+        return address
+    return node_ip
+
+
 def registration_row(config, request, descriptor):
     require(set(request) == {'version', 'target_id', 'environment_id', 'app', 'namespace', 'node_ip',
                              'probe_url', 'registry_file', 'context'} and request['version'] == 1)
@@ -59,14 +77,13 @@ def registration_row(config, request, descriptor):
         require(isinstance(request[key], str) and re.fullmatch(r'[a-z][a-z0-9-]{1,61}[a-z0-9]', request[key]))
     require(isinstance(request['environment_id'], str) and re.fullmatch(r'[A-Za-z0-9._-]{1,128}', request['environment_id']))
     rendered = validate({'name': config['owner'], 'node_ip': request['node_ip'],
-        'observer_source_cidr': config['observer_ip'] + '/32', 'node_metrics_port': config['node_metrics_port'],
+        'observer_source_cidr': config.get('observer_source_cidr', config['observer_ip'] + '/32'), 'node_metrics_port': config['node_metrics_port'],
         'cluster_metrics_port': config['cluster_metrics_port'], 'probe_urls': [request['probe_url']], 'argocd_metrics': None})
-    metrics_host = (descriptor['addresses'].get('metrics', request['node_ip'])
-                    if descriptor.get('provider_kind') == 'openstack' else request['node_ip'])
+    metrics_address = metrics_host(descriptor, request['node_ip'])
     return {'target_id': request['target_id'], 'app': request['app'], 'namespace': request['namespace'],
-            **({'node_ip': request['node_ip']} if metrics_host != request['node_ip'] else {}),
-            'prometheus_url': config['prometheus_url'], 'node_instance': f"{metrics_host}:{config['node_metrics_port']}",
-            'cluster_instance': f"{metrics_host}:{config['cluster_metrics_port']}", 'probe_url': request['probe_url'],
+            **({'node_ip': request['node_ip']} if metrics_address != request['node_ip'] else {}),
+            'prometheus_url': config['prometheus_url'], 'node_instance': f"{metrics_address}:{config['node_metrics_port']}",
+            'cluster_instance': f"{metrics_address}:{config['cluster_metrics_port']}", 'probe_url': request['probe_url'],
             'environment_id': request['environment_id'], 'resource_id': descriptor['resource_id']}, rendered
 
 

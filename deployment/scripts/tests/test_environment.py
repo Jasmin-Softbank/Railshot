@@ -186,10 +186,51 @@ class RegistrationTest(unittest.TestCase):
             with self.subTest(provider=provider):
                 descriptor = json.loads((ROOT / f'examples/ansible/{provider}-node-descriptor.json').read_text())
                 descriptor.update(target_id=self.target, management_endpoint='https://10.99.0.1:16443')
+                descriptor['addresses']['metrics'] = '8.8.8.8'
                 self.write('descriptor.json', descriptor)
-                _, cd, _, _, _, _ = env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
+                _, cd, _, _, _, identity = env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
                 self.assertEqual(cd['targets'][self.target]['target']['cluster_server'],
                     'https://' + descriptor['addresses']['private'] + ':6443')
+                self.assertNotIn('metrics', identity['descriptor']['addresses'])
+
+    def test_gcp_public_management_route_binds_allocated_ip_and_preserves_tls_identity(self):
+        descriptor = json.loads((ROOT / 'examples/ansible/gcp-node-descriptor.json').read_text())
+        descriptor['target_id'] = self.target
+        descriptor['addresses']['public'] = '34.47.68.21'
+        self.write('descriptor.json', descriptor)
+        selected = self.registry['targets'][self.target]
+        for endpoint in (None, 'http://34.47.68.21:6443', 'https://34.47.68.22:6443',
+                'https://34.47.68.21:443', 'https://34.47.68.21:6443/api'):
+            selected['management_endpoint'] = endpoint
+            self.write('registry.json', self.registry)
+            with self.assertRaises(ValueError):
+                self.run_registration()
+            self.assertFalse(self.shared.exists())
+        for public in ('224.0.0.1', '239.1.2.3'):
+            descriptor['addresses']['public'] = public
+            self.write('descriptor.json', descriptor)
+            selected['management_endpoint'] = f'https://{public}:6443'
+            self.write('registry.json', self.registry)
+            with self.assertRaises(ValueError):
+                env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
+            self.assertFalse(self.shared.exists())
+        descriptor['addresses']['public'] = '34.47.68.21'
+        self.write('descriptor.json', descriptor)
+        selected['management_endpoint'] = 'https://34.47.68.21:6443'
+        self.write('registry.json', self.registry)
+        descriptor['addresses']['metrics'] = '8.8.8.8'
+        self.write('descriptor.json', descriptor)
+        *_, identity = env.load(self.root / 'registry.json', self.target, self.root / 'config.json')
+        self.assertEqual(identity['descriptor']['addresses']['metrics'], '34.47.68.21')
+        result = self.run_registration()
+        self.assertEqual(result['status'], 'succeeded', result)
+        renewal = json.loads((self.home / 'renewal.json').read_text())
+        self.assertEqual(renewal['server'], selected['management_endpoint'])
+        self.assertEqual(renewal['tls_server_name'], descriptor['addresses']['private'])
+        secret = self.control.objects['argocd', 'secret', 'railshot-' + self.target]
+        tls = json.loads(base64.b64decode(secret['data']['config']))['tlsClientConfig']
+        self.assertEqual(tls['serverName'], descriptor['addresses']['private'])
+        self.assertIs(tls['insecure'], False)
 
     def test_openstack_management_endpoint_is_explicit_and_bound_to_the_connection_host(self):
         self.use_openstack()
@@ -355,6 +396,20 @@ class RegistrationTest(unittest.TestCase):
         result = self.run_registration()
         self.assertEqual(result['status'], 'unknown')
         self.assertEqual(self.runtime.applications, 0)
+
+    def test_gcp_aws_edge_is_rejected_before_registration_side_effects(self):
+        descriptor = json.loads((ROOT / 'examples/ansible/gcp-node-descriptor.json').read_text())
+        descriptor['target_id'] = self.target
+        self.write('descriptor.json', descriptor)
+        self.config['registration'].update(edge_config_file='/private/edge.json', expires_at='2099-01-01T00:00:00Z')
+        self.write('config.json', self.config)
+        with self.assertRaisesRegex(Exception, 'AWS edge is AWS-only'):
+            self.run_registration()
+        self.assertFalse(self.shared.exists())
+        self.assertFalse(self.home.exists())
+        self.assertEqual(self.runtime.applications, 0)
+        self.assertEqual(self.control.applications, 0)
+        self.assertIsNone(self.variable)
 
     def test_missing_edge_expiry_blocks_before_registration_claim_or_remote_calls(self):
         self.config['registration'].update(edge_config_file='/private/edge.json', expires_at=None)
@@ -532,7 +587,9 @@ class ObservationRegistryTest(unittest.TestCase):
                     registry = private('registry.json', {'version': 1, 'targets': {descriptor['target_id']: target}})
                     request, resource = self.observation.node_request(registry, descriptor['target_id'])
                     self.assertEqual(request['target']['provider'], provider)
-                    self.assertEqual(resource, descriptor)
+                    expected = copy.deepcopy(descriptor)
+                    expected['addresses'].pop('metrics', None)
+                    self.assertEqual(resource, expected)
                     row, _ = self.observation.registration_row(self.config,
                         {**self.request, 'target_id': descriptor['target_id'], 'node_ip': descriptor['addresses']['private']}, resource)
                     self.assertEqual(row['node_instance'], descriptor['addresses']['private'] + ':31490')

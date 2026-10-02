@@ -48,6 +48,12 @@ def documentation(path):
             or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
 
 
+def release_required(paths):
+    """Release common runtime/worker/IaC policy too; only proven docs-only diffs skip."""
+    return paths is None or any(not path or path.startswith('/') or '..' in PurePosixPath(path).parts
+                                or not documentation(path) for path in paths)
+
+
 def container_components(paths):
     components = set()
     for path in paths:
@@ -205,9 +211,16 @@ def main():
     paths = changed_paths(os.environ['GITHUB_EVENT_NAME'], event, Path.cwd())
     selected = set(JOBS) if paths is None else select(paths)
     components = set(COMPONENTS) if paths is None else container_components(paths)
+    release = release_required(paths)
+    # A trusted automatic release exports all images once, even when only the
+    # native runtime/edge/worker source changes. The gate must require that job.
+    if release and os.environ.get('AUTO_RELEASE') == 'true':
+        selected.add('containers')
+        components = set(COMPONENTS)
     result = json.dumps([job for job in JOBS if job in selected])
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         stream.write(f'selected={result}\n')
+        stream.write(f'release={str(release).lower()}\n')
         stream.write('container_components=' + json.dumps([name for name in COMPONENTS if name in components]) + '\n')
         for job in JOBS:
             stream.write(f'{job}={str(job in selected).lower()}\n')

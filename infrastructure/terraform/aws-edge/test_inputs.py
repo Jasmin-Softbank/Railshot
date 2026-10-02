@@ -86,6 +86,51 @@ class EdgeInputsTest(unittest.TestCase):
         self.assertEqual(len(evaluate(values)), 2)
         self.assertEqual(evaluate(values, 'local.gcp_ports'), ['30081', '30082'])
 
+    def test_external_dns_preserves_existing_alb_and_wireguard_route_keys(self):
+        values = fixture()
+        self.assertEqual(set(evaluate(values, 'keys(local.dns_routes)')), set(values['routes']))
+        before = evaluate(values, '{routes=keys(var.routes), private=local.private_routes, ports=local.gcp_ports}')
+        values['routes']['gcp-demo-c3d4']['manage_dns'] = False
+        self.assertEqual(evaluate(values, 'keys(local.dns_routes)'), ['aws-demo-a1b2'])
+        self.assertEqual(evaluate(values, '{routes=keys(var.routes), private=local.private_routes, ports=local.gcp_ports}'), before)
+        source = (MODULE / 'main.tf').read_text()
+        for resource in ('aws_lb_target_group', 'aws_lb_target_group_attachment', 'aws_lb_listener_rule'):
+            block = source.split('resource "' + resource + '" "app" {', 1)[1].split('\n}', 1)[0]
+            self.assertRegex(block, r'for_each\s*= var.routes')
+        dns = source.split('resource "aws_route53_record" "app" {', 1)[1].split('\n}', 1)[0]
+        self.assertIn('for_each = local.dns_routes', dns)
+
+    def test_existing_proxy_egress_is_optional_and_restricted_to_private_nodeport(self):
+        values = fixture()
+        self.assertIsNone(evaluate(values, 'var.openstack_proxy_egress'))
+        values['openstack_proxy_egress'] = {'target_private_ip': '172.31.0.10', 'node_port': 31081}
+        self.assertEqual(evaluate(values, 'var.openstack_proxy_egress'), values['openstack_proxy_egress'])
+        for key, invalid in (('target_private_ip', '8.8.8.8'), ('target_private_ip', '169.254.169.254'),
+                             ('target_private_ip', '100.64.0.1'), ('target_private_ip', '10.999.0.1'),
+                             ('node_port', 443), ('node_port', 32768), ('node_port', 31081.5)):
+            rejected = copy.deepcopy(values)
+            rejected['openstack_proxy_egress'][key] = invalid
+            with self.subTest(key=key, invalid=invalid), self.assertRaises(ValueError):
+                evaluate(rejected, 'var.openstack_proxy_egress')
+
+    def test_app_relay_and_skyline_egress_coexist_without_new_routes(self):
+        values = fixture()
+        self.assertIsNone(evaluate(values, 'var.openstack_app_egress'))
+        routes = evaluate(values, 'keys(var.routes)')
+        values['openstack_proxy_egress'] = {'target_private_ip': '172.31.0.10', 'node_port': 31081}
+        values['openstack_app_egress'] = {'target_private_ip': '172.31.0.10', 'port': 13200,
+                                        'description': 'existing-owner app relay'}
+        expression = '{skyline=var.openstack_proxy_egress, app=var.openstack_app_egress, routes=keys(var.routes)}'
+        self.assertEqual(evaluate(values, expression), {'skyline': values['openstack_proxy_egress'],
+                         'app': values['openstack_app_egress'], 'routes': routes})
+        for key, invalid in (('target_private_ip', '8.8.8.8'), ('target_private_ip', '169.254.169.254'),
+                             ('port', 0), ('port', 65536), ('port', 13200.5),
+                             ('description', ''), ('description', 'wrong\nline')):
+            rejected = copy.deepcopy(values)
+            rejected['openstack_app_egress'][key] = invalid
+            with self.subTest(key=key, invalid=invalid), self.assertRaises(ValueError):
+                evaluate(rejected, 'var.openstack_app_egress')
+
     def test_aws_only_can_reserve_gateway_eip_without_inventing_a_peer(self):
         values = fixture()
         values['wireguard_peer_cidrs'] = []

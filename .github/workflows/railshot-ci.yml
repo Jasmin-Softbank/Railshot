@@ -33,6 +33,7 @@ jobs:
       observability: ${{ steps.select.outputs.observability }}
       containers: ${{ steps.select.outputs.containers }}
       container_components: ${{ steps.select.outputs.container_components }}
+      release: ${{ steps.select.outputs.release }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -42,6 +43,8 @@ jobs:
         run: python3 -m unittest discover -s ci/scripts -p test_ci_scope.py -v
       - name: Compare the complete PR or push change set
         id: select
+        env:
+          AUTO_RELEASE: ${{ github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && vars.RAILSHOT_AUTO_RELEASE == 'true' }}
         run: python3 ci/scripts/ci_scope.py select
 
   contracts:
@@ -229,17 +232,20 @@ jobs:
           python-version: '3.13'
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
-          terraform_version: 1.5.7
+          terraform_version: 1.7.5
           terraform_wrapper: false
       - run: python -m pip install PyYAML==6.0.3
       - name: Validate without credentials, backend or apply
         run: |
           terraform fmt -check -recursive infrastructure/terraform
-          for module in aws aws-edge openstack-edge ci control gcp azure platform-verification; do
+          for module in aws aws-edge openstack-edge ci control gcp gcp-edge azure platform-verification platform-release openstack-relay-edge; do
             terraform -chdir="infrastructure/terraform/$module" init -backend=false -input=false
             terraform -chdir="infrastructure/terraform/$module" validate
           done
-          for suite in infrastructure/terraform/aws infrastructure/terraform/aws-edge infrastructure/terraform/openstack-edge infrastructure/terraform/ci infrastructure/terraform/gcp infrastructure/terraform/azure/tests; do
+          for module in gcp-edge platform-release; do
+            terraform -chdir="infrastructure/terraform/$module" test
+          done
+          for suite in infrastructure/terraform/aws infrastructure/terraform/aws-edge infrastructure/terraform/openstack-edge infrastructure/terraform/openstack-relay-edge infrastructure/terraform/ci infrastructure/terraform/gcp infrastructure/terraform/azure/tests; do
             python -m unittest discover -s "$suite" -p 'test_*.py' -v
           done
 
@@ -293,6 +299,7 @@ jobs:
     uses: ./.github/workflows/platform-containers.yml
     with:
       components: ${{ needs.changes.outputs.container_components }}
+      export_image: ${{ needs.changes.outputs.release == 'true' && github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && vars.RAILSHOT_AUTO_RELEASE == 'true' }}
     permissions:
       contents: read
 
@@ -310,3 +317,18 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: python3 ci/scripts/ci_scope.py gate
+
+  release:
+    name: Promote the verified multicloud release
+    needs: [changes, gate]
+    if: ${{ always() && !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.release == 'true' && github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && vars.RAILSHOT_AUTO_RELEASE == 'true' }}
+    uses: ./.github/workflows/platform-publish.yml
+    with:
+      components: '["dashboard","api","mcp","ci-runner"]'
+      publish: true
+      deploy: true
+      multicloud: true
+      skip_build: true
+      ci_run_id: ${{ format('{0}', github.run_id) }}
+    permissions: {contents: write, actions: read, packages: write, id-token: write}
+    secrets: inherit

@@ -72,8 +72,11 @@ class CiliumEntryTests(unittest.TestCase):
     def test_pins_match_integrated_runtime(self):
         runtime = yaml.safe_load((HERE / 'runtime.yml').read_text())[0]
         identity = runtime['vars']['railshot_runtime_identity']
-        self.assertEqual(self.defaults['k3s_version'], identity['k3s_version'])
-        self.assertEqual(self.defaults['cilium_version'], identity['cilium_version'])
+        self.assertIn("/airgap/versions.json", runtime['vars']['railshot_approved_runtime'])
+        for key in ('k3s_version', 'cilium_version'):
+            self.assertEqual(identity[key], '{{ railshot_approved_runtime.' + key + ' }}')
+            approved = json.loads((HERE.parents[1] / 'deployment/airgap/versions.json').read_text())['runtime']
+            self.assertEqual(self.defaults[key], approved[key])
         profile = next(t for t in self.play['pre_tasks'] if t['name'] == 'Validate the shared single-node Cilium profile')
         checks = profile['ansible.builtin.assert']['that']
         self.assertIn("k3s_cluster_cidr == '10.42.0.0/16'", checks)

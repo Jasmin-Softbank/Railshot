@@ -10,6 +10,7 @@ provider "aws" {
 }
 
 locals {
+  dns_routes = { for key, route in var.routes : key => route if route.manage_dns }
   route_hosts_valid = alltrue([for r in values(var.routes) :
     (r.host == var.base_domain && var.apex_certificate_arn != null) ||
     (endswith(r.host, ".${var.base_domain}") && length(split(".", r.host)) == length(split(".", var.base_domain)) + 1)
@@ -72,6 +73,26 @@ resource "aws_security_group" "alb" {
       protocol    = "tcp"
       from_port   = egress.value.node_port
       to_port     = egress.value.node_port
+      cidr_blocks = ["${egress.value.target_private_ip}/32"]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.openstack_proxy_egress == null ? [] : [var.openstack_proxy_egress]
+    content {
+      description = "OpenStack HTTPS proxy on existing control node"
+      protocol    = "tcp"
+      from_port   = egress.value.node_port
+      to_port     = egress.value.node_port
+      cidr_blocks = ["${egress.value.target_private_ip}/32"]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.openstack_app_egress == null ? [] : [var.openstack_app_egress]
+    content {
+      description = egress.value.description
+      protocol    = "tcp"
+      from_port   = egress.value.port
+      to_port     = egress.value.port
       cidr_blocks = ["${egress.value.target_private_ip}/32"]
     }
   }
@@ -203,7 +224,7 @@ resource "aws_lb_listener_rule" "app" {
   }
 }
 resource "aws_route53_record" "app" {
-  for_each = var.routes
+  for_each = local.dns_routes
   zone_id  = local.zone_id
   name     = each.value.host
   type     = "A"
