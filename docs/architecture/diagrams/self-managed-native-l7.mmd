@@ -1,0 +1,41 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, Apple SD Gothic Neo, sans-serif","fontSize":"18px","lineColor":"#64748b","primaryTextColor":"#172033","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"linear","defaultRenderer":"elk","nodeSpacing":30,"rankSpacing":48,"htmlLabels":true,"wrappingWidth":360,"padding":18}}}%%
+flowchart TB
+  USER["방문자<br/>https://chat-a1b2c3.railshot.io"]
+  EDGE["Cloudflare · 공통 공개 진입점<br/>DNS / Edge TLS / HTTP proxy<br/>서비스마다 선택한 공급자 한 곳으로 연결"]
+  USER -->|"HTTPS 443"| EDGE
+
+  subgraph AWS["AWS 선택"]
+    ALB["AWS ALB · L7<br/>HTTPS listener · Host/path 규칙"]
+    AWSAPP["AWS 사용자 앱 · 1노드<br/>Self-managed K3s<br/>NodePort Service → Pod · Cilium"]
+    ALB -->|"사설망 HTTP · 앱 NodePort"| AWSAPP
+  end
+
+  subgraph GCP["GCP 선택"]
+    GLB["GCP external Application LB · L7<br/>HTTPS frontend · URL map"]
+    GCPAPP["GCP Compute VM 사용자 앱 · 1노드<br/>Self-managed K3s<br/>NodePort Service → Pod · Cilium"]
+    GLB -->|"backend service / instance group<br/>HTTP · 앱 NodePort"| GCPAPP
+  end
+
+  subgraph OPENSTACK["OpenStack 선택"]
+    CONNECTOR["cloudflared · 현장 커넥터<br/>공인 VIP가 없을 때 사용<br/>Cloudflare로 outbound 연결 시작"]
+    OCTAVIA["Octavia Amphora · L7<br/>HTTPS VIP :443 · TLS 종료<br/>Host/path 정책 → 앱 pool"]
+    OSAPP["OpenStack 사용자 앱 · 1노드<br/>Self-managed K3s<br/>NodePort Service → Pod · Cilium"]
+    CONNECTOR -->|"HTTPS · 도달 가능한 내부 VIP"| OCTAVIA
+    OCTAVIA -->|"사설망 HTTP · 앱 NodePort"| OSAPP
+  end
+
+  EDGE -->|"HTTPS 443 · 원본 인증서 검증"| ALB
+  EDGE -->|"HTTPS 443 · 원본 인증서 검증"| GLB
+  EDGE -->|"공개 진입 주소가 있으면<br/>HTTPS 443 · VIP 또는 Floating IP"| OCTAVIA
+  EDGE -->|"공개 진입 주소가 없으면<br/>수립된 Named Tunnel로 요청 전달"| CONNECTOR
+
+  class USER actor
+  class EDGE edge
+  class ALB,AWSAPP aws
+  class GLB,GCPAPP gcp
+  class CONNECTOR,OCTAVIA,OSAPP onprem
+  classDef actor fill:#1e293b,stroke:#0f172a,color:#ffffff,stroke-width:2px
+  classDef edge fill:#ede9fe,stroke:#7c3aed,color:#172033,stroke-width:2px
+  classDef aws fill:#dbeafe,stroke:#2563eb,color:#172033,stroke-width:2px
+  classDef gcp fill:#dcfce7,stroke:#16a34a,color:#172033,stroke-width:2px
+  classDef onprem fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
