@@ -1,0 +1,40 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, Apple SD Gothic Neo, sans-serif","fontSize":"18px","lineColor":"#64748b","primaryTextColor":"#172033","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"linear","defaultRenderer":"elk","nodeSpacing":30,"rankSpacing":42,"htmlLabels":true,"wrappingWidth":360,"padding":16}}}%%
+flowchart TB
+  CF["Cloudflare<br/>요청 Host: chat-a1b2c3.railshot.io"]
+  TUNNEL["cloudflared · 사설망 도달 가능 위치<br/>사전에 outbound Tunnel 수립<br/>origin TLS 이름 검증 + HTTP Host 보존"]
+  CF -->|"공인 진입점 없음 · 수립된 Tunnel"| TUNNEL
+
+  subgraph AMPHORA["Octavia Amphora · L7 LB"]
+    LISTENER["HTTPS VIP :443<br/>Listener protocol = TERMINATED_HTTPS<br/>원본 TLS 종료"]
+    ROUTING["L7 정책 · 가장 구체적인 경로<br/>Host 일치 AND /api 경로 → API pool<br/>Host 일치 AND / 중 /api 제외 → Web pool<br/>미등록 Host → 기본 pool 없음"]
+    API_POOL["API pool · HTTP<br/>member = K3s 사설 IP :30101"]
+    WEB_POOL["Web pool · HTTP<br/>member = K3s 사설 IP :30100"]
+    LISTENER -->|"복호화한 HTTP 요청"| ROUTING
+    ROUTING -->|"API 경로 일치"| API_POOL
+    ROUTING -->|"Web 경로 일치"| WEB_POOL
+  end
+
+  CERT["Barbican<br/>원본 인증서 · private key<br/>listener는 secret reference 사용"]
+  CF -->|"공개 VIP / Floating IP 경로<br/>HTTPS 443 · Full strict"| LISTENER
+  TUNNEL -->|"HTTPS · 내부 VIP :443<br/>인증서 이름 / CA 검증"| LISTENER
+  CERT -.->|"인증서 설정 · 사용자 요청 경로 아님"| LISTENER
+
+  subgraph K3S["Self-managed K3s"]
+    API_SERVICE["API Service · NodePort 30101"]
+    WEB_SERVICE["Web Service · NodePort 30100"]
+    API_POD["API Pod"]
+    WEB_POD["Web Pod"]
+    API_SERVICE -->|"Service 전달"| API_POD
+    WEB_SERVICE -->|"Service 전달"| WEB_POD
+  end
+
+  API_POOL -->|"사설망 HTTP · 평문 구간"| API_SERVICE
+  WEB_POOL -->|"사설망 HTTP · 평문 구간"| WEB_SERVICE
+  class CF edge
+  class TUNNEL,CERT neutral
+  class LISTENER,ROUTING,API_POOL,WEB_POOL onprem
+  class API_SERVICE,WEB_SERVICE,API_POD,WEB_POD runtime
+  classDef edge fill:#ede9fe,stroke:#7c3aed,color:#172033,stroke-width:2px
+  classDef neutral fill:#f1f5f9,stroke:#64748b,color:#172033,stroke-width:2px
+  classDef onprem fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
+  classDef runtime fill:#dbeafe,stroke:#2563eb,color:#172033,stroke-width:2px
