@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Render one observer VM and one single-node cluster. No network or apply calls."""
 import argparse
-import hashlib
 import ipaddress
 import json
 from pathlib import Path
@@ -88,16 +87,6 @@ def obj(kind, name, spec=None, api='v1', namespaced=True, **extra):
     return value
 
 
-def network_policy(config):
-    spec = {'endpointSelector': {}, 'enableDefaultDeny': {'ingress': False, 'egress': False},
-            'egressDeny': [{'toEntities': ['host', 'remote-node'], 'toPorts': [{'ports': [
-                {'port': str(port), 'protocol': 'TCP'} for port in (9100, config['node_metrics_port'])]}]}]}
-    binding = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
-    spec['labels'] = [{'key': 'railshot.io/observer-policy-sha256', 'value': binding, 'source': 'unspec'}]
-    return obj('CiliumClusterwideNetworkPolicy', 'railshot-observer-host-metrics', spec,
-               api='cilium.io/v2', namespaced=False)
-
-
 def cluster(config):
     security = {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                 'runAsNonRoot': True, 'runAsUser': 65534,
@@ -109,17 +98,15 @@ def cluster(config):
            'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
            'readinessProbe': {'httpGet': {'path': '/readyz', 'port': 8081}, 'periodSeconds': 10}}
     node = {'name': 'metrics', 'image': 'quay.io/prometheus/node-exporter:v1.12.1',
-            'args': ['--web.listen-address=$(HOST_IP):9100',
-                     '--path.procfs=/host/proc', '--path.sysfs=/host/sys', '--path.rootfs=/host/root',
-                     '--collector.disable-defaults', '--collector.cpu', '--collector.meminfo', '--collector.filesystem', '--collector.netdev',
+            'args': ['--path.procfs=/host/proc', '--path.sysfs=/host/sys', '--path.rootfs=/host/root',
+                     '--collector.disable-defaults', '--collector.cpu', '--collector.meminfo', '--collector.filesystem',
                      '--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/(docker|containerd|kubelet|rancher))($|/)'],
-            'env': [{'name': 'HOST_IP', 'valueFrom': {'fieldRef': {'fieldPath': 'status.hostIP'}}}],
             'ports': [{'containerPort': 9100}], 'securityContext': security,
             'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
             'readinessProbe': {'httpGet': {'path': '/', 'port': 9100}, 'periodSeconds': 10},
             'volumeMounts': [{'name': n, 'mountPath': p, 'readOnly': True, 'mountPropagation': 'HostToContainer'}
                              for n, p in [('proc', '/host/proc'), ('sys', '/host/sys'), ('root', '/host/root')]]}
-    items = [network_policy(config), obj('Namespace', NAMESPACE, namespaced=False),
+    items = [obj('Namespace', NAMESPACE, namespaced=False),
              obj('ServiceAccount', 'cluster-metrics'),
              obj('ClusterRole', 'railshot-observer', api='rbac.authorization.k8s.io/v1', namespaced=False,
                  rules=[{'apiGroups': [''], 'resources': ['nodes', 'pods'], 'verbs': ['list', 'watch']},
@@ -133,9 +120,6 @@ def cluster(config):
         if kind == 'Deployment':
             pod['serviceAccountName'] = 'cluster-metrics'
         else:
-            # netdev reads this network namespace; a Pod namespace would report the exporter itself.
-            # The operator must restrict native 9100 as well as the NodePort before applying.
-            pod.update(hostNetwork=True, dnsPolicy='ClusterFirstWithHostNet')
             pod['automountServiceAccountToken'] = False
             pod['volumes'] = [{'name': n, 'hostPath': {'path': p, 'type': 'Directory'}}
                               for n, p in [('proc', '/proc'), ('sys', '/sys'), ('root', '/')]]

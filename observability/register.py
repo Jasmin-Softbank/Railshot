@@ -55,9 +55,9 @@ def settings(config):
 
 
 def registration_row(config, request, descriptor):
-    fields = {'version', 'target_id', 'environment_id', 'node_ip', 'registry_file', 'context'}
+    fields = {'version', 'target_id', 'environment_id', 'node_ip', 'registry_file'}
     app_fields = {'app', 'namespace', 'probe_url'} if request.get('app') is not None else set()
-    require(set(request) == fields | app_fields and request['version'] == 1)
+    require(set(request) - {'context'} == fields | app_fields and request['version'] == 1)
     require(request['target_id'] == descriptor['target_id'] and request['node_ip'] == descriptor['addresses']['private'])
     for key in ('target_id', *(['app', 'namespace'] if app_fields else [])):
         require(isinstance(request[key], str) and re.fullmatch(r'[a-z][a-z0-9-]{1,61}[a-z0-9]', request[key]))
@@ -79,11 +79,15 @@ def registration_row(config, request, descriptor):
 
 def merge_rows(rows, row):
     require(isinstance(rows, list) and len(rows) <= 100)
-    existing = [item for item in rows if item['target_id'] == row['target_id']]
+    target = [item for item in rows if item['target_id'] == row['target_id']]
+    physical = ('resource_id', 'prometheus_url', 'node_instance', 'cluster_instance', 'node_ip')
+    require(all(all(item.get(key) == row.get(key) for key in physical) for item in target))
+    existing = [item for item in target if item.get('app') == row.get('app')]
     require(not existing or existing == [row])
     if existing:
         return rows
-    require(len(rows) < 100 and not any(item['node_instance'] == row['node_instance'] for item in rows))
+    require(len(rows) < 100 and not any(item['target_id'] != row['target_id'] and
+                                      item['node_instance'] == row['node_instance'] for item in rows))
     return [*rows, row]
 
 
@@ -150,31 +154,6 @@ def sync_observer(config, request, document, ansible, native):
         require(json.loads(native([*prefix, 'cat ' + directory + '/prometheus.json'])) == document)
 
 
-def wait_network_policy(kube, pod, document):
-    observed = kube('default', 'get', document['kind'], document['metadata']['name'], '-o', 'json')
-    require(observed and observed.get('spec') == document['spec'])
-    uid = observed['metadata']['uid']
-    binding = document['spec']['labels'][0]['value']
-    command = ('exec', pod['metadata']['name'], '-c', 'cilium-agent', '--')
-    deadline = time.monotonic() + 60
-    while True:
-        repository = kube('kube-system', *command, 'cilium-dbg', 'policy', 'get', '-o', 'json')
-        imported = []
-        for rule in json.loads(repository['policy']):
-            labels = {(v['source'], v['key']): v['value'] for v in rule.get('Labels', [])}
-            if labels.get(('k8s', 'io.cilium.k8s.policy.uid')) == uid:
-                imported.append(labels)
-        if len(imported) == 1 and imported[0].get(('unspec', 'railshot.io/observer-policy-sha256')) == binding:
-            break
-        require(time.monotonic() < deadline)
-        time.sleep(1)
-    revision = repository['revision']
-    require(type(revision) is int and revision > 0)
-    # Same pinned native policy-import/revision gate as bootstrap-platform.metadata_policy.
-    kube('kube-system', *command, 'sh', '-c',
-         'cilium-dbg policy wait "$1" --max-wait-time 15 --fail-wait-time 10 >/dev/null && printf null', 'sh', str(revision))
-
-
 def register(config, request, output):
     # Supplied by the runtime registration owner (PR27); imports make no cloud calls.
     from environment import read_private, runtime_kubectl
@@ -201,10 +180,6 @@ def register(config, request, output):
         save()  # Record an uncertain outcome before the first mutation.
         labels = {'app.kubernetes.io/managed-by': 'railshot-observer', 'railshot.io/observer': config['owner']}
         with runtime_kubectl(runtime) as kube:
-            cilium = kube('kube-system', 'get', 'pods', '-l', 'k8s-app=cilium', '-o', 'json')['items']
-            cilium = [pod for pod in cilium if not pod['metadata'].get('deletionTimestamp')]
-            require(len(cilium) == 1 and any(condition.get('type') == 'Ready' and condition.get('status') == 'True'
-                                           for condition in cilium[0].get('status', {}).get('conditions', [])))
             services = kube('default', 'get', 'services', '-A', '-o', 'json')['items']
             for service in services:
                 if any(port.get('nodePort') in (config['node_metrics_port'], config['cluster_metrics_port']) for port in service['spec']['ports']):
@@ -217,8 +192,6 @@ def register(config, request, output):
                 if existing:
                     require(not existing['metadata'].get('ownerReferences') and all(existing['metadata'].get('labels', {}).get(k) == v for k, v in labels.items()))
                 kube(namespace, 'apply', '--server-side', '--field-manager=railshot-observer', '-f', '-', '-o', 'json', document=document)
-                if document['kind'] == 'CiliumClusterwideNetworkPolicy':
-                    wait_network_policy(kube, cilium[0], document)
         receipt['steps'].append('exporters_applied'); save()
         sync_observer(config, observer, scrape_config(rows), ansible, native)
         receipt['steps'].append('collector_registered'); save()
