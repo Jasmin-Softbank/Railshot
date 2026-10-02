@@ -6,7 +6,7 @@
 
 사용자는 네트워크 안이 다른 채팅에서 정리되는 동안 CI 실가동부터 진행하도록 요청했습니다. 새 플랫폼 저장소는 `Jasmin-Softbank/Railshot`, 앱 업로드 저장소는 기존 `Jasmin-Softbank/railshot-apps`입니다. 네트워크·Ansible/runtime 확장안은 이 작업에서 확정하지 않습니다.
 
-테스트 통합본은 기존 `3cc269035a8d29fa08faae80b69275ccb939c043`을 기준으로 `integration/team-assembly-20261002`에 보존합니다. 지환 담당 코드는 `feature/poc-cloud-jihwan`에서 관리합니다. 새 저장소의 `Agents.md`를 유지하고, 빈 기능 폴더를 추가하지 않습니다.
+테스트 통합본은 기존 `3cc269035a8d29fa08faae80b69275ccb939c043`을 기준으로 `integration/team-assembly-20261002`에 보존합니다. 지환 담당 코드는 `feature/poc-cloud-jihwan`에서 관리합니다. 새 저장소의 `AGENT.md`를 유지하고, 빈 기능 폴더를 추가하지 않습니다.
 
 | 브랜치 | 관리 범위 |
 |---|---|
@@ -17,7 +17,7 @@
 
 ## 활성화 전 확인한 원격 상태
 
-- 새 플랫폼 저장소는 public이며 최초 조회 시 `main`에 `Agents.md`와 `README.md`만 있었습니다.
+- 새 플랫폼 저장소는 public이며 최초 조회 시 `main`에는 저장소 규칙 문서와 `README.md`만 있었습니다.
 - apps 저장소는 private이며 예전 `railshot-deploy` workflow가 활성화되어 있습니다. 현재 통합본과 달리 개인 render/GitOps/URL 검사 경로를 포함합니다.
 - apps의 `PLATFORM_REF`는 예전 `b397bc8b042809e306ef5b6c33603520e03f23f1`을 가리킵니다. repository 변수 이름은 `PLATFORM_REF`, `GITOPS_REPO` 두 개였습니다. repository secret과 environment 목록은 비어 있었습니다.
 - repository runner 목록은 0개였습니다. organization runner·secret은 현재 GitHub 권한으로 조회할 수 없어 존재 여부를 확정하지 않습니다.
