@@ -46,7 +46,7 @@
             "containers": [
               {
                 "name": "dashboard",
-                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:7625eec359f5759ecdbfe704febb138c9b7167a204dea844bbbec1de2c9714c4",
+                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:5578784f39af61c7bab92ef2468fcb270723553d4a6de625b5445ad1cba308e3",
                 "ports": [
                   {
                     "name": "http",
@@ -188,7 +188,7 @@
             "initContainers": [
               {
                 "name": "private-config",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:19a69b29a5391a8089a1971c0adb71116dc41e9f422d824dd38a88cd786ae6d8",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:82276bf9a8f11ec8dbb4e9ea637c5cf0943646ca39ed8f49e38982ea008dc8d9",
                 "command": [
                   "node",
                   "/app/apps/api/prepare-state.js"
@@ -246,6 +246,11 @@
                     "name": "config",
                     "mountPath": "/run/config",
                     "readOnly": true
+                  },
+                  {
+                    "name": "dns-config",
+                    "mountPath": "/run/dns",
+                    "readOnly": true
                   }
                 ]
               }
@@ -253,7 +258,7 @@
             "containers": [
               {
                 "name": "api",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:19a69b29a5391a8089a1971c0adb71116dc41e9f422d824dd38a88cd786ae6d8",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:82276bf9a8f11ec8dbb4e9ea637c5cf0943646ca39ed8f49e38982ea008dc8d9",
                 "ports": [
                   {
                     "name": "http",
@@ -284,6 +289,16 @@
                   {
                     "name": "RAILSHOT_CD_CONFIG",
                     "value": "/var/lib/railshot/config/cd.json"
+                  },
+                  {
+                    "name": "RAILSHOT_APPLICATIONS_FILE",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "railshot-environments",
+                        "key": "applications_file",
+                        "optional": true
+                      }
+                    }
                   },
                   {
                     "name": "RAILSHOT_OBSERVER_CONFIG",
@@ -336,6 +351,16 @@
                   {
                     "name": "AWS_EC2_METADATA_V1_DISABLED",
                     "value": "true"
+                  },
+                  {
+                    "name": "GOOGLE_APPLICATION_CREDENTIALS",
+                    "valueFrom": {
+                      "configMapKeyRef": {
+                        "name": "railshot-environments",
+                        "key": "google_credentials_file",
+                        "optional": true
+                      }
+                    }
                   },
                   {
                     "name": "GITHUB_TOKEN",
@@ -465,6 +490,14 @@
                 "secret": {
                   "secretName": "railshot-executors",
                   "defaultMode": 288
+                }
+              },
+              {
+                "name": "dns-config",
+                "secret": {
+                  "secretName": "railshot-cloudflare",
+                  "defaultMode": 288,
+                  "optional": true
                 }
               },
               {
