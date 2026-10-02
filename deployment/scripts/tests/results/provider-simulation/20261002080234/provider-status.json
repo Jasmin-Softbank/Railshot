@@ -1,0 +1,11 @@
+{
+  "aws": {
+    "status": "passed"
+  },
+  "gcp": {
+    "status": "passed"
+  },
+  "openstack": {
+    "status": "passed"
+  }
+}

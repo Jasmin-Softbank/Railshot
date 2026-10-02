@@ -1,0 +1,282 @@
+"""Local Linux execution engine. No AWS/GCP/OpenStack or transport schemas."""
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import signal
+import time
+from datetime import datetime, timezone
+from urllib.request import Request, ProxyHandler, build_opener
+from uuid import uuid4
+from models import DeploymentResult
+from render import NAME, ROOT, labels, render
+
+
+class DeploymentError(RuntimeError):
+    def __init__(self, code, message, exit_code=None):
+        super().__init__(message)
+        self.code, self.exit_code = code, exit_code
+
+
+class CommandRunner:
+    def run(self, argv, *, env, timeout, input_text=None):
+        try:
+            process = subprocess.Popen(argv, env=env, text=True, stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            try:
+                stdout, stderr = process.communicate(input_text, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # Stop descendants too: an orphan installer must not keep mutating a node after failure.
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.communicate()
+                raise
+            result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired as exc:
+            raise DeploymentError('COMMAND_TIMEOUT', f'{Path(argv[0]).name}: timed out after {timeout}s') from exc
+        except OSError as exc:
+            raise DeploymentError('COMMAND_UNAVAILABLE', f'{Path(argv[0]).name}: {exc.strerror}') from exc
+        if result.stderr:
+            print(result.stderr.rstrip(), file=sys.stderr)
+        if result.returncode:
+            # Exclude arbitrary output bodies; managed shell diagnostics contain only readiness/state/events.
+            detail = (result.stderr or result.stdout).strip()[-5000:]
+            raise DeploymentError('COMMAND_FAILED', detail or f'{Path(argv[0]).name} failed', result.returncode)
+        return result.stdout
+
+
+class DeploymentEngine:
+    def __init__(self, spec, runner=None):
+        self.spec, self.runner = spec, runner or CommandRunner()
+        self.result = DeploymentResult()
+        self.stage = 'NODE_READY'
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith(('K3S_', 'INSTALL_K3S_'))}
+        self.env.update({'K3S_VERSION': spec.runtime.k3s_version, 'CILIUM_VERSION': spec.runtime.cilium_version,
+                         'CILIUM_CLI_VERSION': spec.runtime.cilium_cli_version,
+                         'WAIT_TIMEOUT': f'{spec.runtime.timeout_seconds}s',
+                         'WORKLOAD_NAMESPACE': spec.workload.namespace,
+                         'KUBECONFIG': '/etc/rancher/k3s/k3s.yaml', 'NODE_IP': spec.runtime.node_ip or ''})
+
+    def command(self, args, input_text=None, timeout=None):
+        return self.runner.run(args, env=self.env, timeout=timeout or self.spec.runtime.timeout_seconds + 30,
+                               input_text=input_text)
+
+    def shell(self, relative):
+        return self.command(['bash', str(ROOT/relative)], timeout=self.spec.runtime.timeout_seconds + 600)
+
+    def kube(self, *args, input_text=None):
+        return self.command(['/usr/local/bin/k3s', 'kubectl', '--request-timeout=10s', *args], input_text)
+
+    def state(self, state):
+        self.stage = state
+        self.result.states.append({'state': state, 'timestamp': datetime.now(timezone.utc).isoformat()})
+        print(f'[{state}]', file=sys.stderr)
+
+    def owned(self, kind, name, namespace=None):
+        args = ['get', kind, name, '--ignore-not-found', '-o', 'json']
+        if namespace:
+            args += ['-n', namespace]
+        raw = self.kube(*args)
+        if not raw.strip():
+            return False
+        actual = json.loads(raw)['metadata'].get('labels', {})
+        if any(actual.get(k) != v for k, v in labels(self.spec).items()):
+            raise DeploymentError('OWNERSHIP_CONFLICT', f'{kind}/{name}: not owned by this Railshot environment')
+        return True
+
+    def ownership(self, required=False):
+        ns = self.spec.workload.namespace
+        exists = self.owned('namespace', ns)
+        if required and not exists:
+            raise DeploymentError('WORKLOAD_MISSING', f'namespace/{ns}: absent')
+        if exists:
+            for kind in ('deployment', 'service', 'configmap'):
+                self.owned(kind, NAME, ns)
+
+    def diagnose(self):
+        try:
+            raw = self.kube('get', 'pods', '-n', self.spec.workload.namespace, '-o', 'json')
+            items = json.loads(raw)['items']
+            waiting = [f"{p['metadata']['name']}: {c['state']['waiting'].get('reason', '')} {c['state']['waiting'].get('message', '')}"
+                       for p in items for c in p.get('status', {}).get('containerStatuses', []) if 'waiting' in c.get('state', {})]
+            events = self.kube('get', 'events', '-n', self.spec.workload.namespace, '--sort-by=.lastTimestamp')
+            return '\n'.join(waiting + events.splitlines()[-12:])[-5000:]
+        except (DeploymentError, ValueError, KeyError):
+            return 'Additional Kubernetes diagnostics unavailable'
+
+    def workload_ready(self):
+        ns = self.spec.workload.namespace
+        self.kube('-n', ns, 'rollout', 'status', f'deployment/{NAME}', f'--timeout={self.spec.runtime.timeout_seconds}s')
+        deployment = json.loads(self.kube('-n', ns, 'get', 'deployment', NAME, '-o', 'json'))
+        live = deployment['spec']
+        container = live['template']['spec']['containers'][0]
+        if (live['replicas'] != self.spec.workload.replicas or container['image'] != self.spec.workload.image
+                or container['ports'][0]['containerPort'] != self.spec.workload.container_port
+                or container['readinessProbe']['httpGet']['path'] != self.spec.workload.health_path):
+            raise DeploymentError('WORKLOAD_DRIFT', 'Live workload does not match the requested image/replicas/port/health path')
+        self.result.workload_status = 'ready'
+        self.state('WORKLOAD_READY')
+
+    def network_check(self):
+        """Generic image does not need curl/wget. Use a short-lived owned diagnostic Pod."""
+        ns, name = self.spec.workload.namespace, f'railshot-check-{uuid4().hex[:8]}'
+        url = f'http://{NAME}.{ns}.svc.cluster.local{self.spec.workload.health_path}'
+        pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': name, 'namespace': ns, 'labels': labels(self.spec)},
+               'spec': {'restartPolicy': 'Never', 'automountServiceAccountToken': False,
+                        'containers': [{'name': 'check', 'image': 'curlimages/curl:8.12.1',
+                                        'command': ['curl', '--silent', '--show-error', '--connect-timeout', '3',
+                                                    '--max-time', '10', '--output', '/dev/null', '--write-out', '%{http_code}', url]}]}}
+        try:
+            self.kube('create', '-f', '-', input_text=json.dumps(pod))
+            deadline = time.monotonic() + self.spec.runtime.timeout_seconds
+            while True:
+                observed = json.loads(self.kube('-n', ns, 'get', 'pod', name, '-o', 'json'))
+                phase = observed.get('status', {}).get('phase')
+                if phase in ('Succeeded', 'Failed'):
+                    status = self.kube('-n', ns, 'logs', name).strip()
+                    if phase != 'Succeeded' or status != '200':
+                        raise DeploymentError('SERVICE_HTTP_FAILED', f'Pod DNS/Service health check failed (phase={phase}, HTTP={status[-64:]})')
+                    break
+                if time.monotonic() >= deadline:
+                    raise DeploymentError('SERVICE_HTTP_TIMEOUT', 'Diagnostic Pod did not complete; check image access, DNS, Service and NetworkPolicy')
+                time.sleep(1)
+        finally:
+            try:
+                self.kube('-n', ns, 'delete', 'pod', name, '--ignore-not-found', '--wait=false')
+            except DeploymentError:
+                print(f'[WARN] diagnostic Pod cleanup requires retry: {name}', file=sys.stderr)
+
+    def endpoints(self):
+        self.stage = 'ENDPOINT_READY'
+        ns = self.spec.workload.namespace
+        service = json.loads(self.kube('-n', ns, 'get', 'service', NAME, '-o', 'json'))
+        port = service['spec']['ports'][0]
+        if (service['spec']['type'] != 'NodePort' or port['nodePort'] != self.spec.exposure.node_port
+                or port['port'] != 80 or port['targetPort'] != 'http'
+                or service['spec']['selector'] != {'railshot.io/app': NAME}):
+            raise DeploymentError('SERVICE_DRIFT', 'Live Service does not match the requested NodePort/target/selector')
+        self.network_check()
+        nodes = json.loads(self.kube('get', 'nodes', '-o', 'json'))['items']
+        if len(nodes) != 1:
+            raise DeploymentError('UNSUPPORTED_CLUSTER', 'Single-node K3s only')
+        addresses = [a['address'] for a in nodes[0]['status']['addresses'] if a['type'] == 'InternalIP']
+        if not addresses:
+            raise DeploymentError('NODE_IP_MISSING', 'Node InternalIP is missing')
+        try:
+            ipaddress.IPv4Address(addresses[0])
+        except ValueError:
+            raise DeploymentError('NODE_IP_INVALID', 'Node InternalIP must be IPv4') from None
+        base = f'http://{addresses[0]}:{self.spec.exposure.node_port}'
+        urls = [base + self.spec.workload.health_path]
+        if self.spec.exposure.verification_url:
+            urls.append(self.spec.exposure.verification_url)
+        opener = build_opener(ProxyHandler({}))
+        for url in urls:
+            deadline, last = time.monotonic() + self.spec.runtime.timeout_seconds, ''
+            while True:
+                try:
+                    with opener.open(Request(url), timeout=10) as response:
+                        body = response.read(1024) if self.spec.workload.sample_content else b''
+                        if response.status != 200:
+                            raise ValueError(f'HTTP {response.status}')
+                        if self.spec.workload.sample_content and body.strip() != b'Railshot Runtime OK':
+                            raise ValueError('Unexpected sample response body')
+                    break
+                except (OSError, ValueError) as exc:
+                    last = str(exc)
+                    if time.monotonic() >= deadline:
+                        raise DeploymentError('ENDPOINT_HTTP_FAILED', f'{url}: {last}') from exc
+                    time.sleep(1)
+        self.result.endpoint = base
+        self.result.endpoint_scope = 'node-local-with-additional-url' if len(urls) > 1 else 'node-local'
+        self.state('ENDPOINT_READY')
+
+    def cleanup_workload(self):
+        self.stage = 'WORKLOAD_DEPLOYING'
+        if not self.owned('namespace', self.spec.workload.namespace):
+            self.result.workload_status = 'absent'
+            return
+        self.ownership()
+        self.kube('-n', self.spec.workload.namespace, 'delete', 'deployment,service,configmap', NAME,
+                  '--ignore-not-found', '--wait=true', f'--timeout={self.spec.runtime.timeout_seconds}s')
+        self.result.workload_status = 'absent'
+        # Retain Namespace and unrelated resources. No implicit broad deletion.
+
+    def execute(self, action='deploy', full_cleanup=False, disposable=False):
+        lock = None
+        try:
+            if action not in ('deploy', 'verify', 'cleanup'):
+                raise DeploymentError('INVALID_ACTION', action)
+            if full_cleanup and not disposable:
+                raise DeploymentError('DESTRUCTIVE_ACTION_REQUIRES_FLAG', 'Full cleanup requires --disposable-node')
+            self.shell('bootstrap/preflight.sh')
+            lock = open('/run/railshot-deployment.lock', 'a')
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise DeploymentError('RUNTIME_BUSY', 'Another Railshot deployment/verify/cleanup is running') from None
+            self.state('NODE_READY')
+            if action == 'cleanup' and full_cleanup:
+                self.stage = 'CLEANUP'
+                self.command(['bash', str(ROOT/'bootstrap/cleanup.sh'), '--disposable-node'], timeout=self.spec.runtime.timeout_seconds + 600)
+                self.result.cluster_status = self.result.cilium_status = self.result.workload_status = 'absent'
+                self.result.status = 'cleaned'
+                return self.result
+            if action == 'deploy':
+                self.state('K3S_INSTALLING')
+                self.shell('bootstrap/install-k3s.sh')
+            else:
+                self.stage = 'K3S_READY'
+                self.shell('bootstrap/health.sh')
+            self.result.cluster_status = 'api_ready'
+            self.state('K3S_READY')
+            if action == 'cleanup':
+                self.cleanup_workload()
+                self.result.status = 'cleaned'
+                return self.result
+            if action == 'deploy':
+                self.state('CILIUM_INSTALLING')
+                self.shell('cilium/install.sh')
+            else:
+                self.stage = 'CILIUM_READY'
+            self.shell('cilium/health.sh')
+            self.result.cilium_status, self.result.cluster_status = 'healthy', 'ready'
+            self.state('CILIUM_READY')
+            self.stage = 'WORKLOAD_DEPLOYING'
+            self.ownership(required=action == 'verify')
+            if action == 'deploy':
+                self.state('WORKLOAD_DEPLOYING')
+                self.kube('apply', '-f', '-', input_text=json.dumps(render(self.spec)))
+            self.workload_ready()
+            self.endpoints()
+            self.result.status = 'ready'
+        except (DeploymentError, OSError, ValueError, KeyError) as exc:
+            stage = self.stage
+            if stage.startswith('K3S'):
+                self.result.cluster_status = 'failed'
+            elif stage.startswith('CILIUM'):
+                self.result.cilium_status = 'failed'
+            elif stage.startswith('WORKLOAD'):
+                self.result.workload_status = 'failed'
+            detail = self.diagnose() if stage.startswith(('WORKLOAD', 'ENDPOINT')) else ''
+            self.result.endpoint = None
+            self.result.error = {'code': getattr(exc, 'code', 'RUNTIME_ERROR'), 'stage': stage,
+                                 'message': str(exc), 'exit_code': getattr(exc, 'exit_code', None),
+                                 'diagnostics': detail or None}
+            self.state('FAILED')
+        finally:
+            if lock:
+                lock.close()
+        return self.result

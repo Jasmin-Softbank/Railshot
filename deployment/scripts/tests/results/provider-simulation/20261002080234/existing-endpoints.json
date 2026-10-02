@@ -1,0 +1,14 @@
+{
+  "30080": {
+    "http_status": 200,
+    "body": "Jasmin Deployment PoC OK"
+  },
+  "30081": {
+    "http_status": 200,
+    "body": "Jasmin Deployment PoC OK"
+  },
+  "30082": {
+    "http_status": 200,
+    "body": "Railshot Runtime OK"
+  }
+}

@@ -1,0 +1,8 @@
+[PASS] gcp: clean-install
+[PASS] gcp: bootstrap-repeat
+[PASS] gcp: health-endpoint
+[PASS] gcp: workload-update
+[PASS] gcp: update-health
+[PASS] gcp: workload-cleanup
+[PASS] gcp: workload-redeploy
+[PASS] gcp: full-cleanup
