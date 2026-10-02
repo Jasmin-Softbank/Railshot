@@ -40,9 +40,9 @@ async function start(t, options) {
 test('dashboard loads without credentials, offers no login and blocks unconfigured execution', { timeout: 45000 }, async (t) => {
   const { page, origin, errors, requests } = await start(t, { service: null });
   await page.goto(origin);
-  await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('연결을 준비'));
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
   assert.equal(await page.locator('#api-token').count(), 0);
-  assert.equal(await page.locator('input[type="password"]').count(), 0);
+  assert.equal(await page.locator('#deploy-view input[type="password"]').count(), 0);
   await page.locator('#deploy-form button[type="submit"]').click();
   assert.match(await page.locator('#form-error').innerText(), /소스를 선택/);
   await page.locator('#repository-url').fill('https://example.invalid/app');
@@ -50,7 +50,7 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   assert.match(await page.locator('#form-error').innerText(), /GitHub 저장소 URL/);
   await page.locator('#repository-url').fill('https://github.com/example/demo');
   await page.locator('#deploy-form button[type="submit"]').click();
-  assert.match(await page.locator('#form-error').innerText(), /실행 가능한 인프라/);
+  assert.match(await page.locator('#form-error').innerText(), /인프라가 아직 연결되지/);
   assert.equal(await page.locator('#deploy-button').isDisabled(), true);
   await page.locator('[data-view="history"]').click();
   assert.equal(await page.locator('#history-view').isVisible(), true);
@@ -58,7 +58,7 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   assert.equal(await page.locator('#monitor-view').isVisible(), true);
   await page.locator('[data-console="app"]').click();
   assert.match(await page.locator('#console-output').innerText(), /실행을 시작/);
-  assert.equal(requests.some((request) => request.method === 'POST'), false);
+  assert.equal(requests.some((request) => request.method === 'POST' && request.path !== '/api/v1/sessions'), false);
   assert.deepEqual(errors, []);
 });
 
@@ -118,7 +118,7 @@ test('original dashboard cards submit three source types through backend selecti
   assert.equal(await page.locator('#actions-link').getAttribute('href'), 'https://github.com/example/apps/actions/runs/1');
   await page.reload();
   await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
-  assert.match(await page.locator('#history-summary').innerText(), /browser-demo/);
+  assert.match(await page.locator('#history-list').innerText(), /browser-demo/);
   assert.equal(submitted.length, 1, 'reload observes without submitting');
   const files = join(stateDirectory, 'fixture'); await mkdir(files);
   await writeFile(join(files, 'index.js'), 'source from zip');
@@ -138,11 +138,62 @@ test('original dashboard cards submit three source types through backend selecti
   assert.equal(await page.locator('#application-link').getAttribute('href'), 'https://demo.railshot.io/');
   assert.equal(requests.some((request) => request.authorization), false, 'no browser credentials');
   assert.equal(requests.some((request) => ['/api/deploy'].includes(request.path)), false, 'dashboard uses product resources');
+  const other = await page.context().browser().newContext();
+  try {
+    const stranger = await other.newPage(); await stranger.goto(origin);
+    await stranger.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+    assert.equal(await stranger.locator('#history-list li').count(), 0, 'another browser cannot restore these deployments');
+  } finally { await other.close(); }
   assert.deepEqual(errors, []);
   if (process.env.RAILSHOT_BROWSER_SCREENSHOT) {
     const output = process.env.RAILSHOT_BROWSER_SCREENSHOT;
     await page.screenshot({ path: output, fullPage: true });
   }
+});
+
+test('anonymous browser sessions persist settings and write-only OpenStack connections separately', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors } = await start(t, { service: null });
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  const cookie = (await page.context().cookies()).find((row) => row.name === 'railshot_session');
+  assert.ok(cookie.httpOnly); assert.equal(cookie.sameSite, 'Strict');
+  const savedView = page.waitForResponse((res) => res.url().endsWith('/api/v1/preferences') && res.request().method() === 'PUT');
+  await page.locator('[data-view="connections"]').click(); await savedView;
+  await page.locator('#connection-label').fill('우리 OpenStack');
+  await page.locator('#connection-url').fill('https://openstack.example/dashboard/');
+  await page.locator('#connection-username').fill('demo-user');
+  await page.locator('#connection-password').fill('browser-secret-123');
+  await page.locator('#connection-save').click();
+  await page.waitForFunction(() => document.querySelector('#connection-list').textContent.includes('비밀번호 저장됨'));
+  assert.equal(await page.locator('#connection-password').inputValue(), '');
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#connection-list').textContent.includes('demo-user'));
+  assert.equal(await page.locator('#connections-view').isVisible(), true);
+  assert.ok(!(await page.locator('body').textContent()).includes('browser-secret-123'));
+  const other = await page.context().browser().newContext();
+  try {
+    const stranger = await other.newPage(); await stranger.goto(origin);
+    await stranger.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+    assert.equal(await stranger.locator('#deploy-view').isVisible(), true);
+    await stranger.locator('[data-view="connections"]').click();
+    assert.equal(await stranger.locator('#connection-list li').count(), 0);
+  } finally { await other.close(); }
+  if (process.env.CI_OUTPUT_DIR) {
+    await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'sessions-connections-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'sessions-connections-mobile.png'), fullPage: true });
+  }
+  await page.locator('#connection-list').getByRole('button', { name: '수정', exact: true }).click();
+  assert.equal(await page.locator('#connection-password').inputValue(), '');
+  await page.locator('#connection-clear-password').check();
+  await page.locator('#connection-save').click();
+  await page.waitForFunction(() => document.querySelector('#connection-list').textContent.includes('비밀번호 없음'));
+  await page.locator('#connection-list').getByRole('button', { name: '삭제', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#connection-list').children.length === 0);
+  assert.deepEqual(errors, []);
 });
 
 test('deployment monitor binds metrics, restores progress, and distinguishes stale, collection and HTTP failure', { timeout: 45000 }, async (t) => {
@@ -151,6 +202,8 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
     source_commit: 'a'.repeat(40), source_digest: 'b'.repeat(64), ci: { run_id: '123', state: 'published', images: { app: `ghcr.io/example/app@sha256:${'c'.repeat(64)}` }, steps: [{ key: 'release', status: 'completed', conclusion: 'success' }] },
     cd: { state: 'progressing', revision: 'd'.repeat(40), deployed: false }, public_http: { state: 'not_run', verified_at: null, url: null } };
   const { page, origin, errors, requests } = await start(t, { product: {
+    dashboard: { session: () => ({ id: 'monitor-test', expires_at: '2099-01-01T00:00:00Z' }), preferences: () => ({ view: 'deploy', environment: 'cloud', provider: '' }), connections: () => [] },
+    list: () => [record],
     targets: () => [], profiles: () => [],
     getDeployment: () => {
       if (broken) throw new Error('private backend details');
@@ -159,7 +212,6 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
         metrics: Object.fromEntries(Object.entries({ pods: 2, cpu_percent: 12.5, memory_percent: 30, http }).map(([name, value]) => [name, { state, value: state === 'ready' ? value : null, observed_at: new Date(Date.now() - age).toISOString() }])) } };
     },
   } });
-  await page.addInitScript(() => localStorage.setItem('railshot.lastExecution', JSON.stringify({ kind: 'deployments', id: 'monitor-demo' })));
   const monitor = async () => { await page.locator('[data-view="monitor"]').click(); };
   const refresh = async () => {
     await page.locator('[data-view="deploy"]').click();
@@ -197,6 +249,6 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
   await page.reload(); await page.waitForFunction(() => document.querySelector('#run-state').textContent === '실행 실패'); await monitor();
   assert.equal(await page.locator('#monitor-application-link').isVisible(), false);
   if (output) await page.screenshot({ path: join(output, 'monitor-failed.png'), fullPage: true });
-  assert.equal(requests.some((request) => request.method === 'POST'), false, 'resume and observation never redeploy');
+  assert.equal(requests.some((request) => request.method === 'POST' && request.path !== '/api/v1/sessions'), false, 'resume and observation never redeploy');
   assert.deepEqual(errors, []);
 });

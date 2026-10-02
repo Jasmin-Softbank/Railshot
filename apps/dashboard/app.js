@@ -2,6 +2,7 @@ const views = {
   deploy: document.querySelector('#deploy-view'),
   history: document.querySelector('#history-view'),
   monitor: document.querySelector('#monitor-view'),
+  connections: document.querySelector('#connections-view'),
 };
 
 function showView(name) {
@@ -13,6 +14,8 @@ function showView(name) {
     else button.removeAttribute('aria-current');
   }
   document.title = `RailShot · ${views[name].querySelector('h1').textContent}`;
+  savePreferences({ view: name });
+  if (sessionReady && name === 'history') loadHistory().catch(showHistoryError);
 }
 
 document.querySelectorAll('[data-view]').forEach((button) => {
@@ -42,10 +45,12 @@ let reviewing = false;
 let reviewGeneration = 0;
 let connectionError = null;
 let submitting = false;
-// ponytail: remember one resource locator per browser; server owns durable execution records.
 let current = null;
-try { current = JSON.parse(localStorage.getItem('railshot.lastExecution')); } catch { /* Storage may be unavailable. */ }
-if (!current || !/^(builds|deployments)$/.test(current.kind) || !/^[a-zA-Z0-9._-]{1,128}$/.test(current.id || '')) current = null;
+let sessionReady = false, preferenceTimer;
+let history = [], connections = [], editingConnection = null;
+let preferences = { view: 'deploy', environment: 'cloud', provider: '' };
+// The cookie is HttpOnly; no session token, credential, or execution locator enters localStorage.
+try { localStorage.removeItem('railshot.lastExecution'); } catch { /* Storage may be disabled. */ }
 let timer;
 let pollController;
 let lastReadAt = null;
@@ -158,6 +163,7 @@ function updateSelection() {
     : profile ? (profile.supported ? '새 실행 환경과 앱을 함께 준비합니다. 선택 내용을 확인하면 비용과 실행 계획을 표시합니다.' : '환경 생성 사양을 아직 실행할 수 없습니다.')
     : selectedOption()?.message || (selected.environment === 'onprem' && !selected.provider ? '온프레미스 인프라 종류를 선택하세요.' : '실행 가능한 인프라 연결을 준비 중입니다.'));
   invalidateReview();
+  savePreferences({ environment: selected.environment, provider: provider.value });
 }
 document.querySelectorAll('[name="environment"]').forEach((input) => input.addEventListener('change', updateSelection));
 provider.addEventListener('change', updateSelection);
@@ -167,8 +173,8 @@ async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
   const timeout = setTimeout(() => controller.abort(), options.method === 'POST' ? (path === '/api/v1/plans' ? 600000 : 120000) : 15000);
   try {
-    const response = await fetch(path, { ...options, signal: controller.signal, redirect: 'error' });
-    const data = await response.json();
+    const response = await fetch(path, { credentials: 'same-origin', ...options, signal: controller.signal, redirect: 'error' });
+    const data = response.status === 204 ? null : await response.json();
     if (!response.ok) throw new Error(data.error?.message || (typeof data.error === 'string' ? data.error : `요청 실패 (HTTP ${response.status})`));
     return { data, location: response.headers.get('location') };
   } finally { clearTimeout(timeout); requests.delete(controller); }
@@ -262,8 +268,8 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
 document.querySelector('#edit-selection').addEventListener('click', () => { if (!submitting) invalidateReview(); });
 
 function remember() {
-  try { localStorage.setItem('railshot.lastExecution', JSON.stringify({ kind: current.kind, id: current.id, app: current.app })); }
-  catch { /* Execution records remain on the server when browser storage is disabled. */ }
+  history = [current, ...history.filter((row) => row.id !== current.id)];
+  renderHistory();
 }
 function safeLink(selector, value, enabled, github = false) {
   const link = document.querySelector(selector);
@@ -313,8 +319,7 @@ function renderRun() {
   document.querySelector('#monitor-steps').replaceChildren(...['소스 접수', '앱 검사 및 수정', '이미지 빌드', 'GitOps 반영', 'URL 및 앱 상태 확인'].map((label, index) => {
     const item = document.createElement('li'); item.textContent = `${label} · ${stageStates[index] || '대기'}`; return item;
   }));
-  document.querySelector('#history-summary').textContent = `${current.app || '앱'} · ${current.id}`;
-  document.querySelector('#history-detail').textContent = label;
+  renderHistory();
   document.querySelector('#monitor-state').textContent = observationError ? `${label} · 상태 조회 실패` : label;
   renderMetrics();
   renderConsole();
@@ -439,5 +444,97 @@ document.querySelectorAll('[data-console]').forEach((button) => button.addEventL
   document.querySelectorAll('[data-console]').forEach((tab) => tab.setAttribute('aria-selected', String(tab === button)));
   renderConsole();
 }));
-checkConnection();
-if (current) { renderRun(); refreshRun(); }
+function savePreferences(patch) {
+  if (!sessionReady) return;
+  Object.assign(preferences, patch);
+  clearTimeout(preferenceTimer);
+  preferenceTimer = setTimeout(() => request('/api/v1/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(preferences) }).catch(() => { document.querySelector('#session-note').textContent = '화면 설정을 저장하지 못했습니다. 연결을 확인하세요.'; }), 200);
+}
+function showHistoryError(cause) { document.querySelector('#history-detail').textContent = cause.message; }
+function renderHistory() {
+  document.querySelector('#history-summary').textContent = history.length ? `이 세션의 배포 ${history.length}건` : '아직 배포 내역이 없습니다';
+  document.querySelector('#history-detail').textContent = '같은 브라우저의 세션이 유지되는 동안 서버에서 다시 불러올 수 있습니다.';
+  document.querySelector('#history-list').replaceChildren(...history.map((row) => {
+    const item = document.createElement('li'), button = document.createElement('button');
+    button.type = 'button'; button.className = 'text-button';
+    button.textContent = `${row.app || '앱'} · ${labels[row.status] || row.status} · ${row.created_at ? new Date(row.created_at).toLocaleString() : '접수 중'}`;
+    button.addEventListener('click', () => { stopPolling(); current = row; lastReadAt = null; observationError = false; showView('monitor'); renderRun(); refreshRun(); });
+    item.append(button); return item;
+  }));
+}
+async function loadHistory() {
+  const { data } = await request('/api/v1/deployments?limit=100');
+  if (!Array.isArray(data.items)) throw new Error('배포 내역 응답을 확인하지 못했습니다.');
+  history = data.items.map((row) => ({ ...row, kind: 'deployments' })); renderHistory();
+}
+function resetConnectionForm() {
+  editingConnection = null; document.querySelector('#connection-form').reset();
+  document.querySelector('#connection-cancel').hidden = true;
+  document.querySelector('#connection-save').textContent = '저장';
+}
+async function loadConnections() {
+  const { data } = await request('/api/v1/connections?limit=100'); connections = data.items;
+  document.querySelector('#connection-list').replaceChildren(...connections.map((row) => {
+    const item = document.createElement('li'), link = document.createElement('a'), detail = document.createElement('p');
+    link.textContent = row.label; link.href = row.console_url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    detail.textContent = `${row.username || '접속 ID 없음'} · 비밀번호 ${row.has_password ? '저장됨' : '없음'}`;
+    const edit = document.createElement('button'), remove = document.createElement('button');
+    for (const button of [edit, remove]) { button.type = 'button'; button.className = 'text-button'; }
+    edit.textContent = '수정'; remove.textContent = '삭제';
+    edit.addEventListener('click', () => {
+      editingConnection = row.id;
+      for (const [field, value] of [['label', row.label], ['url', row.console_url], ['username', row.username], ['password', '']]) document.querySelector(`#connection-${field}`).value = value;
+      document.querySelector('#connection-clear-password').checked = false;
+      document.querySelector('#connection-cancel').hidden = false; document.querySelector('#connection-save').textContent = '수정 저장';
+      document.querySelector('#connection-label').focus();
+    });
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      try {
+        await request(`/api/v1/connections/${row.id}`, { method: 'DELETE' });
+        if (editingConnection === row.id) resetConnectionForm();
+        await loadConnections(); document.querySelector('#connection-message').textContent = '연결 정보를 삭제했습니다.';
+      } catch (cause) { document.querySelector('#connection-message').textContent = cause.message; remove.disabled = false; }
+    });
+    item.append(link, detail, edit, remove); return item;
+  }));
+}
+document.querySelector('#connection-cancel').addEventListener('click', resetConnectionForm);
+document.querySelector('#connection-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!sessionReady) return;
+  const button = document.querySelector('#connection-save'), password = document.querySelector('#connection-password');
+  const body = { label: document.querySelector('#connection-label').value, console_url: document.querySelector('#connection-url').value,
+    username: document.querySelector('#connection-username').value };
+  if (document.querySelector('#connection-clear-password').checked) body.password = null;
+  else if (password.value) body.password = password.value;
+  button.disabled = true;
+  try {
+    await request(`/api/v1/connections${editingConnection ? '/' + editingConnection : ''}`, {
+      method: editingConnection ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    resetConnectionForm(); await loadConnections();
+    document.querySelector('#connection-message').textContent = '이 세션에 저장했습니다.';
+  } catch (cause) { document.querySelector('#connection-message').textContent = cause.message; }
+  finally { password.value = ''; delete body.password; button.disabled = false; }
+});
+async function initializeDashboard() {
+  try {
+    const { data: session } = await request('/api/v1/sessions', { method: 'POST' });
+    const { data: saved } = await request('/api/v1/preferences');
+    preferences = saved;
+    document.querySelector(`[name="environment"][value="${saved.environment}"]`).checked = true;
+    provider.value = saved.provider;
+    showView(saved.view);
+    await checkConnection();
+    await loadHistory(); await loadConnections();
+    document.querySelector('#session-note').textContent = `이 브라우저 세션 · ${new Date(session.expires_at).toLocaleDateString()}까지 유지`;
+    sessionReady = true;
+    if (history.length) { current = history[0]; renderRun(); refreshRun(); }
+  } catch (cause) {
+    connectionError = cause.message; updateSelection();
+    document.querySelector('#session-note').textContent = '세션을 불러오지 못했습니다. 새로고침하세요.';
+    showHistoryError(cause);
+  }
+}
+initializeDashboard();

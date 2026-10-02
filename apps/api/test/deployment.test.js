@@ -188,9 +188,12 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
   const server = createAppServer({ sourceLoader: async (url) => ({
     files: [{ path: 'app.py', content: Buffer.from('print(1)') }],
     source: { type: 'github', repository: url, sha: 'b'.repeat(40) },
-  }), service: {
-    deploy: async (input) => { observed.push(input); return { run_id: 456, app: input.app, tenant: 'demo' }; },
-    status: async (id) => ({ run_id: Number(id), status: 'queued', steps: [] }),
+  }), service: {}, product: {
+    createBuild: async (input, loadSource) => {
+      observed.push(input.files ? input : { ...input, ...await loadSource(input.repository_url) });
+      return { run_id: 456, app: input.app, tenant: 'demo' };
+    },
+    legacyStatus: async (id) => ({ run_id: Number(id), status: 'queued', steps: [] }),
   } });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {

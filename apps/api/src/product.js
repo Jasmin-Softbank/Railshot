@@ -20,7 +20,7 @@ export function idempotencyKey(value) {
   return value;
 }
 function publicRecord(record) {
-  const { fingerprint, key, source, source_bytes, legacy, ...visible } = record;
+  const { fingerprint, key, source, source_bytes, legacy, session_id, ...visible } = record;
   return structuredClone(visible);
 }
 function checkFree(state) {
@@ -35,6 +35,9 @@ export async function createProductService({ service, directory, target, deployP
   }
   const workers = new Set();
   const targetId = target?.id || service?.targetId;
+  const sharedTargets = new Set(service?.targetIds || (targetId ? [targetId] : []));
+  const scopeKey = (kind, key, sessionId) => `${sessionId ? sessionId + ':' : ''}${kind}:${key}`;
+  const owns = (value, sessionId) => value && (!sessionId || value.session_id === sessionId);
   const cdTarget = deployPublished?.targets?.[targetId];
   const cdAvailable = Boolean(deployPublished && (!deployPublished.targets || cdTarget));
   if (targetId && !TARGET_ID.test(targetId)) { await store.close(); throw invalid('등록된 대상 ID가 잘못되었습니다.'); }
@@ -66,9 +69,9 @@ export async function createProductService({ service, directory, target, deployP
     const worker = Promise.resolve().then(fn).catch(() => { console.error('RAILSHOT worker could not persist its final state; inspect private workspace state.'); }).finally(() => workers.delete(worker));
     workers.add(worker);
   }
-  function find(kind, id) {
+  function find(kind, id, sessionId = null) {
     const operation = store.read().operations[id];
-    if (!operation || operation.kind !== kind) throw new ProductError(404, 'NOT_FOUND', '자원을 찾을 수 없습니다.');
+    if (!owns(operation, sessionId) || operation.kind !== kind) throw new ProductError(404, 'NOT_FOUND', '자원을 찾을 수 없습니다.');
     return operation;
   }
   function validateInput(input) {
@@ -76,9 +79,10 @@ export async function createProductService({ service, directory, target, deployP
     if (typeof input.app !== 'string' || !APP_NAME.test(input.app)) throw invalid('앱 이름이 잘못되었습니다.');
     if (typeof input.target_id !== 'string' || !TARGET_ID.test(input.target_id)) throw invalid('등록된 배포 대상 ID가 잘못되었습니다.');
   }
-  function registeredEnvironment(state, id) {
+  function registeredEnvironment(state, id, sessionId = null) {
     if (typeof environmentAdapter?.deployPublished !== 'function' || typeof id !== 'string' || !TARGET_ID.test(id)) return null;
     for (const operation of Object.values(state.operations).reverse()) {
+      if (!owns(operation, sessionId)) continue;
       const standalone = operation.kind === 'environments';
       const environment = standalone ? operation : operation.kind === 'deployments' ? operation.environment : null;
       const environmentId = standalone ? operation.id : operation.environment_id;
@@ -105,11 +109,11 @@ export async function createProductService({ service, directory, target, deployP
         files: input.files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort(([a], [b]) => a.localeCompare(b)),
       }) });
   }
-  async function reserve(kind, input, key, materialize) {
+  async function reserve(kind, input, key, materialize, sessionId = null) {
     return store.transaction(async (state) => {
       validateInput(input);
       const fingerprint = inputFingerprint(input);
-      const existingId = key && state.keys[`${kind}:${key}`];
+      const existingId = key && state.keys[scopeKey(kind, key, sessionId)];
       if (existingId) {
         const existing = state.operations[existingId];
         if (existing.fingerprint !== fingerprint) throw new ProductError(409, 'IDEMPOTENCY_CONFLICT', '같은 키로 다른 입력을 보낼 수 없습니다.');
@@ -117,12 +121,12 @@ export async function createProductService({ service, directory, target, deployP
       }
       const selectedCdTarget = deployPublished?.targets?.[input.target_id];
       const selectedCdAvailable = Boolean(deployPublished && (!deployPublished.targets || selectedCdTarget));
-      const savedEnvironment = registeredEnvironment(state, input.target_id);
+      const savedEnvironment = registeredEnvironment(state, input.target_id, sessionId);
       const registered = !selectedCdAvailable && !input.plan_id && kind === 'deployments' ? savedEnvironment : null;
-      const admittedTarget = (service.targetIds || [targetId]).includes(input.target_id);
+      const admittedTarget = sharedTargets.has(input.target_id) || Boolean(savedEnvironment);
       const plan = input.plan_id && Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
       if (input.plan_id) {
-        if (kind !== 'deployments' || !plan || !environmentAdapter?.deployPublished) throw invalid('실행 가능한 환경 계획이 필요합니다.');
+        if (kind !== 'deployments' || !owns(plan, sessionId) || !environmentAdapter?.deployPublished) throw invalid('실행 가능한 환경 계획이 필요합니다.');
         if (plan.environment_id) throw new ProductError(409, 'CONFLICT', '이미 실행에 사용된 계획입니다.');
         if (plan.public.name !== input.app || plan.private?.profile?.target?.target_id !== input.target_id
             || !plan.private.profile.deployment) throw invalid('계획의 앱·배포 대상과 일치해야 합니다.');
@@ -142,7 +146,7 @@ export async function createProductService({ service, directory, target, deployP
       checkCapacity(state, sourceBytes);
       const id = randomUUID(), now = new Date().toISOString();
       await store.snapshot(id, files);
-      const record = { id, kind, app: input.app, target_id: input.target_id, ...(plan ? { plan_id: input.plan_id, environment_id: `${id}.environment`, environment: { status: 'queued' } } : registered ? { environment_id: registered.environment_id } : {}), status: 'queued', stage: plan ? 'environment' : 'ci',
+      const record = { id, kind, session_id: sessionId, app: input.app, target_id: input.target_id, ...(plan ? { plan_id: input.plan_id, environment_id: `${id}.environment`, environment: { status: 'queued' } } : registered ? { environment_id: registered.environment_id } : {}), status: 'queued', stage: plan ? 'environment' : 'ci',
         ci: { run_id: null, state: 'queued', steps: [], publication_artifact_id: null, producer_attempt: null },
         cd: { state: 'not_started', revision: null, deployed: false },
         public_http: { state: 'not_run', verified_at: null, url: null }, url: null,
@@ -151,7 +155,7 @@ export async function createProductService({ service, directory, target, deployP
       };
       state.operations[id] = record;
       if (plan) plan.environment_id = record.environment_id;
-      if (key) state.keys[`${kind}:${key}`] = id;
+      if (key) state.keys[scopeKey(kind, key, sessionId)] = id;
       return { record, plan, input: { app: input.app, target_id: input.target_id, files, source: source.source } };
     });
   }
@@ -178,9 +182,9 @@ export async function createProductService({ service, directory, target, deployP
       throw new ProductError(502, 'UPSTREAM_FAILURE', 'CI 접수 결과를 확인할 수 없습니다. 자동으로 재전송하지 마세요.', { outcomeUnknown: true });
     }
   }
-  async function readBuild(runId) {
+  async function readBuild(runId, sessionId = null) {
     const state = store.read(), binding = /^\d+$/.test(runId) && Object.hasOwn(state.bindings, runId) ? state.bindings[runId] : null;
-    if (!binding) throw new ProductError(404, 'NOT_FOUND', '이 workspace에서 접수한 빌드를 찾을 수 없습니다.');
+    if (!binding || !owns(state.operations[binding.operation_id], sessionId)) throw new ProductError(404, 'NOT_FOUND', '이 workspace에서 접수한 빌드를 찾을 수 없습니다.');
     let observed;
     try { observed = await service.status(runId, binding.target_id); }
     catch { throw new ProductError(502, 'UPSTREAM_FAILURE', 'CI 상태를 확인하지 못했습니다.', { retryable: true }); }
@@ -221,18 +225,27 @@ export async function createProductService({ service, directory, target, deployP
     }
   }
   return {
-    deploymentOptions,
-    targets() {
+    dashboard: store.dashboard,
+    list(kind, sessionId) {
       const state = store.read();
-      const ids = new Set(service?.targetIds || (targetId ? [targetId] : []));
+      if (kind === 'plans') return Object.values(state.plans).filter((row) => owns(row, sessionId)).reverse().map((row) => structuredClone(row.public));
+      return Object.values(state.operations).filter((row) => row.kind === kind && owns(row, sessionId))
+        .reverse().filter((row) => kind !== 'builds' || row.ci?.run_id)
+        .map((row) => ({ id: kind === 'builds' ? String(row.ci.run_id) : row.id, kind, status: row.status,
+          ...Object.fromEntries(['app', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
+    },
+    deploymentOptions,
+    targets(sessionId = null) {
+      const state = store.read();
+      const ids = new Set(sharedTargets);
       for (const operation of Object.values(state.operations)) {
         const id = operation.kind === 'environments' ? operation.runtime_target_id : operation.environment?.runtime_target_id;
-        if (registeredEnvironment(state, id)) ids.add(id);
+        if (registeredEnvironment(state, id, sessionId)) ids.add(id);
       }
       return [...ids].map((id) => {
         const staticTarget = deployPublished?.targets?.[id];
         const staticAvailable = Boolean(deployPublished && (!deployPublished.targets || staticTarget));
-        const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id);
+        const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id, sessionId);
         const available = staticAvailable || Boolean(registered);
         return { id, label: id === targetId ? target?.label || id : id,
           provider: id === targetId ? target?.provider || null : null, environment: 'registered',
@@ -242,17 +255,17 @@ export async function createProductService({ service, directory, target, deployP
           runtime: { status: 'unknown', observed_at: null }, blockers: available ? [] : ['CD_ADAPTER_NOT_CONFIGURED'] };
       });
     },
-    async createBuild(input, materialize) {
-      const reserved = await reserve('builds', input, null, materialize);
+    async createBuild(input, materialize, sessionId = null) {
+      const reserved = await reserve('builds', input, null, materialize, sessionId);
       const result = await submit(reserved.record, reserved.input);
       launch(() => observe(reserved.record, String(result.run_id)));
       return result;
     },
     getBuild: readBuild,
-    async legacyStatus(id) { if (!Object.hasOwn(store.read().bindings, id)) throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.'); return service.status(id, store.read().bindings[id].target_id); },
-    async createDeployment(input, key, materialize) {
+    async legacyStatus(id, sessionId = null) { const state = store.read(); if (!Object.hasOwn(state.bindings, id) || !owns(state.operations[state.bindings[id].operation_id], sessionId)) throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.'); return service.status(id, store.read().bindings[id].target_id); },
+    async createDeployment(input, key, materialize, sessionId = null) {
       input = resolveSelection(input);
-      const reserved = await reserve('deployments', input, idempotencyKey(key), materialize);
+      const reserved = await reserve('deployments', input, idempotencyKey(key), materialize, sessionId);
       if (!reserved.replay) launch(async () => {
         try {
           if (reserved.plan) {
@@ -269,42 +282,43 @@ export async function createProductService({ service, directory, target, deployP
       });
       return publicRecord(reserved.record);
     },
-    async getDeployment(id) {
-      const record = publicRecord(find('deployments', id));
+    async getDeployment(id, sessionId = null) {
+      const record = publicRecord(find('deployments', id, sessionId));
       return { ...record, observation: await observeMetrics(record) };
     },
     profiles() { return environmentAdapter?.profiles() || []; },
-    async createPlan(input) {
+    async createPlan(input, sessionId = null) {
       if (!environmentAdapter) throw unavailable();
       return store.transaction(async (state) => {
         checkFree(state);
         if (Object.keys(state.plans).length >= maxOperations) throw new ProductError(409, 'CAPACITY_EXCEEDED', '계획 보관 한도에 도달했습니다.');
         const id = randomUUID(), plan = await environmentAdapter.plan(input, { id });
+        plan.session_id = sessionId;
         state.plans[id] = plan;
         return plan.public;
       });
     },
-    getPlan(id) { const plans = store.read().plans, plan = Object.hasOwn(plans, id) ? plans[id] : null; if (!plan) throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.'); return plan.public; },
-    async createEnvironment(input, key) {
+    getPlan(id, sessionId = null) { const plans = store.read().plans, plan = Object.hasOwn(plans, id) ? plans[id] : null; if (!owns(plan, sessionId)) throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.'); return plan.public; },
+    async createEnvironment(input, key, sessionId = null) {
       idempotencyKey(key);
       if (!input || Object.keys(input).length !== 1 || typeof input.plan_id !== 'string') throw invalid('plan_id만 입력하세요.');
       if (!environmentAdapter) throw unavailable();
       const accepted = await store.transaction(async (state) => {
-        const fingerprint = digest(input), existingId = state.keys[`environments:${key}`];
+        const fingerprint = digest(input), existingId = state.keys[scopeKey('environments', key, sessionId)];
         if (existingId) {
           const record = state.operations[existingId];
           if (record.fingerprint !== fingerprint) throw new ProductError(409, 'IDEMPOTENCY_CONFLICT', '같은 키로 다른 계획을 실행할 수 없습니다.');
           return { record, replay: true };
         }
         const plan = Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
-        if (!plan) throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.');
+        if (!owns(plan, sessionId)) throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.');
         if (plan.environment_id) throw new ProductError(409, 'CONFLICT', '이미 실행에 사용된 계획입니다.');
         checkFree(state);
         checkCapacity(state);
         await environmentAdapter.verifyPlan(plan);
         const id = randomUUID();
-        const record = { id, kind: 'environments', plan_id: input.plan_id, status: 'queued', stage: 'provision', error: null, fingerprint, created_at: new Date().toISOString() };
-        state.operations[id] = record; state.keys[`environments:${key}`] = id; plan.environment_id = id;
+        const record = { id, kind: 'environments', session_id: sessionId, plan_id: input.plan_id, status: 'queued', stage: 'provision', error: null, fingerprint, created_at: new Date().toISOString() };
+        state.operations[id] = record; state.keys[scopeKey('environments', key, sessionId)] = id; plan.environment_id = id;
         return { record, plan };
       });
       if (!accepted.replay) launch(async () => {
@@ -316,7 +330,7 @@ export async function createProductService({ service, directory, target, deployP
       });
       return publicRecord(accepted.record);
     },
-    getEnvironment(id) { return publicRecord(find('environments', id)); },
+    getEnvironment(id, sessionId = null) { return publicRecord(find('environments', id, sessionId)); },
     async close() { abort.abort(); await Promise.allSettled(workers); await store.close(); },
   };
 }

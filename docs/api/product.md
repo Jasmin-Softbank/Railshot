@@ -1,8 +1,8 @@
-# Shared workspace product API
+# Session-scoped product API
 
 이 문서는 `apps/api/src/server.js`, `product.js`, `environments.js`, `product-store.js`에 구현한 제품 API를 설명한다. 기계 판독 계약은 [product.openapi.json](product.openapi.json)이다. 이 계약의 문서·로컬 검증은 `not_deployed`이며 실제 클라우드 E2E 결과와 별도로 기록한다.
 
-사용자 계정·로그인·팀원 allowlist는 없다. 모든 사용자가 같은 workspace의 등록 대상과 접수 기록을 사용한다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. GitHub·Provider·SSH 자격은 서버 설정에만 둔다.
+사용자 계정·로그인·팀원 allowlist는 없다. 익명 브라우저 세션별로 접수 기록·계획·화면 설정·연결 정보를 분리한다. 운영자 지정 공용 대상과 실행기의 동시 실행 한도는 공유한다. 세션·스키마·이관 계약은 [dashboard-sessions.md](dashboard-sessions.md)를 따른다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. 실행용 GitHub·Provider·SSH 자격은 서버 설정에만 둔다. 별도 OpenStack 연결 정보 저장은 실행용 자격을 바꾸지 않는다.
 
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
@@ -38,9 +38,9 @@ profile의 `target_id`는 고정 runtime 대상 또는 새 대상 이름의 기�
 
 비동기 접수는 화균 님의 `{resource_id, action:"create", status:"accepted", request_id}` 형식과 `202`, `Location`, `Retry-After: 2`, `X-Request-ID`, `Cache-Control: no-store`를 사용한다. 오류는 `{error:{code,message,request_id,retryable,outcome_unknown}}`다. 매 HTTP 요청마다 새로운 request ID를 생성한다. 작업에 저장한 오류 ID와 Ansible의 `ansible_job_id`는 별개다.
 
-배포·환경 생성에는 `Idempotency-Key`가 필요하다. 같은 키와 입력은 같은 ID를 반환한다. queued/running이면 202, 완료·실패·차단·unknown이면 200 자원 객체와 Location이다. 같은 키로 입력을 바꾸면 409이며 배포의 `plan_id`와 환경·provider 선택도 입력에 포함한다. ZIP의 압축 시각·multipart boundary는 파일 의미에 포함하지 않으며 폴더 파일 순서도 정규화한다. GitHub URL의 첫 SHA·소스 snapshot은 고정하고 같은 키의 재요청에서 다시 다운로드하지 않는다. 빌드 생성에는 이 멱등 계약이 없으므로 응답 유실 시 자동 재전송하지 않는다.
+배포·환경 생성에는 `Idempotency-Key`가 필요하다. 같은 세션·자원 종류 안에서 같은 키와 입력은 같은 ID를 반환한다. queued/running이면 202, 완료·실패·차단·unknown이면 200 자원 객체와 Location이다. 같은 키로 입력을 바꾸면 409이며 배포의 `plan_id`와 환경·provider 선택도 입력에 포함한다. ZIP의 압축 시각·multipart boundary는 파일 의미에 포함하지 않으며 폴더 파일 순서도 정규화한다. GitHub URL의 첫 SHA·소스 snapshot은 고정하고 같은 키의 재요청에서 다시 다운로드하지 않는다. 빌드 생성에는 이 멱등 계약이 없으므로 응답 유실 시 자동 재전송하지 않는다.
 
-`RAILSHOT_STATE_DIR`는 저장소 밖의 전용 영속 디렉터리로 설정한다. 기본값은 사용자 홈의 `.local/state/railshot`이다. 최종 디렉터리와 state 파일은 현재 OS 사용자 소유이며 다른 사용자 접근 권한과 심볼릭 링크를 거부한다. 소스는 0600 snapshot, 작은 작업 기록은 fsync 후 atomic rename으로 저장한다. snapshot과 의도를 저장한 뒤에만 CI·CD·환경 실행을 시작한다. 기본 보관 상한은 작업 100개, 계획 100개, 소스 snapshot 512 MiB다. 상한 도달 시 409를 반환하며 자동 삭제하지 않는다. 운영자는 작업을 확인하고 보관·정리 정책을 적용해야 한다.
+`RAILSHOT_STATE_DIR`는 저장소 밖의 전용 영속 디렉터리로 설정한다. 기본값은 사용자 홈의 `.local/state/railshot`이다. 최종 디렉터리와 state 파일은 현재 OS 사용자 소유이며 다른 사용자 접근 권한과 심볼릭 링크를 거부한다. 소스는 0600 snapshot, 작업·계획·run binding·멱등 키는 dashboard.sqlite3의 WAL 트랜잭션(synchronous=FULL)으로 저장한다. 기존 state.json은 첫 기동에 한 번 이관하고 이후 갱신하지 않는다. snapshot과 의도를 저장한 뒤에만 CI·CD·환경 실행을 시작한다. 기본 보관 상한은 작업 100개, 계획 100개, 소스 snapshot 512 MiB다. 상한 도달 시 409를 반환하며 자동 삭제하지 않는다. 운영자는 작업을 확인하고 보관·정리 정책을 적용해야 한다.
 
 한 API 프로세스가 한 로컬 저장소를 소유한다. 프로세스 ID와 시작 식별자로 같은 호스트의 중복 사용을 막는다. 이 lock은 여러 호스트의 분산 잠금이 아니므로 API replica는 1개로 운영하고 Recreate 전략으로 이전·새 컨테이너의 동시 쓰기를 피한다. 서로 다른 PID namespace와 여러 호스트의 동시 writer는 지원하지 않는다. 미완료 작업과 unknown은 하나의 admission 한도를 공유한다. 재시작 시 queued/running을 unknown으로 저장하고 작업을 자동 재실행하지 않는다. 외부 실행 결과 유실이나 저장 실패도 성공으로 표시하지 않는다. unknown을 해제하는 공개 API는 없으며 운영자가 GitHub·CD·환경 기록을 확인해야 한다.
 
@@ -60,7 +60,7 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 
 디렉터리는 0700, 비공개 파일은 0600, API OS 사용자 소유여야 한다. 기존 API·Terraform·edge·budget writer 중지, SQLite backup·integrity·행 digest와 Terraform lineage 확인 후 단일 정본을 이전한다. 개인 자격·비밀을 이미지나 HTTP에 포함하지 않는다. 이 설정 계약은 이관·실배포 완료 증거가 아니며 VM·DB readiness·대상 등록·migration·공개 HTTP 결과는 각각 실행 기록으로 확인한다. GCP의 서버 자격과 자동 billing 수집, AWS↔GCP 사설 연결은 별도 준비·검증이 필요하다.
 
-기존 `POST /api/deploy`와 `GET /api/runs/{run_id}`는 응답 필드와 `x-jasmin-request: deploy` 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·admission·run binding을 공유하므로 이 workspace에서 접수하지 않은 과거 또는 외부 run ID는 조회하지 않는다. v1 배포와 달리 legacy deploy는 CI 제출이다.
+기존 `POST /api/deploy`와 `GET /api/runs/{run_id}`는 응답 필드와 `x-jasmin-request: deploy` 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·admission·run binding을 공유하므로 다른 세션에서 접수했거나 이 workspace에 없는 run ID는 원격에서 조회하지 않는다. CLI/MCP는 호스트별 쿠키를 ~/.local/state/railshot-client의 0600 파일에 저장하며 RAILSHOT_CLIENT_SESSION_DIR로 위치를 지정한다. 쿠키 없는 비공개 localhost 유지보수만 기존 공유 범위를 유지한다. v1 배포와 달리 legacy deploy는 CI 제출이다.
 
 현재 운영 메트릭, 수집 시각과 실패 상태는 [제품 관측 계약](observations.md)을 따른다.
 
@@ -69,3 +69,5 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 대시보드는 소스와 `environment=cloud|onprem`, `provider=aws|openstack|proxmox`를 기존 배포 endpoint로 보낸다. 이 모드는 `app`·`target_id`와 함께 사용할 수 없다. API가 `RAILSHOT_TARGET_ID`·`RAILSHOT_TARGET_PROVIDER`와 CD 등록 앱을 결정하며, 등록 앱이 없으면 GitHub/ZIP/폴더 이름에서 유효한 앱 이름을 생성한다. 폴더명은 선택적 `source_name`(1–255자, 제어 문자 금지)으로 전달한다. 알 수 없는 provider와 잘못된 조합은 422, 연결되지 않은 선택은 409이며 다른 대상으로 대체하지 않는다. 기존 app/target_id 요청과 builds API는 유지한다.
 
 현재 공개 플랫폼 manifest는 검증된 AWS 대상에 `RAILSHOT_TARGET_PROVIDER=aws`를 명시한다. 대상 인프라를 바꾸면 이 운영자 설정도 함께 바꿔야 한다. provider 미설정 시 화면 선택 실행은 차단되며 대상 ID 문자열로 provider를 추측하지 않는다. UI의 클라우드/온프레미스 카드와 provider 선택을 backend의 target ID나 실행 종류 드롭다운으로 대체하지 않는다.
+
+`GET /api/v1/builds`, `/api/v1/deployments`, `/api/v1/environments`는 현재 세션의 실행 요약 목록을, `GET /api/v1/plans`는 현재 세션의 계획 목록을 반환한다. 배포 내역은 서버 목록으로 복원하며 localStorage의 기존 마지막 실행 ID를 사용하지 않는다. 세션·설정·OpenStack 연결 API는 [별도 명세](dashboard-sessions.md)에 정리했다.
