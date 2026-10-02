@@ -46,6 +46,9 @@
                 <div class="source-divider"><span>또는</span></div>
                 <label class="field-label" for="repository-url">공개 GitHub URL</label>
                 <input id="repository-url" type="url" inputmode="url" autocomplete="url" placeholder="https://github.com/owner/repo" />
+                <div class="source-divider"><span>또는</span></div>
+                <label class="field-label" for="registered-app">등록된 앱 재배포</label>
+                <input id="registered-app" type="text" autocomplete="off" placeholder="앱 이름 (예: memo-sqlite)" />
                 <p class="selection" id="source-selection" role="status" hidden></p>
               </div>
             </section>
@@ -96,33 +99,33 @@
               <div><dt>소스</dt><dd id="review-source"></dd></div>
               <div><dt>배포 환경</dt><dd id="review-target"></dd></div>
             </dl>
-            <p class="review-note">화면 준비 단계입니다. 배포 요청은 아직 전송되지 않습니다.</p>
-            <button class="primary-button" type="button" disabled>배포 시작</button>
+            <p class="review-note" id="review-note"></p>
+            <button class="primary-button" id="start-deployment" type="button" disabled>배포 시작</button>
           </section>
         </section>
 
         <section class="view" id="history-view" aria-labelledby="history-title" hidden>
           <header class="page-header"><span class="eyebrow">DEPLOYMENTS</span><h1 id="history-title">배포 내역</h1></header>
-          <div class="panel empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2>아직 배포 내역이 없습니다</h2><p>배포 API가 연결되면 이곳에서 실행 기록을 확인할 수 있습니다.</p></div>
+          <div class="panel empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2>저장된 배포 내역이 없습니다</h2><p>현재 실행은 환경 모니터링에서 확인할 수 있습니다. 내역 저장은 아직 연결되지 않았습니다.</p></div>
         </section>
 
         <section class="view" id="monitor-view" aria-labelledby="monitor-title" hidden>
           <header class="page-header"><span class="eyebrow">ENVIRONMENT</span><h1 id="monitor-title">환경 모니터링</h1></header>
           <div class="monitor-grid">
             <div class="monitor-left">
-              <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2>연결된 배포 없음</h2><p>배포를 선택하면 환경 상태가 표시됩니다.</p></div></div>
-              <div class="panel stages-panel"><h2>배포 단계</h2><ol><li>소스 접수</li><li>앱 검사 및 수정</li><li>이미지 빌드</li><li>GitOps 반영</li><li>URL 및 앱 상태 확인</li></ol></div>
+              <div class="panel monitor-summary"><span class="status-dot muted" id="run-dot"></span><div><h2 id="run-title">연결된 실행 없음</h2><p id="run-status">배포를 시작하면 Actions 상태가 표시됩니다.</p><a id="actions-link" href="#" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions에서 보기 ↗</a></div></div>
+              <div class="panel stages-panel"><h2>Actions 작업·단계</h2><ol id="workflow-jobs"><li>실행 대기</li></ol></div>
             </div>
             <div class="console panel">
-              <div class="console-heading"><h2>배포 환경 콘솔</h2><span><i class="status-dot muted"></i> 연결 대기 · 읽기 전용</span></div>
+              <div class="console-heading"><h2>배포 환경 콘솔</h2><span><i class="status-dot muted"></i> Actions 상태 · 읽기 전용</span></div>
               <div class="console-tabs" role="tablist" aria-label="콘솔 보기">
-                <button type="button" role="tab" aria-selected="true" data-console="work">작업 로그</button>
+                <button type="button" role="tab" aria-selected="true" data-console="work">Actions 단계</button>
                 <button type="button" role="tab" aria-selected="false" data-console="environment">환경 상태</button>
                 <button type="button" role="tab" aria-selected="false" data-console="app">앱 로그</button>
               </div>
               <div class="console-metrics"><span>Pod <strong>—</strong></span><span>CPU <strong>—</strong></span><span>Memory <strong>—</strong></span><span>HTTP <strong>—</strong></span></div>
-              <div class="console-output" id="console-output" role="tabpanel"><p>배포가 연결되면 작업 로그가 여기에 표시됩니다.</p></div>
-              <div class="console-footer">로그 연결 전</div>
+              <div class="console-output" id="console-output" role="tabpanel"><p>실행을 시작하면 Actions 단계별 상태가 표시됩니다.</p></div>
+              <div class="console-footer">전체 로그는 GitHub Actions에서 확인할 수 있습니다.</div>
             </div>
           </div>
         </section>
