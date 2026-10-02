@@ -43,7 +43,7 @@ the new IP before moving the existing hostname:
 ```sh
 gcloud certificate-manager certificates describe railshot-gcp-edge --location=global --project=railshot-poc-20261001
 gcloud compute backend-services get-health railshot-gcp-edge --global --project=railshot-poc-20261001
-curl --fail --resolve fixture-npm-js-3feba5a1b1cf.railshot.io:443:NEW_GLOBAL_IP https://fixture-npm-js-3feba5a1b1cf.railshot.io/health
+curl --fail --resolve your-app.example.com:443:NEW_GLOBAL_IP https://your-app.example.com/health
 ```
 
 The backend's 100 requests/second per endpoint is a balancing capacity setting,
