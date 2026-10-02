@@ -119,8 +119,21 @@ class HandoffTest(unittest.TestCase):
                 render(root, target)
             spec['resources'] = {'postgres': {'size': 'small'}}
             prepare()
-            with self.assertRaisesRegex(ValueError, 'stateless'):
+            with self.assertRaisesRegex(ValueError, 'PostgreSQL binding'):
                 render(root, target)
+            binding = {'host': '10.20.0.10', 'port': 5432, 'runtime_secret': 'demo-runtime',
+                       'migration_secret': 'demo-migration', 'ca_secret': 'demo-ca'}
+            spec['services'][0]['migrate'] = {'command': ['python', 'migrate.py']}
+            prepare()
+            result = render(root, {**target, 'database': binding})
+            job = result['workload']['items'][-1]
+            self.assertEqual(job, render(root, {**target, 'database': binding})['workload']['items'][-1])
+            spec['services'][0]['migrate']['command'] = ['python', 'next.py']; prepare()
+            self.assertNotEqual(job['metadata']['name'], render(root, {**target, 'database': binding})['workload']['items'][-1]['metadata']['name'])
+            for changes in ({'host': '0.0.0.0'}, {'host': '8.8.8.8'}, {'host': '127.0.0.1'}, {'port': 443},
+                            {'password': 'must-not-cross-git'}, {'migration_secret': 'demo-runtime'}, {'ca_secret': '../secret'}):
+                with self.subTest(binding_changes=changes), self.assertRaises(ValueError):
+                    render(root, {**target, 'database': {**binding, **changes}})
 
 
 if __name__ == '__main__':

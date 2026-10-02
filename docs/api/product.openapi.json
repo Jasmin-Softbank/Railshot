@@ -1,0 +1,3095 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RAILSHOT shared workspace product API",
+    "version": "1.0.0",
+    "description": "Implemented local contract. Public demo requires exact configured Host/Origin and no login or browser bearer. Server-only provider/GitHub/Ansible credentials are never request fields. Private operator mode may require its existing internal bearer. One API process on one host, durable private state, one unfinished operation; no multi-replica scheduler. Legacy POST /api/deploy and GET /api/runs/{run_id} preserve response shape and use the same durable run binding. Local contract tests are not cloud deployment evidence."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [],
+  "paths": {
+    "/api/v1/targets": {
+      "get": {
+        "operationId": "listTargets",
+        "summary": "List registered targets",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configured public metadata only; unconfigured server returns an empty list.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TargetList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "List configured CI targets and successfully registered environment targets, including application and DB capability. Successful environment bindings restore after API restart; runtime unknown is not a readiness observation."
+      }
+    },
+    "/api/v1/profiles": {
+      "get": {
+        "operationId": "listProfiles",
+        "summary": "List registered profiles",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configured public metadata only; unconfigured server returns an empty list.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "description": "List operator-registered runtime targets, optional fixed application names and Patroni role counts. supported and deployment_supported describe configured capabilities, not completed provisioning, database readiness or a deployed application."
+      }
+    },
+    "/api/v1/builds": {
+      "post": {
+        "operationId": "createBuild",
+        "summary": "Create build",
+        "description": "Uses the existing CI submitter. id is the GitHub run ID as a string. A shared-workspace binding is saved before 202. No build idempotency guarantee; do not automatically replay a lost response. plan_id is not accepted for builds.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/Source"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "plan_id"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "$ref": "#/components/responses/Accepted"
+          }
+        }
+      }
+    },
+    "/api/v1/builds/{id}": {
+      "get": {
+        "operationId": "getBuild",
+        "summary": "Read build",
+        "description": "Read-only. Does not dispatch, provision or reconcile external state. Builds only query locally bound runs; deployment/environment details read the persisted operation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]+$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Build"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/deployments": {
+      "post": {
+        "operationId": "createDeployment",
+        "summary": "Create deployment",
+        "description": "Persist a normalized private source snapshot and execution intent before any external mutation. Without plan_id, require the app-bound target in server CD configuration or a successful saved environment registration; reuse does not provision VMs or databases again. An environment/provider selection resolves the existing registered target server-side. Optional plan_id is only accepted with explicit app/target_id and consumes an executable, unexpired, unchanged plan for the same app and runtime target; its profile must include deployment registration. Complete environment execution and registration before CI, verified publication and CD. Environment or database success alone does not mean application deployment succeeded. One unfinished operation including unknown occupies the single worker. Same GitHub URL/key reuses the first SHA without refetching HEAD; plan_id and environment/provider selection are part of idempotent input.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/DeploymentSource"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "$ref": "#/components/responses/Accepted"
+          },
+          "200": {
+            "description": "Replay of a terminal operation; unknown is terminal for retries and continues to occupy admission.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}": {
+      "get": {
+        "operationId": "getDeployment",
+        "summary": "Read deployment",
+        "description": "Read persisted execution state and bounded, read-only observations of the operator-bound target and app. Observer failures do not change deployment outcome. Metrics older than 90 seconds have null values. No dispatch, provision or reconcile.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/plans": {
+      "post": {
+        "operationId": "createPlan",
+        "summary": "Create plan",
+        "description": "Strict JSON. name is an application name of 3 through 30 characters. Operator profiles expose no credentials or local paths. Execution supports one registered AWS/GCP amd64 runtime node with database.mode=none or configured Patroni placements. Each placement must exactly match its registered database, DCS voter and proxy role counts; the combined topology needs at least two database nodes, at least three odd-numbered DCS voters and at least one proxy. standalone and unsupported runtime counts/providers/topologies produce a saved non-executable plan with blockers. Plans expire after 15 minutes, bind policy and target snapshots plus every provider plan digest, and admit only new resources without changes to existing resources. Plan creation uses the same execution admission lock. A saved or executable plan is not deployment evidence. For profiles with deployment configuration, the target database binding requirement must equal whether the request uses patroni; mismatches produce DATABASE_BINDING_PROFILE_MISMATCH before Terraform planning. Profiles without deployment configuration can independently select database preparation.",
+        "parameters": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "201": {
+            "description": "Plan completed and persisted; no VM has been created.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/plans/{id}": {
+      "get": {
+        "operationId": "getPlan",
+        "summary": "Read plan",
+        "description": "Read-only. Does not dispatch, provision or reconcile external state. Builds only query locally bound runs; deployment/environment details read the persisted operation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/environments": {
+      "post": {
+        "operationId": "createEnvironment",
+        "summary": "Create environment",
+        "description": "Execute a saved, unexpired, unchanged, operator-enabled plan once. The same plan cannot also be consumed by a deployment or another idempotency key. Record resource, guest, runtime, optional Patroni database and optional deployment registration results separately. deployment_supported becomes true only after registration succeeds; successful runtime preparation alone does not register the target. This endpoint does not build or deploy application source and does not verify public application HTTP.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnvironmentInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "$ref": "#/components/responses/Accepted"
+          },
+          "200": {
+            "description": "Replay of a terminal operation; unknown is terminal for retries and continues to occupy admission.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Environment"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/environments/{id}": {
+      "get": {
+        "operationId": "getEnvironment",
+        "summary": "Read environment",
+        "description": "Read-only. Does not dispatch, provision or reconcile external state. Builds only query locally bound runs; deployment/environment details read the persisted operation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Environment"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/options": {
+      "get": {
+        "operationId": "listDeploymentOptions",
+        "summary": "Resolve original cloud and on-premise UI choices against operator configuration",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configured public metadata only; unconfigured server returns an empty list.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/DeploymentOption"
+                      }
+                    },
+                    "next_marker": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_marker"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Accepted": {
+        "type": "object",
+        "properties": {
+          "resource_id": {
+            "type": "string"
+          },
+          "action": {
+            "const": "create"
+          },
+          "status": {
+            "const": "accepted"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "resource_id",
+          "action",
+          "status",
+          "request_id"
+        ],
+        "additionalProperties": false
+      },
+      "OperationError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "outcome_unknown": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "request_id",
+          "retryable",
+          "outcome_unknown"
+        ],
+        "additionalProperties": false
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/OperationError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "Target": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environment": {
+            "type": "string"
+          },
+          "application_name": {
+            "type": "string"
+          },
+          "deployment_scope": {
+            "const": "registered_application"
+          },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "ci_submission": {
+                "type": "boolean"
+              },
+              "application_deployment": {
+                "type": "boolean"
+              },
+              "database_configuration": {
+                "const": false
+              }
+            },
+            "required": [
+              "ci_submission",
+              "application_deployment",
+              "database_configuration"
+            ],
+            "additionalProperties": false
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "unknown"
+              },
+              "observed_at": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "status",
+              "observed_at"
+            ],
+            "additionalProperties": false
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "provider",
+          "environment",
+          "capabilities",
+          "runtime",
+          "blockers"
+        ],
+        "additionalProperties": false
+      },
+      "Profile": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "site": {
+            "type": "string"
+          },
+          "purposes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "supported": {
+            "type": "boolean",
+            "description": "Whether provider, runtime purpose and operator execution policy permit this profile. Not a live readiness result."
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "target_id": {
+            "type": "string",
+            "description": "Operator target ID, or the naming template when create_per_request is true."
+          },
+          "application_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Configured fixed application, or null when requests may choose an application name or no application is configured."
+          },
+          "deployment_supported": {
+            "type": "boolean",
+            "description": "Whether the profile contains deployment configuration. This is configuration capability, not completed target registration."
+          },
+          "database": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "const": "patroni"
+                  },
+                  "database_nodes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16
+                  },
+                  "dcs_voters": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16
+                  },
+                  "proxy_nodes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 16
+                  },
+                  "required": {
+                    "type": "boolean",
+                    "description": "Whether this profile's registered application target requires a database binding. When deployment configuration exists, its binding requirement must match database.mode=patroni before Terraform planning."
+                  }
+                },
+                "required": [
+                  "mode",
+                  "database_nodes",
+                  "dcs_voters",
+                  "proxy_nodes",
+                  "required"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Configured Patroni role counts, or null. One VM may have both database and DCS roles, so the counts are not necessarily distinct VM counts. Plan validation checks the requested topology."
+          },
+          "create_per_request": {
+            "type": "boolean",
+            "description": "Derive a new runtime and database target set per plan from this operator template. This is capability, not a completed allocation."
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "provider",
+          "site",
+          "purposes",
+          "supported",
+          "blockers",
+          "target_id",
+          "application_name",
+          "deployment_supported",
+          "database",
+          "create_per_request"
+        ],
+        "additionalProperties": false
+      },
+      "Build": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          },
+          "app": {
+            "type": "string"
+          },
+          "tenant": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "source_commit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "failed",
+              "publication_unverified",
+              "published"
+            ]
+          },
+          "workflow": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "conclusion": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "conclusion"
+            ],
+            "additionalProperties": false
+          },
+          "actions_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": "null"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "publication": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "CI artifact receipt validated by the registered GitHub workflow; publication is not application deployment."
+          }
+        },
+        "required": [
+          "id",
+          "app",
+          "target_id",
+          "source_commit",
+          "status",
+          "workflow",
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "Deployment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "const": "deployments"
+          },
+          "app": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "blocked",
+              "unknown"
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "environment",
+              "ci",
+              "cd",
+              "complete",
+              "http"
+            ]
+          },
+          "ci": {
+            "type": "object",
+            "properties": {
+              "run_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "type": "string"
+              },
+              "steps": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "publication_artifact_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "producer_attempt": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "images": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "description": "Verified immutable image references from the bound publication receipt."
+              }
+            },
+            "required": [
+              "run_id",
+              "state",
+              "publication_artifact_id",
+              "producer_attempt"
+            ],
+            "additionalProperties": false
+          },
+          "cd": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string"
+              },
+              "revision": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "deployed": {
+                "type": "boolean"
+              },
+              "migration": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "succeeded",
+                      "unverified"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "state"
+                ],
+                "additionalProperties": false,
+                "description": "Optional observed migration Job result. Its success alone does not establish application deployment or public HTTP success."
+              }
+            },
+            "required": [
+              "state",
+              "revision",
+              "deployed"
+            ],
+            "additionalProperties": false
+          },
+          "public_http": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string"
+              },
+              "verified_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "site_url": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https://",
+                "description": "App path verified with HTTPS 200 after the health contract, exact ALB route, DNS alias and target health checks."
+              },
+              "receipt": {
+                "type": "object",
+                "description": "Present only after verification of an allocated edge route. Does not contain endpoint IPs or credentials.",
+                "properties": {
+                  "deployment_id": {
+                    "type": "string"
+                  },
+                  "target_id": {
+                    "type": "string"
+                  },
+                  "tenant": {
+                    "type": "string"
+                  },
+                  "app": {
+                    "type": "string"
+                  },
+                  "environment_id": {
+                    "type": "string"
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "source_commit": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "revision": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "images_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "route_sha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "expires_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "plan_sha256": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "route_key": {
+                    "type": "string",
+                    "pattern": "^app-[a-f0-9]{24}$"
+                  },
+                  "target_health": {
+                    "const": "healthy"
+                  },
+                  "dns_alias": {
+                    "const": "verified"
+                  },
+                  "tls_http": {
+                    "const": "verified"
+                  }
+                },
+                "required": [
+                  "deployment_id",
+                  "target_id",
+                  "tenant",
+                  "app",
+                  "environment_id",
+                  "namespace",
+                  "source_commit",
+                  "revision",
+                  "images_sha256",
+                  "route_sha256",
+                  "expires_at",
+                  "plan_sha256",
+                  "route_key",
+                  "target_health",
+                  "dns_alias",
+                  "tls_http"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "state",
+              "verified_at",
+              "url"
+            ],
+            "additionalProperties": false
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actions_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_commit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "plan_id": {
+            "type": "string",
+            "description": "Optional saved plan consumed before CI for this deployment."
+          },
+          "environment_id": {
+            "type": "string",
+            "description": "Present with plan_id; the deployment UUID followed by .environment identifies its private execution state. This is not a separately registered /environments/{id} resource."
+          },
+          "environment": {
+            "$ref": "#/components/schemas/EnvironmentProgress"
+          },
+          "source_digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "SHA-256 of the accepted normalized input snapshot; source content is private."
+          },
+          "observation": {
+            "$ref": "#/components/schemas/Observation"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "app",
+          "target_id",
+          "status",
+          "stage",
+          "ci",
+          "cd",
+          "public_http",
+          "url",
+          "actions_url",
+          "error",
+          "created_at",
+          "updated_at"
+        ],
+        "additionalProperties": false
+      },
+      "PlanInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$",
+            "minLength": 3,
+            "maxLength": 30
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "profile_id": {
+                "type": "string"
+              },
+              "node_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64,
+                "description": "Accepted range is 1 through 64; current execution supports exactly one runtime node. Other values produce SINGLE_NODE_ONLY."
+              }
+            },
+            "required": [
+              "profile_id",
+              "node_count"
+            ],
+            "additionalProperties": false
+          },
+          "database": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "standalone",
+                  "patroni"
+                ],
+                "description": "none skips database preparation and requires absent or empty placements. patroni uses registered placements. standalone is accepted as input but produces STANDALONE_DATABASE_UNSUPPORTED."
+              },
+              "placements": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "profile_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                    },
+                    "database_nodes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 31
+                    },
+                    "dcs_voters": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 31
+                    },
+                    "proxy_nodes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 31
+                    }
+                  },
+                  "required": [
+                    "profile_id",
+                    "database_nodes",
+                    "dcs_voters",
+                    "proxy_nodes"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 16,
+                "description": "Requested role counts must exactly match each referenced profile. Duplicate profiles and unsupported or insufficient combined topologies block execution."
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "none"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "placements": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "runtime",
+          "database"
+        ],
+        "additionalProperties": false
+      },
+      "Plan": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$",
+            "minLength": 3,
+            "maxLength": 30
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "profile_id": {
+                "type": "string"
+              },
+              "node_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 64,
+                "description": "Accepted range is 1 through 64; current execution supports exactly one runtime node. Other values produce SINGLE_NODE_ONLY."
+              }
+            },
+            "required": [
+              "profile_id",
+              "node_count"
+            ],
+            "additionalProperties": false
+          },
+          "database": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "standalone",
+                  "patroni"
+                ],
+                "description": "none skips database preparation and requires absent or empty placements. patroni uses registered placements. standalone is accepted as input but produces STANDALONE_DATABASE_UNSUPPORTED."
+              },
+              "placements": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "profile_id": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+                    },
+                    "database_nodes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 31
+                    },
+                    "dcs_voters": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 31
+                    },
+                    "proxy_nodes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 31
+                    }
+                  },
+                  "required": [
+                    "profile_id",
+                    "database_nodes",
+                    "dcs_voters",
+                    "proxy_nodes"
+                  ],
+                  "additionalProperties": false
+                },
+                "maxItems": 16,
+                "description": "Requested role counts must exactly match each referenced profile. Duplicate profiles and unsupported or insufficient combined topologies block execution."
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "none"
+                    }
+                  },
+                  "required": [
+                    "mode"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "placements": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "policy_revision": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Plan-ready time plus 15 minutes, capped by the earliest provider cost quote expiry. Verification and replay do not extend it."
+          },
+          "executable": {
+            "type": "boolean"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "cost": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "incremental_estimate": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "projected_total": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "limit": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+                  },
+                  "currency": {
+                    "const": "USD"
+                  },
+                  "within_budget": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "currency",
+                  "incremental_estimate",
+                  "projected_total",
+                  "limit",
+                  "within_budget"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Fresh AWS billing and price estimate when automatic budget refresh is configured; null otherwise. Includes existing held reservations and unreported-cost allowance. This is admission estimation, not a hard spending cap."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Planned work: resources, guest, runtime; database and binding when a database is requested; registration when deployment configuration exists. These labels do not prove execution or map one-to-one to progress.stage."
+          },
+          "plan_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runtime_target_id": {
+            "type": "string",
+            "description": "Exact runtime target derived and fixed by this plan. Use this ID with plan_id when submitting a deployment."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "runtime",
+          "database",
+          "policy_revision",
+          "expires_at",
+          "executable",
+          "blockers",
+          "cost",
+          "steps",
+          "plan_sha256",
+          "runtime_target_id"
+        ],
+        "additionalProperties": false
+      },
+      "EnvironmentInput": {
+        "type": "object",
+        "properties": {
+          "plan_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "plan_id"
+        ],
+        "additionalProperties": false
+      },
+      "Environment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "const": "environments"
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "blocked",
+              "unknown"
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "description": "Current or last environment step, such as provision, resources, guest, runtime, database or binding. A succeeded environment may retain its last step name."
+          },
+          "resources": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              },
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "target_id": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "target_id",
+                    "provider"
+                  ],
+                  "additionalProperties": false
+                },
+                "description": "Applied runtime and database VM descriptors. Present after all resource applications succeed; not guest, runtime or database readiness."
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "guest": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "database": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "runtime_target_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deployment_supported": {
+            "type": "boolean",
+            "description": "True only after deployment target registration succeeds. Runtime or database success alone is insufficient."
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "binding": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false,
+            "description": "Deployment target registration, including the private database binding when one was produced."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "plan_id",
+          "status",
+          "stage",
+          "error",
+          "created_at"
+        ],
+        "additionalProperties": false
+      },
+      "Source": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "app": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$"
+              },
+              "source_type": {
+                "const": "github"
+              },
+              "repository_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "Public HTTPS GitHub owner/repository URL. Default branch SHA is pinned once."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              }
+            },
+            "required": [
+              "app",
+              "target_id",
+              "repository_url"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "app": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$"
+              },
+              "source_type": {
+                "const": "zip"
+              },
+              "archive": {
+                "type": "string",
+                "format": "binary",
+                "description": "ZIP; at most 100 MiB expanded and 2,000 files."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              }
+            },
+            "required": [
+              "app",
+              "target_id",
+              "archive"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "app": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$"
+              },
+              "source_type": {
+                "const": "folder"
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "maxItems": 2000
+              },
+              "paths": {
+                "type": "string",
+                "description": "JSON string array, one safe relative path per files entry."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              }
+            },
+            "required": [
+              "app",
+              "target_id",
+              "files",
+              "paths"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "description": "Exactly one source. source_type is optional and must match if supplied. Reject unknown fields and duplicate singleton fields; only files may repeat. Credentials, provider URLs and SSH paths are not accepted. Optional plan_id is accepted only by deployments, not builds or legacy deploy."
+      },
+      "TargetList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Target"
+            }
+          },
+          "next_marker": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "next_marker"
+        ],
+        "additionalProperties": false
+      },
+      "ProfileList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Profile"
+            }
+          },
+          "next_marker": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "next_marker"
+        ],
+        "additionalProperties": false
+      },
+      "EnvironmentProgress": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "blocked",
+              "unknown"
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "description": "Current or last environment step, such as provision, resources, guest, runtime, database or binding. A succeeded environment may retain its last step name."
+          },
+          "resources": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              },
+              "nodes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "target_id": {
+                      "type": "string"
+                    },
+                    "provider": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "target_id",
+                    "provider"
+                  ],
+                  "additionalProperties": false
+                },
+                "description": "Applied runtime and database VM descriptors. Present after all resource applications succeed; not guest, runtime or database readiness."
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "guest": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "database": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "runtime_target_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deployment_supported": {
+            "type": "boolean",
+            "description": "True only after deployment target registration succeeds. Runtime or database success alone is insufficient."
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "binding": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false,
+            "description": "Deployment target registration, including the private database binding when one was produced."
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false,
+        "description": "Embedded environment execution progress. Initially only status=queued is present. Environment completion is separate from CI, application CD and public HTTP verification."
+      },
+      "Metric": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "not_configured",
+              "unsupported",
+              "unavailable",
+              "collection_failed",
+              "no_data",
+              "stale"
+            ]
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "observed_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "app_pods",
+              "target_node",
+              "app_probe"
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "value",
+          "observed_at",
+          "scope"
+        ],
+        "additionalProperties": false
+      },
+      "Observation": {
+        "type": "object",
+        "properties": {
+          "deployment_id": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "app": {
+            "type": "string"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stale_after_seconds": {
+            "const": 90
+          },
+          "metrics": {
+            "type": "object",
+            "properties": {
+              "pods": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "cpu_percent": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "memory_percent": {
+                "$ref": "#/components/schemas/Metric"
+              },
+              "http": {
+                "$ref": "#/components/schemas/Metric"
+              }
+            },
+            "required": [
+              "pods",
+              "cpu_percent",
+              "memory_percent",
+              "http"
+            ],
+            "additionalProperties": false
+          },
+          "collector": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "role": {
+                "const": "shared_observer"
+              },
+              "lifecycle": {
+                "enum": [
+                  "acceptance",
+                  "shared"
+                ]
+              },
+              "expires_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "role",
+              "lifecycle",
+              "expires_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "deployment_id",
+          "target_id",
+          "app",
+          "checked_at",
+          "stale_after_seconds",
+          "metrics"
+        ],
+        "additionalProperties": false
+      },
+      "DeploymentOption": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "environment": {
+            "enum": [
+              "cloud",
+              "onprem"
+            ]
+          },
+          "provider": {
+            "enum": [
+              "aws",
+              "openstack",
+              "proxmox"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "environment",
+          "provider",
+          "label",
+          "available",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "DeploymentSource": {
+        "description": "Either explicit app/target_id with optional plan_id, or the original UI environment/provider choice, never both. A plan binds app to its name and target_id to its runtime_target_id. Without a plan, explicit fields may reuse a successful saved environment registration. For environment/provider selection, the server resolves the existing registered target and fixed app name; otherwise it derives a valid app name from the source. An unavailable provider is rejected before source retrieval or execution.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Source"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "github"
+              },
+              "repository_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "Public HTTPS GitHub owner/repository URL. Default branch SHA is pinned once."
+              },
+              "environment": {
+                "enum": [
+                  "cloud",
+                  "onprem"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "aws",
+                  "openstack",
+                  "proxmox"
+                ]
+              },
+              "source_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000-\\u001f]+$"
+              }
+            },
+            "required": [
+              "repository_url",
+              "environment",
+              "provider"
+            ],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "properties": {
+                  "environment": {
+                    "const": "cloud"
+                  },
+                  "provider": {
+                    "const": "aws"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "environment": {
+                    "const": "onprem"
+                  },
+                  "provider": {
+                    "enum": [
+                      "openstack",
+                      "proxmox"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "zip"
+              },
+              "archive": {
+                "type": "string",
+                "format": "binary",
+                "description": "ZIP; at most 100 MiB expanded and 2,000 files."
+              },
+              "environment": {
+                "enum": [
+                  "cloud",
+                  "onprem"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "aws",
+                  "openstack",
+                  "proxmox"
+                ]
+              },
+              "source_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000-\\u001f]+$"
+              }
+            },
+            "required": [
+              "archive",
+              "environment",
+              "provider"
+            ],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "properties": {
+                  "environment": {
+                    "const": "cloud"
+                  },
+                  "provider": {
+                    "const": "aws"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "environment": {
+                    "const": "onprem"
+                  },
+                  "provider": {
+                    "enum": [
+                      "openstack",
+                      "proxmox"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "folder"
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "maxItems": 2000
+              },
+              "paths": {
+                "type": "string",
+                "description": "JSON string array, one safe relative path per files entry."
+              },
+              "environment": {
+                "enum": [
+                  "cloud",
+                  "onprem"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "aws",
+                  "openstack",
+                  "proxmox"
+                ]
+              },
+              "source_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "^[^\\u0000-\\u001f]+$"
+              }
+            },
+            "required": [
+              "files",
+              "paths",
+              "environment",
+              "provider"
+            ],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "properties": {
+                  "environment": {
+                    "const": "cloud"
+                  },
+                  "provider": {
+                    "const": "aws"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "environment": {
+                    "const": "onprem"
+                  },
+                  "provider": {
+                    "enum": [
+                      "openstack",
+                      "proxmox"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "responses": {
+      "Error400": {
+        "description": "Malformed request",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error401": {
+        "description": "Private operator mode only: missing or invalid internal token",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error403": {
+        "description": "Host or Origin rejected",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error404": {
+        "description": "Registered resource not found",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error405": {
+        "description": "Method not supported",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "Allow": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error409": {
+        "description": "Capability, admission, capacity, plan or idempotency conflict",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "Retry-After": {
+            "schema": {
+              "const": "2"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error413": {
+        "description": "Request exceeds bounded input size",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error415": {
+        "description": "Unsupported media type",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error422": {
+        "description": "Unknown, duplicate or invalid input",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error500": {
+        "description": "Internal state failure; no automatic replay",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error502": {
+        "description": "Upstream result could not be verified",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Error503": {
+        "description": "Server configuration or private state is unavailable",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Accepted": {
+        "description": "Durable intent accepted. Follow Location; accepted does not mean execution succeeded.",
+        "headers": {
+          "X-Request-ID": {
+            "description": "Fresh server-generated UUID for this HTTP request.",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "Location": {
+            "schema": {
+              "type": "string"
+            }
+          },
+          "Retry-After": {
+            "schema": {
+              "const": "2"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Accepted"
+            }
+          }
+        }
+      }
+    },
+    "parameters": {
+      "limit": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 20
+        }
+      },
+      "marker": {
+        "name": "marker",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "ID of the last item returned by this resource list. Unknown, duplicate or foreign markers are rejected."
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "description": "Shared workspace and resource-kind scope. Same semantic input returns the same operation; a different input conflicts. Unknown operations never replay."
+      }
+    }
+  }
+}

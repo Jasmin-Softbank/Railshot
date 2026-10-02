@@ -1,4 +1,4 @@
-# Set the exact reviewed config commit before applying. No auto-sync or prune.
+# Reviewed release workflow updates this dedicated branch. No automatic prune.
 # Only rendered workload.json belongs in gitops/applications/railshot-platform/.
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
@@ -11,6 +11,7 @@ spec:
   namespaceResourceWhitelist:
     - {group: apps, kind: Deployment}
     - {group: '', kind: Service}
+    - {group: '', kind: PersistentVolumeClaim}
     - {group: networking.k8s.io, kind: NetworkPolicy}
 ---
 apiVersion: argoproj.io/v1alpha1
@@ -20,7 +21,9 @@ spec:
   project: railshot-platform
   source:
     repoURL: https://github.com/Jasmin-Softbank/Railshot.git
-    targetRevision: REPLACE_WITH_REVIEWED_CONFIG_COMMIT
+    targetRevision: deployment/platform
     path: gitops/applications/railshot-platform
     directory: {include: workload.json}
   destination: {server: 'https://kubernetes.default.svc', namespace: railshot-system}
+  syncPolicy:
+    automated: {prune: false, selfHeal: true}

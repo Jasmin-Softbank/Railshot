@@ -2,6 +2,7 @@ output "node_descriptor" {
   description = "Secret-free adapter input. Terraform creation does not prove guest/cluster readiness."
   value = {
     host_egress      = { profile = var.host_egress_profile, runtime_verification = "unverified", tenant_isolation = "separate_guest_policy_required" }
+    purpose          = var.purpose
     schema_version   = "v1"
     provider_kind    = "gcp"
     compute          = { machine_type = var.machine_type, source = "configured" }
@@ -24,7 +25,7 @@ output "node_descriptor" {
       resource_id  = google_compute_disk.data.id
       size_gib     = var.data_disk_gib
       device       = "/dev/disk/by-id/google-railshot-data"
-      mount_path   = "/var/lib/rancher"
+      mount_path   = var.purpose == "database" ? "/var/lib/postgresql" : "/var/lib/rancher"
       preservation = "retain"
     }
     bootstrap = {

@@ -11,6 +11,8 @@ from pathlib import Path, PurePosixPath
 import re
 import resource
 import shlex
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from observability import OperationError  # noqa: E402
+from bundle import source_digest  # noqa: E402
 
 NODE = "22.23.3"
 PYTHON = "3.12.14"
@@ -414,13 +417,27 @@ set -eu""", setup]
     return "\n".join(script)
 
 
+def stage_quality_source(workspace, destination):
+    """Copy only application input; private source and run records keep their modes."""
+    before = source_digest(workspace)  # Reject symlinks/special files before copying.
+    destination = Path(destination)
+    shutil.copytree(workspace, destination, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+    if source_digest(destination) != before or source_digest(workspace) != before:
+        raise ValueError("quality source changed while staging")
+    # The parent stays 0700. Docker binds only this snapshot into the non-root
+    # checker; never chmod the original checkout, credentials or run evidence.
+    for path in (destination, *destination.rglob("*")):
+        mode = path.lstat().st_mode
+        path.chmod(0o755 if stat.S_ISDIR(mode) or mode & 0o111 else 0o644)
+    return destination
+
+
 def docker_command(ws, plan, name, network):
     source = str(ws.resolve())
     if "," in source:
         raise ValueError("workspace path contains unsupported mount delimiter")
-    # Intake's private Git metadata is not application input (source_digest and
-    # L2 exclude it too). Preserve application modes; do not make secrets or
-    # unreadable source world-readable just to satisfy the non-root checker.
+    # run_quality supplies a readable application-only snapshot. Keep .git out
+    # even for callers inspecting/running this command builder directly.
     setup = ("mkdir -p /tmp/home\n"
              "for source in /source/* /source/.[!.]* /source/..?*; do\n"
              "  [ -e \"$source\" ] || continue\n"
@@ -622,9 +639,15 @@ def run_quality(ws, run, *, network=None, timeout=900, selected_root=None):
     results = []
     for plan in plans:
         name = "railshot-quality-" + uuid.uuid4().hex[:16]
-        pending, primary_cause, launched, phase = None, None, False, "Q.command"
+        pending, primary_cause, launched, phase = None, None, False, "Q.snapshot"
+        staging = None
         try:
-            command = docker_command(ws, plan, name, network)
+            # TMPDIR is the runner's existing same-path host mount, checked by
+            # container_preflight; no wider host mount is needed for siblings.
+            staging = tempfile.TemporaryDirectory(prefix="railshot-quality-")
+            source = stage_quality_source(ws, Path(staging.name) / "source")
+            phase = "Q.command"
+            command = docker_command(source, plan, name, network)
             # Do not buffer unlimited untrusted output in Python memory.
             with tempfile.TemporaryFile() as log:
                 launched = True
@@ -671,6 +694,9 @@ def run_quality(ws, run, *, network=None, timeout=900, selected_root=None):
             primary_cause = exc
             if isinstance(exc, OperationError):
                 error = exc
+            elif phase == "Q.snapshot":
+                error = OperationError("GATE_CONFIG_INVALID" if isinstance(exc, ValueError) else "GATE_ENVIRONMENT_UNAVAILABLE",
+                                       component="gate", phase=phase, retry_policy="after_configuration", cause=exc)
             elif isinstance(exc, subprocess.TimeoutExpired):
                 error = OperationError("GATE_EXECUTION_FAILED", component="gate", phase=phase, outcome="UNKNOWN",
                                        retry_policy="after_reconcile", side_effect="unknown", cause=exc)
@@ -701,6 +727,13 @@ def run_quality(ws, run, *, network=None, timeout=900, selected_root=None):
                         exc.__cause__ = primary_cause
                     error = OperationError("GATE_EXECUTION_FAILED", component="gate", phase="Q.cleanup", outcome="UNKNOWN",
                                            retry_policy="after_reconcile", side_effect="unknown", cause=exc)
+                    pending = blocked("QUALITY_CLEANUP_FAILED: discard the executor before reuse", error=error, projects=results)
+            if staging is not None:
+                try:
+                    staging.cleanup()
+                except OSError as exc:
+                    error = OperationError("GATE_EXECUTION_FAILED", component="gate", phase="Q.snapshot-cleanup", outcome="UNKNOWN",
+                                           retry_policy="after_reconcile", side_effect="possible", cause=exc)
                     pending = blocked("QUALITY_CLEANUP_FAILED: discard the executor before reuse", error=error, projects=results)
         if pending is not None:
             return pending

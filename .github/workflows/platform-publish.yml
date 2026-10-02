@@ -11,20 +11,53 @@ on:
         description: Publish tested images to GHCR (trusted branch only)
         type: boolean
         default: false
+      deploy:
+        description: Update the platform deployment branch after publication (dashboard and api required)
+        type: boolean
+        default: false
 
 permissions: {contents: read}
+concurrency:
+  group: platform-release
+  cancel-in-progress: false
 
 jobs:
   admission:
     runs-on: ubuntu-24.04
     steps:
-      - name: Require a trusted ref for publication
+      - name: Validate publication and deployment inputs
         env:
           PUBLISH: ${{ inputs.publish }}
+          DEPLOY: ${{ inputs.deploy }}
+          COMPONENTS: ${{ inputs.components }}
+          PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
+          PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
+          VERIFY_REF: ${{ vars.RAILSHOT_PLATFORM_VERIFY_REF }}
+          VERIFY_ROLE: ${{ vars.RAILSHOT_PLATFORM_VERIFY_ROLE_ARN }}
+          VERIFY_VERSION: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_VERSION }}
+          VERIFY_HASH: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_SHA256 }}
         run: |
+          set -euo pipefail
           if [ "$PUBLISH" = true ]; then
             case "$GITHUB_REF" in refs/heads/main|refs/heads/integration/*) ;; *) echo 'Publish requires a reviewed main or integration ref' >&2; exit 1 ;; esac
           fi
+          python3 - <<'PYCODE'
+          import json, os, re
+          components = json.loads(os.environ['COMPONENTS'])
+          allowed = {'dashboard', 'api', 'mcp', 'ci-runner'}
+          assert isinstance(components, list) and components and all(isinstance(value, str) for value in components), 'components must be a nonempty string array'
+          assert len(components) == len(set(components)) and set(components) <= allowed, 'components must be unique supported names'
+          if os.environ['DEPLOY'] == 'true':
+              assert os.environ['GITHUB_REPOSITORY'] == 'Jasmin-Softbank/Railshot' and os.environ['GITHUB_REPOSITORY_ID'] == '1400202256', 'deploy requires the registered platform repository'
+              assert os.environ['VERIFY_REF'] and os.environ['GITHUB_REF'] == os.environ['VERIFY_REF'], 'deploy requires the exact OIDC trusted ref'
+              assert os.environ['VERIFY_ROLE'] == 'arn:aws:iam::721622471953:role/railshot-platform-verifier', 'verification bootstrap role is required'
+              assert re.fullmatch(r'[1-9][0-9]*', os.environ['VERIFY_VERSION']) and re.fullmatch(r'[a-f0-9]{64}', os.environ['VERIFY_HASH']), 'verification document version and hash are required'
+              assert os.environ['PUBLISH'] == 'true', 'deploy requires publish=true'
+              assert {'dashboard', 'api'} <= set(components), 'deploy requires dashboard and api from this run'
+              assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', os.environ['PLATFORM_TARGET']), 'RAILSHOT_PLATFORM_TARGET_ID is required'
+              port = os.environ['PLATFORM_PORT']
+              assert re.fullmatch(r'[0-9]+', port) and 30000 <= int(port) <= 32767, 'RAILSHOT_PLATFORM_NODE_PORT must be 30000..32767'
+          PYCODE
   build:
     needs: admission
     uses: ./.github/workflows/platform-containers.yml
@@ -78,4 +111,82 @@ jobs:
           name: platform-image-${{ matrix.component }}-${{ github.sha }}
           path: published/${{ matrix.component }}.json
           if-no-files-found: error
+          retention-days: 14
+
+  deploy:
+    if: inputs.deploy && inputs.publish
+    needs: [admission, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {contents: write, actions: read}
+    outputs:
+      revision: ${{ steps.declaration.outputs.revision }}
+      dashboard_digest: ${{ steps.declaration.outputs.dashboard_digest }}
+      api_digest: ${{ steps.declaration.outputs.api_digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          # Only this ephemeral job needs authenticated, non-force Git push.
+          persist-credentials: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: platform-image-*-${{ github.sha }}
+          path: ${{ runner.temp }}/platform-published
+          merge-multiple: true
+      - name: Install renderer dependency from existing CI pin
+        run: |
+          pin=$(sed -n '/^PyYAML==[0-9.]*$/p' ci/requirements-test.txt)
+          test -n "$pin"
+          python3 -m pip install --disable-pip-version-check "$pin"
+      - name: Commit the tested digest declaration to the platform branch
+        id: declaration
+        env:
+          PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
+          PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
+        run: |
+          python3 deployment/scripts/publish-platform.py \
+            --artifacts "$RUNNER_TEMP/platform-published" \
+            --source-sha "$GITHUB_SHA" \
+            --target-id "$PLATFORM_TARGET" \
+            --dashboard-node-port "$PLATFORM_PORT"
+
+  verify:
+    if: inputs.deploy && inputs.publish
+    needs: deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions: {contents: read, id-token: write}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Assume the fixed read-only verification role
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          aws-region: ap-northeast-2
+          role-to-assume: arn:aws:iam::721622471953:role/railshot-platform-verifier
+          role-duration-seconds: 900
+          role-session-name: railshot-platform-${{ github.run_id }}
+          allowed-account-ids: '721622471953'
+      - name: Verify the exact Argo revision, running digests and public edge
+        env:
+          REVISION: ${{ needs.deploy.outputs.revision }}
+          DASHBOARD_DIGEST: ${{ needs.deploy.outputs.dashboard_digest }}
+          API_DIGEST: ${{ needs.deploy.outputs.api_digest }}
+          DOCUMENT_VERSION: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_VERSION }}
+          DOCUMENT_HASH: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_SHA256 }}
+        run: |
+          python3 deployment/scripts/verify-platform.py remote \
+            --revision "$REVISION" --dashboard-digest "$DASHBOARD_DIGEST" --api-digest "$API_DIGEST" \
+            --document-version "$DOCUMENT_VERSION" --document-hash "$DOCUMENT_HASH" \
+            --receipt "$RUNNER_TEMP/platform-verification.json"
+      - name: Preserve the verification outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: platform-verification-${{ github.sha }}
+          path: ${{ runner.temp }}/platform-verification.json
+          if-no-files-found: warn
           retention-days: 14

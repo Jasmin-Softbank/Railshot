@@ -6,13 +6,12 @@ import json
 from pathlib import Path
 import re
 import secrets
-import shutil
 from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
 NAMESPACE = 'railshot-observability'
 KSM_METRICS = [
-    'kube_node_status_condition', 'kube_deployment_spec_replicas',
+    'kube_node_status_condition', 'kube_pod_status_phase', 'kube_pod_labels', 'kube_deployment_spec_replicas',
     'kube_deployment_status_replicas_available',
     'kube_pod_container_status_restarts_total',
     'kube_pod_container_status_waiting_reason',
@@ -91,7 +90,8 @@ def cluster(config):
                 'runAsNonRoot': True, 'runAsUser': 65534,
                 'capabilities': {'drop': ['ALL']}, 'seccompProfile': {'type': 'RuntimeDefault'}}
     ksm = {'name': 'metrics', 'image': 'registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.18.0',
-           'args': ['--resources=nodes,pods,deployments', '--metric-allowlist=' + ','.join(KSM_METRICS)],
+           'args': ['--resources=nodes,pods,deployments',
+                    '--metric-labels-allowlist=pods=[app.kubernetes.io/name,railshot.io/target]', '--metric-allowlist=' + ','.join(KSM_METRICS)],
            'ports': [{'containerPort': 8080}], 'securityContext': security,
            'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
            'readinessProbe': {'httpGet': {'path': '/readyz', 'port': 8081}, 'periodSeconds': 10}}
@@ -186,17 +186,17 @@ def write_json(path, value):
     path.chmod(0o644)
 
 
-def render(config, output):
-    validate(config)
+def render_observer(config, output, scrape_config, bind_ip="127.0.0.1"):
+    ipaddress.IPv4Address(bind_ip)
     output = Path(output)
     # Refuse existing paths so rerendering never silently rotates credentials or changes a running stack.
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
-    shutil.copyfile(HERE / 'compose.yaml', output / 'compose.yaml')
-    write_json(output / 'prometheus.json', prometheus(config))
+    compose = (HERE / 'compose.yaml').read_text().replace('127.0.0.1:9090', bind_ip + ':9090')
+    (output / 'compose.yaml').write_text(compose)
+    write_json(output / 'prometheus.json', scrape_config)
     write_json(output / 'blackbox.json', {'modules': {'http_2xx': {'prober': 'http', 'timeout': '5s',
                'http': {'method': 'GET', 'follow_redirects': False, 'preferred_ip_protocol': 'ip4',
                         'ip_protocol_fallback': False}}}})
-    write_json(output / 'cluster.json', cluster(config))
     write_json(output / 'dashboards/deployment.json', dashboard(config))
     write_json(output / 'provisioning/datasources/prometheus.yaml', {
         'apiVersion': 1, 'datasources': [{'name': 'Prometheus', 'uid': 'railshot-prometheus',
@@ -212,6 +212,12 @@ def render(config, output):
     password = secret_dir / 'grafana_password'
     password.write_text(secrets.token_urlsafe(32) + '\n', encoding='ascii')
     password.chmod(0o444)
+
+
+def render(config, output):
+    validate(config)
+    render_observer(config, output, prometheus(config))
+    write_json(Path(output) / 'cluster.json', cluster(config))
 
 
 def main():

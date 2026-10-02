@@ -23,7 +23,7 @@ examples/ansible/                    # 자격증명이 없는 입력 예제
 
 | 구성요소 | 책임 | 경계 |
 |---|---|---|
-| 상위 API·MCP | 유저 권한 확인, 대상·작업 선택, 생성→조회→설치 순서 조율 | 유저가 임의 IP·명령·키 경로를 지정하지 않도록 합니다. |
+| 상위 API·MCP | 서버 등록 대상·지원 작업·입력 검사, 생성→조회→설치 순서 조율 | 제품은 로그인 없는 공유 workspace입니다. 임의 IP·명령·키 경로를 요청받지 않습니다. |
 | OpenStack Controller / CSP 코드 | VM 생성·상태 조회, 프로젝트·자원 정보 반환 | OpenStack 생성의 `202 accepted`를 guest 준비 완료로 해석하지 않습니다. |
 | Ansible 연결부 | 등록 target 조회, 입력 변환, 실행 상태와 준비 확인 결과 반환 | 기존 단일 worker가 CLI와 같은 실행 함수를 호출합니다. |
 | 정빈 님 guest / 승민 님 runtime | OS 선행조건 확인 / 단일 노드 K3s·Cilium 설치 | 원본 설치 로직을 재작성하지 않습니다. |
@@ -32,7 +32,7 @@ examples/ansible/                    # 자격증명이 없는 입력 예제
 
 ```mermaid
 flowchart LR
-    API["상위 API<br>유저 권한·작업 선택"] --> R["등록 자원 해석<br>Provider 결과 + 운영자 접속 설정"]
+    API["상위 API<br>등록 대상·입력 검사"] --> R["등록 자원 해석<br>Provider 결과 + 운영자 접속 설정"]
     R --> V["입력 검사<br>inventory·변수 매핑"]
     V --> P["validate<br>요약 반환·원격 실행 없음"]
     V --> J["jobs<br>기록 저장 후 202 반환"]
@@ -49,24 +49,30 @@ DB HA 요청은 승인 profile·배치·TLS/Vault 참조를 확인한 뒤 접수
 
 ### B-0. 제품 REST API와 내부 실행기 경계
 
-2026-10-02 문서 보완입니다. 제품 API는 아래 자원으로 설계하며 **아직 구현된 v1 라우트가 아닙니다.** 현재 Dashboard의 CI 제출·조회는 기존 `/api/deploy`, `/api/runs/{run_id}`를 사용합니다. 기존 내부 Ansible 계약 1.1과 OpenAPI는 그대로 유지합니다.
+2026-10-02 제품 API 구현에 맞춰 갱신했습니다. 현행 공개 계약은 [제품 API](product.md)와 [OpenAPI](product.openapi.json)가 정본입니다. 사용자 계정·로그인·팀원 allowlist 없이 모든 사용자가 같은 workspace에서 업로드·빌드·배포를 요청합니다. 실행 범위는 서버에 등록한 target·profile과 입력 검사로 결정합니다. 아래 B-1 이후의 **내부 Ansible HTTP 계약 1.2와 DB HA 계약은 별도로 유지**합니다.
 
 | 제품 자원 | 생성·요청 | 조회 | Ansible과의 관계 |
 |---|---|---|---|
 | 빌드 | `POST /api/v1/builds` | `GET /api/v1/builds/{id}` | 소스 검사·검증 이미지 게시. Ansible 설치 호출 없음 |
-| 배포 | `POST /api/v1/deployments` | `GET /api/v1/deployments/{id}` | 준비된 target의 CI→GitOps/Argo→공개 HTTP 상태 연결 |
-| 실행 대상 | 없음 | `GET /api/v1/targets` | 인가된 대상과 지원 기능 조회. 등록만으로 준비 완료 처리하지 않음 |
-| 환경 사양 | 없음 | `GET /api/v1/profiles` | 운영자가 허용한 Provider·site·용도·사양 선택 |
-| 환경 계획 | `POST /api/v1/plans` | `GET /api/v1/plans/{id}` | runtime·DB·DCS·proxy 배치 검사. VM 생성·설치 없음 |
-| 실행 환경 | `POST /api/v1/environments` | `GET /api/v1/environments/{id}` | 저장한 plan의 자원 준비 후 내부 Ansible validate/jobs/status 연결 |
+| 배포 | `POST /api/v1/deployments` | `GET /api/v1/deployments/{id}` | 등록한 target의 CI→GitOps/Argo→기대 공개 HTTP 검증 |
+| 실행 대상 | 없음 | `GET /api/v1/targets` | 서버 등록 대상과 지원 기능. 등록만으로 runtime 준비 완료 처리하지 않음 |
+| 환경 사양 | 없음 | `GET /api/v1/profiles` | 운영자가 등록한 Provider·site·용도·지원 범위 |
+| 환경 계획 | `POST /api/v1/plans` | `GET /api/v1/plans/{id}` | 입력·정책 검사와 Terraform saved plan 생성·저장. VM apply·설치 없음 |
+| 실행 환경 | `POST /api/v1/environments` | `GET /api/v1/environments/{id}` | 저장한 plan의 자원 준비 후 환경별 snapshot으로 native Ansible CLI 실행 |
 
-경로는 짧은 제품 자원의 복수 명사로 정하고 대시·밑줄로 내부 실행 용어를 조합하지 않습니다. 명명은 팀 규칙이고 HTTP 메서드·상태 의미는 표준을 따릅니다. 화균 님 OpenStack Controller의 상세 자원 직접 반환, 목록 `items/next_marker`, 접수 `202 + Location`, 공통 오류 객체를 신규 제품 API에 재사용합니다. 동기 계획 저장은 `201 + Location`, 비동기 환경·배포 접수는 202입니다. 접수 본문은 `resource_id`, `action`, `status: accepted`, `request_id`; 오류는 `error: {code, message, request_id, retryable, outcome_unknown}`입니다.
+경로는 짧은 제품 자원의 복수 명사로 정하고 대시·밑줄로 내부 실행 용어를 조합하지 않습니다. 명명은 팀 규칙이고 HTTP 메서드·상태 의미는 표준을 따릅니다. 화균 님 OpenStack Controller의 상세 자원 직접 반환, 목록 `items/next_marker`, 접수 `202 + Location`, 공통 오류 객체를 재사용합니다. 동기 계획 저장은 `201 + Location`, 비동기 환경·배포 접수는 202입니다. 접수 본문은 `resource_id`, `action`, `status: accepted`, `request_id`; 오류는 `error: {code, message, request_id, retryable, outcome_unknown}`입니다.
 
-제품 HTTP의 `request_id`는 매 요청 서버가 생성하는 추적 ID입니다. 이 내부 Ansible API의 `request_id`는 같은 작업을 조회·중복 방지하는 영속 ID이므로 제품 기록에서는 `ansible_job_id`로 구분합니다. 제품 `Idempotency-Key`도 별개이며 내부 작업의 응답이 유실됐을 때 새 작업 ID로 무조건 재시도하지 않습니다. 내부 Ansible의 기존 입력·상태·오류를 제품 HTTP 형식으로 바꾸어 직접 호출하지 않습니다.
+제품 HTTP의 `request_id`는 매 요청 서버가 생성하는 추적 ID입니다. 내부 Ansible의 `request_id`는 작업 조회·중복 방지에 사용하는 영속 ID이므로 제품의 guest/runtime 기록에서는 `ansible_job_id`로 구분합니다. 제품 `Idempotency-Key`도 별개입니다. 응답이 유실되거나 결과가 unknown이면 새 작업 ID로 무조건 재실행하지 않습니다.
 
-환경 준비는 **제품 API의 권한·plan 확인 → Provider 생성/상세 조회 → 승인된 대상 등록 → Ansible 입력 검사 → guest/runtime 실행 → 결과 저장** 순서입니다. 브라우저는 SSH 키·운영자 Bearer·파일 경로를 받지 않습니다. 현재 대상 등록은 운영자 파일 방식이며 동적 등록 연결은 추가 구현이 필요합니다. DB `nodes/placements`를 화균 님의 `db_nodes/etcd_nodes/proxy_nodes`와 필수 변수·비밀/TLS 참조로 변환하는 연결도 필요합니다. 이 매핑과 실제 실행 검증 전에는 `database.configure`의 501 차단을 유지합니다.
+현재 제품 환경 실행은 **등록된 AWS/GCP 단일 amd64 runtime과 `database.mode=none`**을 지원합니다. 제품 API는 저장한 plan의 만료·정책·snapshot·digest·apply 이력을 확인하고 계획을 한 환경에 한 번만 연결합니다. 순서는 **계획 확인 → Terraform apply → Provider descriptor 고정 → 환경별 등록 snapshot → native 입력 검사 → guest/runtime 실행 → 결과 저장**입니다.
 
-상세 계약은 [제품 API 설계](ci-backend-design.md), [REST 컨벤션](conventions.md), 저장소 작업 지침은 [AGENT.md](../../AGENT.md)를 따릅니다. 성공·오류 외형의 기준 구현은 [화균 님 OpenStack schema](../../infrastructure/providers/openstack/src/control_plane/api/schemas.py)입니다. REST 원칙과 팀 이름 규칙의 구분 및 공식 표준 링크는 컨벤션 문서에 정리했습니다.
+[environments.js](../../apps/api/src/environments.js)는 Provider 결과와 운영자 SSH 참조로 비공개 `descriptor.json`·`targets.json`을 생성합니다. 이 snapshot을 사용해 기존 `run.py --validate-only`, `guest.check`, `runtime.install`을 순서대로 실행하고 각 결과의 요청 ID·target·operation·준비 상태를 확인합니다. 기존 상시 HTTP 실행기의 시작 시 target registry를 갱신하거나 재시작하지 않으므로 C-1의 수동 등록 운영과 구분합니다. 브라우저는 SSH 키·운영자 Bearer·파일 경로를 받지 않습니다.
+
+환경의 runtime 준비와 제품 CI/CD 대상 등록도 구분합니다. 새 `runtime_target_id`가 생겨도 `deployment_supported=false`, `DEPLOYMENT_TARGET_NOT_REGISTERED`를 유지합니다. 운영자가 해당 환경의 CI·CD·Git·공개 URL 설정을 연결하고 검증해야 제품 배포 대상으로 제공할 수 있습니다.
+
+제품 환경 계획의 DB mode `standalone`·`patroni`는 `DATABASE_EXECUTION_NOT_CONNECTED`로 실행을 차단합니다. 이는 B-1 이후 **내부 HTTP의 승인 profile 기반 `database.configure` HA 실행이 구현되어 있다는 사실과 별개**입니다. DB 역할·배치·TLS/Vault 매핑과 별도 DB 검증은 아래 계약을 따르며 이 제품 연결 때문에 기존 HA 계약을 501로 되돌리지 않습니다. 로컬·모의 시험은 실제 VM·DB·클라우드 준비 완료의 증거가 아닙니다.
+
+책임 경계는 [CI 백엔드 설계](ci-backend-design.md), 이름·응답 규칙은 [REST 컨벤션](conventions.md), 저장소 작업 지침은 [AGENT.md](../../AGENT.md)를 따릅니다. 성공·오류 외형의 기준 구현은 [화균 님 OpenStack schema](../../infrastructure/providers/openstack/src/control_plane/api/schemas.py)입니다.
 
 ### B-1. 호출 경로
 

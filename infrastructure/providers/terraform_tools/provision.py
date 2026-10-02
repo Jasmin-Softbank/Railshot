@@ -246,6 +246,12 @@ def execute(action, target_path, state_root, plan_sha256=None, *, maintenance=No
                 raise ValueError('invalid provider descriptor schema')
             if any(descriptor.get(key) != binding[key] for key in ('provider_kind', 'target_id', 'owner_ref', 'execution_driver')):
                 raise ValueError('provider output does not match authoritative target/state binding')
+            purpose = variables.get('purpose', 'runtime')
+            disk, runtime = descriptor.get('data_disk'), descriptor.get('runtime')
+            if descriptor.get('purpose', 'runtime') != purpose or (purpose == 'database' and
+                    (not isinstance(disk, dict) or disk.get('mount_path') != '/var/lib/postgresql' or
+                     not isinstance(runtime, dict) or runtime.get('readiness') != 'not_configured')):
+                raise ValueError('provider output does not match the approved node purpose')
             write_private(home / 'node-descriptor.json', encoded(descriptor))
         except (ValueError, TypeError, OSError, OperationError) as exc:
             raise OperationError('OBSERVATION_WRITE_FAILED', component='infra', phase='terraform.output',

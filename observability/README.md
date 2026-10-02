@@ -1,7 +1,7 @@
 # 배포용 최소 관측 구성
 
 대상별 노드/클러스터 기본 상태와 배포된 HTTP 주소를 확인합니다. 서비스 전체의 관측성,
-CI 실행 엔진, 배포 성공 판정기를 만드는 구성이 아닙니다. 기존 API/CI/CD 코드는 변경하지 않습니다.
+CI 실행 엔진이나 배포 성공 판정기를 만드는 구성이 아닙니다. 제품 API/UI 연결은 [제품 관측 계약](../docs/api/observations.md)을 따릅니다.
 
 ## 배치와 범위
 
@@ -151,7 +151,8 @@ cat observability/.local/aws-demo/secrets/grafana_password
 
 수집 성공(`up`)과 검사 성공(`probe_success`)을 각각 확인합니다. 첫 CPU rate 계산은 최소 두 번
 수집이 필요합니다. Pod 재시작 증가량은 exporter가 놓친 짧은 Pod 수명을 완전히 복원하지 못합니다.
-플랫폼 API `/healthz`는 현재 localhost 전용이므로 이 구성에서 임의로 공개하거나 수집하지 않습니다.
+플랫폼 API는 기본 localhost 바인딩이며, 명시적 Host·token 설정을 갖춘 비로컬 모드도 지원합니다.
+이 관측 구성은 API `/healthz`를 자동 공개하거나 수집하지 않습니다.
 승인된 접근 경로가 생기면 `probe_urls`에 추가하되 설정 유무와 실제 CI 실행 가능 여부를 구분합니다.
 
 ## 버전과 검증
@@ -181,7 +182,7 @@ PROMTOOL=/path/to/promtool BLACKBOX=/path/to/blackbox_exporter \
 2026-10-02 [AWS 실자원 인수 검증](../docs/integration/observability-acceptance-20261002.md)에서
 설치·수집·정상/실패 HTTP·수집 중단·앱 이미지 장애·NodePort/Cilium 접근 제한과 자원 정리를 확인했습니다.
 Grafana는 API 및 패널 질의 결과를 확인했으며 브라우저 화면 렌더는 검증하지 않았습니다.
-온프레미스/VPN 도달성과 제품 API/CD 연결도 별도 검증 대상입니다.
+온프레미스/VPN 도달성과 실제 제품 API/CD 연결은 별도 검증 대상입니다. 제품 관측 helper/UI의 모의 검사는 클라우드 연결 증거가 아닙니다.
 
 중지 시 `docker compose -f .../compose.yaml down`은 named volume을 보존합니다. `down -v`는 데이터를
 삭제하므로 기본 절차로 사용하지 않습니다. Exporter 제거는 해당 `cluster.json`의 리소스만 검토 후

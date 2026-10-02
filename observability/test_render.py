@@ -66,6 +66,12 @@ class ConfigurationTests(unittest.TestCase):
         policy = next(o for o in objects if o['kind'] == 'NetworkPolicy')
         self.assertEqual(policy['spec']['ingress'][0]['from'], [{'ipBlock': {'cidr': '192.0.2.20/32'}}])
 
+    def test_app_pods_use_only_existing_identity_labels(self):
+        ksm = next(o for o in cluster(self.config)['items'] if o['kind'] == 'Deployment')
+        args = ksm['spec']['template']['spec']['containers'][0]['args']
+        self.assertIn('--metric-labels-allowlist=pods=[app.kubernetes.io/name,railshot.io/target]', args)
+        self.assertIn('kube_pod_labels', next(a for a in args if a.startswith('--metric-allowlist=')))
+
     def test_exporter_security(self):
         for obj in cluster(self.config)['items']:
             if obj['kind'] not in ('Deployment', 'DaemonSet'):

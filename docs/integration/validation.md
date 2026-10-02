@@ -2,7 +2,9 @@
 
 이 문서는 초기 통합 검토본 `3cc2690`에서 연결한 구현과 로컬 검사 결과를 보존합니다. 이후 상태는 [클라우드 E2E](cloud-e2e-progress.md), [후속 사안별 통합](remaining-work-20261002.md)을 따릅니다. 당시 검증 범위는 **담당 소스 조립, 로컬 계약 연결, 정적·단위 검사**입니다. 당시 인수 경계는 아래에 보존합니다.
 
-## 이번에 연결한 구현
+현재 runtime과 최초 R&R의 관계는 [소스 조립 기록의 현재 경로 대조](summary.md#현재-runtime-경로와-승민-담당-범위--2026-10-02-대조)를 먼저 확인합니다. 아래 `runtime-only entrypoint`는 초기 설명입니다. 현재 Ansible은 `runtime.yml`에서 팀 bootstrap/Cilium 스크립트를 직접 실행하며, standalone JSON 엔진과 제품 Argo의 앱·NetworkPolicy·Secret 경로는 따로 검증합니다. 아래 545 PASS와 미완료 표를 최신 운영 상태로 해석하지 않습니다.
+
+## 당시 연결한 구현
 
 | 경계 | 변경과 확인 |
 |---|---|
@@ -14,7 +16,7 @@
 
 OpenStack Controller는 기존 package 구조와 provider 책임을 유지합니다. 외부 provider 규약과 내부 Python Port를 위한 원격 서버는 추가하지 않았습니다. source-map에는 고정 branch/SHA/경로, relocation-map에는 최초 이동, api-ci-changes에는 API/CI 연결 해시를 기록했습니다. 최종 코드·문서의 파일 manifest는 공유 패키지를 생성할 때 별도로 기록합니다.
 
-## 실행한 검사
+## 당시 실행한 검사
 
 | 검사 | 개수/결과 | 실제 범위 |
 |---|---:|---|
@@ -36,6 +38,8 @@ OpenStack Controller는 기존 package 구조와 provider 책임을 유지합니
 검사를 재현할 때는 각 package의 README와 위 세부 명령을 따릅니다. CI Python 검사는 PyYAML/jsonschema와 기존 SDK 테스트 환경을 사용했습니다. 기본 테스트 명령은 모델 호출·VM 생성·전체 장애 주입·자동 cleanup을 실행하지 않습니다. 팀원별 PoC와 검증 스크립트는 보존하며 일반 실행 경로와 별도로 둡니다.
 
 ## 남은 인수 경계
+
+다음은 `3cc2690` 시점에 남았던 항목입니다. 이후 runtime·DB 실행·CI·CD 연결 여부는 위 후속 기록과 각 담당 API 문서를 따릅니다. 과거에 blocked였다는 기록과 현재 지원 범위를 구분하기 위해 원래 표를 보존합니다.
 
 | 항목 | 남은 일 / 담당 |
 |---|---|

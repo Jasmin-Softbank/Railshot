@@ -64,11 +64,53 @@ locals {
   "arn:aws:ssm:${var.region}:${var.account_id}:parameter${path}"]
 }
 
+variable "build_worker_security_group_id" {
+  description = "Reviewed operations cluster peer SG; null keeps this module standalone."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.build_worker_security_group_id == null ? true : can(regex("^sg-[0-9a-f]{17}$", var.build_worker_security_group_id))
+    error_message = "Use an exact reviewed peer security group ID."
+  }
+}
+locals {
+  build_peer_health = var.build_worker_security_group_id == null ? [] : [
+    { protocol = "udp", from_port = 8472, to_port = 8472, description = "Cilium VXLAN node overlay" },
+    { protocol = "tcp", from_port = 4240, to_port = 4240, description = "Cilium node health" },
+    { protocol = "icmp", from_port = 8, to_port = 0, description = "Cilium ICMP echo health; stateful reply" }
+  ]
+  build_peer_api = var.build_worker_security_group_id == null ? [] : [
+    { protocol = "tcp", from_port = 6443, to_port = 6443, description = "K3s agent supervisor/API" }
+  ]
+}
+
 resource "aws_security_group" "control" {
   name        = local.name
   description = "Administrator PoC: no ingress; SSM and HTTPS outbound"
   vpc_id      = var.vpc_id
-  ingress     = []
+  # Keep rules inline with the existing owner; do not mix standalone SG rules.
+  # Empty by default. A reviewed peer only opens node overlay/health and API.
+  ingress = [for rule in concat(local.build_peer_health, local.build_peer_api) : {
+    description      = rule.description
+    from_port        = rule.from_port
+    to_port          = rule.to_port
+    protocol         = rule.protocol
+    security_groups  = [var.build_worker_security_group_id]
+    cidr_blocks      = []
+    ipv6_cidr_blocks = []
+    prefix_list_ids  = []
+    self             = false
+  }]
+  dynamic "egress" {
+    for_each = local.build_peer_health
+    content {
+      description     = egress.value.description
+      from_port       = egress.value.from_port
+      to_port         = egress.value.to_port
+      protocol        = egress.value.protocol
+      security_groups = [var.build_worker_security_group_id]
+    }
+  }
   dynamic "egress" {
     for_each = [80, 443]
     content {
@@ -81,7 +123,7 @@ resource "aws_security_group" "control" {
 }
 
 # No inline ingress/egress: aws-edge owns this group's explicit rules.
-# The original base SG remains unchanged and is never passed to aws-edge.
+# The original base SG identity is retained and is never passed to aws-edge.
 resource "aws_security_group" "edge" {
   name        = "${local.name}-edge"
   description = "RAILSHOT edge rules managed by aws-edge"

@@ -1,6 +1,6 @@
 # Railshot REST API 컨벤션
 
-2026-10-02 · 로컬 개발 기준 · **신규 API 설계에 적용하며 기존 실행 계약을 자동 변경하지 않는다.**
+2026-10-02 · 로컬 개발 기준 · **현행 제품 계약은 [제품 API](product.md)와 [OpenAPI](product.openapi.json)를 따른다.** 기존 내부 실행 계약은 제품 경계에서 변환한다.
 
 ## 1. 기준 구현과 적용 범위
 
@@ -10,11 +10,13 @@
 |---|---|
 | [router.py](../../infrastructure/providers/openstack/src/control_plane/api/router.py) | `/api/v1`, 복수형 자원, HTTP 메서드, 목록 페이지, `202 + Location` |
 | [schemas.py](../../infrastructure/providers/openstack/src/control_plane/api/schemas.py) | 요청/응답 모델 분리, 엄격한 입력, 직접 자원 응답, 접수·목록·오류 형식 |
-| [auth.py](../../infrastructure/providers/openstack/src/control_plane/auth.py) | 인증 우선 검사, 서버 생성 요청 ID, 응답 `X-Request-ID` |
-| [error_handlers.py](../../infrastructure/providers/openstack/src/control_plane/api/error_handlers.py) | 공통 오류 객체, 안전한 메시지, `401` 인증 안내, `405` 허용 메서드 |
+| [auth.py](../../infrastructure/providers/openstack/src/control_plane/auth.py) | 서버 생성 요청 ID, 응답 `X-Request-ID`. OpenStack의 사용자 인증 모델을 제품에 복제하지 않음 |
+| [error_handlers.py](../../infrastructure/providers/openstack/src/control_plane/api/error_handlers.py) | 공통 오류 객체, 안전한 메시지, `405` 허용 메서드. 내부 운영자 모드의 `401` 인증 안내 |
 | [OpenAPI](../../infrastructure/providers/openstack/docs/openapi.json), [HTTP 테스트](../../infrastructure/providers/openstack/tests/unit/api/test_http.py) | 선언과 실제 HTTP 응답을 함께 확인 |
 
 위 구현의 HTTP 형식을 신규 제품 API에 적용한다. Node 서비스를 FastAPI로 바꾸거나 Python 계층 구조·Protocol을 그대로 복제할 필요는 없다. 기존 Ansible·OpenStack 내부 계약은 담당 구현을 유지하고 제품 API 경계에서 변환한다.
+
+제품은 **사용자 계정·로그인·팀원 allowlist 없는 공유 workspace**다. 모든 사용자가 소스를 업로드하고, 서버에 등록한 대상의 지원 범위에서 빌드·배포를 요청한다. 사용자별 소유권이나 user/auth 도메인을 추가하지 않는다. 운영자만 target·profile·실행 도구·자격을 설정하며, 공개 입력에는 이 등록 항목의 ID와 제품 입력만 받는다. 내부 서비스 인증과 Host/Origin 검사는 사용자 로그인과 별개다.
 
 ## 2. REST 원칙·HTTP 표준·로컬 이름 규칙
 
@@ -33,9 +35,9 @@ HTTP 메서드·상태는 [RFC 9110 §9·§15](https://www.rfc-editor.org/rfc/rf
 - 제품 상태는 소문자로 정의한다. 공급자 원본 `ACTIVE`, `BUILD` 등을 바꾸거나 제품 성공 상태로 치환하지 않는다. 시간은 UTC 문자열(`2026-10-02T09:00:00Z`)로 반환한다.
 - 일반 본문은 `application/json`, 소스 업로드는 기존 `multipart/form-data`를 사용한다. ZIP·파일을 JSON base64로 다시 감싸지 않는다.
 - 요청의 알 수 없는 필드, 중복 단일 필드, 알 수 없는 query와 중복 query는 `422 INVALID_INPUT`이다. 스키마에서 반복을 선언한 multipart `files`만 예외다. JSON의 잘못된 문법은 `400 INVALID_INPUT`, 지원하지 않는 Content-Type은 `415 UNSUPPORTED_MEDIA_TYPE`, 업로드 한도 초과는 `413 PAYLOAD_TOO_LARGE`로 정한다. 마지막 세 매핑은 제품 API에 추가하는 규칙이다.
-- `principal/tenant/project`와 자격은 인증·서버 설정으로 결정한다. 요청 본문을 신뢰해 소유권을 바꾸지 않는다. 이름·파일 경로·업로드 크기의 기존 검증 한도는 재사용한다.
+- CI의 기존 tenant 값, Provider account/project, target·profile·자격은 서버 설정으로 결정한다. 요청 본문으로 이 값을 바꾸거나 임의 Provider URL·명령·자격·로컬 경로를 지정하지 못한다. 이름·파일 경로·업로드 크기의 기존 검증 한도를 재사용한다.
 
-각 요청은 인증 정보·대상 자원·필요 입력을 스스로 제공한다. 이전 화면에서 선택한 target을 서버의 숨은 대화 상태로 추측하지 않는다. 배포·계획·job 기록을 자원으로 영속 저장하는 것은 이 요청 독립성과 구분한다. 초기 제품 API의 인증된 동적 응답은 [RFC 9111의 no-store](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.5)에 따라 `Cache-Control: no-store`로 캐시 정책을 명시한다. 공개 정적 Dashboard 자산의 캐시는 별도 배치 규약이다.
+각 요청은 대상 자원·필요 입력을 스스로 제공한다. 이전 화면에서 선택한 target을 서버의 숨은 대화 상태로 추측하지 않는다. 배포·계획·job 기록을 자원으로 영속 저장하는 것은 이 요청 독립성과 구분한다. 제품 API의 동적 응답은 [RFC 9111의 no-store](https://www.rfc-editor.org/rfc/rfc9111.html#section-5.2.2.5)에 따라 `Cache-Control: no-store`로 캐시 정책을 명시한다. 공개 정적 Dashboard 자산의 캐시는 별도 배치 규약이다.
 
 클라이언트는 202의 `Location`을 상태 조회 경로로 사용한다. 현재 설계의 연결 정보는 이 Location과 기존 `actions_url` 범위다. 상태별 허용 작업·링크 관계와 표현 형식까지 정의한 하이퍼미디어 계약은 아직 없으므로 이 문서는 **REST 원칙에 맞춘 자원 중심 HTTP 계약**으로 설명하며 완전한 REST 적합성 검증을 주장하지 않는다.
 
@@ -53,7 +55,7 @@ HTTP 메서드·상태는 [RFC 9110 §9·§15](https://www.rfc-editor.org/rfc/rf
 }
 ```
 
-목록은 아래 형식을 사용한다. `limit` 기본 20, 범위 1–100, `marker`는 이전 응답의 `next_marker`다. marker를 다른 자원·유저·조회 조건에 재사용하지 않는다. 처음 target 하나만 지원하더라도 같은 형식으로 반환하고 다음 페이지가 없으면 null을 쓴다. 필터·정렬은 실제 필요와 허용 목록을 정의한 뒤 추가하며 고정 스냅샷을 보장한다고 쓰지 않는다.
+목록은 아래 형식을 사용한다. `limit` 기본 20, 범위 1–100, `marker`는 이전 응답의 `next_marker`다. marker를 다른 자원·조회 조건에 재사용하지 않는다. 처음 target 하나만 지원하더라도 같은 형식으로 반환하고 다음 페이지가 없으면 null을 쓴다. 필터·정렬은 실제 필요와 허용 목록을 정의한 뒤 추가하며 고정 스냅샷을 보장한다고 쓰지 않는다.
 
 ```json
 {"items": [], "next_marker": null}
@@ -89,7 +91,7 @@ Content-Type: application/json
 | `Idempotency-Key` | 클라이언트가 동일한 생성 의도를 재접수할 때 재사용. 인증·자원 ID·HTTP 추적 ID를 대신하지 않음 |
 | 기존 Ansible `request_id` | 내부 API의 영속 job 식별자/중복 방지 값. 제품 HTTP `request_id`와 의미가 다르므로 제품 기록의 `ansible_job_id`로 매핑 |
 
-제품 `POST /api/v1/deployments`와 `POST /api/v1/environments`에는 `Idempotency-Key`를 요구한다. 1–128자의 영문·숫자·`.`·`_`·`-`만 허용하고 principal/tenant·자원 종류 범위에서 관리한다. 같은 키·같은 정규화 입력이면 같은 자원을, 다른 입력이면 `409 IDEMPOTENCY_CONFLICT`를 반환한다. 기존 자원이 queued/running이면 같은 `resource_id`의 202 접수 형식, succeeded/failed/blocked/unknown이면 같은 자원 객체의 200 형식과 Location을 반환한다. unknown을 다시 접수하거나 실행하지 않으며 신규 작업 한도는 계속 점유한다. HTTP `request_id`는 매번 새 값이다.
+제품 `POST /api/v1/deployments`와 `POST /api/v1/environments`에는 `Idempotency-Key`를 요구한다. 1–128자의 영문·숫자·`.`·`_`·`-`만 허용하고 공유 workspace의 자원 종류별로 관리한다. 같은 키·같은 정규화 입력이면 같은 자원을, 다른 입력이면 `409 IDEMPOTENCY_CONFLICT`를 반환한다. 기존 자원이 queued/running이면 같은 `resource_id`의 202 접수 형식, succeeded/failed/blocked/unknown이면 같은 자원 객체의 200 형식과 Location을 반환한다. unknown을 다시 접수하거나 실행하지 않으며 신규 작업 한도는 계속 점유한다. HTTP `request_id`는 매번 새 값이다.
 
 재시작 후에도 키·소스 snapshot·입력 digest·외부 실행 식별자를 복구해야 한다. 원문 multipart boundary/ZIP 시각을 입력 의미로 비교하지 않는다. TTL이 있는 구현은 보존 기간과 만료 후 동작을 계약에 명시하고 미완료/unknown 기록을 자동 만료시키지 않는다.
 
@@ -114,9 +116,9 @@ Content-Type: application/json
 | HTTP | code / 처리 |
 |---|---|
 | 400 | `INVALID_INPUT`: 본문 문법 오류 |
-| 401 | `UNAUTHENTICATED`: 인증 실패. Bearer 방식이면 `WWW-Authenticate: Bearer` |
-| 403 | `FORBIDDEN`: 허가되지 않은 작업 |
-| 404 | `NOT_FOUND`: 자원·경로 없음 또는 다른 소유자의 자원. 존재 여부를 노출하지 않음 |
+| 401 | `UNAUTHENTICATED`: 별도 내부 운영자 모드의 Bearer 실패. `WWW-Authenticate: Bearer`. 공개 workspace의 사용자 로그인 응답이 아님 |
+| 403 | `FORBIDDEN`: 허용되지 않은 Host·Origin 등 요청 경계 위반 |
+| 404 | `NOT_FOUND`: 자원·경로 없음. 이 workspace에 기록되지 않은 외부 CI run도 조회하지 않음 |
 | 405 | `METHOD_NOT_ALLOWED`: `Allow` 헤더 유지 |
 | 409 | `CONFLICT`, `QUOTA_EXCEEDED`; 제품 추가 `IDEMPOTENCY_CONFLICT`, `EXECUTOR_BUSY`, `CAPABILITY_UNAVAILABLE` |
 | 413 / 415 | `PAYLOAD_TOO_LARGE` / `UNSUPPORTED_MEDIA_TYPE` |
@@ -125,14 +127,14 @@ Content-Type: application/json
 | 500 | `INTERNAL_ERROR`: 예상하지 못한 내부 오류 |
 | 502 / 503 / 504 | `UPSTREAM_FAILURE` / `UPSTREAM_UNAVAILABLE` / `UPSTREAM_TIMEOUT` |
 
-HTTP 조회가 성공했지만 작업이 실패한 경우 `GET`은 200이고 자원의 `status=failed`다. 조회 자체가 실패한 경우 위 오류 HTTP 상태를 사용한다. 알려진 미지원 기능은 기능 목록에서 차단하고 생성 요청도 `409 CAPABILITY_UNAVAILABLE`로 거부한다. 기존 내부 Ansible의 501 계약은 별도로 유지한다.
+HTTP 조회가 성공했지만 작업이 실패한 경우 `GET`은 200이고 자원의 `status=failed`다. 조회 자체가 실패한 경우 위 오류 HTTP 상태를 사용한다. 알려진 미지원 기능은 기능 목록과 계획의 `blockers`로 표시하고 실행 접수를 차단한다. 제품 환경의 DB 실행은 미지원이며, 별도 내부 Ansible의 승인 HA 실행·standalone 차단은 [Ansible 계약](ansible.md)을 따른다.
 
 `retryable`은 동일 요청 재호출의 안전 여부이며 성공 보장이 아니다. 같은 idempotency key의 제품 접수 재조회와 내부 Provider 부작용 재실행을 구분한다. 원문 validation 오류·SDK exception·stdout·토큰·개인키를 응답이나 로그에 내보내지 않는다.
 
 ## 6. 적용·호환·검증
 
-신규 제품 경로는 [CI 백엔드 설계](ci-backend-design.md)에 정의한다. `/api/deploy`, `/api/runs/{run_id}`, `/healthz`는 기존 호출자용으로 유지한다. v1 라우트를 구현하기 전에는 alias나 redirect가 이미 존재한다고 설명하지 않는다. 업로드 POST를 HTTP redirect로 이관하지 않고 내부 입력 검사·실행·게시 검증 함수를 재사용한다.
+구현된 제품 경로와 필드는 [제품 API](product.md)·[OpenAPI](product.openapi.json)가 정본이고, [CI 백엔드 설계](ci-backend-design.md)는 책임 경계와 감사 이력을 설명한다. `/api/deploy`, `/api/runs/{run_id}`, `/healthz`는 기존 호출자용으로 유지한다. legacy 업로드 POST를 HTTP redirect하지 않고 내부 입력 검사·실행·게시 검증과 영속 접수·run binding을 재사용한다.
 
-v1 구현 시 라우트·요청/응답 모델·OpenAPI·HTTP 계약 테스트를 같은 변경에서 맞춘다. 본문뿐 아니라 `Location`, `X-Request-ID`, `Retry-After`, `Cache-Control` 응답 헤더도 새 OpenAPI에 표현한다. 기존 OpenStack snapshot에는 일부 런타임 헤더 선언이 없으므로 이를 이미 완비한 예제로 설명하지 않는다. REST 규약을 만들기 위해 아직 없는 모든 CRUD나 범용 작업 API를 추가하지 않는다. 구현 전 설계 예시와 실행 코드에서 생성한 OpenAPI는 별도로 표시한다.
+라우트·요청/응답 모델·OpenAPI·HTTP 계약 테스트를 같은 변경에서 맞춘다. 본문뿐 아니라 `Location`, `X-Request-ID`, `Retry-After`, `Cache-Control` 응답 헤더도 OpenAPI에 표현한다. 기존 OpenStack snapshot에는 일부 런타임 헤더 선언이 없으므로 이를 이미 완비한 예제로 설명하지 않는다. REST 규약을 만들기 위해 아직 없는 모든 CRUD나 범용 작업 API를 추가하지 않는다. 제안·실행 코드·로컬 시험·실제 배포 결과를 구분한다.
 
-구현 검증은 화균 님의 기존 테스트 패턴을 재사용한다: 정상 상태/본문/Location, 잘못된 입력의 외부 호출 0회, 인증·소유권 실패, 모든 오류의 동일 envelope와 X-Request-ID, 목록 범위·중복 query 거부, 결과 불확실 시 재실행 금지. 제품 idempotency는 저장 실패·중복 접수·재시작 복구까지 확인한다. 이 문서는 규약이며 위 동작이 제품 API에 구현됐다는 증거가 아니다.
+구현 검증은 화균 님의 기존 테스트 패턴을 재사용한다: 정상 상태/본문/Location, 잘못된 입력의 외부 호출 0회, Host·Origin 및 미등록 대상·run 차단, 모든 오류의 동일 envelope와 X-Request-ID, 목록 범위·중복 query 거부, 결과 불확실 시 재실행 금지. 제품 idempotency는 저장 실패·중복 접수·재시작 복구까지 확인한다. 실제 실행 근거는 해당 소스·계약 테스트와 배포별 결과이며, 이 규약 문서나 모의 시험만으로 클라우드 E2E 완료를 주장하지 않는다.

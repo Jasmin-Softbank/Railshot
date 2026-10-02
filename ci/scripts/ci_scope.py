@@ -11,6 +11,35 @@ JOBS = ('contracts', 'openstack', 'database-ansible', 'api-browser', 'terraform'
         'runtime-smoke', 'observability', 'containers')
 COMPONENTS = ('dashboard', 'api', 'mcp', 'ci-runner')
 SHA = re.compile(r'[0-9a-f]{40}')
+# Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
+API_NATIVE_FILES = {
+    'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml',
+    'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
+    'gitops/edge.py', 'gitops/service_name.py',
+    'ci/scripts/execution.py', 'ci/scripts/observability.py', 'ci/scripts/process.py',
+    'ci/scripts/publication.py', 'ci/scripts/storage.py', 'ci/scripts/gate/bundle.py',
+    'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/jasmin.schema.json',
+    'ci/requirements-dev.txt', 'ci/requirements-test.txt',
+    'infrastructure/ansible/run.py', 'infrastructure/ansible/transport.py',
+    'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/guest.yml',
+    'infrastructure/ansible/runtime.yml', 'infrastructure/ansible/tasks/guest-checks.yml',
+    'infrastructure/ansible/group_vars/all.yml', 'contracts/ansible-request.schema.json',
+    'contracts/ansible-job.schema.json', 'infrastructure/ansible/cluster.py',
+    'infrastructure/ansible/database.py', 'infrastructure/ansible/inputs.py',
+    'infrastructure/ansible/application_database.py', 'infrastructure/ansible/database.yml',
+    'infrastructure/ansible/application-database.yml',
+    'deployment/scripts/common.sh', 'deployment/scripts/environment.py', 'deployment/bootstrap/preflight.sh',
+    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh',
+    'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
+    'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
+}
+API_NATIVE_PREFIXES = ('infrastructure/ansible/roles/', 'infrastructure/ansible/playbooks/',
+                       'infrastructure/providers/terraform_tools/',
+                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/', 'infrastructure/terraform/aws-edge/')
+
+
+def api_native_dependency(path):
+    return path in API_NATIVE_FILES or path.startswith(API_NATIVE_PREFIXES)
 
 
 def documentation(path):
@@ -22,8 +51,10 @@ def documentation(path):
 def container_components(paths):
     components = set()
     for path in paths:
-        if documentation(path):
+        if documentation(path) or path == 'docs/api/product.openapi.json':
             continue
+        if api_native_dependency(path):
+            components.add('api')
         if path.startswith(('.github/', 'contracts/')) or path in {
                 '.dockerignore', 'ci/scripts/container-smoke.py'}:
             components.update(COMPONENTS)
@@ -38,7 +69,7 @@ def container_components(paths):
             components.add('ci-runner')  # The runner image COPYs all CI scripts.
         elif path == 'deployment/manifests/build-runner.yaml' or path == 'infrastructure/ansible/ci.yml':
             components.add('ci-runner')
-        elif path in {'deployment/scripts/render-platform.py', 'deployment/scripts/tests/test_platform.py'}:
+        elif path in {'deployment/scripts/render-platform.py', 'deployment/scripts/tests/test_platform.py', 'deployment/manifests/build-controller.yaml'}:
             components.update(COMPONENTS)
         elif path in {'deployment/compose.yaml', 'deployment/.env.example',
                       'deployment/manifests/platform.yaml',
@@ -62,7 +93,9 @@ def select(paths):
         parts = PurePosixPath(path).parts
         if not path or path.startswith('/') or '..' in parts:
             return set(JOBS)
-        if path == 'docs/api/ansible.openapi.json' or path.startswith('examples/ansible/'):
+        if path == 'docs/api/product.openapi.json':
+            selected.update(('contracts', 'api-browser'))
+        elif path == 'docs/api/ansible.openapi.json' or path.startswith('examples/ansible/'):
             selected.add('contracts')  # These documents are executable test fixtures.
         elif documentation(path):
             continue
@@ -85,7 +118,7 @@ def select(paths):
             if path == 'infrastructure/ansible/ci.yml':
                 selected.add('terraform')  # CI VM bootstrap consumes this playbook.
         elif path in {'deployment/compose.yaml', 'deployment/.env.example',
-                      'deployment/manifests/platform.yaml', 'deployment/manifests/build-runner.yaml', 'deployment/scripts/render-platform.py',
+                      'deployment/manifests/platform.yaml', 'deployment/manifests/build-runner.yaml', 'deployment/manifests/build-controller.yaml', 'deployment/scripts/render-platform.py',
                       'deployment/scripts/tests/test_platform.py'}:
             selected.add('contracts')  # Platform workloads do not install the customer runtime.
         elif path.startswith('deployment/'):
@@ -98,6 +131,8 @@ def select(paths):
             selected.update(JOBS)  # Shared CI scripts/workflows serve several consumers.
         else:
             selected.update(JOBS)
+        if api_native_dependency(path):
+            selected.add('api-browser')
     selected.discard('containers')
     if container_components(paths):
         selected.add('containers')

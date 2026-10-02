@@ -42,6 +42,17 @@ class SpecsheetTest(unittest.TestCase):
         self.assertEqual(sheet['capabilities']['node_scale_out']['implementation'], 'not_implemented')
         self.assertIn('| vCPU | unknown |', markdown(sheet))
 
+    def test_aws_guest_timer_does_not_claim_provider_restart_configuration(self):
+        descriptor = deepcopy(self.gcp)
+        descriptor['provider_kind'] = 'aws'
+        descriptor['runtime_limit'] = {'seconds': 7200, 'instance_termination_action': 'STOP',
+                                       'implementation': 'guest_systemd_timer', 'readiness': 'unverified'}
+        sheet = build(descriptor, now=self.now)
+        self.assertEqual(sheet['runtime_limit']['action'], 'STOP')
+        self.assertEqual(sheet['runtime_limit']['implementation'], 'guest_systemd_timer')
+        self.assertIsNone(sheet['runtime_limit']['automatic_restart'])
+        self.assertEqual(sheet['runtime_limit']['verification'], 'unverified')
+
     def test_host_only_descriptor_has_no_runtime_or_gitops_readiness(self):
         descriptor = deepcopy(self.gcp)
         descriptor['runtime'] = {'configuration_status': 'not_configured', 'readiness': 'not_configured'}

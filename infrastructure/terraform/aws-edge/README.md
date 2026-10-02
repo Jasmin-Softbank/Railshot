@@ -4,7 +4,7 @@
 
 운영 AWS EC2의 기존 primary ENI에 EIP를 연결해 WireGuard gateway로 사용한다. 별도 gateway VM을 만들지 않고 ALB에도 EIP를 붙이지 않는다. GCP 앱 target은 터널로 도달할 수 있는 RFC1918 IPv4만 허용한다. 공개 IP, metadata IP, IPv6 및 RFC6598 범위는 거부한다. GCP target attachment는 VPC 밖 IP에 필요한 `availability_zone = all`을 사용한다.
 
-이 코드는 기존 single-app 미적용 인터페이스를 대체한다. 저장소 내 실행 caller는 없으며, 종전 `target_instance_ids`, `target_security_group_id`, `target_port`, `health_path`, `app_domain` 입력 대신 아래 `routes`를 사용한다. 기존 state에 적용했던 별도 운영 환경이 있다면 자동 이관하지 말고 먼저 state/plan을 검토한다.
+이 코드는 기존 single-app 미적용 인터페이스를 대체한다. [gitops/edge.py](../../../gitops/edge.py)가 환경 등록에서 할당한 신규 앱 route를 기존 routes에 추가하고 saved plan을 검사·적용하는 caller다. 종전 `target_instance_ids`, `target_security_group_id`, `target_port`, `health_path`, `app_domain` 입력 대신 아래 `routes`를 사용한다. 기존 state에 적용했던 별도 운영 환경이 있다면 자동 이관하지 말고 먼저 state/plan을 검토한다. [실행·인수 계약](../../../gitops/README.md#신규-앱-주소와-공유-edge-연결)을 따르며 적용만으로 공개 HTTP 성공을 주장하지 않는다.
 
 ## 입력 예시
 
@@ -54,7 +54,7 @@ ALB는 서로 다른 두 AZ의 지정 VPC subnet을 확인한다. 운영자는 �
 
 새 도메인은 private backend/입력을 준비한 후 먼저 `terraform plan -target=aws_route53_zone.app -out=<private-zone-plan>`으로 zone만 계획하고, 그 saved plan을 검토·적용한다. 출력 `zone_id`와 `name_servers`를 확인해 registrar에서 정확한 NS로 위임한다. 그 다음 **target 옵션 없이 전체 plan을 새로 만들고** 검토·적용해 ACM/ALB를 구성한다. 부분 apply는 NS 위임을 준비하는 단계이며 edge 전체 적용이나 앱 공개 완료가 아니다.
 
-`certificate_arn`이 null이면 `*.base_domain` ACM 인증서, DNS 검증 record와 검증 대기를 만든다. Route host는 base domain 바로 아래 한 label만 허용한다. 기존 ARN을 쓰면 같은 region/account와 모든 host coverage를 운영자가 검증한다. 도메인의 실제 NS 위임이 끝나지 않으면 ACM DNS 검증이 완료되지 않는다. DNS 등록과 TLS 설정은 앱 준비 완료 증거가 아니다.
+`certificate_arn`이 null이면 `*.base_domain` ACM 인증서, DNS 검증 record와 검증 대기를 만든다. Route host는 기본적으로 base domain 바로 아래 한 label만 허용한다. `railshot.io` 같은 apex route는 같은 region/account에서 발급·DNS 검증을 마친 `apex_certificate_arn`을 명시해야 한다. 모듈은 기존 wildcard/default 인증서를 교체하지 않고 추가 SNI 인증서만 연결한다. Apex 인증서와 DNS 검증 receipt는 운영자가 보관하고, 기존 검증 CNAME을 재사용할 때 중복 Terraform 소유자를 만들지 않는다. 기존 ARN을 쓰면 같은 region/account와 모든 host coverage를 운영자가 검증한다. 도메인의 실제 NS 위임이 끝나지 않으면 ACM DNS 검증이 완료되지 않는다. DNS 등록과 TLS 설정은 앱 준비 완료 증거가 아니다.
 
 ## 보안 그룹과 WireGuard 소유권
 
