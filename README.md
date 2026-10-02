@@ -43,3 +43,7 @@ Ansible은 설치·구성을 수행하고, 운영 중 주 서버 선출과 장�
 [검증 계획](docs/poc/validation-plan.md)과 [검증 결과](docs/poc/validation-results.md)를 분리합니다. 문법 통과는 실서버 동작 보장이 아닙니다. 복제·네트워크 단절·과반수 상실·백업 복원 시험 전에는 운영 검증 완료로 취급하지 않습니다.
 
 약어: DB는 데이터베이스, SSH는 암호화 원격 접속, TLS는 통신 암호화·인증, SAN은 인증서의 허용 호스트 이름·주소 목록입니다.
+
+## 고객 OpenStack 설치 프로그램
+
+기존 데이터베이스 구축과 별도로 WireGuard 연결, 고객 측 OpenStack 인증·기능 진단·가상 머신 접근 준비를 수행하는 설치 프로그램을 추가했습니다. 사용법과 제한은 [설치 안내](docs/architecture/client-bootstrap.md), [등록 서버 규격 초안](docs/api/enrollment-contract.md), [로컬 인증정보 보관](docs/decisions/local-credentials.md), [검증 범위](docs/poc/bootstrap-verification.md)를 확인하십시오. 실제 고객 환경 동작은 아직 검증하지 않았습니다.
