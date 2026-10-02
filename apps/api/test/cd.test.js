@@ -5,6 +5,28 @@ import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import { test } from 'node:test';
 import { createCdAdapter } from '../src/cd.js';
+import { createProductService } from '../src/product.js';
+
+test('removing all app registrations keeps the API available without accepting an upload or inventing a default app', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-empty-cd-'));
+  let product;
+  t.after(async () => { await product?.close(); await rm(directory, { recursive: true, force: true }); });
+  const configPath = join(directory, 'config.json');
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: {} }), { mode: 0o600 });
+  const deployPublished = createCdAdapter({ configPath, loadPublished: async () => assert.fail('No publication for an unregistered app') });
+  product = await createProductService({ directory: join(directory, 'product'),
+    service: { targetId: 'k3s-aws', targetIds: ['k3s-aws'], deploy: async () => assert.fail('No CI dispatch') },
+    target: { id: 'k3s-aws', provider: 'aws' }, deployPublished });
+  assert.deepEqual(deployPublished.targets, {});
+  assert.ok(product.deploymentOptions().every(({ available }) => !available));
+  assert.equal(product.targets()[0].capabilities.application_deployment, false);
+  assert.equal(product.targets()[0].application_name, undefined);
+  await assert.rejects(product.createDeployment({ source_name: 'calculator',
+    deployment_selection: { environment: 'cloud', provider: 'aws' } }, 'new-upload'), { code: 'CAPABILITY_UNAVAILABLE' });
+  await assert.rejects(deployPublished({ app: 'calculator', targetId: 'k3s-aws', sourceCommit: 'a'.repeat(40),
+    publication: { app: 'calculator', tenant: 'team', target_id: 'k3s-aws', source_commit: 'a'.repeat(40) } }),
+  /Registered deployment application differs/);
+});
 
 test('CD adapter validates output and terminates the whole process group on abort or timeout', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-cd-'));
