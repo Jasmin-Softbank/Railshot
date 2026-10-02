@@ -92,7 +92,7 @@ DB 배치는 화균 담당의 [고정된 README](https://github.com/Jasmin-Softb
 
 하나의 Patroni 클러스터를 여러 거점에 배치하며 예시는 DB 3개·etcd 3개·HAProxy 1개다. 이 예시가 위 그림의 각 환경별 최종 VM 수를 확정하지는 않는다. 거점별 독립 대기 클러스터나 자동 거점 승격은 미구현이다. 기본값은 동기 복제, `synchronous_mode_strict=true`, `synchronous_node_count=1`이며 동기 복제본이 없으면 쓰기를 차단한다. `backup_enabled=false`이고 단일 HAProxy는 단일 장애점이므로 원격 복구와 접속점 이중화가 완료됐다고 표시하지 않는다.
 
-현재 [Ansible HTTP 계약](../api/ansible.md)은 DB 배치 입력만 검증하며 담당 플레이북의 설치 실행 연결은 미완료다. [CD 인계 계약](../../gitops/README.md)도 DB 자격 주입과 외부 egress를 지원 범위에서 제외한다. DB 사용 앱을 연결하려면 HAProxy endpoint·TLS·자격 참조·앱에서 DB로 가는 네트워크 정책을 맞추고 실제 연결을 검증해야 한다.
+현재 [Ansible HTTP 계약](../api/ansible.md)은 등록된 HA profile과 대상·TLS/Vault/SSH 참조를 검증한 뒤 담당 플레이북을 실행하고 결과 receipt를 확인하는 코드까지 연결되어 있다. standalone 설치는 지원하지 않는다. 이 연결 코드의 병합은 실제 DB 설치·복제 검증을 뜻하지 않으며 DB VM 작업은 동결 상태로 둔다. [CD 인계 계약](../../gitops/README.md)은 DB 자격 주입과 외부 egress를 지원 범위에서 제외한다. DB 사용 앱을 연결하려면 HAProxy endpoint·TLS·자격 참조·앱에서 DB로 가는 네트워크 정책을 맞추고 실제 연결을 검증해야 한다.
 
 ## 파일과 실행 책임
 
@@ -167,13 +167,15 @@ python3 deployment/scripts/render-platform.py /private/images.json \
 
 운영자는 기존 플랫폼 노드와 빌드 워커를 식별한 뒤 앞서 정한 역할 label과 빌드 taint를 적용한다. 대시보드·API는 플랫폼 선언의 nodeSelector를 사용한다. 기존 Argo CD Pod도 플랫폼 노드에 머무르게 할 배치 설정을 확인하며, 공식 Argo 설치 선언만으로 이 역할 지정이 끝난 것으로 간주하지 않는다. 빌드 워커의 가입과 기존 Pod 재배치는 실제 실행 전 검토 항목이다.
 
+운영 CNI의 목표 소스는 Cilium `1.20.2`이며 기존 Flannel 서버는 [별도 전환 절차](../operations/control-cilium-migration.md)를 따른다. Cilium 사전 검사는 운영 server 한 대와 전용 build agent 한 대의 배치를 허용하고 고객 프로필의 단일 노드 제한은 유지한다. 이는 노드 가입과 Docker/Cilium 공존이 실제로 검증됐다는 뜻은 아니다.
+
 1. 운영자가 `railshot-system` namespace와 해당 namespace의 `ghcr-pull`, `railshot-api` Secret(`token`), `railshot-github` Secret(`token`)을 비공개 입력에서 준비한다. API token은 UID/GID 1000이 읽도록 `0440`+`fsGroup:1000`으로 mount한다. GitHub 자격은 API에만 준다.
 2. 검토한 renderer 출력만 `gitops/applications/railshot-platform/workload.json`에 넣어 config commit을 만든다. AppProject/Application 파일의 `targetRevision`을 그 정확한 commit으로 교체한다. 이 파일은 workload 경로 밖에 유지한다.
 3. namespace와 선언 범위를 확인한 뒤 AppProject/Application을 적용하고 수동 sync한다. 자동 sync·prune·Namespace/Secret 생성 권한은 넣지 않았다. 초기 requests/limits는 측정 전 시작값이므로 기존 운영 노드 여유량과 업로드 메모리를 확인한다.
 4. 기본 Service는 모두 ClusterIP다. 우선 승인된 운영 context에서 `kubectl -n railshot-system port-forward service/railshot-dashboard 4181:8080`, API는 `service/railshot-api 4173:4173`으로 검증한다. API readiness는 `configured:true`도 확인하지만 GitHub 자격의 실제 권한을 보증하지 않으므로 실요청 검증이 별도로 필요하다.
 5. 공개 UI가 필요하면 renderer에 할당한 `--dashboard-node-port`를 추가하고 기존 `infrastructure/terraform/aws-edge`의 host route로 운영 노드 사설 IP와 연결한다. health path는 `/healthz`. `externalTrafficPolicy:Local`이므로 ALB target 노드에 실제 UI Pod가 있어야 한다. 보안 그룹은 ALB에서 오는 해당 포트만 허용한다. API에는 공개 route나 프런트 프록시를 넣지 않았다.
 
-통합 브랜치의 UI는 API와 함께 실행할 때 CI 제출·결과 조회를 지원한다. 현재 정적 대시보드 컨테이너에는 API 프록시가 없으므로 분리 배포의 연결과 사용자 인증·사용자별 target 인가는 후속 작업이다. 현재 Bearer token은 신뢰한 운영자 CLI/MCP용이며 사용자 로그인이나 multi-tenant 인가 구현이 아니다. 프런트에 이 token을 넣지 않는다. Ansible HTTP API의 운영 클러스터 이전도 이번 배포에 포함하지 않는다.
+통합 브랜치의 UI는 API와 함께 실행할 때 CI 제출·결과 조회를 지원한다. 현재 정적 대시보드 컨테이너에는 API 프록시가 없으므로 공개 데모의 프런트 연결은 제품 API 작업에서 이어간다. 현재 Bearer token은 신뢰한 운영자 CLI/MCP용이며 프런트에 이 token을 넣지 않는다. Ansible HTTP API의 운영 클러스터 이전도 이번 배포에 포함하지 않는다.
 
 ## 빌드 워커와 고객 앱
 

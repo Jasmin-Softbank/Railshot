@@ -14,6 +14,7 @@ class ScopeTests(unittest.TestCase):
         cases = {
             'docs/architecture/README.md': set(),
             'README.md': set(),
+            'AGENT.md': set(),
             'apps/api/src/server.js': {'api-browser', 'containers'},
             'apps/dashboard/app.js': {'api-browser', 'containers'},
             'ci/browser/smoke.test.mjs': {'api-browser'},

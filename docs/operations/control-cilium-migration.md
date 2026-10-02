@@ -4,6 +4,8 @@
 
 ## 1. 적용 대상과 설치 계약
 
+이 전환 절차는 아래의 기존 운영 서버 한 대가 대상이다. Cilium 전환과 기능 인수를 마친 뒤 전용 빌드 agent를 추가하는 절차는 [runner 준비 문서](../../ci/scripts/runner/README.md)를 따른다. 설치기 사전 검사는 운영 서버 한 대 또는 운영 서버와 전용 빌드 agent 한 대를 허용하지만, 이 runbook을 다중 노드의 동시 CNI 전환 절차로 사용하지 않는다. 아래 자동 smoke는 운영 서버에 검사 Pod를 고정하며 노드 간 통신과 Docker 빌드 격리의 공존 검증은 별도로 수행한다.
+
 2026-10-02 18:08 KST 조사 기준 대상은 AWS 계정 `721622471953`, 서울 `ap-northeast-2`, `railshot-control-poc` / `i-033ae2db907fde68e`, private IP `172.31.0.172`다. t3.medium 2 vCPU / 4 GiB, 30 GiB gp3, K3s `v1.34.11+k3s1` amd64이며 Flannel VXLAN과 `wg-railshot`이 함께 있었다. Argo 7개와 CoreDNS/local-path Pod 2개가 Ready였고 Dashboard/API는 없었다. 이는 이전 관측이며 전환 직전에 다시 확인한다.
 
 | 항목 | 운영 control | 고객 runtime |

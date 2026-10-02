@@ -8,14 +8,17 @@ BuildKit은 새로 만들지 않습니다. 먼저 `infrastructure/ansible/ci.yml
 
 ## 운영 K3s의 build agent 준비
 
-기존 `railshot-build-worker-aws-01`을 전용 agent로 사용합니다. 운영 서버와 고객 K3s를 재설치하지 않습니다. 먼저 운영자가 기존 STOP 기한과 사설 통신 경로를 확인해야 합니다. 현재 CI Terraform의 보안 그룹은 Kubernetes 연결을 허용하지 않으므로 **그대로 시작하는 것만으로 가입되지 않습니다.** 운영 서버의 실제 K3s/CNI 버전에 맞춰 SG와 호스트 방화벽을 검토합니다. 현재 `control.sh` 기준은 K3s `v1.34.11+k3s1`, 기본 Flannel, Pod CIDR `10.52.0.0/16`, Service CIDR `10.53.0.0/16`입니다. CI Docker `172.30.0.0/24`와 겹치지 않게 합니다.
+기존 `railshot-build-worker-aws-01`을 전용 agent로 사용합니다. 운영 서버와 고객 K3s를 재설치하지 않습니다. 먼저 운영자가 기존 STOP 기한과 사설 통신 경로를 확인해야 합니다. 현재 CI Terraform의 보안 그룹은 Kubernetes 연결을 허용하지 않으므로 **그대로 시작하는 것만으로 가입되지 않습니다.** 현재 `control.sh` 소스는 K3s `v1.34.11+k3s1`, Cilium `1.20.2`/CLI `v0.20.1`, VXLAN, Pod CIDR `10.52.0.0/16`, Service CIDR `10.53.0.0/16`을 사용합니다. 기존 운영 서버의 Flannel 전환은 자동으로 수행하지 않으며, [운영 Cilium 전환 절차](../../../docs/operations/control-cilium-migration.md)와 실제 CNI 상태를 먼저 확인합니다. SG와 호스트 방화벽을 실제 버전에 맞추고 CI Docker `172.30.0.0/24`와 CIDR이 겹치지 않게 합니다.
 
 | 경로 | 필요한 사설 통신 |
 |---|---|
 | build agent → 운영 server | K3s API/supervisor TCP 6443 |
-| 운영 cluster 노드 사이 | 해당 CNI의 데이터 경로. 현재 Flannel VXLAN은 UDP 8472; 인터넷 공개 금지 |
+| 운영 cluster 노드 사이 | 목표 Cilium VXLAN의 UDP 8472; 인터넷 공개 금지 |
 | 운영 cluster 노드 사이 | 필요한 kubelet TCP 10250; 승인된 노드/관리 경로로 한정 |
+| 운영 cluster 노드 사이 | Cilium health 검사를 위한 TCP 4240 또는 ICMP echo; 검토한 사설 노드 사이에서만 허용 |
 | 고객 코드 컨테이너 | 기존 CI bridge 정책 유지. 운영 API·메타데이터·사설 DB 접근 차단 |
+
+통신 근거는 [K3s 요구사항](https://docs.k3s.io/installation/requirements)과 [Cilium 방화벽 요구사항](https://docs.cilium.io/en/stable/operations/system_requirements/#firewall-rules)을 따른다. Cilium agent/Envoy 같은 필수 DaemonSet이 build taint를 허용하고 새 노드에서도 정상 기동하는지 확인합니다. 일반 제품 workload에는 build toleration을 추가하지 않습니다.
 
 운영 서버와 같은 검토된 K3s binary/installer를 사용합니다. build 노드의 root 소유 `0600` `/etc/rancher/k3s/config.yaml`은 다음 입력으로 준비합니다. `server`와 별도 `token-file`은 실제 운영 cluster 값이며 join token을 문서·Git·Pod에 넣지 않습니다. 다른 config drop-in은 허용하지 않습니다.
 

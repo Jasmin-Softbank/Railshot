@@ -16,7 +16,7 @@ SHA = re.compile(r'[0-9a-f]{40}')
 def documentation(path):
     return (path.startswith('docs/') and PurePosixPath(path).suffix in
             {'.md', '.txt', '.svg', '.png', '.jpg', '.jpeg', '.pdf', '.drawio', '.mmd'}
-            or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENTS.md', 'LICENSE'})
+            or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
 
 
 def container_components(paths):

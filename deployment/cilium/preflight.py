@@ -1,4 +1,4 @@
-"""Read-only guard for the two supported single-node K3s Cilium profiles."""
+"""Read-only guard for customer and operations K3s Cilium profiles."""
 import ipaddress
 import json
 import os
@@ -60,23 +60,56 @@ def kube(*args):
     return json.loads(raw) if raw.strip() else None
 
 
-def check_cluster(pod_cidr, service_cidr, wait_seconds=300):
+def check_cluster(pod_cidr, service_cidr, wait_seconds=300, profile='customer'):
+    if profile not in ('customer', 'control'):
+        raise ValueError('expected customer or control profile')
+    pod_pool, service_pool = ipaddress.ip_network(pod_cidr), ipaddress.ip_network(service_cidr)
+    if pod_pool.version != 4 or service_pool.version != 4 or pod_pool.overlaps(service_pool):
+        raise ValueError('profile requires non-overlapping IPv4 Pod and Service CIDRs')
     # /readyz can precede kubelet registration and controller CIDR allocation.
     # Wait for those API objects only; NodeReady itself needs Cilium.
     deadline = time.monotonic() + wait_seconds
     while True:
         nodes = kube('get', 'nodes', '-o', 'json')['items']
-        if len(nodes) > 1:
-            raise ValueError('exactly one K3s node is supported')
-        if nodes and nodes[0].get('spec', {}).get('podCIDR'):
+        if profile == 'customer' and len(nodes) > 1:
+            raise ValueError('exactly one customer K3s node is supported')
+        selected = nodes[0] if nodes else None
+        if profile == 'control' and nodes:
+            server_roles = {'node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master'}
+            servers = [node for node in nodes if server_roles & set(node.get('metadata', {}).get('labels', {}))]
+            if len(nodes) > 2 or len(servers) != 1:
+                raise ValueError('control requires one server and at most one approved build agent')
+            selected = servers[0]
+            if (selected['metadata']['labels'].get('railshot.io/node-role') == 'build'
+                    or any(t.get('key') == 'railshot.io/dedicated' and t.get('value') == 'build'
+                           for t in selected.get('spec', {}).get('taints', []))):
+                raise ValueError('control-plane server cannot also be the dedicated build worker')
+            for node in nodes:
+                if node is selected:
+                    continue
+                labels = node.get('metadata', {}).get('labels', {})
+                dedicated = {'key': 'railshot.io/dedicated', 'value': 'build', 'effect': 'NoSchedule'}
+                taints = [t for t in node.get('spec', {}).get('taints', []) if t.get('key') == dedicated['key']]
+                if (labels.get('railshot.io/node-role') != 'build'
+                        or 'node-role.kubernetes.io/etcd' in labels or taints != [dedicated]):
+                    raise ValueError('additional control node must be the approved tainted build agent')
+        if nodes and all(node.get('spec', {}).get('podCIDR') for node in nodes):
             break
         if time.monotonic() >= deadline:
             raise ValueError('timed out waiting for node registration/PodCIDR')
         time.sleep(3)
-    if not ipaddress.ip_network(nodes[0]['spec']['podCIDR']).subnet_of(ipaddress.ip_network(pod_cidr)):
-        raise ValueError('live node PodCIDR differs from selected profile')
+    allocations = []
+    for node in nodes:
+        cidr = node['spec']['podCIDR']
+        allocation = ipaddress.ip_network(cidr)
+        if (allocation.version != 4 or not allocation.subnet_of(pod_pool)
+                or node['spec'].get('podCIDRs', [cidr]) != [cidr]):
+            raise ValueError('live node PodCIDR differs from selected IPv4 profile')
+        if any(allocation.overlaps(other) for other in allocations):
+            raise ValueError('live node PodCIDRs overlap')
+        allocations.append(allocation)
     service = kube('-n', 'default', 'get', 'service', 'kubernetes', '-o', 'json')
-    if ipaddress.ip_address(service['spec']['clusterIP']) not in ipaddress.ip_network(service_cidr):
+    if ipaddress.ip_address(service['spec']['clusterIP']) not in service_pool:
         raise ValueError('live Kubernetes Service CIDR differs from selected profile')
     config = kube('-n', 'kube-system', 'get', 'configmap', 'cilium-config', '--ignore-not-found', '-o', 'json')
     if config:
@@ -93,6 +126,8 @@ def check_cluster(pod_cidr, service_cidr, wait_seconds=300):
         images = [c['image'] for c in daemon['spec']['template']['spec']['containers'] if c['name'] == 'cilium-agent']
         if not config or images != [pinned]:
             raise ValueError('existing Cilium agent differs from the pinned release; explicit upgrade required')
+    # The operations smoke uses this validated server, not NodeList ordering.
+    return selected
 
 
 if __name__ == '__main__':
@@ -105,7 +140,7 @@ if __name__ == '__main__':
         timeout = os.environ.get('WAIT_TIMEOUT', '300s')
         if not re.fullmatch(r'[1-9][0-9]*s', timeout):
             raise ValueError('WAIT_TIMEOUT must be seconds, e.g. 300s')
-        check_cluster(pod, service, int(timeout[:-1]))
+        check_cluster(pod, service, int(timeout[:-1]), profile=profile)
         print(pod)
     except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         sys.exit(f'Cilium preflight refused: {exc}')
