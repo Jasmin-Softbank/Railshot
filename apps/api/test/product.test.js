@@ -205,6 +205,24 @@ test('unconfigured server lists empty capabilities without creating state', asyn
   assert.equal(await server.productReady, null);
 });
 
+test('health stays live but not ready when private product state fails initialization', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-unready-'));
+  await chmod(directory, 0o750);
+  let externalCalls = 0;
+  const server = createAppServer({ stateDirectory: directory,
+    service: { targetId: 'demo', deploy: async () => { externalCalls++; }, status: async () => { externalCalls++; } } });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); await rm(directory, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const response = await fetch(`${base}/healthz`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true, configured: false, target_id: 'demo' });
+  const api = await fetch(`${base}/api/v1/targets`);
+  assert.equal(api.status, 503);
+  assert.ok(!(await api.text()).includes(directory));
+  assert.equal(externalCalls, 0);
+});
+
 
 test('intent write failure prevents external effects and fails subsequent writes closed', async (t) => {
   const f = await fixture(t);

@@ -120,6 +120,29 @@ def native_api_smoke(image):
         remove_container(name)
 
 
+def state_init_smoke(image):
+    # Exercise restart on the actual PVC layout without network or real secrets.
+    script = '''set -eu
+mkdir -p /var/lib/railshot/repository
+git -C /var/lib/railshot/repository init -b deployment/apps >/dev/null
+git -C /var/lib/railshot/repository remote add origin https://github.com/Jasmin-Softbank/Railshot.git
+printf '{"fixture":true}' > /run/config/cd.json
+node /app/apps/api/prepare-state.js
+node /app/apps/api/prepare-state.js
+node -e "const fs=require('node:fs');const p='/var/lib/railshot/config';if((fs.statSync(p).mode&511)!==448||(fs.statSync(p+'/cd.json').mode&511)!==384||!JSON.parse(fs.readFileSync(p+'/cd.json')).fixture)process.exit(1)"
+git -C /var/lib/railshot/repository symbolic-ref HEAD refs/heads/unregistered
+if node /app/apps/api/prepare-state.js >/dev/null 2>&1; then exit 1; fi
+'''
+    name = 'railshot-init-smoke-' + secrets.token_hex(6)
+    try:
+        docker('run', '--rm', '--name', name, '--network', 'none', '--read-only', '--tmpfs', '/tmp',
+               '--tmpfs', '/var/lib/railshot:uid=1000,gid=1000', '--tmpfs', '/run/config:uid=1000,gid=1000',
+               '--user', '1000:1000', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+               '--entrypoint', 'sh', image, '-c', script)
+    finally:
+        remove_container(name)
+
+
 def web_smoke(component, image, token_file, token, upstream=None):
     port = '8080' if component == 'dashboard' else '4173'
     options = ['--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
@@ -184,6 +207,7 @@ def smoke(component, image):
         return
     if component == 'api':
         native_api_smoke(image)
+        state_init_smoke(image)
     token = secrets.token_hex(32)
     with tempfile.TemporaryDirectory(prefix='railshot-container-smoke-') as directory:
         token_file = Path(directory) / 'token'

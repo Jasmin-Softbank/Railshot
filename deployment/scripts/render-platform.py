@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Render private platform workloads from published immutable image references."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -66,25 +67,45 @@ def render_build_runner(images, name, url, node):
     return {"apiVersion": "v1", "kind": "List", "items": documents}
 
 
+def render_build_controller(images, url, node):
+    runners = render_build_runner(images, 'railshot-runner-template', url, node)['items']
+    template = next(item for item in runners if item['kind'] == 'Job')
+    encoded = json.dumps(template, sort_keys=True, separators=(',', ':'))
+    policy = {'version': 1, 'template_sha256': hashlib.sha256(encoded.encode()).hexdigest(),
+              'repository': url.removeprefix('https://github.com/'), 'node': node,
+              'image': image_ref(images, 'ci-runner')}
+    source = Path(__file__).resolve().parents[1] / 'manifests/build-controller.yaml'
+    documents = list(yaml.safe_load_all(source.read_text()))
+    for document in documents:
+        if document['kind'] == 'ConfigMap':
+            document['data'] = {'job.json': encoded, 'policy.json': json.dumps(policy, sort_keys=True)}
+        if document['kind'] == 'CronJob':
+            document['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['image'] = image_ref(images, 'api')
+    # The existing runner identity/RBAC is installed unchanged; its Job is a reviewed template only.
+    return {'apiVersion': 'v1', 'kind': 'List', 'items': [item for item in runners if item['kind'] != 'Job'] + documents}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("images", type=Path, help="JSON map of component to GHCR digest")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--target-id")
     mode.add_argument("--build-runner-name", help="render a separate one-job build runner and scoped RBAC")
+    mode.add_argument("--build-controller", action="store_true", help="render the platform CronJob that replenishes reviewed ephemeral runners")
     parser.add_argument("--runner-url")
     parser.add_argument("--build-node", help="exact approved build worker hostname label")
     parser.add_argument("--dashboard-node-port", type=int, help="optional allocated ALB backend port; API stays private")
     args = parser.parse_args()
     try:
         images = json.loads(args.images.read_text())
-        if args.build_runner_name:
+        if args.build_runner_name or args.build_controller:
             if args.dashboard_node_port:
                 raise ValueError("build runner cannot expose a dashboard port")
-            output = render_build_runner(images, args.build_runner_name, args.runner_url, args.build_node)
+            output = (render_build_controller(images, args.runner_url, args.build_node) if args.build_controller
+                      else render_build_runner(images, args.build_runner_name, args.runner_url, args.build_node))
         else:
             if args.runner_url or args.build_node:
-                raise ValueError("runner options require --build-runner-name")
+                raise ValueError("runner options require --build-runner-name or --build-controller")
             output = render(images, args.target_id, args.dashboard_node_port)
         print(json.dumps(output, indent=2))
     except (ValueError, TypeError, KeyError) as error:

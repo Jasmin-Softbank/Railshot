@@ -96,4 +96,35 @@ python -m unittest discover -s gitops -p 'test_*.py'
 
 테스트는 native kubectl 경계를 모의 실행하고 임시 로컬 bare Git에서 commit/push·고정 SHA·불명확 결과의 재실행 차단을 검사합니다. 별도 localhost HTTP 서버에서 기대 본문과 redirect 거부를 확인합니다. 실제 Argo 설치·cluster 등록·sync·공개 HTTPS 배포를 증명하지 않습니다.
 
-공식 형식: [Argo declarative setup](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/), [kubectl sync operation](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/), [Argo 3 resource health 변경](https://argo-cd.readthedocs.io/en/stable/operator-manual/upgrading/2.14-3.0/#health-status-in-the-application-cr), [Kubernetes private registry Secret](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/).
+## 짧은 Argo 고객 토큰 갱신
+
+`credentials.py`는 기존 고객 ServiceAccount의 6시간 토큰을 2시간마다 갱신하는 일회성 명령입니다. 새 관리자 자격이나 장기 ServiceAccount Secret을 만들지 않습니다. 운영자가 고객별 기존 SA 이름·UID, 등록 namespace, server, CA SHA-256, audience를 확인한 비밀 없는 정책을 준비합니다. 예시는 다음과 같으며 값은 실제 등록에서 읽어야 합니다.
+
+```json
+{"version":1,"targets":[{
+  "secret":"railshot-k3s-aws","target_id":"k3s-aws",
+  "server":"https://192.0.2.1:6443","project":"railshot-apps",
+  "namespaces":["tenant-demo"],
+  "service_account":{"namespace":"tenant-demo","name":"railshot-argocd","uid":"12345678-1234-1234-1234-123456789012"},
+  "ca_sha256":"REPLACE_WITH_OBSERVED_CA_SHA256",
+  "audiences":["https://kubernetes.default.svc.cluster.local","k3s"]
+}]}
+```
+
+먼저 각 고객 클러스터에 [credentials-customer.yaml](credentials-customer.yaml)의 제한된 Role/RoleBinding을 적용합니다. 기존 `tenant-demo/railshot-argocd`에 **자기 이름의 `serviceaccounts/token` create만** 추가하며 기존 배포 Role을 덮어쓰지 않습니다. 실제 자기 SA의 발급 허용과 다른 SA·namespace의 발급 거부를 확인합니다. 이 권한은 현재 토큰이 유효한 동안 계속 재갱신할 수 있으므로, 6시간은 각 토큰의 요청 TTL이지 운영 종료 기한이 아닙니다.
+
+```sh
+python3 gitops/credentials.py render --policy /private/credentials-policy.json \
+  --image "${RAILSHOT_API_IMAGE:?Set the published immutable API image}" > /private/credentials.json
+kubectl --context railshot-control apply -f /private/credentials.json
+# 첫 실행을 기다리지 않고 확인; 같은 CronJob의 다른 실행과 겹치지 않게 한다.
+kubectl --context railshot-control -n argocd create job --from=cronjob/railshot-credentials railshot-credentials-initial
+```
+
+선언은 기존 API 이미지의 `/app/gitops/credentials.py`, `argocd/ghcr-pull`, 플랫폼 노드를 사용합니다. 운영 SA는 정책에 등록된 Argo Secret 이름만 `get/patch`할 수 있습니다. 코드와 자격을 ConfigMap에 넣지 않으며 정책만 읽기 전용으로 마운트합니다. CronJob은 동시 실행을 금지하고, 5분 실행 제한과 재시도 0을 사용합니다. 직접 실행은 `python3 gitops/credentials.py renew --policy ...`이며 kubectl의 현재 운영 context 또는 Pod의 projected SA를 사용합니다.
+
+현재 Secret의 소유권·등록 범위·CA·SA를 확인한 뒤 TokenRequest를 보냅니다. 새 토큰을 원래 CA로 검증한 고객 API에서 SelfSubjectReview의 이름·UID와 각 등록 namespace의 Pod 조회 권한까지 확인한 경우에만 `data.config`의 bearer token을 교체합니다. JSON Patch의 `resourceVersion` test가 동시 변경을 막습니다. 발급·검증 실패 시 기존 값을 보존하고, patch 결과가 불명확하면 읽기 한 번으로 확인하여 `renewed/unchanged/unknown`을 구분합니다. 토큰과 native 오류 원문을 로그에 쓰지 않습니다.
+
+연속 장애로 기존 토큰까지 만료되면 이 경로는 스스로 복구할 수 없습니다. 운영자가 독립 SSM/IAP 경로에서 기존 고객 SA의 짧은 토큰을 다시 발급해 같은 등록 Secret에 넣고 첫 실행을 검증해야 합니다. 운영 종료 시 CronJob을 `suspend: true`로 전환하고, 진행 중인 갱신 Job이 끝났는지 확인한 뒤 각 고객의 `railshot-argocd-renewal` **RoleBinding을 제거**하여 자기 갱신 권한을 회수합니다. 기존 배포 SA·Role과 고객 앱은 제거하지 않습니다. 이미 발급된 토큰은 자체 만료 시각까지 유효합니다.
+
+공식 형식: [Argo declarative setup](https://argo-cd.readthedocs.io/en/stable/operator-manual/declarative-setup/), [kubectl sync operation](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-kubectl/), [Argo 3 resource health 변경](https://argo-cd.readthedocs.io/en/stable/operator-manual/upgrading/2.14-3.0/#health-status-in-the-application-cr), [Kubernetes private registry Secret](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/), [TokenRequest](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#tokenrequest-api), [SelfSubjectReview](https://kubernetes.io/docs/reference/access-authn-authz/authentication/#api-access-to-authentication-information-for-a-client).

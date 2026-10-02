@@ -13,9 +13,8 @@ python3 -m venv /opt/railshot-python
 python3 "$ROOT/apps/api/runtime-smoke.py" --requirements > /tmp/railshot-runtime-requirements.txt
 /opt/railshot-python/bin/python -m pip install --no-cache-dir --disable-pip-version-check \
   -r /tmp/railshot-runtime-requirements.txt
-ln -s /opt/railshot-python/bin/python3 /usr/local/bin/python3
-ln -s /opt/railshot-python/bin/ansible /usr/local/bin/ansible
-ln -s /opt/railshot-python/bin/ansible-playbook /usr/local/bin/ansible-playbook
+# Invoke the interpreter inside its venv; an external symlink loses pyvenv.cfg.
+export PATH="/opt/railshot-python/bin:$PATH"
 TASK_TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TASK_TMP"; rm -f /tmp/railshot-runtime-requirements.txt' EXIT
 python3 "$ROOT/apps/api/runtime-smoke.py" --downloads > "$TASK_TMP/downloads.tsv"

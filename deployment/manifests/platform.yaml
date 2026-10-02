@@ -57,6 +57,7 @@ spec:
   template:
     metadata: {labels: {app: railshot-api}}
     spec:
+      serviceAccountName: railshot-product
       automountServiceAccountToken: false
       nodeSelector: {kubernetes.io/arch: amd64, railshot.io/node-role: platform}
       imagePullSecrets: [{name: ghcr-pull}]
@@ -65,20 +66,15 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile: {type: RuntimeDefault}
       initContainers:
         - name: private-config
           image: BUILD_REQUIRED/api
-          command: [node, -e]
-          args:
-            - >-
-              const fs=require('fs');
-              const target='/var/lib/railshot/config';
-              fs.mkdirSync(target,{recursive:true,mode:0o700});
-              for(const name of fs.readdirSync('/run/config').filter(n=>!n.startsWith('.'))){
-                fs.writeFileSync(target+'/'+name,fs.readFileSync('/run/config/'+name),{mode:0o600});
-                fs.chmodSync(target+'/'+name,0o600);
-              }
+          command: [node, /app/apps/api/prepare-state.js]
+          env:
+            - {name: GITHUB_TOKEN, valueFrom: {secretKeyRef: {name: railshot-github, key: token}}}
+            - {name: HOME, value: /var/lib/railshot}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -120,6 +116,7 @@ spec:
             - {name: tmp, mountPath: /tmp}
             - {name: api-token, mountPath: /run/secrets/api, readOnly: true}
             - {name: state, mountPath: /var/lib/railshot}
+            - {name: kubernetes-api, mountPath: /run/railshot-kubernetes, readOnly: true}
           livenessProbe:
             httpGet: {path: /healthz, port: http, httpHeaders: [{name: Host, value: localhost}]}
             initialDelaySeconds: 10
@@ -134,6 +131,14 @@ spec:
           secret: {secretName: railshot-executors, defaultMode: 288}
         - name: state
           persistentVolumeClaim: {claimName: railshot-api}
+        - name: kubernetes-api
+          projected:
+            defaultMode: 288
+            sources:
+              - serviceAccountToken: {path: token, expirationSeconds: 3600}
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: ca.crt}]
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

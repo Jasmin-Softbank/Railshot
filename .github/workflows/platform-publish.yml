@@ -11,20 +11,45 @@ on:
         description: Publish tested images to GHCR (trusted branch only)
         type: boolean
         default: false
+      deploy:
+        description: Update the platform deployment branch after publication (dashboard and api required)
+        type: boolean
+        default: false
 
 permissions: {contents: read}
+concurrency:
+  group: platform-release
+  cancel-in-progress: false
 
 jobs:
   admission:
     runs-on: ubuntu-24.04
     steps:
-      - name: Require a trusted ref for publication
+      - name: Validate publication and deployment inputs
         env:
           PUBLISH: ${{ inputs.publish }}
+          DEPLOY: ${{ inputs.deploy }}
+          COMPONENTS: ${{ inputs.components }}
+          PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
+          PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
         run: |
+          set -euo pipefail
           if [ "$PUBLISH" = true ]; then
             case "$GITHUB_REF" in refs/heads/main|refs/heads/integration/*) ;; *) echo 'Publish requires a reviewed main or integration ref' >&2; exit 1 ;; esac
           fi
+          python3 - <<'PYCODE'
+          import json, os, re
+          components = json.loads(os.environ['COMPONENTS'])
+          allowed = {'dashboard', 'api', 'mcp', 'ci-runner'}
+          assert isinstance(components, list) and components and all(isinstance(value, str) for value in components), 'components must be a nonempty string array'
+          assert len(components) == len(set(components)) and set(components) <= allowed, 'components must be unique supported names'
+          if os.environ['DEPLOY'] == 'true':
+              assert os.environ['PUBLISH'] == 'true', 'deploy requires publish=true'
+              assert {'dashboard', 'api'} <= set(components), 'deploy requires dashboard and api from this run'
+              assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', os.environ['PLATFORM_TARGET']), 'RAILSHOT_PLATFORM_TARGET_ID is required'
+              port = os.environ['PLATFORM_PORT']
+              assert re.fullmatch(r'[0-9]+', port) and 30000 <= int(port) <= 32767, 'RAILSHOT_PLATFORM_NODE_PORT must be 30000..32767'
+          PYCODE
   build:
     needs: admission
     uses: ./.github/workflows/platform-containers.yml
@@ -79,3 +104,36 @@ jobs:
           path: published/${{ matrix.component }}.json
           if-no-files-found: error
           retention-days: 14
+
+  deploy:
+    if: inputs.deploy && inputs.publish
+    needs: [admission, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {contents: write, actions: read}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          # Only this ephemeral job needs authenticated, non-force Git push.
+          persist-credentials: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: platform-image-*-${{ github.sha }}
+          path: ${{ runner.temp }}/platform-published
+          merge-multiple: true
+      - name: Install renderer dependency from existing CI pin
+        run: |
+          pin=$(sed -n '/^PyYAML==[0-9.]*$/p' ci/requirements-test.txt)
+          test -n "$pin"
+          python3 -m pip install --disable-pip-version-check "$pin"
+      - name: Commit the tested digest declaration to the platform branch
+        env:
+          PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
+          PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
+        run: |
+          python3 deployment/scripts/publish-platform.py \
+            --artifacts "$RUNNER_TEMP/platform-published" \
+            --source-sha "$GITHUB_SHA" \
+            --target-id "$PLATFORM_TARGET" \
+            --dashboard-node-port "$PLATFORM_PORT"

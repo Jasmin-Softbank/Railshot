@@ -87,7 +87,8 @@ def installed(rows):
         run('git', '--version')
         subprocess.run(['ssh', '-V'], env=env, check=True, capture_output=True, timeout=10)
         run('ansible-playbook', '--version')
-        for script in ['gitops/bridge.py', 'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py']:
+        for script in ['gitops/bridge.py', 'gitops/credentials.py', 'ci/scripts/runner/replenish.py',
+                       'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py']:
             run(sys.executable, script, '--help')
         # Ansible builtin task imports and all runtime copy sources must actually be packaged.
         for script in ['guest.yml', 'runtime.yml']:
@@ -96,7 +97,7 @@ def installed(rows):
                          'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/group_vars/all.yml',
                          'infrastructure/ansible/tasks/guest-checks.yml',
                          'deployment/scripts/common.sh', 'deployment/bootstrap/preflight.sh', 'deployment/bootstrap/install-k3s.sh',
-                         'deployment/bootstrap/health.sh', 'deployment/cilium/install.sh', 'deployment/cilium/health.sh']:
+                         'deployment/bootstrap/health.sh', 'deployment/cilium/install.sh', 'deployment/cilium/preflight.py', 'deployment/cilium/health.sh']:
             if not (ROOT / relative).is_file():
                 raise ValueError('Missing native runtime source: ' + relative)
         for provider in ['aws', 'gcp']:
