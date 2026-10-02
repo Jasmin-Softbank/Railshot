@@ -34,7 +34,7 @@ jobs:
   loop:
     runs-on: ${{ fromJSON(vars.RAILSHOT_CI_RUNNER_LABELS) }}
     timeout-minutes: 40
-    permissions: {contents: read}
+    permissions: {contents: read, checks: write}
     outputs:
       passed: ${{ steps.loop.outputs.passed }}
       bundle_id: ${{ steps.bundle.outputs.artifact-id }}
@@ -80,8 +80,12 @@ jobs:
           RAILSHOT_CODEX_HOME: ${{ vars.RAILSHOT_CODEX_HOME }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          RAILSHOT_PROGRESS_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          progress_token="$RAILSHOT_PROGRESS_TOKEN"
+          unset RAILSHOT_PROGRESS_TOKEN
+          test -f .railshot/ci/scripts/loop/checks_progress.py || { echo 'PLATFORM_REF must support isolated progress publishing'; exit 1; }
           python -c 'import os; from pathlib import Path; p=Path.cwd().resolve()/"apps"/os.environ["TENANT"]/os.environ["APP"]; assert p.is_dir() and p.resolve()==p, "app directory must stay within checkout; symlinks forbidden"'
           case "$RAILSHOT_AUTH_MODE:$PROVIDER" in
             subscription:codex)
@@ -100,7 +104,7 @@ jobs:
           args=(--repair-scope "$REPAIR_SCOPE" --app-id "$APP")
           if [ -f "$RUN_DIR/state.sqlite3" ]; then args+=(--resume); fi
           if [ -n "$QUALITY_NETWORK" ]; then args+=(--quality-network "$QUALITY_NETWORK"); fi
-          if python .railshot/ci/scripts/loop/loop.py "apps/$TENANT/$APP" "$RUN_DIR" --provider "$PROVIDER" "${args[@]}"; then
+          if RAILSHOT_PROGRESS_TOKEN="$progress_token" python .railshot/ci/scripts/loop/loop.py "apps/$TENANT/$APP" "$RUN_DIR" --provider "$PROVIDER" "${args[@]}"; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"

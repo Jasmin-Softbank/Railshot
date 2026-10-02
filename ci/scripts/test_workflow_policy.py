@@ -14,6 +14,39 @@ HERE = Path(__file__).resolve().parent
 
 
 class WorkflowPolicyTest(unittest.TestCase):
+    def test_progress_token_is_only_forwarded_to_trusted_loop_and_checks_permission_is_job_scoped(self):
+        jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
+        self.assertEqual(jobs['loop']['permissions'], {'contents': 'read', 'checks': 'write'})
+        self.assertNotIn('checks', jobs['release']['permissions'])
+        steps = [step for step in jobs['loop']['steps'] if 'RAILSHOT_PROGRESS_TOKEN' in step.get('env', {})]
+        self.assertEqual(len(steps), 1)
+        step = steps[0]
+        self.assertEqual(step['env']['RAILSHOT_PROGRESS_TOKEN'], '${{ github.token }}')
+        with tempfile.TemporaryDirectory() as directory:
+            env = {**os.environ, 'RAILSHOT_PROGRESS_TOKEN': 'sentinel-progress-token', 'RAILSHOT_AUTH_MODE': 'api-key',
+                   'PROVIDER': 'codex', 'CODEX_API_KEY': 'synthetic', 'REPAIR_SCOPE': 'source', 'QUALITY_NETWORK': '',
+                   'APP': 'calculator', 'TENANT': 'demo', 'RUN_DIR': directory + '/run', 'GITHUB_OUTPUT': directory + '/output'}
+            # Execute the real shell flow. Setup/install subprocesses must not receive the publisher token.
+            stub = '''python() {
+              if [ "$1" = ".railshot/ci/scripts/loop/loop.py" ]; then
+                test "$RAILSHOT_PROGRESS_TOKEN" = sentinel-progress-token
+              else
+                test -z "${RAILSHOT_PROGRESS_TOKEN+x}"
+              fi
+            }
+            pip() { test -z "${RAILSHOT_PROGRESS_TOKEN+x}"; }
+            '''
+            # A stale platform pin must stop before handing the token to an older loop.
+            result = subprocess.run(['bash', '-c', stub + step['run']], cwd=directory, env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(Path(env['GITHUB_OUTPUT']).exists())
+            capability = Path(directory, '.railshot/ci/scripts/loop/checks_progress.py')
+            capability.parent.mkdir(parents=True); capability.touch()
+            result = subprocess.run(['bash', '-c', stub + step['run']], cwd=directory, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(Path(env['GITHUB_OUTPUT']).read_text(), 'passed=true\n')
+            self.assertNotIn('sentinel-progress-token', result.stdout + result.stderr)
+
     def test_repository_scope_outputs_and_required_gate_cover_every_job(self):
         import ci_scope
         workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())

@@ -4,6 +4,7 @@ import { createProductStore } from './product-store.js';
 import { APP_NAME, TARGET_ID, sourceAppName } from './contract.js';
 import { validateFiles } from './archive.js';
 import { createMetricsObserver } from './metrics.js';
+import { emptyAgentEvents } from './agent-events.js';
 
 export class ProductError extends Error {
   constructor(status, code, message, { outcomeUnknown = false, retryable = false } = {}) {
@@ -333,6 +334,26 @@ export async function createProductService({ service, directory, target, provide
         } catch { /* Keep the recorded failure when read-only diagnostics are unavailable. */ }
       }
       return { ...record, observation: await observeMetrics(record) };
+    },
+    async getDeploymentEvents(id, sessionId = null) {
+      const record = find('deployments', id, sessionId);
+      const identity = { runId: record.ci?.run_id ? String(record.ci.run_id) : null,
+        source_commit: record.source_commit, app: record.app, target_id: record.target_id };
+      const empty = (state, reason) => ({ deployment_id: id, ...emptyAgentEvents(identity, state, reason) });
+      if (!identity.runId) return empty('not_started', 'not_dispatched');
+      const bound = () => {
+        const current = find('deployments', id, sessionId), state = store.read();
+        const binding = Object.hasOwn(state.bindings, identity.runId) ? state.bindings[identity.runId] : null;
+        return binding?.operation_id === id && binding.app === identity.app && binding.target_id === identity.target_id
+          && binding.source_commit === identity.source_commit && current.source_commit === identity.source_commit
+          && String(current.ci?.run_id) === identity.runId && current.app === identity.app && current.target_id === identity.target_id;
+      };
+      if (!bound()) return empty('unavailable', 'binding_mismatch');
+      if (typeof service?.events !== 'function') return empty('unavailable', 'not_configured');
+      try {
+        const observed = await service.events(identity.runId, { source_commit: identity.source_commit, app: identity.app, target_id: identity.target_id });
+        return bound() ? { ...observed, deployment_id: id } : empty('unavailable', 'binding_mismatch');
+      } catch { return empty('unavailable', 'upstream_unavailable'); }
     },
     async getDeploymentLogs(id, sessionId = null) {
       const record = publicRecord(find('deployments', id, sessionId));
