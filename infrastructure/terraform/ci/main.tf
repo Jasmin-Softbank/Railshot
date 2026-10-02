@@ -14,6 +14,15 @@ variable "name" {
     error_message = "Use a lowercase resource and target name."
   }
 }
+variable "instance_name" {
+  description = "EC2 display Name only; keep name stable for IAM, security group and target identity."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.instance_name == null ? true : can(regex("^[a-z][a-z0-9-]{0,62}$", var.instance_name))
+    error_message = "Use a lowercase EC2 display name."
+  }
+}
 variable "account_id" {
   type = string
   validation {
@@ -156,7 +165,7 @@ resource "aws_instance" "ci" {
     public_key   = var.admin_ssh_public_key, stop_at = var.stop_at
   }))
   user_data_replace_on_change = false
-  tags                        = { Name = local.name }
+  tags                        = { Name = coalesce(var.instance_name, local.name) }
   depends_on                  = [aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.deny_credentials]
 }
 output "node_descriptor" {
