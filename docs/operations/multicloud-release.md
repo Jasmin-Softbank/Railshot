@@ -69,6 +69,8 @@ GCP의 WireGuard를 사용하지 않는 관리 경로는 provisioned public IPv4
 
 제어 서버는 바인딩된 Deployment·PVC 및 그 ReplicaSet이 소유한 Ready API Pod를 확인하고, 그 Pod의 기존 `register.py --api-registrar`에 대상 한 건만 전달한다. API의 일반 앱 등록과 이 요청은 같은 `registration.lock` 안에서 현재 desired/product를 병합하고 Prometheus를 갱신한 후 product를 원자적으로 저장한다. 운영자 디렉터리로 product를 복제하지 않으며, 릴리스 검증도 API 원본을 다시 읽는다. 실행 중 Pod/Deployment/PVC가 바뀌거나 응답이 불확실하면 실패로 남기고 자동 재시도하지 않는다.
 
+대상 한 건에는 해당 런타임에서 검증한 `/healthz` TLS 바인딩도 포함한다. API는 독립적인 노드 행과 `runtime-healthz.json`의 인증서 설정을 같은 잠금 안에서 병합한다. 기존 앱·노드·인증서를 보존하며, CA와 TLS 서버 이름은 공개 product/desired 파일에 넣지 않는다.
+
 API 바인딩이 준비되지 않으면 노드 변경 전에 `observer_preflight`에서 차단한다. 기존 앱의 관측 파일을 이동해야 한다면 먼저 API·운영자 등록을 정지하고, 기존 desired와 product의 대상이 모두 보존된 한 원본을 API PVC에 준비한 뒤 경로를 연결한다. 단순 파일 덮어쓰기나 두 collector writer의 병행 운용은 허용하지 않는다.
 
 ## 검증과 복구

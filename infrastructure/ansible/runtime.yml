@@ -78,6 +78,7 @@
         - bootstrap/preflight.sh
         - bootstrap/install-k3s.sh
         - bootstrap/health.sh
+        - bootstrap/runtime-healthz.py
         - cilium/install.sh
         - cilium/preflight.py
         - cilium/health.sh

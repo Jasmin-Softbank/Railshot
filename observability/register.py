@@ -25,6 +25,7 @@ _renderer_spec = importlib.util.spec_from_file_location('railshot_observer_rende
 _renderer = importlib.util.module_from_spec(_renderer_spec)
 _renderer_spec.loader.exec_module(_renderer)
 cluster, prometheus, NAMESPACE, validate = _renderer.cluster, _renderer.prometheus, _renderer.NAMESPACE, _renderer.validate
+blackbox = _renderer.blackbox
 from storage import durable_write
 
 
@@ -98,9 +99,15 @@ def merge_rows(rows, row):
     physical = ('resource_id', 'prometheus_url', 'node_instance', 'cluster_instance', 'node_ip')
     require(all(all(item.get(key) == row.get(key) for key in physical) for item in target))
     existing = [item for item in target if item.get('app') == row.get('app')]
-    require(not existing or existing == [row])
     if existing:
-        return rows
+        require(len(existing) == 1)
+        previous = existing[0]
+        # Add healthz to an existing binding without changing its original identity.
+        require({k: v for k, v in previous.items() if k != 'healthz_url'} ==
+                {k: v for k, v in row.items() if k != 'healthz_url'})
+        require(not (previous.get('healthz_url') and row.get('healthz_url')) or
+                previous['healthz_url'] == row['healthz_url'])
+        return [{**previous, **row} if item is previous else item for item in rows]
     require(len(rows) < 100 and not any(item['target_id'] != row['target_id'] and
                                       item['node_instance'] == row['node_instance'] for item in rows))
     return [*rows, row]
@@ -122,6 +129,17 @@ def scrape_config(rows):
             job['static_configs'] = [{'targets': addresses}]
             jobs.append(job)
     result['scrape_configs'] = jobs
+    health = {row['target_id']: row['healthz_url'] for row in rows if row.get('healthz_url')}
+    if health:
+        jobs.append({'job_name': 'runtime_healthz', 'metrics_path': '/probe',
+            'scrape_interval': '30s', 'scrape_timeout': '10s',
+            'static_configs': [{'targets': [url], 'labels': {'module': 'runtime_healthz_' + target}}
+                               for target, url in sorted(health.items())],
+            'relabel_configs': [
+                {'source_labels': ['module'], 'target_label': '__param_module'},
+                {'source_labels': ['__address__'], 'target_label': '__param_target'},
+                {'source_labels': ['__param_target'], 'target_label': 'instance'},
+                {'target_label': '__address__', 'replacement': 'blackbox:9115'}]})
     return result
 
 
@@ -145,7 +163,7 @@ def observer_ssh(config, request, ansible):
         node = request['inventory']['control_plane'][0]
         node['ssh'].pop('transport_ref', None)
         require(node['ssh'].get('connect_host', node['private_ipv4']) == node['private_ipv4'])
-    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 90) as port:
+    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 360) as port:
         host = next(iter(ansible.build_inventory(request, port)['all']['children']['k3s_server']['hosts'].values()))
         if direct:
             require(port is None and host['ansible_host'] == config['observer_ip'])
@@ -156,8 +174,72 @@ def observer_ssh(config, request, ansible):
         yield prefix
 
 
-def sync_observer(config, request, document, ansible, native):
+SYNC_RUNTIME = '''import json,pathlib,subprocess,sys,time
+p=json.load(sys.stdin); out=pathlib.Path(p['directory'])
+assert out.is_dir() and not out.is_symlink() and (out/'owner').read_text().strip()==p['owner']
+assert (out/'compose.yaml').read_text() in (p['compose'],p['previous_compose'])
+ca=out/'runtime-ca'
+assert not ca.is_symlink()
+ca.mkdir(mode=0o755,exist_ok=True)
+files={'compose.yaml':p['compose'],'prometheus.json':json.dumps(p['prometheus']),
+       'blackbox.json':json.dumps(p['blackbox']),**{'runtime-ca/'+k+'.crt':v for k,v in p['certificates'].items()}}
+before={}
+for name in files:
+    path=out/name
+    assert not path.is_symlink() and (not path.exists() or path.is_file())
+    before[name]=path.read_bytes() if path.exists() else None
+existing=json.loads(before['blackbox.json'])
+assert set(existing)=={'modules'} and isinstance(existing['modules'],dict)
+modules={**p['blackbox']['modules'],**existing['modules']}
+modules.update({name:value for name,value in p['blackbox']['modules'].items() if name.startswith('runtime_healthz_')})
+files['blackbox.json']=json.dumps({'modules':modules})
+def command(*args):
+    subprocess.run(['sudo','docker','compose',*args],cwd=out,check=True,
+                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+def reload_blackbox():
+    command('up','-d','--no-deps','blackbox')
+    for attempt in range(5):
+        try:
+            command('exec','-T','prometheus','wget','-q','-O-','--post-data=',
+                    'http://blackbox:9115/-/reload')
+            return
+        except subprocess.CalledProcessError:
+            if attempt==4: raise
+            time.sleep(0.5)
+try:
+    for name,data in files.items():
+        path=out/name
+        path.write_text(data); path.chmod(0o644)
+    command('exec','-T','prometheus','promtool','check','config','/etc/prometheus/prometheus.json')
+    command('run','--rm','--no-deps','blackbox','--config.file=/etc/blackbox/blackbox.json','--config.check')
+    reload_blackbox()
+    command('kill','-s','SIGHUP','prometheus')
+    assert all((out/name).read_text()==data for name,data in files.items())
+except Exception:
+    for name,data in before.items():
+        path=out/name
+        if data is None: path.unlink(missing_ok=True)
+        else: path.write_bytes(data)
+    reload_blackbox()
+    command('kill','-s','SIGHUP','prometheus')
+    raise
+print(json.dumps({'synced':True}))
+'''
+
+
+def sync_observer(config, request, document, ansible, native, bindings=None):
     with observer_ssh(config, request, ansible) as prefix:
+        if bindings:
+            compose = (ROOT / 'observability/compose.yaml').read_text().replace('127.0.0.1:9090', config['observer_ip'] + ':9090')
+            previous_compose = compose.replace('    volumes:\n      - ./blackbox.json:/etc/blackbox/blackbox.json:ro\n'
+                '      - ./runtime-ca:/etc/blackbox/runtime-ca:ro',
+                '    volumes: ["./blackbox.json:/etc/blackbox/blackbox.json:ro"]')
+            payload = {'directory': config['observer_directory'], 'owner': config['owner'] + ':' + config['lifecycle'],
+                'compose': compose, 'previous_compose': previous_compose, 'prometheus': document,
+                'blackbox': blackbox(bindings), 'certificates': {key: value['ca_pem'] for key, value in bindings.items()}}
+            require(json.loads(native([*prefix, 'python3 -c ' + shlex.quote(SYNC_RUNTIME)],
+                                      document=payload, timeout=300)) == {'synced': True})
+            return
         directory = shlex.quote(config['observer_directory'])
         # Bootstrap owns this exact directory and marker. Registration cannot adopt another stack.
         command = f'cd {directory} && test "$(cat owner)" = {shlex.quote(config["owner"] + ":" + config["lifecycle"])} && cat > prometheus.next.json && '
@@ -213,7 +295,7 @@ def local_product(config):
     return product
 
 
-def commit_row(config, row, before_commit=lambda: None):
+def commit_row(config, row, before_commit):
     """Both API registrations and operator deltas commit under this one PVC lock."""
     from environment import read_private
     import run as ansible
@@ -236,10 +318,31 @@ def commit_row(config, row, before_commit=lambda: None):
         for previous in product['targets'] if product else []:
             rows = merge_rows(rows, previous)
         rows = merge_rows(rows, row)
+        # Keep runtime health independent of any application registered on this node.
+        node_row = next((dict(item) for item in rows if item['target_id'] == row['target_id'] and not item.get('app')), None)
+        if node_row is None:
+            node_row = {key: value for key, value in row.items() if key not in ('app', 'namespace', 'probe_url')}
+        rows = merge_rows(rows, node_row)
         durable_write(desired, json.dumps({'version': 1, 'targets': rows}).encode())
-        before_commit()
+        binding = before_commit()
+        blackbox({row['target_id']: binding})
+        require(binding['server_name'] == row.get('node_ip', row['node_instance'].split(':')[0]))
+        bindings_path = state / 'runtime-healthz.json'
+        bindings = read_private(bindings_path)['targets'] if bindings_path.exists() else {}
+        bindings[row['target_id']] = binding
+        node_row['healthz_url'] = binding['healthz_url']
+        rows = merge_rows(rows, node_row)
+        durable_write(bindings_path, json.dumps({'version': 1, 'targets': bindings}).encode())
+        durable_write(desired, json.dumps({'version': 1, 'targets': rows}).encode())
+        active_bindings = {}
+        for item in rows:
+            if item.get('healthz_url'):
+                bound = bindings.get(item['target_id'])
+                require(bound and bound['healthz_url'] == item['healthz_url'])
+                active_bindings[item['target_id']] = bound
+        blackbox(active_bindings)
         observer, _ = node_request(config['observer_registry_file'], config['observer_target_id'])
-        sync_observer(config, observer, scrape_config(rows), ansible, native)
+        sync_observer(config, observer, scrape_config(rows), ansible, native, bindings=active_bindings)
         product = {'version': 1, 'targets': rows, 'collector': collector(config)}
         durable_write(state / 'product.json', json.dumps(product).encode())
         require(local_product(config) == product)
@@ -287,7 +390,7 @@ def api_pod(binding, kube):
     return {'name': pod['metadata']['name'], 'uid': pod['metadata']['uid'], 'image': image}
 
 
-def api_exchange(config, *, request=None, descriptor=None):
+def api_exchange(config, *, request=None, descriptor=None, health_binding=None):
     from argo import kubectl
     binding = api_binding(config['api_registrar'])
     kube = lambda *args: kubectl(binding['context'], 'railshot-system', *args)
@@ -295,12 +398,14 @@ def api_exchange(config, *, request=None, descriptor=None):
     payload = {'version': 1, 'action': 'read' if request is None else 'commit',
                'config_file': binding['config_file'], 'collector': collector_route(config)}
     if request is not None:
-        payload.update(request=request, descriptor=descriptor)
-    command = ['kubectl', '--context', binding['context'], '--request-timeout=20s', '-n', 'railshot-system',
+        blackbox({request['target_id']: health_binding})
+        require(health_binding['server_name'] == request['node_ip'])
+        payload.update(request=request, descriptor=descriptor, health_binding=health_binding)
+    command = ['kubectl', '--context', binding['context'], '--request-timeout=420s', '-n', 'railshot-system',
                'exec', '-i', before['name'], '-c', 'api', '--', '/opt/railshot-python/bin/python3',
                '/app/observability/register.py', '--api-registrar']
     # Send once: a timeout or Pod replacement is unknown, never an automatic retry.
-    result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, timeout=180)
+    result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True, timeout=420)
     require(result.returncode == 0 and len(result.stdout) <= 131072)
     response = json.loads(result.stdout)
     require(api_pod(binding, kube) == before and response.get('status') == 'succeeded')
@@ -308,7 +413,9 @@ def api_exchange(config, *, request=None, descriptor=None):
     require(product.get('version') == 1 and product.get('collector') == collector(config))
     if request is not None:
         row, _ = registration_row(config, request, descriptor)
-        require(row in product['targets'])
+        require(merge_rows(product['targets'], row) == product['targets'])
+        nodes = [item for item in product['targets'] if item['target_id'] == row['target_id'] and not item.get('app')]
+        require(len(nodes) == 1 and nodes[0].get('healthz_url') == health_binding['healthz_url'])
     return product
 
 
@@ -322,7 +429,7 @@ def api_request(payload):
     from environment import read_private
     require(payload.get('version') == 1 and payload.get('action') in ('read', 'commit'))
     require(set(payload) == {'version', 'action', 'config_file', 'collector'} |
-            ({'request', 'descriptor'} if payload['action'] == 'commit' else set()))
+            ({'request', 'descriptor', 'health_binding'} if payload['action'] == 'commit' else set()))
     path = Path(payload['config_file'])
     require(str(path).startswith('/var/lib/railshot/config/') and '..' not in path.parts and str(path) == payload['config_file'])
     config = settings(read_private(path))
@@ -332,12 +439,17 @@ def api_request(payload):
         result = local_product(config)
     else:
         row, _ = registration_row(config, payload['request'], payload['descriptor'])
-        result = commit_row(config, row)
+        binding = payload['health_binding']
+        blackbox({row['target_id']: binding})
+        require(binding['server_name'] == payload['request']['node_ip'])
+        result = commit_row(config, row, lambda: binding)
     return {'status': 'succeeded', 'product': result}
 
 
 def register(config, request, output):
     from environment import runtime_kubectl
+    import run as ansible
+    from argo import native
     config = settings(config)
     runtime, descriptor = node_request(request['registry_file'], request['target_id'])
     row, rendering = registration_row(config, request, descriptor)
@@ -347,6 +459,11 @@ def register(config, request, output):
         durable_write(output, json.dumps(receipt).encode())
     def apply_exporters():
         save()  # Record an uncertain outcome before the first mutation.
+        from runtime_health import configure_runtime_healthz
+        binding = configure_runtime_healthz(runtime, descriptor, ansible, native)
+        blackbox({row['target_id']: binding})
+        require(binding['server_name'] == request['node_ip'])
+        receipt['steps'].append('runtime_healthz_configured'); save()
         labels = {'app.kubernetes.io/managed-by': 'railshot-observer', 'railshot.io/observer': config['owner']}
         with runtime_kubectl(runtime) as kube:
             cilium = kube('kube-system', 'get', 'pods', '-l', 'k8s-app=cilium', '-o', 'json')['items']
@@ -368,11 +485,12 @@ def register(config, request, output):
                 if document['kind'] == 'CiliumClusterwideNetworkPolicy':
                     wait_network_policy(kube, cilium[0], document)
         receipt['steps'].append('exporters_applied'); save()
+        return binding
     if 'api_registrar' in config:
         # Validate the live canonical binding before touching any exporter.
         merge_rows(product(config, require_api=True)['targets'], row)
-        apply_exporters()
-        api_exchange(config, request=request, descriptor=descriptor)
+        binding = apply_exporters()
+        api_exchange(config, request=request, descriptor=descriptor, health_binding=binding)
     else:
         commit_row(config, row, apply_exporters)
     receipt.update(status='succeeded', registered=True)

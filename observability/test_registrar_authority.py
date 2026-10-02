@@ -22,6 +22,15 @@ API_CONFIG = '/var/lib/railshot/config/observer-registrar.json'
 
 
 class RegistrarAuthorityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        with tempfile.TemporaryDirectory() as root:
+            cert = Path(root) / 'ca.crt'
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                '-keyout', str(Path(root) / 'key.pem'), '-out', str(cert), '-days', '1',
+                '-subj', '/CN=registrar-test'], check=True, capture_output=True)
+            cls.ca_pem = cert.read_text()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
@@ -55,7 +64,11 @@ class RegistrarAuthorityTests(unittest.TestCase):
         self.enterContext(patch.object(environment, 'read_private', side_effect=lambda path, **kwargs:
             read_private(config_file if str(path) == API_CONFIG else path, **kwargs)))
         self.enterContext(patch.dict(os.environ, {'RAILSHOT_OBSERVER_PRODUCT_FILE': str(self.state / 'product.json')}))
+        self.enterContext(patch('runtime_health.configure_runtime_healthz',
+            side_effect=lambda request, descriptor, *args: self.health_binding(descriptor['target_id'])))
         self.old, _ = registrar.registration_row(self.config, self.request('existing-node'), self.descriptors['existing-node'])
+        self.old['healthz_url'] = self.health_binding('existing-node')['healthz_url']
+        self.write(self.state / 'runtime-healthz.json', {'version': 1, 'targets': {'existing-node': self.health_binding('existing-node')}})
         self.write(self.state / 'product.json', {'version': 1, 'collector': registrar.collector(self.config), 'targets': [self.old]})
         self.syncs = []
         @contextmanager
@@ -74,16 +87,20 @@ class RegistrarAuthorityTests(unittest.TestCase):
             result.update(app='calculator', namespace='tenant-app', probe_url='https://calculator.example/health')
         return result
 
+    def health_binding(self, target):
+        ip = self.descriptors[target]['addresses']['private']
+        return {'healthz_url': f'https://{ip}:6443/healthz', 'server_name': ip, 'ca_pem': self.ca_pem}
+
     def api_payload(self, target):
         return {'version': 1, 'action': 'commit', 'config_file': API_CONFIG,
                 'collector': registrar.collector_route(self.config), 'request': self.request(target),
-                'descriptor': self.descriptors[target]}
+                'descriptor': self.descriptors[target], 'health_binding': self.health_binding(target)}
 
-    def remote(self, command, *, document=None):
+    def remote(self, command, *, document=None, timeout=None):
         self.assertEqual(command[0], 'fake-ssh')
         if document is not None:
-            self.syncs.append(copy.deepcopy(document)); self.write(self.collector_file, document)
-            return ''
+            self.syncs.append(copy.deepcopy(document)); self.write(self.collector_file, document['prometheus'])
+            return json.dumps({'synced': True})
         return self.collector_file.read_text()
 
     def test_concurrent_local_registration_and_delta_share_actual_lock_and_preserve_rows(self):
@@ -108,11 +125,11 @@ class RegistrarAuthorityTests(unittest.TestCase):
         @contextmanager
         def runtime(_):
             yield kube
-        def remote(command, *, document=None):
+        def remote(command, *, document=None, timeout=None):
             if document is not None and not entered.is_set():
                 entered.set()
                 self.assertTrue(release.wait(5), 'test failed to release the first writer')
-            return self.remote(command, document=document)
+            return self.remote(command, document=document, timeout=timeout)
         self.native.side_effect = remote
         first_request = self.request('normal-api', app=True)
         def delta():
@@ -139,6 +156,13 @@ class RegistrarAuthorityTests(unittest.TestCase):
         self.assertIn(self.old, product['targets'])
         self.assertEqual(json.loads(self.collector_file.read_text()), registrar.scrape_config(product['targets']))
         self.assertEqual(len(self.syncs), 2)
+        self.assertEqual(set(self.syncs[-1]['certificates']), {'existing-node', 'normal-api', 'host-delta'})
+        bindings = environment.read_private(self.state / 'runtime-healthz.json')['targets']
+        self.assertEqual(set(bindings), {'existing-node', 'normal-api', 'host-delta'})
+        self.assertEqual((self.state / 'runtime-healthz.json').stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len([r for r in product['targets'] if r['target_id'] == 'normal-api']), 2)
+        for name in ('product.json', 'desired.json'):
+            self.assertNotIn('ca_pem', (self.state / name).read_text())
 
     def test_wrong_canonical_environment_or_collector_fails_before_sync_or_callback(self):
         row, _ = registrar.registration_row(self.config, self.request('host-delta'), self.descriptors['host-delta'])
@@ -209,7 +233,8 @@ class RegistrarAuthorityTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout=json.dumps(response))
             with self.subTest(mode=mode), patch.object(registrar.subprocess, 'run', side_effect=execute) as execute_mock:
                 with self.assertRaises((ValueError, subprocess.TimeoutExpired)):
-                    registrar.api_exchange(self.host_config, request=request, descriptor=descriptor)
+                    registrar.api_exchange(self.host_config, request=request, descriptor=descriptor,
+                                           health_binding=self.health_binding('host-delta'))
                 execute_mock.assert_called_once()
             self.assertFalse((self.root / 'host-copy').exists())
             self.assertEqual(initial, {str(p): p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
@@ -229,6 +254,22 @@ class RegistrarAuthorityTests(unittest.TestCase):
             self.assertEqual(registrar.product(self.host_config, require_api=True), product)
             execute.assert_called_once()
             self.assertEqual(json.loads(execute.call_args.kwargs['input'])['action'], 'read')
+        self.assertFalse((self.root / 'host-copy').exists())
+
+    def test_host_sends_one_health_binding_and_accepts_the_enriched_node_row(self):
+        product = self.host(); request = self.request('host-delta')
+        descriptor = self.descriptors['host-delta']; binding = self.health_binding('host-delta')
+        row, _ = registrar.registration_row(self.host_config, request, descriptor)
+        product['targets'].append({**row, 'healthz_url': binding['healthz_url']})
+        response = SimpleNamespace(returncode=0, stdout=json.dumps({'status': 'succeeded', 'product': product}))
+        with patch.object(registrar.subprocess, 'run', return_value=response) as execute:
+            self.assertEqual(registrar.api_exchange(self.host_config, request=request,
+                descriptor=descriptor, health_binding=binding), product)
+            execute.assert_called_once()
+            payload = json.loads(execute.call_args.kwargs['input'])
+            self.assertEqual(payload['health_binding'], binding)
+            self.assertEqual(payload['request'], request)
+            self.assertNotIn('targets', payload)
         self.assertFalse((self.root / 'host-copy').exists())
 
 

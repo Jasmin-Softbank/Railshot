@@ -26,12 +26,12 @@ test('session history pages and live environment states remain truthful across n
     }
   });
   await store.close();
-  let broken = false, recovered = false;
+  let broken = false, recovered = false, healthFailed = false;
   const observeMetrics = async (row) => {
     const state = broken ? 'unavailable' : row.target_id === 'demo-gcp' && !recovered ? 'stale' : 'ready';
     const observed_at = new Date(Date.now() - (state === 'stale' ? 120000 : 0)).toISOString();
     return { target_id: row.target_id, app: row.app, deployment_id: row.id ?? null, checked_at: new Date().toISOString(), stale_after_seconds: 90,
-      runtime: { status: state, observed_at }, metrics: Object.fromEntries(Object.entries({ node_up: 1, cpu_percent: 0, memory_percent: 32.5, disk_percent: 20,
+      runtime: { status: state, observed_at }, metrics: Object.fromEntries(Object.entries({ runtime_healthz: healthFailed && row.target_id === 'demo-openstack' ? 0 : 1, node_up: 1, cpu_percent: 0, memory_percent: 32.5, disk_percent: 20,
         pods: 2, http: row.target_id === 'demo-openstack' && !recovered ? 0 : 1, network_receive_bytes_per_second: null, network_transmit_bytes_per_second: null })
         .map(([name, value]) => [name, { state: value === null ? 'no_data' : state, value: state === 'ready' ? value : null, observed_at, scope: 'target_node' }])) };
   };
@@ -92,9 +92,9 @@ test('session history pages and live environment states remain truthful across n
   await page.locator('[data-view="monitor"]').click();
   await page.waitForFunction(() => document.querySelector('#environment-message').textContent.includes('마지막 조회'));
   assert.equal(await page.locator('#environment-list tr').count(), 3);
-  assert.equal(await page.locator('#environment-list [data-state="ready"]').count(), 1);
+  assert.equal(await page.locator('#environment-list [data-state="ready"]').count(), 2);
   assert.equal(await page.locator('#environment-list [data-state="stale"]').count(), 1);
-  assert.equal(await page.locator('#environment-list [data-state="failed"]').count(), 1);
+  assert.equal(await page.locator('#environment-list [data-state="failed"]').count(), 0, 'app HTTP failure cannot disconnect the runtime');
   assert.match(await page.locator('#environment-list').innerText(), /0.0%/, 'observed zero remains a real zero');
   await page.locator('#monitor-provider').selectOption('gcp');
   await page.waitForFunction(() => document.querySelectorAll('#environment-list tr').length === 1);
@@ -106,6 +106,24 @@ test('session history pages and live environment states remain truthful across n
   await page.waitForFunction(() => document.querySelector('#environment-list [data-state="ready"]'));
   await page.locator('#monitor-provider').selectOption('');
   await page.waitForFunction(() => document.querySelectorAll('#environment-list tr').length === 3);
+  delete cd.targets['demo-openstack'];
+  await page.locator('#monitor-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#environment-list').textContent.includes('앱 미지정'));
+  assert.equal(await page.locator('#environment-list [data-state="ready"]').count(), 3, 'deleting the app binding preserves runtime connectivity');
+  healthFailed = true; await page.locator('#monitor-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#environment-list [data-state="failed"]'));
+  assert.equal(await page.locator('#environment-list [data-state="ready"]').count(), 2);
+  healthFailed = false; await page.locator('#monitor-refresh').click();
+  await page.waitForFunction(() => document.querySelectorAll('#environment-list [data-state="ready"]').length === 3);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  await page.locator('[data-view="deploy"]').click();
+  await page.getByRole('radio', { name: /온프레미스/ }).check();
+  await page.locator('#provider').selectOption('openstack');
+  await page.waitForFunction(() => document.querySelector('#runtime-connection-status').textContent.includes('런타임 연결 정상'));
+  assert.match(await page.locator('#connection-status').innerText(), /앱 배포 설정.*준비되지/, 'deployment settings are independent from a connected runtime');
+  await page.locator('[data-view="monitor"]').click();
+  await page.waitForFunction(() => document.querySelector('#environment-message').textContent.includes('마지막 조회'));
   await page.locator('#environment-detail summary').first().click();
   assert.match(await page.locator('#environment-detail').innerText(), /네트워크 수신.*데이터 없음/s);
   if (process.env.CI_OUTPUT_DIR) {
@@ -140,7 +158,7 @@ test('session history pages and live environment states remain truthful across n
     await page.clock.fastForward(15001);
     await page.waitForFunction(() => document.querySelector('#environment-message').textContent.includes('환경 조회 실패'));
     assert.match(await page.locator('#environment-message').innerText(), /30초 후/);
-    assert.equal(await page.locator('#environment-list [data-state="failed"]').count(), 3);
+    assert.equal(await page.locator('#environment-list [data-state="missing"]').count(), 3);
     await page.unroute(path);
     await Promise.all(held.map((route) => route.continue().catch(() => {})));
     await page.clock.fastForward(30001);

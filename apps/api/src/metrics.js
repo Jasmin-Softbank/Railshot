@@ -2,7 +2,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { APP_NAME, TARGET_ID } from './contract.js';
 
 const STALE_SECONDS = 90;
-const scopes = { pods: 'app_pods', node_up: 'target_node', cpu_percent: 'target_node', memory_percent: 'target_node',
+const scopes = { runtime_healthz: 'target_runtime', pods: 'app_pods', node_up: 'target_node', cpu_percent: 'target_node', memory_percent: 'target_node',
   disk_percent: 'target_node', network_receive_bytes_per_second: 'target_node', network_transmit_bytes_per_second: 'target_node', http: 'app_probe' };
 const dns = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const instance = /^[a-zA-Z0-9.-]+:[0-9]{1,5}$/;
@@ -25,7 +25,15 @@ function configuration(path) {
       if (!APP_NAME.test(target.app) || !dns.test(target.namespace || '') || !instance.test(target.cluster_instance || '')) throw new Error('Invalid app observer binding');
       safeUrl(target.probe_url);
     } else if (target.namespace != null || target.probe_url != null) throw new Error('App identity required for app observations');
+    if (target.healthz_url != null) {
+      const url = safeUrl(target.healthz_url);
+      if (url.protocol !== 'https:' || url.pathname !== '/healthz') throw new Error('Native runtime health endpoint required');
+    }
     safeUrl(target.prometheus_url); seen.add(key);
+  }
+  for (const target of config.targets) {
+    if (new Set(config.targets.filter((row) => row.target_id === target.target_id && row.healthz_url)
+      .map((row) => `${row.prometheus_url}|${row.node_instance}|${row.healthz_url}`)).size > 1) throw new Error('Ambiguous runtime health binding');
   }
   let collector;
   if (config.collector) {
@@ -59,7 +67,10 @@ function queries(target) {
     }) },
     { names: ['pods'], query: group(cluster, { pods: [`sum(${pod} and on(namespace,pod,uid) ${podLabels})`, `min(timestamp(${pod}) and on(namespace,pod,uid) ${podLabels})`] }) },
     { names: ['http'], query: group(http, { http: [`probe_success${http}`, `timestamp(probe_success${http})`] }) },
-  ].filter(({ names }) => target.app || names[0] !== 'pods' && names[0] !== 'http');
+    { names: ['runtime_healthz'], query: group(selector('runtime_healthz', target.healthz_url), {
+      runtime_healthz: [`probe_success${selector('runtime_healthz', target.healthz_url)}`, `timestamp(probe_success${selector('runtime_healthz', target.healthz_url)})`],
+    }) },
+  ].filter(({ names: [name] }) => name === 'runtime_healthz' ? Boolean(target.healthz_url) : target.app || !['pods', 'http'].includes(name));
 }
 async function query(url, expression, fetchImpl) {
   const endpoint = new URL(`${url.replace(/\/$/, '')}/api/v1/query`);
@@ -114,7 +125,9 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
       return result;
     }
     const selected = bindings.find((item) => item.app == null) || bindings[0];
-    const target = selected && { ...selected, app: selected.app && record.app || null };
+    const healthBinding = config.targets.find((item) => item.target_id === nodeId && item.healthz_url);
+    const target = selected && { ...selected, app: selected.app && record.app || null,
+      healthz_url: selected.healthz_url || (healthBinding?.prometheus_url === selected.prometheus_url && healthBinding.node_instance === selected.node_instance ? healthBinding.healthz_url : null) };
     if (!target?.app) for (const name of ['pods', 'http']) result.metrics[name] = metric(name, 'unsupported');
     if (!target) { for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unsupported'); return result; }
     await Promise.all(queries(target).map(async ({ names, query: expression }) => {
@@ -126,7 +139,7 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
           const fresh = timestamp !== null && checked - timestamp <= STALE_SECONDS * 1000 && timestamp <= checked + 5000;
           const value = values.get(name);
           const state = ![0, 1].includes(values.get('up')) || timestamp === null ? 'no_data' : !fresh ? 'stale' : values.get('up') === 0 ? 'collection_failed'
-            : value === undefined || value < 0 || (['http', 'node_up'].includes(name) ? ![0, 1].includes(value) : name.endsWith('percent') && value > 100) ? 'no_data' : 'ready';
+            : value === undefined || value < 0 || (['http', 'node_up', 'runtime_healthz'].includes(name) ? ![0, 1].includes(value) : name.endsWith('percent') && value > 100) ? 'no_data' : 'ready';
           result.metrics[name] = metric(name, state, state === 'ready' ? value : null, timestamp === null ? null : new Date(timestamp).toISOString());
         }
       } catch { for (const name of names) result.metrics[name] = metric(name, 'unavailable'); }
