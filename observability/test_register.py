@@ -62,6 +62,19 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(result['scrape_configs'][0]['static_configs'][0]['targets'], ['192.0.2.10:30910', '192.0.2.11:30910'])
         self.assertEqual(len(rows), 1)
 
+
+    def test_gcp_uses_verified_public_route_and_actual_observer_source(self):
+        config = {**self.config, 'observer_source_cidr': '198.51.100.20/32'}
+        settings(config)
+        descriptor = {**self.descriptor, 'provider_kind': 'gcp', 'management_endpoint': 'https://198.51.100.10:6443'}
+        row, rendering = registration_row(config, self.request, descriptor)
+        self.assertEqual(row['node_instance'], '198.51.100.10:30910')
+        self.assertEqual(row['node_ip'], self.request['node_ip'])
+        self.assertEqual(rendering['observer_source_cidr'], '198.51.100.20/32')
+        for source in ['0.0.0.0/0', '198.51.100.0/24', '127.0.0.1/32']:
+            with self.assertRaises(ValueError):
+                settings({**config, 'observer_source_cidr': source})
+
     def test_direct_observer_ssh_keeps_identity_and_default_transport(self):
         request = {'inventory': {'control_plane': [{'private_ipv4': self.config['observer_ip'],
             'ssh': {'transport_ref': 'ssm:ap-northeast-2:i-12345678'}}]}}
@@ -123,6 +136,8 @@ class RegistrationTests(unittest.TestCase):
             output = Path(root) / 'receipt.json'
             writes = []
             def kube(namespace, *args, document=None):
+                if args[:2] == ('get', 'pods'):
+                    return {'items': [{'metadata': {'name': 'cilium'}, 'status': {'conditions': [{'type': 'Ready', 'status': 'True'}]}}]}
                 if args[:2] == ('get', 'services'):
                     return {'items': []}
                 if args[0] == 'apply':
@@ -132,7 +147,7 @@ class RegistrationTests(unittest.TestCase):
             def runtime(_):
                 yield kube
             environment = SimpleNamespace(read_private=lambda path: json.loads(Path(path).read_text()), runtime_kubectl=runtime)
-            with patch.dict(sys.modules, {'environment': environment, 'argo': SimpleNamespace(native=None)}), patch.object(registration, 'node_request', return_value=({}, self.descriptor)), patch.object(registration, 'sync_observer', side_effect=RuntimeError('offline')):
+            with patch.dict(sys.modules, {'environment': environment, 'argo': SimpleNamespace(native=None)}), patch.object(registration, 'node_request', return_value=({}, self.descriptor)), patch.object(registration, 'sync_observer', side_effect=RuntimeError('offline')), patch.object(registration, 'wait_network_policy'):
                 with self.assertRaises(RuntimeError):
                     registration.register(config, self.request, output)
                 self.assertFalse((Path(root) / 'product.json').exists())
@@ -142,7 +157,7 @@ class RegistrationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     registration.register(config, {**self.request, 'environment_id': 'env-2'}, output)
                 self.assertEqual(len(writes), before)
-            with patch.dict(sys.modules, {'environment': environment, 'argo': SimpleNamespace(native=None)}), patch.object(registration, 'node_request', return_value=({}, self.descriptor)), patch.object(registration, 'sync_observer'):
+            with patch.dict(sys.modules, {'environment': environment, 'argo': SimpleNamespace(native=None)}), patch.object(registration, 'node_request', return_value=({}, self.descriptor)), patch.object(registration, 'sync_observer'), patch.object(registration, 'wait_network_policy'):
                 self.assertTrue(registration.register(config, self.request, output)['registered'])
                 published = json.loads((Path(root) / 'product.json').read_text())['targets']
                 node = next(row for row in published if not row.get('app'))
@@ -178,25 +193,18 @@ class RegistrationTests(unittest.TestCase):
             registration_row(self.config, {**request, 'probe_url': self.request['probe_url']}, self.descriptor)
 
 
-    def test_gcp_uses_verified_public_route_and_actual_observer_source(self):
-        config = {**self.config, 'observer_source_cidr': '198.51.100.20/32'}
-        settings(config)
-        descriptor = {**self.descriptor, 'provider_kind': 'gcp', 'management_endpoint': 'https://198.51.100.10:6443'}
-        row, rendering = registration_row(config, self.request, descriptor)
-        self.assertEqual(row['node_instance'], '198.51.100.10:30910')
-        self.assertEqual(row['node_ip'], self.request['node_ip'])
-        self.assertEqual(rendering['observer_source_cidr'], '198.51.100.20/32')
-        for source in ['0.0.0.0/0', '198.51.100.0/24', '127.0.0.1/32']:
-            with self.assertRaises(ValueError):
-                settings({**config, 'observer_source_cidr': source})
-
     def test_node_health_upgrade_survives_failed_sync_without_publishing_trust(self):
         request = {k: v for k, v in self.request.items() if k not in {'app', 'namespace', 'probe_url'}}
         row, _ = registration_row(self.config, request, self.descriptor)
         binding = {'healthz_url': 'https://192.0.2.10:6443/healthz', 'server_name': '192.0.2.10', 'ca_pem': self.ca_pem}
         @contextmanager
         def runtime(_):
-            yield lambda namespace, *args, **kw: {'items': []} if args[:2] == ('get', 'services') else None
+            def kube(namespace, *args, **kw):
+                if args[:2] == ('get', 'pods'):
+                    return {'items': [{'metadata': {'name': 'cilium'}, 'status': {'conditions': [{'type': 'Ready', 'status': 'True'}]}}]}
+                return {'items': []} if args[:2] == ('get', 'services') else None
+            with patch.object(registration, 'wait_network_policy'):
+                yield kube
         with tempfile.TemporaryDirectory() as root:
             state = Path(root).resolve()
             config = {**self.config, 'state_dir': str(state)}
@@ -295,6 +303,55 @@ class RegistrationTests(unittest.TestCase):
             with patch('subprocess.run') as run, self.assertRaises(AssertionError):
                 sync()
             run.assert_not_called()
+
+    def test_network_policy_must_be_imported_and_realized_before_exporters(self):
+        for mode in ('cilium_missing', 'stale_policy', 'wait_failed', 'ready'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = str(Path(directory).resolve())
+                config = {**self.config, 'state_dir': root}
+                writes, events = [], []
+                policy = None
+                def kube(namespace, *args, document=None):
+                    nonlocal policy
+                    if args[:2] == ('get', 'pods'):
+                        return {'items': [] if mode == 'cilium_missing' else [{'metadata': {'name': 'cilium'},
+                            'status': {'conditions': [{'type': 'Ready', 'status': 'True'}]}}]}
+                    if args[:2] == ('get', 'services'):
+                        return {'items': []}
+                    if args[0] == 'apply':
+                        writes.append(document['kind']); events.append(document['kind'])
+                        if document['kind'] == 'CiliumClusterwideNetworkPolicy':
+                            policy = {**document, 'metadata': {**document['metadata'], 'uid': 'policy-uid'}}
+                    if args[:2] == ('get', 'CiliumClusterwideNetworkPolicy'):
+                        return policy
+                    if args[0] == 'exec':
+                        if 'get' in args:
+                            labels = [{'source': 'k8s', 'key': 'io.cilium.k8s.policy.uid', 'value': 'policy-uid'},
+                                      *policy['spec']['labels']]
+                            if mode == 'stale_policy':
+                                labels = [*labels[:1], {**labels[1], 'value': 'older-policy'}]
+                            return {'revision': 7, 'policy': json.dumps([{'Labels': labels}])}
+                        if 'sh' in args:
+                            events.append('policy_wait')
+                            if mode == 'wait_failed':
+                                raise RuntimeError('policy not realized')
+                    return None
+                @contextmanager
+                def runtime(_):
+                    yield kube
+                environment = SimpleNamespace(read_private=lambda path: json.loads(Path(path).read_text()), runtime_kubectl=runtime)
+                with patch.dict(sys.modules, {'environment': environment, 'argo': SimpleNamespace(native=None)}), \
+                        patch.object(registration, 'node_request', return_value=({}, self.descriptor)), \
+                        patch.object(registration, 'sync_observer'), \
+                        patch.object(registration.time, 'monotonic', side_effect=[0, 61]):
+                    if mode == 'ready':
+                        self.assertTrue(registration.register(config, self.request, Path(root) / 'receipt.json')['registered'])
+                        self.assertLess(events.index('policy_wait'), events.index('DaemonSet'))
+                    else:
+                        with self.assertRaises((RuntimeError, ValueError)):
+                            registration.register(config, self.request, Path(root) / 'receipt.json')
+                        self.assertEqual(writes, [] if mode == 'cilium_missing' else ['CiliumClusterwideNetworkPolicy'])
+                        self.assertFalse((Path(root) / 'product.json').exists())
 
 
 if __name__ == '__main__':

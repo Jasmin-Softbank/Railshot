@@ -1,5 +1,6 @@
-# Apply as bootstrap configuration after replacing APPLICATION_REQUIRED and
-# TARGET_REQUIRED with the registered Application and target. Separate from platform CD.
+# bootstrap-platform.py replaces the registered target and Application names.
+# With github.application=null it omits the Application rule until app registration.
+# Separate from platform CD.
 apiVersion: v1
 kind: ServiceAccount
 metadata: {name: railshot-product, namespace: railshot-system}
