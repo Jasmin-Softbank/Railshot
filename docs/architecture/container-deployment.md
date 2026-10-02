@@ -6,20 +6,20 @@
 
 대시보드, 제품 API, MCP, CI runner는 별도 이미지로 빌드한다. CD는 공식 Argo CD 컨테이너를 재사용하고 고객 앱은 기존 CI가 검사한 이미지 digest로 배포한다. MCP는 현재 stdio 방식이므로 연결한 클라이언트에서 컨테이너를 실행한다. 새 로컬 Kubernetes는 구성하지 않는다.
 
-이 문서는 배치 설계와 컨테이너·CI 선언을 설명한다. 기존 빌드 EC2의 운영 K3s 가입, 이미지 게시, 운영 설치, UI의 전체 배포 기능이 완료됐다는 뜻은 아니다.
+이 문서는 배치 설계와 현재 컨테이너·CI 선언을 설명한다. [제품 API](../api/product.md)·[OpenAPI](../api/product.openapi.json)에 v1 빌드·배포·환경 연결을 정의했고, Dashboard는 같은 origin의 `/api/`를 호출한다. 사용자 계정·로그인·팀원 allowlist 없이 같은 workspace를 사용한다. 코드 연결을 기존 빌드 EC2의 운영 K3s 가입, 이미지 게시·운영 설치, 실제 클라우드 E2E 완료로 해석하지 않는다.
 
 ```mermaid
 flowchart TB
   subgraph OPS["운영 K3s · EC2 2대"]
     subgraph PLATFORM["플랫폼 노드"]
       D["프런트 Pod<br/>Dashboard · Nginx"]
-      A["제품 API Pod<br/>CI dispatch"]
+      A["제품 API Pod<br/>CI·환경·CD 조율"]
       C["CD · Argo CD Pod<br/>배포 선언 적용"]
     end
     subgraph BUILD["빌드 워커 · taint"]
       R["CI runner Job<br/>검사 · 호스트 BuildKit"]
     end
-    D -. "분리 배포 연결 예정" .-> A
+    D -->|"같은 origin /api 프록시"| A
     A -->|"GitHub Actions"| R
     R -. "이미지 게시 · Git 검토 경유" .-> C
   end
@@ -66,7 +66,7 @@ flowchart TB
 
 MCP는 현재 stdio 방식으로 클라이언트 측 컨테이너에서 실행한다. 운영 노드에 별도 MCP 서버를 추가하지 않으며, 허가된 관리 경로/port-forward로 내부 API에 연결한다.
 
-**빌드 워커의 EC2 이름은 `railshot-build-worker-aws-01`이다.** 기존 `railshot-ci-k3s-aws`의 표시 이름만 바꿨으며 인스턴스 ID는 `i-09955d23ad1d8dbe2`다. 이름에서 빌드 역할을 드러내고, 고객 배포 대상인 K3s와 혼동하지 않게 했다. 이름 변경 후에도 중지 상태이며, 새 컨테이너 배포나 클러스터 가입을 실행한 것은 아니다.
+**빌드 워커의 EC2 이름은 `railshot-build-worker-aws-01`이다.** 기존 `railshot-ci-k3s-aws`의 표시 이름만 바꿨으며 인스턴스 ID는 `i-09955d23ad1d8dbe2`다. 이름에서 빌드 역할을 드러내고 고객 배포 대상인 K3s와 구분한다. 2026-10-02 이름 변경 확인 당시에는 중지 상태였고 새 컨테이너 배포나 클러스터 가입을 실행하지 않았다. 이후 실제 상태·가입·job 결과는 운영 검증 기록으로 별도 확인한다.
 
 ## 2025 사례와 배치 판단
 
@@ -92,7 +92,7 @@ DB 배치는 화균 담당의 [고정된 README](https://github.com/Jasmin-Softb
 
 하나의 Patroni 클러스터를 여러 거점에 배치하며 예시는 DB 3개·etcd 3개·HAProxy 1개다. 이 예시가 위 그림의 각 환경별 최종 VM 수를 확정하지는 않는다. 거점별 독립 대기 클러스터나 자동 거점 승격은 미구현이다. 기본값은 동기 복제, `synchronous_mode_strict=true`, `synchronous_node_count=1`이며 동기 복제본이 없으면 쓰기를 차단한다. `backup_enabled=false`이고 단일 HAProxy는 단일 장애점이므로 원격 복구와 접속점 이중화가 완료됐다고 표시하지 않는다.
 
-현재 [Ansible HTTP 계약](../api/ansible.md)은 등록된 HA profile과 대상·TLS/Vault/SSH 참조를 검증한 뒤 담당 플레이북을 실행하고 결과 receipt를 확인하는 코드까지 연결되어 있다. standalone 설치는 지원하지 않는다. 이 연결 코드의 병합은 실제 DB 설치·복제 검증을 뜻하지 않으며 DB VM 작업은 동결 상태로 둔다. [CD 인계 계약](../../gitops/README.md)은 DB 자격 주입과 외부 egress를 지원 범위에서 제외한다. DB 사용 앱을 연결하려면 HAProxy endpoint·TLS·자격 참조·앱에서 DB로 가는 네트워크 정책을 맞추고 실제 연결을 검증해야 한다.
+현재 [Ansible HTTP 계약](../api/ansible.md)은 등록된 HA profile과 대상·TLS/Vault/SSH 참조를 검증한 뒤 담당 플레이북을 실행하고 결과 receipt를 확인하는 코드까지 연결되어 있다. standalone 설치는 지원하지 않는다. DB VM을 마련한 별도 담당 채팅에서 실제 DB 검증을 진행하며, 이 문서는 설치·복제 검증 완료를 주장하지 않는다. 제품 환경 API의 DB 실행은 아직 연결하지 않았다. [CD 인계 계약](../../gitops/README.md)은 DB 자격 주입과 외부 egress를 지원 범위에서 제외한다. DB 사용 앱을 연결하려면 HAProxy endpoint·TLS·자격 참조·앱에서 DB로 가는 네트워크 정책을 맞추고 실제 연결을 검증해야 한다.
 
 ## 파일과 실행 책임
 
@@ -109,9 +109,25 @@ DB 배치는 화균 담당의 [고정된 README](https://github.com/Jasmin-Softb
 
 Provider Controller와 Terraform은 host 준비, Ansible은 guest 검사와 runtime 호출 책임을 유지한다. 운영 K3s의 노드 배치 변경과 고객 K3s·DB의 설치는 별개 작업이며 이 문서 변경으로 고객 runtime을 재설치하지 않는다.
 
+## API 실행 도구와 영속 상태
+
+[API Dockerfile](../../apps/api/Dockerfile)의 `api` target은 Node 서비스와 함께 Python, Git, SSH, PyYAML, jsonschema, Ansible, Terraform, kubectl, AWS CLI·SSM plugin, Google Cloud CLI를 설치한다. 제품의 native CD·환경 어댑터가 Pod 안에서 기존 Python 실행기를 호출하기 위한 도구다. MCP target에는 이 실행 도구를 추가하지 않는다. API가 Docker/BuildKit으로 고객 코드를 직접 빌드하지도 않는다.
+
+[runtime-install.sh](../../apps/api/runtime-install.sh)는 Linux amd64 컨테이너 build에서만 실행한다. Python 패키지는 기존 CI requirements의 고정 버전, Terraform·kubectl은 CI·K3s 버전 정책을 재사용한다. 추가 도구의 공식 배포 URL·버전·SHA-256은 [runtime-tools.json](../../apps/api/runtime-tools.json)에 고정한다. 내려받은 파일을 모두 검증한 뒤 설치하고, [runtime-smoke.py](../../apps/api/runtime-smoke.py)가 버전·Python import·native CLI 도움말·Ansible syntax를 확인한다. Dockerfile은 UID 1000으로도 이 smoke를 실행한다. 이는 클라우드 자격·연결·VM 설치 시험과 구분한다.
+
+이미지에는 기존 GitOps bridge와 의존 CI 모듈·schema, Terraform AWS/GCP 모듈과 lock 파일, Ansible guest/runtime·tasks·group_vars·schema, deployment bootstrap/Cilium·버전 정책을 함께 복사한다. 운영 SSH 키·known_hosts·Provider 자격·kubeconfig·Git/CD 설정은 이미지에 넣지 않고 실행 시 비공개 설정으로 제공한다.
+
+API는 UID/GID 1000, root filesystem 읽기 전용, 쓰기 가능한 `/tmp`와 `/var/lib/railshot`을 사용한다. Kubernetes는 `railshot-api` PVC 4 GiB·ReadWriteOnce, replica 1, `Recreate`로 이전·새 API Pod의 동시 쓰기를 피한다. `RAILSHOT_STATE_DIR=/var/lib/railshot/state`에는 접수 기록·idempotency·소스 snapshot·환경 결과를 보존한다. 파일 잠금은 여러 호스트의 분산 잠금이 아니므로 replica 증가나 같은 PVC의 별도 writer는 지원하지 않는다. 재시작 후 미완료 작업은 unknown으로 보존하고 자동 재실행하지 않는다.
+
+`railshot-executors` Secret은 init container가 `/var/lib/railshot/config`에 복사한다. 디렉터리 0700·설정 파일 0600과 API 실행 UID 소유 조건을 맞추며 기본 manifest는 `cd.json`·`kubeconfig` 경로를 설정한다. 새 환경 기능을 켜려면 `RAILSHOT_PROFILES_FILE`, profile의 Terraform state·target·SSH 참조와 Provider 자격도 이 권한 모델로 준비해야 한다. Secret을 root 소유 0444로 직접 mount하는 것만으로 개인키·비공개 profile 검사를 통과하지 않는다. known_hosts는 신뢰된 host key를 사전 등록하고 group/other 쓰기를 금지한다.
+
+[prepare-state.js](../../apps/api/prepare-state.js)는 최초 PVC에서 `Jasmin-Softbank/Railshot`의 기존 `deployment/apps` 브랜치를 `/var/lib/railshot/repository`에 clone한다. 이후 init은 저장된 checkout의 브랜치·origin을 확인한다. 이 앱 선언 브랜치는 API rollout 전에 별도로 준비해야 하며, 플랫폼 이미지 release가 생성하는 `deployment/platform`과 구분한다. init과 CD의 Git 인증은 서버 내부 `GITHUB_TOKEN`과 이미지의 askpass를 사용한다.
+
+HOME은 쓰기 가능한 `/var/lib/railshot`이며 Ansible·gcloud의 실행 파일과 임시 상태가 이 경로를 사용할 수 있다. Git config checkout·Terraform state도 API UID가 쓰고 외부에 공개되지 않는 경로여야 한다. GitHub·Provider·SSH 자격을 전달하는 설정은 서버 운영 설정이며 사용자 로그인 데이터가 아니다. 현재 기본 manifest의 CD 설정과 추가 환경 profile 준비 여부를 실제 배포 전에 각각 확인한다.
+
 ## 로컬 실행
 
-저장소 루트에서 실행한다. 토큰을 출력하지 않고 Git에서 제외된 `.local`에 만든다. 로컬 UID를 API/MCP에 전달해 Compose의 파일 secret을 읽을 수 있게 한다. CI runner용 Compose는 맥에서 실행하지 않는다.
+저장소 루트에서 실행한다. 현재 Compose는 Dashboard Nginx→API 내부 연결용 토큰을 사용하고 브라우저에는 노출하지 않는다. 토큰을 출력하지 않고 Git에서 제외된 `.local`에 만든다. 로컬 UID를 API/MCP에 전달해 Compose의 파일 secret을 읽을 수 있게 한다. state init 서비스는 named volume을 같은 UID·0700으로 준비한다. CI runner용 Compose는 맥에서 실행하지 않는다.
 
 ```sh
 mkdir -p .local/container-secrets
@@ -123,7 +139,7 @@ docker compose -f deployment/compose.yaml --profile mcp build
 docker compose -f deployment/compose.yaml up -d dashboard api
 ```
 
-화면은 `http://127.0.0.1:4181`, API health는 `http://127.0.0.1:4173/healthz`다. GitHub 자격과 target 없이도 컨테이너 health와 MCP 프로토콜을 확인할 수 있으나 배포 요청은 503이다. 실제 게시에는 [환경 변수 예시](../../deployment/.env.example)를 비공개 파일로 복사해 값을 채우고 Compose의 `--env-file`로 전달한다.
+화면은 `http://127.0.0.1:4181`, API health는 `http://127.0.0.1:4173/healthz`다. 화면의 `/api/` 요청은 Nginx가 내부 API로 전달하므로 사용자 로그인·토큰 입력이 없다. GitHub 자격과 target 없이도 컨테이너 health와 MCP 프로토콜을 확인할 수 있고 대상 목록은 비어 있다. 실행 기능 미설정 요청은 503이다. 실제 CI 게시에는 [환경 변수 예시](../../deployment/.env.example)를 비공개 파일로 복사해 값을 채우고 Compose의 `--env-file`로 전달한다. 전체 앱 배포와 환경 준비에는 CD·profile 파일, 자격과 쓰기 가능한 HOME·실행 state mount를 별도로 준비한다.
 
 MCP 클라이언트의 command는 `docker`, args는 아래와 같다. `-T`로 터미널 제어 문자가 JSON-RPC stdout에 섞이지 않게 한다. API 컨테이너를 먼저 시작하고 관련 환경 변수를 MCP 클라이언트 프로세스에도 전달한다.
 
@@ -139,7 +155,15 @@ Railshot 자체의 변경 검사는 [railshot-ci.yml](../../.github/workflows/ra
 
 `Platform containers` workflow는 선택된 이미지마다 빌드 후 실제 entrypoint를 실행한다. UI assets, API Host/인증/Secret 파일, MCP 초기화, runner 도구를 검사한다. CI runner의 전용 VM firewall·등록·실제 job과 클라우드 배포는 이 smoke 검사와 별개다.
 
-`Publish platform containers`에서 이미지 게시가 필요할 때 검토한 `main` 또는 `integration/**` ref에서 workflow_dispatch의 `publish=true`를 사용한다. 일반 PR은 이미지를 게시하지 않는다. 게시 job은 빌드 job의 검사한 이미지 tar를 받아 그대로 GHCR에 게시하며 재빌드하지 않는다. component별 JSON artifact에는 `ghcr.io/jasmin-softbank/railshot-<component>@sha256:...`가 남는다. 이들을 합친 `images.json`으로 배포 선언을 만든다.
+`Publish platform containers`는 검토한 `main` 또는 `integration/**` ref에서 실행한다. `publish=true`이면 빌드·smoke를 통과한 이미지 tar를 그대로 GHCR에 게시하며 재빌드하지 않는다. 일반 PR은 게시하지 않는다. component별 JSON artifact에는 `ghcr.io/jasmin-softbank/railshot-<component>@sha256:...`가 남는다.
+
+플랫폼까지 연결할 때는 **`publish=true`, `deploy=true`와 dashboard·api를 모두 포함한 components**를 지정한다. deploy 기본값은 false다. 저장소 Actions 변수 `RAILSHOT_PLATFORM_TARGET_ID`, `RAILSHOT_PLATFORM_NODE_PORT`가 있어야 하며 등록 target와 30000–32767의 할당 포트인지 실행 전에 검사한다. workflow의 release concurrency는 중간 실행을 취소하지 않고 같은 게시·선언 갱신을 직렬화한다.
+
+deploy job은 같은 workflow run에서 게시한 digest artifact만 합쳐 검토 SHA의 [renderer](../../deployment/scripts/render-platform.py)를 호출한다. [publish-platform.py](../../deployment/scripts/publish-platform.py)는 `deployment/platform` 전용 브랜치의 **`gitops/applications/railshot-platform/workload.json` 한 파일만** commit하고 일반 fast-forward push한다. 브랜치가 없으면 검토한 소스 SHA에서 시작하고, 이미 있으면 다른 파일과 기존 이력을 유지한다. 강제 push·전체 branch 덮어쓰기는 하지 않으며 push 충돌은 실패로 남긴다. AppProject/Application과 운영 Secret·클러스터 자격은 이 출력 경로에 넣지 않는다.
+
+운영자가 최초 등록한 플랫폼 Argo Application은 `deployment/platform`을 감시하고 [공식 자동 sync](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)로 원하는 상태를 적용한다. `prune:false`, `selfHeal:true`이며 삭제 자동화·Namespace/Secret 생성 권한은 켜지 않는다. CI는 Kubernetes·Argo 자격 없이 Git 선언까지만 갱신한다. **workflow deploy 성공은 Git 원하는 상태의 게시 성공이며**, 실제 Argo revision·Synced/Healthy, Pod Ready·image digest, railshot.io HTTP 검증은 별도 인수 결과다. 최초 Application 등록과 저장소 접근·Secret·PVC 준비도 여전히 운영자 작업이다.
+
+아래 명령은 게시 digest의 선언을 로컬에서 검토하는 방법이다. 자동 release에서는 같은 renderer를 사용한다.
 
 ```sh
 python3 -c 'import json,pathlib; result={}; [result.update(json.loads(p.read_text())) for p in pathlib.Path("/private/published").glob("*.json")]; pathlib.Path("/private/images.json").write_text(json.dumps(result))'
@@ -169,13 +193,15 @@ python3 deployment/scripts/render-platform.py /private/images.json \
 
 운영 CNI의 목표 소스는 Cilium `1.20.2`이며 기존 Flannel 서버는 [별도 전환 절차](../operations/control-cilium-migration.md)를 따른다. Cilium 사전 검사는 운영 server 한 대와 전용 build agent 한 대의 배치를 허용하고 고객 프로필의 단일 노드 제한은 유지한다. 이는 노드 가입과 Docker/Cilium 공존이 실제로 검증됐다는 뜻은 아니다.
 
-1. 운영자가 `railshot-system` namespace와 해당 namespace의 `ghcr-pull`, `railshot-api` Secret(`token`), `railshot-github` Secret(`token`)을 비공개 입력에서 준비한다. API token은 UID/GID 1000이 읽도록 `0440`+`fsGroup:1000`으로 mount한다. GitHub 자격은 API에만 준다.
-2. 검토한 renderer 출력만 `gitops/applications/railshot-platform/workload.json`에 넣어 config commit을 만든다. AppProject/Application 파일의 `targetRevision`을 그 정확한 commit으로 교체한다. 이 파일은 workload 경로 밖에 유지한다.
-3. namespace와 선언 범위를 확인한 뒤 AppProject/Application을 적용하고 수동 sync한다. 자동 sync·prune·Namespace/Secret 생성 권한은 넣지 않았다. 초기 requests/limits는 측정 전 시작값이므로 기존 운영 노드 여유량과 업로드 메모리를 확인한다.
+1. 운영자가 `railshot-system` namespace와 해당 namespace의 `ghcr-pull`, `railshot-api` Secret(`token`), `railshot-github` Secret(`token`), `railshot-executors` Secret을 비공개 입력에서 준비한다. 내부 API token은 API UID/GID 1000과 Dashboard UID/GID 101이 각각 읽도록 0440과 각 Pod의 fsGroup으로 mount한다. Nginx가 내부 요청에만 token을 주입하며 브라우저에 전달하지 않는다. GitHub·native 실행 자격은 API에만 준다. rollout 전에 `deployment/apps` 브랜치, 등록 대상의 고객 AppProject/Application, [railshot-product ServiceAccount·권한](../../deployment/manifests/product-access.yaml)을 별도로 bootstrap한다. 권한 선언의 `APPLICATION_REQUIRED`는 등록한 Application 이름으로 치환한다. 제품 API는 그 Application의 get/patch만 허용하므로 최초 생성은 운영자 bootstrap이 담당한다. PVC 바인딩과 init container의 설정 소유권·권한을 확인한다.
+2. Actions의 target·NodePort 변수를 설정하고 검토한 ref에서 `publish=true`, `deploy=true`로 실행해 전용 `deployment/platform` 브랜치와 workload 선언을 만든다. Application의 `targetRevision`은 이 브랜치를 가리킨다. AppProject/Application 파일은 workload 경로 밖에 유지한다.
+3. namespace·저장소 접근·선언 범위를 확인한 뒤 [AppProject/Application](../../gitops/applications/railshot-platform.yaml)을 최초 적용한다. 이후 전용 브랜치 변경은 native Argo 자동 sync가 적용한다. `prune:false`, `selfHeal:true`이며 Namespace/Secret 자동 생성은 허용하지 않는다. API의 한 replica·Recreate·PVC와 초기 requests/limits를 확인한다. 초기 자원값은 측정 전 시작값이므로 운영 노드 여유량과 업로드·native 도구 사용량을 확인한다.
 4. 기본 Service는 모두 ClusterIP다. 우선 승인된 운영 context에서 `kubectl -n railshot-system port-forward service/railshot-dashboard 4181:8080`, API는 `service/railshot-api 4173:4173`으로 검증한다. API readiness는 `configured:true`도 확인하지만 GitHub 자격의 실제 권한을 보증하지 않으므로 실요청 검증이 별도로 필요하다.
-5. 공개 UI가 필요하면 renderer에 할당한 `--dashboard-node-port`를 추가하고 기존 `infrastructure/terraform/aws-edge`의 host route로 운영 노드 사설 IP와 연결한다. health path는 `/healthz`. `externalTrafficPolicy:Local`이므로 ALB target 노드에 실제 UI Pod가 있어야 한다. 보안 그룹은 ALB에서 오는 해당 포트만 허용한다. API에는 공개 route나 프런트 프록시를 넣지 않았다.
+5. 공개 UI에는 renderer에 할당한 `--dashboard-node-port`를 추가하고 기존 `infrastructure/terraform/aws-edge`의 host route로 운영 노드 사설 IP와 연결한다. health path는 `/healthz`. `externalTrafficPolicy:Local`이므로 ALB target 노드에 실제 UI Pod가 있어야 한다. 보안 그룹은 ALB에서 오는 해당 포트만 허용한다. Dashboard Nginx의 `/api/`가 ClusterIP API로 연결되며 API 자체에 별도 public NodePort를 열지 않는다. API ingress NetworkPolicy는 등록한 Dashboard client label만 허용한다.
 
-통합 브랜치의 UI는 API와 함께 실행할 때 CI 제출·결과 조회를 지원한다. 현재 정적 대시보드 컨테이너에는 API 프록시가 없으므로 공개 데모의 프런트 연결은 제품 API 작업에서 이어간다. 현재 Bearer token은 신뢰한 운영자 CLI/MCP용이며 프런트에 이 token을 넣지 않는다. Ansible HTTP API의 운영 클러스터 이전도 이번 배포에 포함하지 않는다.
+Dashboard의 [start.sh](../../apps/dashboard/start.sh)는 서버의 token 파일을 읽어 `/api/` upstream과 Authorization 주입 설정을 `/tmp`에 만든다. 업로드 상한과 긴 API 요청의 proxy 제한 시간도 여기서 맞춘다. 사용자 계정·로그인 없이 같은 workspace를 사용하며 Host·Origin·등록 대상·입력·실행 한도 검사는 API에서 계속 적용한다. API를 직접 공개하는 별도 구성은 `RAILSHOT_PUBLIC_DEMO=1`과 명시적 allowed hosts/origins를 사용한다. 현재 gateway 구성의 내부 token을 브라우저 Bearer나 사용자 계정으로 해석하지 않는다.
+
+제품 환경 어댑터는 API 이미지의 native CLI를 호출하므로 별도 상시 Ansible HTTP 서버를 운영 클러스터로 옮기지 않는다. 승인 DB HA를 실행하는 내부 HTTP 서버의 배치·검증은 DB 담당 작업이다. 등록 설정이나 Pod Ready만으로 고객 클라우드의 CI→CD→공개 HTTP 성공을 판정하지 않는다.
 
 ## 빌드 워커와 고객 앱
 

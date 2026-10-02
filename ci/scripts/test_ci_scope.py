@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import subprocess
+import shlex
 import tempfile
 import unittest
 
@@ -22,15 +23,17 @@ class ScopeTests(unittest.TestCase):
             'package-lock.json': {'api-browser', 'containers'},
             '.dockerignore': {'containers'},
             'infrastructure/providers/openstack/pyproject.toml': {'contracts', 'openstack'},
-            'infrastructure/providers/terraform_tools/costs.py': {'contracts', 'terraform'},
+            'infrastructure/providers/terraform_tools/costs.py': {'contracts', 'terraform', 'api-browser', 'containers'},
             'infrastructure/terraform/aws-edge/main.tf': {'contracts', 'terraform'},
-            'infrastructure/ansible/runtime.yml': {'contracts', 'database-ansible'},
+            'infrastructure/ansible/runtime.yml': {'contracts', 'database-ansible', 'api-browser', 'containers'},
             'infrastructure/ansible/ci.yml': {'contracts', 'database-ansible', 'terraform', 'containers'},
             'deployment/manifests/build-runner.yaml': {'contracts', 'containers'},
-            'deployment/bootstrap/install-k3s.sh': {'contracts', 'runtime-smoke'},
+            'deployment/manifests/build-controller.yaml': {'contracts', 'containers'},
+            'deployment/bootstrap/install-k3s.sh': {'contracts', 'runtime-smoke', 'api-browser', 'containers'},
             'gitops/argo/render.py': {'contracts'},
             'observability/compose.yaml': {'observability'},
             'docs/api/ansible.openapi.json': {'contracts'},
+            'docs/api/product.openapi.json': {'contracts', 'api-browser'},
             'examples/ansible/runtime-single-node.json': {'contracts'},
         }
         for path, expected in cases.items():
@@ -57,15 +60,22 @@ class ScopeTests(unittest.TestCase):
             'apps/api/package.json': {'dashboard', 'api', 'mcp'},
             'package-lock.json': {'dashboard', 'api', 'mcp'},
             '.dockerignore': set(ci_scope.COMPONENTS),
-            'ci/scripts/publication.py': {'ci-runner'},
+            'ci/scripts/publication.py': {'api', 'ci-runner'},
             'ci/scripts/runner/entrypoint.sh': {'ci-runner'},
+            'ci/scripts/runner/replenish.py': {'api', 'ci-runner'},
             'ci/runner-compose.yml': {'ci-runner'},
             'deployment/manifests/platform.yaml': {'dashboard', 'api', 'mcp'},
             'deployment/manifests/build-runner.yaml': {'ci-runner'},
+            'deployment/manifests/build-controller.yaml': set(ci_scope.COMPONENTS),
             'infrastructure/ansible/ci.yml': {'ci-runner'},
             'deployment/scripts/render-platform.py': set(ci_scope.COMPONENTS),
-            'deployment/bootstrap/install-k3s.sh': set(),
+            'deployment/bootstrap/install-k3s.sh': {'api'},
             'docs/architecture/README.md': set(),
+            'docs/api/product.openapi.json': set(),
+            'gitops/bridge.py': {'api'},
+            'gitops/credentials.py': {'api'},
+            'infrastructure/terraform/gcp/main.tf': {'api'},
+            'deployment/cilium/preflight.py': {'api'},
             '.github/workflows/platform-containers.yml': set(ci_scope.COMPONENTS),
             'ci/scripts/container-smoke.py': set(ci_scope.COMPONENTS),
             'unknown/source.py': set(ci_scope.COMPONENTS),
@@ -74,6 +84,24 @@ class ScopeTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ci_scope.container_components([path]), expected)
                 self.assertEqual('containers' in ci_scope.select([path]), bool(expected))
+
+    def test_api_native_copy_sources_select_api_image_and_http_checks(self):
+        # Audit the actual Dockerfile: a new COPY source must not silently bypass API validation.
+        root = Path(__file__).resolve().parents[2]
+        for line in (root / 'apps/api/Dockerfile').read_text().splitlines():
+            if not line.startswith('COPY ') or '--from=' in line:
+                continue
+            sources = [value for value in shlex.split(line)[1:-1] if not value.startswith('--')]
+            for source in sources:
+                path = root / source
+                files = [file for file in path.rglob('*') if file.is_file()] if path.is_dir() else [path]
+                for file in files:
+                    relative = file.relative_to(root).as_posix()
+                    if ci_scope.documentation(relative):
+                        continue
+                    with self.subTest(path=relative):
+                        self.assertIn('api', ci_scope.container_components([relative]))
+                        self.assertIn('api-browser', ci_scope.select([relative]))
 
     def test_gate_requires_success_for_selected_and_skip_only_for_unselected(self):
         checks = {job: {'result': 'skipped'} for job in ci_scope.JOBS}

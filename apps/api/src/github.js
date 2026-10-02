@@ -18,7 +18,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
 
   async function request(path, options = {}) {
     const response = await fetchImpl(`${API}${path}`, {
-      ...options,
+      signal: AbortSignal.timeout(30_000), ...options,
       headers: {
         accept: 'application/vnd.github+json',
         authorization: `Bearer ${token}`,
@@ -28,8 +28,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       },
     });
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ServiceError(`GitHub API ${response.status}: ${body.message || '요청 실패'}`, [404, 409].includes(response.status) ? response.status : 502);
+      throw new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502);
     }
     return response.status === 204 ? {} : response.json();
   }
@@ -56,9 +55,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
       method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id: targetId } }),
     });
-    if (!dispatched.workflow_run_id) {
-      throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
-    }
+    if (!dispatched.workflow_run_id) throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
     return {
       run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id: targetId, state: 'queued', changes, ...(source ? { source } : {}),
       actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
@@ -119,7 +116,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return dispatch(app, sourceCommit, changes, source);
   }
 
-  async function redeploy({ app, target_id = targetId }) {
+  async function validateRegistered({ app, target_id = targetId }) {
     if (typeof app !== 'string' || !APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
     if (target_id !== targetId) throw new ServiceError('이 API에 설정된 배포 대상과 일치하지 않습니다.', 400);
     const branch = await request(`${repoPath}/git/ref/heads/${encodeURIComponent(ref)}`);
@@ -128,7 +125,12 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     const base = await request(`${repoPath}/git/commits/${sourceCommit}`);
     const existing = await findAppTree(base.tree.sha, app);
     if (!existing?.length) throw new ServiceError(`등록된 앱을 찾을 수 없습니다: ${app}`, 404);
-    return dispatch(app, sourceCommit, { added: 0, updated: 0, deleted: 0, unchanged: existing.length });
+    return { sourceCommit, fileCount: existing.length };
+  }
+
+  async function redeploy(input) {
+    const { sourceCommit, fileCount } = await validateRegistered(input);
+    return dispatch(input.app, sourceCommit, { added: 0, updated: 0, deleted: 0, unchanged: fileCount });
   }
 
   async function status(runId) {
@@ -175,7 +177,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         : artifactError || (state === 'failed' ? 'CI가 완료되지 않았습니다. GitHub Actions 로그를 확인하세요.' : null) };
   }
 
-  async function published(runId, attempt, headSha) {
+  async function published(runId, attempt, headSha, includeFiles = false) {
     const name = `published-${attempt}`;
     const list = await request(`${repoPath}/actions/runs/${runId}/artifacts?name=${name}&per_page=100`);
     const matches = list.artifacts?.filter((item) => item.name === name) || [];
@@ -185,13 +187,21 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     if (artifact.size_in_bytes > archiveLimits.maxBytes) throw new ServiceError('게시 artifact가 허용 크기를 초과했습니다.', 502);
     // Build the GitHub URL from the verified ID; do not send the token to an artifact-supplied URL.
     const response = await fetchImpl(`${API}${repoPath}/actions/artifacts/${artifact.id}/zip`, {
-      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' },
+      signal: AbortSignal.timeout(30_000), headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' },
     });
     if (!response.ok) throw new ServiceError('게시 artifact를 다운로드하지 못했습니다.', 502);
     const files = await inspectArchive(Buffer.from(await response.arrayBuffer()));
     const receipt = readPublished(files, { runId, attempt, headSha, targetId, tenant });
-    return { ...receipt, artifact_id: artifact.id, artifact_name: name };
+    const publication = { ...receipt, artifact_id: artifact.id, artifact_name: name };
+    return includeFiles ? { publication, files } : publication;
   }
 
-  return { deploy, redeploy, status, targetId };
+  async function publishedFiles(publication) {
+    if (!publication || !Number.isSafeInteger(publication.run_id) || !Number.isSafeInteger(publication.producer_attempt) || !SOURCE_COMMIT.test(publication.source_commit || '')) throw new ServiceError('게시 참조가 잘못되었습니다.', 502);
+    const verified = await published(String(publication.run_id), publication.producer_attempt, publication.source_commit, true);
+    if (JSON.stringify(verified.publication) !== JSON.stringify(publication)) throw new ServiceError('게시 참조가 변경되었습니다.', 502);
+    return verified.files;
+  }
+
+  return { deploy, redeploy, validateRegistered, status, publishedFiles, targetId };
 }

@@ -16,5 +16,7 @@
 **/auth.json
 **/config.json
 **/credentials*
+# Public renewal implementation; credential data remains excluded.
+!gitops/credentials.py
 **/secrets
 **/.token-usage

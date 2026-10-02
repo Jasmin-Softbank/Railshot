@@ -1,12 +1,16 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createDeploymentService, ServiceError } from './github.js';
 import { archiveLimits, inspectArchive, validateFiles } from './archive.js';
 import { fetchPublicGithubSource } from './public-github.js';
 import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
+import { createProductService, ProductError, idempotencyKey } from './product.js';
 import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
+import { createEnvironmentAdapter, EnvironmentError } from './environments.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
 const assets = new Map([
@@ -14,127 +18,223 @@ const assets = new Map([
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
 ]);
-
-function json(response, code, data) {
-  response.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+function json(response, code, data, headers = {}) {
+  response.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
   response.end(JSON.stringify(data));
 }
-
 async function readLimited(request, limit) {
-  const chunks = [];
-  let size = 0;
+  const chunks = []; let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > limit) throw new ServiceError('업로드가 100 MB를 초과했습니다.', 413);
+    if (size > limit) throw new ServiceError('요청 크기가 허용 범위를 초과했습니다.', 413);
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
 }
-
-// HTTP upload adapter: a future presigned URL adapter can produce the same file tree.
-async function uploadedSource(request, sourceLoader) {
+function normalizedRepository(value) {
+  let url;
+  try { url = new URL(value); } catch { throw new ServiceError('공개 GitHub 저장소 URL이 필요합니다.', 400); }
+  const match = /^\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(url.pathname);
+  if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.port || url.username || url.password || url.search || url.hash || !match || match[1].startsWith('-') || match[2].startsWith('.') || match[2].endsWith('.')) throw new ServiceError('공개 GitHub 저장소 기본 URL만 사용할 수 있습니다.', 400);
+  return `https://github.com/${match[1].toLowerCase()}/${match[2].toLowerCase()}`;
+}
+// Parse without fetching GitHub: an idempotency replay must retain its first source snapshot.
+async function uploadedSource(request, strict = false) {
   const contentType = request.headers['content-type'] || '';
-  if (!contentType.startsWith('multipart/form-data;')) throw new ServiceError('multipart/form-data 요청이 필요합니다.', 415);
+  if (!/^multipart\/form-data\s*;/i.test(contentType)) throw new ServiceError('multipart/form-data 요청이 필요합니다.', 415);
   const body = await readLimited(request, archiveLimits.maxBytes + 1024 * 1024);
-  const form = await new Request('http://localhost/api/deploy', {
-    method: 'POST', headers: { 'content-type': contentType }, body,
-  }).formData();
+  let form;
+  try { form = await new Request('http://localhost/', { method: 'POST', headers: { 'content-type': contentType }, body }).formData(); }
+  catch { throw new ServiceError('multipart 요청 형식이 잘못되었습니다.', 400); }
+  const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
+  const allowed = new Set(['app', 'target_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
+  for (const key of form.keys()) {
+    if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
+    if (key !== 'files' && form.getAll(key).length !== 1) fail('단일 입력 필드를 중복해서 보낼 수 없습니다.');
+  }
   const app = form.get('app');
-  if (typeof app !== 'string') throw new ServiceError('앱 이름이 필요합니다.', 400);
-  if (!APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
-  const target_id = form.get('target_id') || undefined;
-  if (target_id !== undefined && typeof target_id !== 'string') throw new ServiceError('대상 ID가 잘못되었습니다.', 400);
+  if (typeof app !== 'string' || !APP_NAME.test(app)) fail(APP_NAME_MESSAGE);
+  const target_id = form.has('target_id') ? form.get('target_id') : undefined;
+  if (target_id !== undefined && (typeof target_id !== 'string' || !target_id)) fail('대상 ID가 잘못되었습니다.');
+  if (strict && !target_id) fail('대상 ID가 필요합니다.');
   const uploads = form.getAll('files');
-  const supplied = [
-    form.get('source_type') === 'registered' && 'registered',
-    form.has('repository_url') && 'github',
-    uploads.length > 0 && 'folder',
-    form.has('archive') && 'zip',
-  ].filter(Boolean);
-  if (supplied.length !== 1) throw new ServiceError('배포 소스 하나만 입력하세요.', 400);
-  const sourceType = supplied[0];
-  if (form.has('source_type') && form.get('source_type') !== sourceType) throw new ServiceError('소스 형식과 입력값이 일치하지 않습니다.', 400);
-  if (sourceType === 'registered') return { app, target_id, registered: true };
-  if (sourceType === 'github') {
-    const repositoryUrl = form.get('repository_url');
-    if (typeof repositoryUrl !== 'string') throw new ServiceError('공개 GitHub 저장소 URL이 필요합니다.', 400);
-    return { app, target_id, ...await sourceLoader(repositoryUrl) };
+  const supplied = [form.get('source_type') === 'registered' && 'registered', form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
+  if (supplied.length !== 1) fail('배포 소스 하나만 입력하세요.');
+  const source_type = supplied[0];
+  if (form.has('source_type') && form.get('source_type') !== source_type) fail('소스 형식과 입력값이 일치하지 않습니다.');
+  if (source_type !== 'folder' && form.has('paths')) fail('폴더 소스에만 paths를 사용할 수 있습니다.');
+  if (source_type === 'registered') return { app, target_id, source_type };
+  if (source_type === 'github') {
+    if (typeof form.get('repository_url') !== 'string') fail('공개 GitHub 저장소 URL이 필요합니다.');
+    let repository_url;
+    try { repository_url = normalizedRepository(form.get('repository_url')); } catch { fail('공개 GitHub 저장소 기본 URL이 필요합니다.'); }
+    return { app, target_id, source_type, repository_url };
   }
-  if (sourceType === 'folder') {
-    let paths;
-    try { paths = JSON.parse(form.get('paths')); } catch { throw new ServiceError('폴더 파일 경로가 잘못되었습니다.', 400); }
-    if (!Array.isArray(paths) || paths.length !== uploads.length || uploads.length > archiveLimits.maxFiles) {
-      throw new ServiceError('폴더 파일 목록이 잘못되었습니다.', 400);
+  try {
+    if (source_type === 'folder') {
+      const paths = JSON.parse(form.get('paths'));
+      if (!Array.isArray(paths) || paths.length !== uploads.length || uploads.length > archiveLimits.maxFiles) fail('폴더 파일 목록이 잘못되었습니다.');
+      const files = await Promise.all(uploads.map(async (file, index) => {
+        if (!file || typeof file.arrayBuffer !== 'function') fail('폴더 파일이 잘못되었습니다.');
+        return { path: paths[index], content: Buffer.from(await file.arrayBuffer()) };
+      }));
+      return { app, target_id, source_type, files: validateFiles(files) };
     }
-    const files = await Promise.all(uploads.map(async (file, index) => {
-      if (!file || typeof file.arrayBuffer !== 'function') throw new ServiceError('폴더 파일이 잘못되었습니다.', 400);
-      return { path: paths[index], content: Buffer.from(await file.arrayBuffer()) };
-    }));
-    return { app, target_id, files: validateFiles(files) };
+    const file = form.get('archive');
+    if (!file || typeof file.arrayBuffer !== 'function' || !file.name?.toLowerCase().endsWith('.zip')) fail('ZIP 파일이 필요합니다.');
+    return { app, target_id, source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
+  } catch { fail('소스 파일 목록·경로·크기를 확인하세요. 비밀 파일은 보낼 수 없습니다.'); }
+}
+async function jsonInput(request) {
+  if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] || '')) throw new ServiceError('application/json 요청이 필요합니다.', 415);
+  let value, raw;
+  try { raw = (await readLimited(request, 64 * 1024)).toString('utf8'); value = JSON.parse(raw); }
+  catch (error) { if (error.status) throw error; throw new ServiceError('JSON 형식이 잘못되었습니다.', 400); }
+  // JSON.parse validates grammar; this small token pass rejects duplicate decoded object keys at every depth.
+  const tokens = raw.match(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:]/g) || [], stack = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token === '{' || token === '[') stack.push(token === '{' ? new Set() : null);
+    else if (token === '}' || token === ']') stack.pop();
+    else if (token.startsWith('"') && tokens[i + 1] === ':') {
+      const key = JSON.parse(token), keys = stack.at(-1);
+      if (keys.has(key)) throw new ServiceError('JSON 필드를 중복해서 보낼 수 없습니다.', 422);
+      keys.add(key);
+    }
   }
-  const file = form.get('archive');
-  if (!file || typeof file.arrayBuffer !== 'function') throw new ServiceError('ZIP 파일이 필요합니다.', 400);
-  if (!file.name?.toLowerCase().endsWith('.zip')) throw new ServiceError('ZIP 파일만 업로드할 수 있습니다.', 400);
-  return { app, target_id, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ServiceError('JSON 객체가 필요합니다.', 422);
+  return value;
+}
+function page(items, parameters) {
+  for (const key of parameters.keys()) if (!['limit', 'marker'].includes(key) || parameters.getAll(key).length !== 1) throw new ServiceError('조회 조건이 잘못되었습니다.', 422);
+  const rawLimit = parameters.get('limit') ?? '20';
+  if (!/^[1-9]\d?$|^100$/.test(rawLimit)) throw new ServiceError('limit는 1–100이어야 합니다.', 422);
+  const marker = parameters.get('marker');
+  const start = marker === null ? 0 : items.findIndex((item) => item.id === marker) + 1;
+  if (marker !== null && start === 0) throw new ServiceError('marker가 잘못되었습니다.', 422);
+  const visible = items.slice(start, start + Number(rawLimit));
+  return { items: visible, next_marker: start + visible.length < items.length ? visible.at(-1).id : null };
+}
+function apiError(response, error, requestId, versioned) {
+  const status = error instanceof EnvironmentError && error.status === 400 ? 422 : Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+  const codes = { 400: 'INVALID_INPUT', 401: 'UNAUTHENTICATED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 405: 'METHOD_NOT_ALLOWED', 409: 'CONFLICT', 413: 'PAYLOAD_TOO_LARGE', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'INVALID_INPUT', 502: 'UPSTREAM_FAILURE', 503: 'UPSTREAM_UNAVAILABLE' };
+  const message = error instanceof ServiceError || error instanceof ProductError ? error.message : '요청을 처리하지 못했습니다.';
+  const headers = { 'X-Request-ID': requestId, ...(error.allow ? { Allow: error.allow } : {}), ...(error.retryable ? { 'Retry-After': '2' } : {}) };
+  const code = error instanceof EnvironmentError && error.status === 400 ? 'INVALID_INPUT'
+    : (error instanceof ProductError || error instanceof EnvironmentError) && error.code || codes[status] || 'INTERNAL_ERROR';
+  json(response, status, versioned ? { error: { code, message,
+    request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown) } } : { error: message }, headers);
+}
+function requestKey(request) {
+  const count = request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'idempotency-key').length;
+  if (count !== 1) throw new ServiceError('Idempotency-Key 하나만 입력하세요.', 422);
+  return idempotencyKey(request.headers['idempotency-key']);
+}
+function accepted(response, kind, record, requestId) {
+  const terminal = !['queued', 'running'].includes(record.status);
+  json(response, terminal ? 200 : 202, terminal ? record : { resource_id: record.id, action: 'create', status: 'accepted', request_id: requestId },
+    { Location: `/api/v1/${kind}/${record.id}`, 'X-Request-ID': requestId, ...(!terminal ? { 'Retry-After': '2' } : {}) });
 }
 
-export function createAppServer({ access = apiAccessConfig(), sourceLoader = fetchPublicGithubSource, service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({
-  token: process.env.GITHUB_TOKEN,
-  owner: process.env.GITHUB_OWNER,
-  repo: process.env.GITHUB_REPO,
-  ref: process.env.GITHUB_REF,
-  tenant: process.env.JASMIN_TENANT,
-  workflow: process.env.GITHUB_WORKFLOW,
-  targetId: process.env.RAILSHOT_TARGET_ID,
-}) : null } = {}) {
-  return createServer(async (request, response) => {
-    if (!allowsHost(request.headers.host, access)) { response.writeHead(403).end('Host not allowed'); return; }
-    const origin = request.headers.origin;
-    if (!allowsOrigin(origin, access)) {
-      json(response, 403, { error: '다른 사이트에서는 접근할 수 없습니다.' }); return;
+export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
+  service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({ token: process.env.GITHUB_TOKEN,
+    owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.JASMIN_TENANT,
+    workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID }) : null,
+  stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
+  deployPublished, environmentAdapter, product, pollInterval,
+} = {}) {
+  // Explicit adapter instances keep tests offline; production adapters consume only operator files.
+  const productReady = Promise.resolve().then(async () => {
+    if (product) return product;
+    if (!service?.targetId && !environmentAdapter && !process.env.RAILSHOT_PROFILES_FILE) return null;
+    let cd = deployPublished;
+    if (!cd && service && process.env.RAILSHOT_CD_CONFIG) {
+      const { createCdAdapter } = await import('./cd.js');
+      cd = await createCdAdapter({ configPath: process.env.RAILSHOT_CD_CONFIG, loadPublished: service.publishedFiles });
     }
-    const url = new URL(request.url, 'http://localhost');
-    if (request.method === 'GET' && url.pathname === '/healthz') {
-      json(response, 200, { ok: true, configured: Boolean(service), ...(!access.remote && { target_id: service?.targetId || null }) }); return;
-    }
-    if (url.pathname.startsWith('/api/')) {
-      if (!allowsToken(request.headers.authorization, access.token)) {
-        response.setHeader('www-authenticate', 'Bearer');
-        json(response, 401, { error: 'API authentication required' }); return;
+    const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments') }) : undefined);
+    return createProductService({ service, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
+  });
+  // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
+  productReady.catch(() => {});
+  const server = createServer(async (request, response) => {
+    const requestId = randomUUID();
+    let versioned = request.url.startsWith('/api/v1');
+    response.setHeader('X-Request-ID', requestId);
+    try {
+      if (!allowsHost(request.headers.host, access) || !allowsOrigin(request.headers.origin, access)) throw new ServiceError('요청의 Host 또는 Origin이 허용되지 않습니다.', 403);
+      let url;
+      try { url = new URL(request.url, 'http://localhost'); } catch { throw new ServiceError('요청 경로가 잘못되었습니다.', 400); }
+      versioned = url.pathname.startsWith('/api/v1');
+      if (request.method === 'GET' && url.pathname === '/healthz') {
+        // Liveness remains local; readiness also requires usable durable state and operator config.
+        const configured = Boolean(await productReady.catch(() => null));
+        json(response, 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
-      if (!service) { json(response, 503, { error: 'GITHUB_TOKEN과 RAILSHOT_TARGET_ID를 설정하세요.' }); return; }
-      try {
+      if (url.pathname.startsWith('/api/')) {
+        if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
+          response.setHeader('www-authenticate', 'Bearer');
+          throw new ServiceError('API authentication required', 401);
+        }
+        let products;
+        try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
+        if (versioned) {
+          const routes = /^(?:\/api\/v1\/(targets|builds|deployments|profiles|plans|environments))(?:\/([A-Za-z0-9._-]+))?$/.exec(url.pathname);
+          if (!routes) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+          const [, kind, id] = routes;
+          const methods = id ? ['builds', 'deployments', 'plans', 'environments'].includes(kind) ? ['GET'] : [] : ['targets', 'profiles'].includes(kind) ? ['GET'] : ['POST'];
+          if (!methods.length) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+          if (!methods.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = methods.join(', '); throw error; }
+          if (['targets', 'profiles'].includes(kind)) {
+            json(response, 200, page(products ? await products[kind]() : [], url.searchParams)); return;
+          }
+          if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+          if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+          if (request.method === 'GET') {
+            const getter = { builds: 'getBuild', deployments: 'getDeployment', plans: 'getPlan', environments: 'getEnvironment' }[kind];
+            json(response, 200, await products[getter](id)); return;
+          }
+          if (kind === 'builds') {
+            const result = await products.createBuild(await uploadedSource(request, true), sourceLoader);
+            accepted(response, kind, { id: String(result.run_id), status: 'queued' }, requestId); return;
+          }
+          if (kind === 'deployments') {
+            const key = requestKey(request);
+            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true), key, sourceLoader), requestId); return;
+          }
+          if (kind === 'plans') {
+            const plan = await products.createPlan(await jsonInput(request));
+            json(response, 201, plan, { Location: `/api/v1/plans/${plan.id}` }); return;
+          }
+          const key = requestKey(request);
+          accepted(response, kind, await products.createEnvironment(await jsonInput(request), key), requestId); return;
+        }
+        if (!service) throw new ServiceError('CI 실행 기능이 설정되지 않았습니다.', 503);
         if (request.method === 'POST' && url.pathname === '/api/deploy') {
-          // A non-simple header forces a browser CORS preflight for cross-site requests.
           if (request.headers['x-jasmin-request'] !== 'deploy') throw new ServiceError('요청 헤더가 필요합니다.', 403);
-          const input = await uploadedSource(request, sourceLoader);
-          json(response, 202, input.registered ? await service.redeploy(input) : await service.deploy(input));
-          return;
+          const input = await uploadedSource(request);
+          input.target_id ??= service.targetId;
+          const result = products ? await products.createBuild(input, sourceLoader)
+            : input.source_type === 'registered' ? await service.redeploy(input)
+              : await service.deploy(input.files ? input : { ...input, ...await sourceLoader(input.repository_url) });
+          json(response, 202, result); return;
         }
         const match = request.method === 'GET' && /^\/api\/runs\/(\d+)$/.exec(url.pathname);
-        if (match) { json(response, 200, await service.status(match[1])); return; }
-        json(response, 404, { error: 'API 경로를 찾을 수 없습니다.' });
-      } catch (error) {
-        json(response, error.status || 400, { error: error.message || '요청을 처리하지 못했습니다.' });
+        if (match) { json(response, 200, products ? await products.legacyStatus(match[1]) : await service.status(match[1])); return; }
+        throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
       }
-      return;
-    }
-    const asset = request.method === 'GET' && assets.get(url.pathname);
-    if (!asset) { response.writeHead(404).end('Not found'); return; }
-    try {
+      const asset = request.method === 'GET' && assets.get(url.pathname);
+      if (!asset) { response.writeHead(404).end('Not found'); return; }
       const content = await readFile(join(root, asset[0]));
-      response.writeHead(200, {
-        'content-type': asset[1], 'content-length': content.length,
-        'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
-      }).end(content);
-    } catch { response.writeHead(500).end('Unable to load asset'); }
+      response.writeHead(200, { 'content-type': asset[1], 'content-length': content.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }).end(content);
+    } catch (error) { apiError(response, error, requestId, versioned); }
   });
+  server.on('close', () => { productReady.then((value) => value?.close?.()).catch(() => {}); });
+  server.productReady = productReady;
+  return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const port = Number(process.env.PORT || 4173);
-  const access = apiAccessConfig();
-  createAppServer({ access }).listen(port, access.bindHost, () => {
-    console.log(`RAILSHOT API: http://${access.bindHost}:${port}`);
-  });
+  const port = Number(process.env.PORT || 4173), access = apiAccessConfig();
+  createAppServer({ access }).listen(port, access.bindHost, () => { console.log(`RAILSHOT API listening on ${access.bindHost}:${port}`); });
 }

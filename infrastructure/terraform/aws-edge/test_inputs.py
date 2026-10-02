@@ -44,6 +44,16 @@ def evaluate(values, expression='local.private_routes'):
 
 
 class EdgeInputsTest(unittest.TestCase):
+    def test_apex_requires_explicit_certificate_and_preserves_child_routes(self):
+        values = fixture()
+        self.assertTrue(evaluate(values, 'local.route_hosts_valid'))
+        values['routes']['aws-demo-a1b2']['host'] = 'example.com'
+        self.assertFalse(evaluate(values, 'local.route_hosts_valid'))
+        values['apex_certificate_arn'] = 'arn:aws:acm:ap-northeast-2:123456789012:certificate/1234abcd-1234-1234-1234-123456789abc'
+        self.assertTrue(evaluate(values, 'local.route_hosts_valid'))
+        values['routes']['aws-demo-a1b2']['host'] = 'nested.app.example.com'
+        self.assertFalse(evaluate(values, 'local.route_hosts_valid'))
+
     def test_aws_and_gcp_apps_use_private_targets_and_only_gcp_needs_routes(self):
         values = fixture()
         routes = evaluate(values)

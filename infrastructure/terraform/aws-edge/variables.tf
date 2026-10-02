@@ -79,6 +79,15 @@ variable "http_redirect" {
   type    = bool
   default = false
 }
+variable "apex_certificate_arn" {
+  type        = string
+  default     = null
+  description = "Additional ISSUED regional ACM certificate for base_domain itself. Keeps the existing wildcard/default certificate and customer routes intact."
+  validation {
+    condition     = var.apex_certificate_arn == null ? true : can(regex("^arn:aws:acm:[a-z0-9-]+:[0-9]{12}:certificate/[a-f0-9-]+$", var.apex_certificate_arn))
+    error_message = "Use the verified regional ACM certificate ARN for the apex hostname."
+  }
+}
 variable "web_client_cidrs" {
   type    = set(string)
   default = ["0.0.0.0/0"]

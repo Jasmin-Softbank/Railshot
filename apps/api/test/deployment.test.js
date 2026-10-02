@@ -147,6 +147,9 @@ test('등록된 앱 재실행은 소스를 수정하지 않고 현재 commit으�
   assert.deepEqual(calls.at(-1).body.inputs, { tenant: 'demo', app: 'my-app', source_commit: 'a'.repeat(40), target_id: 'aws-demo' });
   await assert.rejects(service.redeploy({ app: 'my-app', target_id: 'other' }), /대상/);
   await assert.rejects(service.redeploy({ app: 'bad!' }), /앱 이름/);
+  const missing = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, async (url, options) =>
+    new URL(url).pathname.endsWith('/git/trees/tenant-tree') ? Response.json({ tree: [] }) : fakeFetch(url, options));
+  await assert.rejects(missing.redeploy({ app: 'my-app' }), { status: 404 });
 });
 
 test('ZIP 경로 이동과 비밀키 파일을 거부한다', async () => {
@@ -248,7 +251,7 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
     assert.equal(observed.length, 5);
     const rerun = await redeployRegistered({ app: 'my-app', baseUrl: base });
     assert.equal(rerun.run_id, 789);
-    assert.deepEqual(observed[5], { app: 'my-app', target_id: undefined, registered: true });
+    assert.deepEqual(observed[5], { app: 'my-app', target_id: undefined, source_type: 'registered' });
     const mixed = new FormData();
     mixed.set('app', 'my-app');
     mixed.set('source_type', 'registered');
@@ -319,6 +322,9 @@ test('실제 producer artifact ID와 해시를 확인한 경우에만 이미지 
   assert.equal(result.publication.artifact_id, 200);
   assert.equal(result.publication.producer_attempt, 1);
   assert.equal(result.publication.version, 2);
+  const trustedFiles = await service.publishedFiles(result.publication);
+  assert.equal(trustedFiles.length, 5);
+  await assert.rejects(service.publishedFiles({ ...result.publication, artifact_id: 201 }), /게시 참조/);
   assert.equal(result.publication.registry.verification, 'anonymous_manifest_read');
   assert.equal(result.publication.registry.image_pull_secret, null);
   assert.equal(result.target_id, 'aws-demo');
@@ -506,7 +512,7 @@ test('HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까�
     throw new Error(`Unexpected GitHub request: ${method} ${path}`);
   };
   const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fetchImpl);
-  const server = createAppServer({ service, sourceLoader: async () => { throw new Error('ZIP upload must not fetch a source'); } });
+  const server = createAppServer({ service, stateDirectory: join(root, 'product'), sourceLoader: async () => { throw new Error('ZIP upload must not fetch a source'); } });
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -566,6 +572,7 @@ with patch.object(publication, 'verify_registry', side_effect=verified_registry)
     assert.equal(result.url, null); // Image publication does not claim a deployed application URL.
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    await (await server.productReady)?.close();
     await rm(root, { recursive: true, force: true });
   }
 });
