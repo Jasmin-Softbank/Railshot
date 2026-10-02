@@ -1,6 +1,6 @@
 # 통합 Ansible 진입점
 
-통합 호출 계약은 [Ansible 실행 인터페이스](../../docs/api/ansible.md)를 기준으로 합니다. `api.py`가 승인된 AWS/GCP/OpenStack 자원을 작업별 입력과 결합하고, `run.py`가 JB guest 검사 후 승민 K3s/Cilium runtime을 실행합니다. 아래 원본 standalone `site.yml`의 Flannel 설치를 함께 실행하지 않습니다. DB는 K3s 밖의 별도 VM을 기본으로 하며, 현재 HTTP는 배치 검증만 지원하고 담당 플레이북이 없어 설치를 차단합니다.
+통합 호출 계약은 [Ansible 실행 인터페이스](../../docs/api/ansible.md)를 기준으로 합니다. `api.py`가 승인된 AWS/GCP/OpenStack 자원을 작업별 입력과 결합하고, `run.py`가 JB guest 검사 후 승민 K3s/Cilium runtime을 실행합니다. 아래 원본 standalone `site.yml`의 Flannel 설치를 함께 실행하지 않습니다. DB는 K3s 밖의 별도 VM을 기본으로 하며, 현재 HTTP는 배치 검증만 지원하고 담당 HA 플레이북을 이 API에 연결하지 않아 설치를 차단합니다.
 
 ```bash
 python3 run.py --request ../../examples/ansible/runtime-single-node.json --validate-only

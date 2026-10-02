@@ -35,7 +35,7 @@ def database_plan(body, parameters, resolve):
     """Resolve approved VM references into an external DB inventory, not K8s objects.
 
     Database/Patroni installation is the DB owner's boundary. This mapping can be
-    consumed and tested now without claiming that a missing playbook was run.
+    consumed and tested now without claiming that an unconnected playbook was run.
     """
     groups = {'database': {'hosts': {}}, 'dcs': {'hosts': {}}}
     counts, node_ids, resources, addresses = Counter(), set(), set(), set()

@@ -253,7 +253,7 @@ PostgreSQL의 [listen 주소·기본 5432 포트](https://www.postgresql.org/doc
 
 standalone은 DB 1개·DCS 0개를 검사합니다. Patroni 모드에서는 역할·배치 일치만 검사하며 복제·quorum·장애 도메인·장애 전환 가능 여부를 검증하지 않습니다. 회의의 AWS 3개·온프렘 2개 예시는 배치를 변수로 전달하려는 설명으로 해석하며 기본 노드 수로 고정하지 않습니다.
 
-검증 결과가 유효해도 DB는 `execution_supported: false`, `blockers: [{"code":"DATABASE_PLAYBOOK_UNAVAILABLE"}]`입니다. 통합된 [HA 입력 규격](deployment-inputs.md)은 DB 2대 이상·etcd 홀수 3대 이상·proxy 1대 이상과 별도 TLS·Vault 입력을 요구하며, 위 기본 단일 PostgreSQL VM 요청을 실행하지 못합니다. 단일 DB 설치 지원과 운영자 비밀 참조·데이터 경로·백업·준비 상태 계약을 담당자와 맞춘 뒤 실제 변수 이름에 연결해야 합니다. 이 문서 수정으로 API·Schema·실행 차단 동작을 바꾸지는 않습니다.
+검증 결과가 유효해도 DB는 `execution_supported: false`, `blockers: [{"code":"DATABASE_PLAYBOOK_UNAVAILABLE"}]`입니다. 통합된 [HA 입력 규격](deployment-inputs.md)은 DB 2대 이상·etcd 홀수 3대 이상·proxy 1대 이상과 별도 TLS·Ansible Vault 입력을 요구하며, 위 기본 단일 PostgreSQL VM 요청을 실행하지 못합니다. 단일 DB 설치 지원과 운영자 비밀 참조·데이터 경로·백업·준비 상태 계약을 담당자와 맞춘 뒤 실제 변수 이름에 연결해야 합니다. 이 문서 수정으로 API·Schema·실행 차단 동작을 바꾸지는 않습니다.
 
 ## F. Integration / Verification
 
