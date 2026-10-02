@@ -36,6 +36,8 @@
 - 해당 package는 private이며 조직 정책은 public 전환을 금지합니다. 사용자는 private 유지를 선택했습니다. 익명 조회에서 차단된 run의 API readback은 `failed`, `url: null`, `publication: null`입니다. push 성공만으로 `published`를 주장하지 않습니다.
 - private 연결 코드는 별도 읽기 자격의 digest manifest 조회와 v2 인계 계약을 추가합니다. 대상 참조는 `k3s-aws` / `tenant-demo` / `ghcr-pull`로 준비했으며 아직 실제 Secret은 없습니다. release 환경 허용 branch를 `main`, `ci/fixture-packaging-repair`로 제한했습니다.
 - 사용자 지시로 관리자 설정을 진행했으나 PAT 발급은 GitHub sudo-mode 본인 인증에서 대기 중입니다. 토큰 등록·실제 private 접근 검증은 아직 완료되지 않았습니다.
+- private 계약을 반영한 run `36948066574`(apps source `e04c620e130abcecd6da86184b5601fdec452a0f`, platform `b77d53b514ef0f6896e5178fab804c679e7b1014`)도 전체 gate를 통과했습니다. pull 자격 누락 때문에 release가 registry 로그인 전에 차단됐으며 API는 `failed / url: null / publication: null`로 다시 확인했습니다. 실제 private 조회 성공은 아직 없습니다.
+- private 변경 검사는 CI 9개, GitOps 1개, API 18개와 actionlint를 통과했습니다.
 - 최초 apps workflow 구문 검사 실패 `36943634074`와 샘플 등록 전 경로 검사 실패 `36945479367`도 보존합니다. 후자는 모델 호출 전 차단됐습니다.
 
 실제 자원 ID·Terraform state·plan·원격 검사 기록은 Git에서 제외한 `.local/ci-k3s-aws-20261002/`에 보관합니다. 인증 파일과 토큰은 저장소·문서에 포함하지 않습니다.
