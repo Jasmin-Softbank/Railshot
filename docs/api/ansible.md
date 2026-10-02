@@ -220,7 +220,7 @@ PostgreSQL의 [listen 주소·기본 5432 포트](https://www.postgresql.org/doc
 
 현재 팀의 `deployment/cilium/network-policy.json.template`은 **Ingress만** 정의합니다. 앱→외부 DB의 Egress 허용 정책이나 DB 방화벽이 구현됐다고 볼 수 없습니다. Pod CIDR `10.42.0.0/16`, Service CIDR `10.43.0.0/16`과 LAN/VPC/VPN 대역 중복도 실제 환경에서 확인해야 합니다.
 
-현재 [CD 인계 경로](../../gitops/README.md)도 DB·Secret·외부 egress를 지원 범위에서 제외합니다. 따라서 위 앱 접속 구조는 기본 설계이며, 기존 자동 배포만으로 DB 자격과 접속 정책까지 적용되는 것은 아닙니다. DB 사용 앱을 연결할 때 해당 계약을 담당자와 함께 확장해야 합니다.
+현재 [CD 인계 경로](../../gitops/README.md)도 DB·앱 Secret 주입·외부 egress를 지원 범위에서 제외하며, 생성하는 NetworkPolicy는 egress를 차단합니다. 이미지 pull Secret 참조 지원과 DB 자격 주입은 다른 기능입니다. 따라서 위 앱 접속 구조는 기본 설계이며 기존 자동 배포만으로 DB 자격과 TCP 5432 접속 정책까지 적용되지 않습니다. DB 사용 앱을 연결할 때 해당 계약을 담당자와 함께 확장해야 합니다.
 
 ### E-2. 담당자에게 전달할 입력
 
