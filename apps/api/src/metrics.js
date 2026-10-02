@@ -2,7 +2,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { APP_NAME, TARGET_ID } from './contract.js';
 
 const STALE_SECONDS = 90;
-const scopes = { pods: 'app_namespace', cpu_percent: 'target_node', memory_percent: 'target_node', http: 'app_probe' };
+const scopes = { pods: 'app_pods', cpu_percent: 'target_node', memory_percent: 'target_node', http: 'app_probe' };
 const dns = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const instance = /^[a-zA-Z0-9.-]+:[0-9]{1,5}$/;
 function safeUrl(value) {
@@ -29,6 +29,7 @@ const named = (name, expression) => `label_replace((${expression}), "railshot_me
 function queries(target) {
   const node = selector('node', target.node_instance), cluster = selector('cluster', target.cluster_instance), http = selector('http', target.probe_url);
   const pod = `kube_pod_status_phase{job="cluster",instance=${JSON.stringify(target.cluster_instance)},namespace=${JSON.stringify(target.namespace)},phase="Running"}`;
+  const podLabels = `kube_pod_labels{job="cluster",instance=${JSON.stringify(target.cluster_instance)},namespace=${JSON.stringify(target.namespace)},label_app_kubernetes_io_name=${JSON.stringify(target.app)},label_railshot_io_target=${JSON.stringify(target.target_id)}}`;
   const group = (labels, values) => [named('up', `up${labels}`), named('observed', `timestamp(up${labels})`),
     ...Object.entries(values).flatMap(([name, [value, timestamp]]) => [named(name, value), named(`${name}_observed`, timestamp)])].join(' or ');
   return [
@@ -36,7 +37,7 @@ function queries(target) {
       cpu_percent: [`100 * (1 - avg(rate(node_cpu_seconds_total${node.slice(0, -1)},mode="idle"}[2m])))`, `min(timestamp(node_cpu_seconds_total${node}))`],
       memory_percent: [`100 * (1 - node_memory_MemAvailable_bytes${node} / node_memory_MemTotal_bytes${node})`, `min(timestamp(node_memory_MemAvailable_bytes${node}) or timestamp(node_memory_MemTotal_bytes${node}))`],
     }) },
-    { names: ['pods'], query: group(cluster, { pods: [`sum(${pod})`, `min(timestamp(${pod}))`] }) },
+    { names: ['pods'], query: group(cluster, { pods: [`sum(${pod} and on(namespace,pod,uid) ${podLabels})`, `min(timestamp(${pod}) and on(namespace,pod,uid) ${podLabels})`] }) },
     { names: ['http'], query: group(http, { http: [`probe_success${http}`, `timestamp(probe_success${http})`] }) },
   ];
 }

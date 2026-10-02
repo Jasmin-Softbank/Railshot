@@ -1797,7 +1797,7 @@
           "scope": {
             "type": "string",
             "enum": [
-              "app_namespace",
+              "app_pods",
               "target_node",
               "app_probe"
             ]

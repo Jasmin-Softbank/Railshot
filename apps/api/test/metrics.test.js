@@ -28,6 +28,8 @@ test('bound observations expire, fail closed, and never expose backend details',
   assert.equal(fresh.deployment_id, record.id); assert.equal(fresh.metrics.pods.value, 2);
   assert.equal(fresh.metrics.cpu_percent.scope, 'target_node'); assert.equal(fresh.metrics.http.state, 'ready');
   assert.match(queries[1], /namespace="tenant-demo-app"/);
+  assert.match(queries[1], /label_app_kubernetes_io_name="demo-app"/);
+  assert.match(queries[1], /label_railshot_io_target="demo"/);
   assert.match(queries[0], /timestamp\(up/); assert.ok(!JSON.stringify(fresh).includes('internal'));
   http = 0; assert.equal((await observe(record)).metrics.http.value, 0, 'probe failure differs from collection failure');
   age = 100; assert.equal((await observe(record)).metrics.http.state, 'stale');

@@ -15,7 +15,7 @@
 운영자가 [product.example.json](../../observability/product.example.json)의 형식으로
 소유자 전용 0600 파일을 만들고 API에 `RAILSHOT_OBSERVER_CONFIG` 절대 경로를 지정한다.
 파일은 요청마다 다시 읽으므로 새 target/app 등록은 원자적 파일 교체로 반영할 수 있다.
-각 행은 정확한 target/app, 앱 전용 namespace, node/cluster scrape instance, Blackbox의
+각 행은 정확한 target/app, 앱 namespace, node/cluster scrape instance, Blackbox의
 정확한 probe URL을 묶는다. 미등록 앱의 요청은 외부 질의를 하지 않는다.
 
 Prometheus 접근은 관리망에서 API 노드에만 허용한다. 기본 Compose의 loopback 바인딩을
@@ -24,8 +24,9 @@ API 노드 송신 주소에만 제한한다. 공개 Prometheus/Grafana/Blackbox 
 API 컨테이너에 파일을 읽기 전용 마운트하는 배포 설정은 플랫폼 담당이 적용한다.
 
 기존 관측 렌더러는 30초마다 node/cluster/http를 수집한다. Pod 수에는 새로 허용한
-`kube_pod_status_phase`가 필요하다. 기존 exporter에는 렌더된 allowlist 갱신이 필요하다.
-CPU/메모리는 노드 전체의 사용률이며 특정 앱의 소비량이 아니다. Pod는 앱 namespace의
+`kube_pod_status_phase`와 `kube_pod_labels`가 필요하다. 기존 manifest의
+`app.kubernetes.io/name`과 `railshot.io/target` 두 라벨만 수집하며 정확한 앱/대상의 Pod로 제한한다. 기존 exporter에는 렌더된 allowlist 갱신이 필요하다.
+CPU/메모리는 노드 전체의 사용률이며 특정 앱의 소비량이 아니다. Pod는 namespace와 두 앱/대상 라벨이 모두 일치하는
 Running phase 개수이며 readiness를 의미하지 않는다. HTTP 1은 관측 위치의 2xx 응답이고,
 0은 probe 실패다. 앱 본문/배포 버전 확인은 CD의 `public_http` receipt가 담당한다.
 
