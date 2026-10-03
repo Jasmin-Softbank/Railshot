@@ -83,6 +83,14 @@ class ControlCiliumTests(unittest.TestCase):
         for existing in (False, True):
             with patch.object(guard, 'kube', side_effect=[nodes, service, config if existing else None, daemon if existing else None]):
                 guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', profile='control')
+        daemon['spec']['template']['spec']['containers'][0]['image'] = pinned.replace('@', ':v1.20.2@')
+        with patch.object(guard, 'kube', side_effect=[nodes, service, config, daemon]):
+            guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', profile='control')
+        daemon['spec']['template']['spec']['containers'][0]['image'] = pinned.replace('@', ':v1.20.2@').replace('quay.io/cilium/cilium', 'quay.io/cilium/other')
+        with patch.object(guard, 'kube', side_effect=[nodes, service, config, daemon]):
+            with self.assertRaisesRegex(ValueError, 'explicit upgrade'):
+                guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', profile='control')
+        daemon['spec']['template']['spec']['containers'][0]['image'] = pinned
         with patch.object(guard, 'kube', side_effect=[{'items': []}]):
             with self.assertRaisesRegex(ValueError, 'registration/PodCIDR'):
                 guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', wait_seconds=0, profile='control')
