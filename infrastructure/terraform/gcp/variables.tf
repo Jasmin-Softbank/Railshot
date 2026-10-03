@@ -128,10 +128,10 @@ variable "operator_ssh_public_key" {
 variable "wireguard_peer_public_cidrs" {
   type        = list(string)
   default     = []
-  description = "Registered AWS gateway public endpoint IPv4 /32 addresses. Allows only UDP 51820 in/out; does not install WireGuard, keys, tunnel routes or Kubernetes."
+  description = "Retired input retained only to reject old WireGuard configurations. Remove it from target settings."
   validation {
-    condition     = length(var.wireguard_peer_public_cidrs) <= 4 && alltrue([for cidr in var.wireguard_peer_public_cidrs : can(cidrnetmask(cidr)) && endswith(cidr, "/32")])
-    error_message = "Supply at most four exact IPv4 /32 peer endpoints."
+    condition     = length(var.wireguard_peer_public_cidrs) == 0
+    error_message = "WireGuard is retired. Remove wireguard_peer_public_cidrs from the target configuration; existing live tunnels require a separate reviewed cutover."
   }
 }
 

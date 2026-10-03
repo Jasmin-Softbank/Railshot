@@ -102,7 +102,7 @@
             "$ref": "#/paths/~1v1~1ansible~1jobs/post/responses/503"
           },
           "200": {
-            "description": "Input and approved target mappings are valid. Inspect execution_supported and blockers separately. A valid DB plan still has execution_supported=false.",
+            "description": "Input and approved target mappings are valid. Inspect execution_supported and blockers separately. A matching approved HA profile may enable database execution; validation alone does not prove remote readiness.",
             "headers": {
               "Cache-Control": {
                 "$ref": "#/components/headers/NoStore"
@@ -126,7 +126,7 @@
       "post": {
         "operationId": "submitAnsibleJob",
         "summary": "Submit or retrieve a registered target job",
-        "description": "Accept guest.check or runtime.install after validating the approved target and operation parameters. database.configure is validated but returns 501 without creating a job. The request ID binds all expanded server-side inputs, including typed parameters, resource/SSH configuration and timeout. Matching retries return the current/stored job. Changed input returns 409; uncertain remote work is never retried automatically. Query strings and a trailing slash are unsupported.",
+        "description": "Accept guest.check, runtime.install or approved HA database.configure after validating the registered targets and operation parameters. Standalone, insufficient HA topology or an omitted profile_id returns 501 without creating a job. An unregistered profile_id returns 400. The request ID binds all expanded server-side inputs, including typed parameters, resource/SSH configuration and timeout. Matching retries return the current/stored job. Changed input returns 409; uncertain remote work is never retried automatically. Query strings and a trailing slash are unsupported.",
         "parameters": [
           {
             "name": "Content-Length",
@@ -575,7 +575,8 @@
         "type": "string",
         "enum": [
           "guest.check",
-          "runtime.install"
+          "runtime.install",
+          "database.configure"
         ]
       },
       "JobRequest": {
@@ -930,7 +931,7 @@
             ]
           }
         },
-        "description": "A successful job proves only the requested guest/runtime readiness, never application deployment or public HTTP availability."
+        "description": "A successful job proves only the requested guest, runtime or database readiness, never application deployment or public HTTP availability."
       },
       "HTTPError": {
         "type": "object",
@@ -1034,6 +1035,9 @@
                         "$ref": "#/components/schemas/InventoryGroup"
                       },
                       "dcs": {
+                        "$ref": "#/components/schemas/InventoryGroup"
+                      },
+                      "proxy": {
                         "$ref": "#/components/schemas/InventoryGroup"
                       }
                     }
@@ -1156,6 +1160,11 @@
                               "maximum": 16
                             },
                             "dcs_voters": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 16
+                            },
+                            "proxy_nodes": {
                               "type": "integer",
                               "minimum": 0,
                               "maximum": 16

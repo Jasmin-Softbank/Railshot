@@ -58,19 +58,34 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def validate_public_http(config, health_path):
+    """Bind one registrar-owned response contract to the published health path."""
+    handoff.require(isinstance(config, dict) and set(config) in (
+        {'url', 'expected_json'}, {'url', 'expected_status'}), 'registered public health expectation required')
+    handoff.require(isinstance(config['url'], str), 'registered HTTPS health URL required')
+    url = argo.https_url(config['url'])
+    handoff.require(urlsplit(url).path == handoff.http_path(health_path), 'public health path differs')
+    if 'expected_json' in config:
+        handoff.require(isinstance(config['expected_json'], dict) and len(encoded(config['expected_json'])) <= 65536,
+                        'bounded public JSON expectation required')
+    else:
+        handoff.require(type(config['expected_status']) is int and config['expected_status'] == 200,
+                        'public health status must be 200')
+    return url
+
+
 def public_probe(config, health_path):
     """Observe exactly the operator-approved HTTPS URL; no proxy, redirect, or body echo."""
-    handoff.require(set(config) == {'url', 'expected_json'}, 'registered public health expectation required')
-    url = argo.https_url(config['url'])
-    parsed = urlsplit(url)
-    handoff.require(parsed.path == health_path and isinstance(config['expected_json'], dict) and
-                    len(encoded(config['expected_json'])) <= 65536, 'public health path/JSON expectation required')
+    url = validate_public_http(config, health_path)
     result = {'state': 'unverified', 'verified_at': None, 'url': None}
     try:
-        request = Request(url, headers={'Accept': 'application/json', 'User-Agent': 'railshot-health/1'})
+        request = Request(url, headers={'Accept': 'application/json' if 'expected_json' in config else '*/*',
+                                       'User-Agent': 'railshot-health/1'})
         with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=10) as response:
             raw = response.read(65537)
-            ok = response.status == 200 and len(raw) <= 65536 and encoded(json.loads(raw)) == encoded(config['expected_json'])
+            ok = response.status == 200 and len(raw) <= 65536
+            if ok and 'expected_json' in config:
+                ok = encoded(json.loads(raw)) == encoded(config['expected_json'])
         if ok:
             result.update(state='succeeded', verified_at=datetime.now(timezone.utc).isoformat(), url=url)
     except (OSError, ValueError, HTTPError, URLError):
@@ -83,8 +98,7 @@ def site_probe(url):
     try:
         with build_opener(ProxyHandler({}), NoRedirect()).open(
                 Request(argo.https_url(url), headers={'User-Agent': 'railshot-health/1'}), timeout=10) as response:
-            response.read(1)
-            return response.status == 200
+            return response.status == 200 and len(response.read(65537)) <= 65536
     except (OSError, ValueError, HTTPError, URLError):
         return False
 
@@ -123,7 +137,9 @@ def validate_request(config, request):
                     'registered application/tenant mismatch')
     if 'edge' in registered:
         edge.validate_binding(registered['edge'], registered)
-    handoff.require(isinstance(request['files'], dict) and set(request['files']) == set(FILES),
+    handoff.require(isinstance(request['files'], dict), 'trusted publication files required')
+    spec = handoff.spec_name(request['files'])
+    handoff.require(set(request['files']) == {spec, 'images.json', 'verdict.json', 'manifest.json', 'handoff.json'},
                     'exact trusted publication files required')
     files = {}
     for name, value in request['files'].items():
@@ -160,6 +176,11 @@ def observe(config, registered, directory, state):
                 public = {'state': 'unverified', 'verified_at': None, 'url': None}
         else:
             public = public_probe(registered['public_http'], review['receipt']['http']['health_path'])
+            if public['state'] == 'succeeded':
+                health = urlsplit(registered['public_http']['url'])
+                site_url = 'https://' + health.netloc + handoff.http_path(review['receipt']['http']['route'])
+                public = {**public, 'site_url': site_url} if site_probe(site_url) else {
+                    'state': 'unverified', 'verified_at': None, 'url': None}
     return output(observed['status'], revision=observed['git_revision'], deployed=observed['deployed'], public=public,
                   migration=observed.get('migration'))
 
@@ -207,17 +228,19 @@ def execute(config, request):
             remote = argo.https_url(git(config, 'remote', 'get-url', 'origin'))
             handoff.require(remote.rstrip('/').removesuffix('.git') == target['repo_url'].rstrip('/').removesuffix('.git'),
                             'registered Git remote mismatch')
-            git(config, 'fetch', '--no-tags', 'origin', config['branch'])
+            git(config, 'fetch', '--no-tags', 'origin', 'refs/heads/' + config['branch'])
             base = git(config, 'rev-parse', 'HEAD')
-            handoff.require(base == git(config, 'rev-parse', 'FETCH_HEAD'), 'config checkout must match remote branch')
+            remote_revision = git(config, 'rev-parse', 'FETCH_HEAD')
+            if base != remote_revision:
+                handoff.require(git(config, 'merge-base', base, remote_revision) == base,
+                                'config checkout must match or fast-forward to remote branch')
+                git(config, 'merge', '--ff-only', remote_revision)
+                base = git(config, 'rev-parse', 'HEAD')
+            handoff.require(base == remote_revision, 'config checkout must match remote branch')
             target['revision'] = base
             rendered = handoff.render(published, target)
             # Validate the public contract before any remote mutation.
-            public = registered['public_http']
-            handoff.require(set(public) == {'url', 'expected_json'} and isinstance(public['expected_json'], dict) and
-                            len(encoded(public['expected_json'])) <= 65536 and
-                            urlsplit(argo.https_url(public['url'])).path == rendered['http']['health_path'],
-                            'registered HTTPS health expectation required')
+            validate_public_http(registered['public_http'], rendered['http']['health_path'])
             app = rendered['application']
             project = argo.kubectl(config['context'], app['metadata']['namespace'],
                                   'get', 'appproject', app['spec']['project'], '-o', 'json')

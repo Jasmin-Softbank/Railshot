@@ -1,5 +1,6 @@
 import base64
 import copy
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -54,6 +55,38 @@ class BridgeTest(unittest.TestCase):
         return subprocess.run(['git', '-C', str(self.repo), '-c', 'core.hooksPath=/dev/null', *args],
                               check=True, capture_output=True, text=True).stdout.strip()
 
+    def advance_remote(self):
+        writer = self.root / 'other-writer'
+        subprocess.run(['git', 'clone', '-q', '--branch', 'main', str(self.remote), str(writer)],
+                       check=True, capture_output=True)
+        def git(*args):
+            return subprocess.run(['git', '-C', str(writer), '-c', 'core.hooksPath=/dev/null', *args],
+                                  check=True, capture_output=True, text=True).stdout.strip()
+        git('config', 'user.name', 'Other writer'); git('config', 'user.email', 'other@example.invalid')
+        (writer / 'other-app.json').write_text('{"owner":"another-application"}\n')
+        git('add', '--', 'other-app.json'); git('commit', '-qm', 'Independent app release')
+        git('push', '-q', 'origin', 'main')
+        return git('rev-parse', 'HEAD')
+
+    def test_historical_publication_crosses_bridge_without_renaming_bytes(self):
+        request = copy.deepcopy(self.request)
+        files = {name: base64.b64decode(value) for name, value in request['files'].items()}
+        files['jasmin.yaml'] = files.pop('railshot.yaml')
+        manifest = json.loads(files['manifest.json'])
+        manifest['files']['jasmin.yaml'] = manifest['files'].pop('railshot.yaml')
+        files['manifest.json'] = json.dumps(manifest).encode()
+        receipt = json.loads(files['handoff.json'])
+        receipt['files']['jasmin.yaml'] = receipt['files'].pop('railshot.yaml')
+        receipt['files']['manifest.json'] = hashlib.sha256(files['manifest.json']).hexdigest()
+        files['handoff.json'] = json.dumps(receipt).encode()
+        request['publication'].update(receipt)
+        request['files'] = {name: base64.b64encode(value).decode() for name, value in files.items()}
+        _, accepted, _ = bridge.validate_request(self.config, request)
+        self.assertEqual(accepted, files)
+        request['files']['railshot.yaml'] = request['files']['jasmin.yaml']
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            bridge.validate_request(self.config, request)
+
     def native_local_only(self, args, **kwargs):
         self.calls.append(args)
         if args[-3:] == ['remote', 'get-url', 'origin']:
@@ -61,6 +94,46 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(args[0], 'git')
         # The fixture's origin is a temporary local bare repository; no network writes.
         return self.native(args, **kwargs)
+
+    def test_cloud_publications_keep_cluster_path_namespace_and_pull_secret_isolated(self):
+        config = copy.deepcopy(self.config)
+        template = config['targets'].pop('k3s-aws')
+        requests = {}
+        for index, provider in enumerate(('aws', 'gcp', 'openstack'), 1):
+            target_id = 'k3s-' + provider
+            registered = copy.deepcopy(template)
+            registered['target'].update(id=target_id, namespace='app-' + provider, project='railshot-' + provider,
+                cluster_server=f'https://10.{index}.0.2:6443', path=f'gitops/applications/demo/{target_id}', revision='e' * 40,
+                image_pull_secret={'namespace': 'app-' + provider, 'name': 'pull-' + provider})
+            config['targets'][target_id] = registered
+            request = copy.deepcopy(self.request)
+            request['target_id'] = target_id
+            receipt = json.loads(base64.b64decode(request['files']['handoff.json']))
+            receipt['target_id'] = target_id
+            receipt['registry'].update(visibility='private', verification='authenticated_manifest_read',
+                image_pull_secret=registered['target']['image_pull_secret'])
+            request['publication'].update(receipt)
+            request['files']['handoff.json'] = base64.b64encode(json.dumps(receipt).encode()).decode()
+            requests[target_id] = request
+        with patch('argo.native') as native:
+            for target_id, request in requests.items():
+                registered, files, _ = bridge.validate_request(config, request)
+                published = self.root / target_id; published.mkdir()
+                for name, content in files.items(): (published / name).write_bytes(content)
+                rendered = bridge.handoff.render(published, registered['target'])
+                application, workload = rendered['application']['spec'], rendered['workload']['items'][0]
+                self.assertEqual(application['destination'], {'server': registered['target']['cluster_server'], 'namespace': registered['target']['namespace']})
+                self.assertEqual(application['source']['path'], registered['target']['path'])
+                self.assertEqual(application['project'], registered['target']['project'])
+                self.assertEqual(workload['spec']['template']['spec']['imagePullSecrets'], [{'name': registered['target']['image_pull_secret']['name']}])
+                for other in requests:
+                    if other == target_id: continue
+                    forged = {**request, 'target_id': other}
+                    with self.assertRaisesRegex(ValueError, 'publication target mismatch'):
+                        bridge.validate_request(config, forged)
+                    with self.assertRaisesRegex(ValueError, 'artifact target mismatch'):
+                        bridge.handoff.render(published, config['targets'][other]['target'])
+            native.assert_not_called()
 
     def kubectl(self, context, namespace, *args, document=None):
         self.calls.append(['kubectl', *args])
@@ -77,9 +150,11 @@ class BridgeTest(unittest.TestCase):
     def test_apply_pins_git_argo_and_public_receipt_then_replay_only_observes(self):
         verified = {'state': 'succeeded', 'verified_at': '2026-10-02T12:00:00+00:00', 'url': 'https://app.example/health'}
         with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
-                patch('bridge.public_probe', return_value=verified):
+                patch('bridge.public_probe', return_value=verified), patch('bridge.site_probe', return_value=True) as site:
             result = bridge.execute(self.config, self.request)
-            self.assertTrue(result['cd']['deployed']); self.assertEqual(result['public_http'], verified)
+            self.assertTrue(result['cd']['deployed'])
+            self.assertEqual(result['public_http'], {**verified, 'site_url': 'https://app.example/health'})
+            site.assert_called_once_with('https://app.example/health')
             self.assertEqual(result['cd']['revision'], self.git('rev-parse', 'HEAD'))
             remote_revision = subprocess.check_output(['git', '--git-dir', str(self.remote), 'rev-parse', 'main'], text=True).strip()
             self.assertEqual(result['cd']['revision'], remote_revision)
@@ -90,6 +165,116 @@ class BridgeTest(unittest.TestCase):
             bad = copy.deepcopy(self.request); bad['publication']['artifact_id'] = 4
             with self.assertRaisesRegex(ValueError, 'binding conflict'):
                 bridge.execute(self.config, bad)
+
+    def test_clean_behind_checkout_fast_forwards_before_app_commit_without_losing_other_release(self):
+        before = self.git('rev-parse', 'HEAD')
+        remote_revision = self.advance_remote()
+        self.assertNotEqual(before, remote_revision)
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value={'state': 'unverified', 'verified_at': None, 'url': None}):
+            result = bridge.execute(self.config, self.request)
+        self.assertTrue(result['cd']['deployed'])
+        self.assertEqual(self.git('rev-parse', 'HEAD^'), remote_revision)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), result['cd']['revision'])
+        self.assertEqual(json.loads((self.repo / 'other-app.json').read_text()), {'owner': 'another-application'})
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.assertEqual([args[-3:] for args in self.calls if 'merge' in args], [['merge', '--ff-only', remote_revision]])
+        remote_head = subprocess.check_output(['git', '--git-dir', str(self.remote), 'rev-parse', 'main'], text=True).strip()
+        self.assertEqual(remote_head, result['cd']['revision'])
+
+    def test_ahead_or_diverged_checkout_is_not_reset_merged_or_pushed(self):
+        original_remote = self.git('rev-parse', 'HEAD')
+        (self.repo / 'local-only.txt').write_text('preserve unpublished work\n')
+        self.git('add', '--', 'local-only.txt'); self.git('commit', '-qm', 'Unpublished local commit')
+        local_head = self.git('rev-parse', 'HEAD')
+        for state in ('ahead', 'diverged'):
+            expected_remote = self.advance_remote() if state == 'diverged' else original_remote
+            self.calls.clear()
+            with self.subTest(state=state), patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl') as kube:
+                result = bridge.execute(self.config, {**self.request, 'deployment_id': state})
+                self.assertEqual(result['cd']['state'], 'blocked')
+                self.assertEqual(result['error']['code'], 'CD_PREPARATION_FAILED')
+                self.assertFalse(result['error']['outcome_unknown'])
+                kube.assert_not_called()
+            self.assertEqual(self.git('rev-parse', 'HEAD'), local_head)
+            self.assertEqual((self.repo / 'local-only.txt').read_text(), 'preserve unpublished work\n')
+            self.assertFalse(any(command in args for args in self.calls for command in ('merge', 'reset', 'push', 'commit')))
+            remote_head = subprocess.check_output(['git', '--git-dir', str(self.remote), 'rev-parse', 'main'], text=True).strip()
+            self.assertEqual(remote_head, expected_remote)
+
+    def test_fast_forward_does_not_bypass_clean_checkout_or_registered_branch(self):
+        self.advance_remote()
+        before = self.git('rev-parse', 'HEAD')
+        for state in ('dirty', 'wrong-branch'):
+            if state == 'dirty':
+                (self.repo / 'README.md').write_text('local edit\n')
+            else:
+                (self.repo / 'README.md').write_text('fixture\n')
+                self.git('checkout', '-qb', 'another-branch')
+            self.calls.clear()
+            with self.subTest(state=state), patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl') as kube:
+                result = bridge.execute(self.config, {**self.request, 'deployment_id': state})
+                self.assertEqual(result['cd']['state'], 'blocked')
+                kube.assert_not_called()
+            self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+            self.assertFalse(any(command in args for args in self.calls for command in ('fetch', 'merge', 'reset', 'push', 'commit')))
+
+    def test_status_health_requires_current_argo_revision_images_and_site_before_url(self):
+        self.config['targets']['k3s-aws']['public_http'] = {'url': 'https://app.example/health', 'expected_status': 200}
+        files = {name: base64.b64decode(value) for name, value in self.request['files'].items()}
+        spec = json.loads(files['railshot.yaml']); spec['services'][0]['route'] = '/app'
+        files['railshot.yaml'] = json.dumps(spec).encode()
+        manifest = json.loads(files['manifest.json'])
+        manifest['files']['railshot.yaml'] = hashlib.sha256(files['railshot.yaml']).hexdigest()
+        files['manifest.json'] = json.dumps(manifest).encode()
+        receipt = json.loads(files['handoff.json'])
+        receipt['files'] = {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items() if name != 'handoff.json'}
+        files['handoff.json'] = json.dumps(receipt).encode()
+        self.request['publication'].update(receipt)
+        self.request['files'] = {name: base64.b64encode(raw).decode() for name, raw in files.items()}
+        verified = {'state': 'succeeded', 'verified_at': '2026-10-03T00:00:00Z', 'url': 'https://app.example/health'}
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value=verified) as health, patch('bridge.site_probe', return_value=False) as site:
+            result = bridge.execute(self.config, self.request)
+            self.assertTrue(result['cd']['deployed'])
+            self.assertEqual(result['public_http'], {'state': 'unverified', 'verified_at': None, 'url': None})
+            site.assert_called_once_with('https://app.example/app')
+            site.return_value = True
+            result = bridge.execute(self.config, {**self.request, 'action': 'observe'})
+            self.assertEqual(result['public_http'], {**verified, 'site_url': 'https://app.example/app'})
+            for field in ('revision', 'images'):
+                def stale(context, namespace, *args, document=None):
+                    live = self.kubectl(context, namespace, *args, document=document)
+                    if args[0:2] == ('get', 'application'):
+                        if field == 'revision':
+                            live['status']['sync']['revision'] = 'a' * 40
+                        else:
+                            live['status']['summary']['images'] = ['ghcr.io/example/web@sha256:' + 'a' * 64]
+                    return live
+                health.reset_mock(); site.reset_mock()
+                with self.subTest(field=field), patch('argo.kubectl', side_effect=stale):
+                    result = bridge.execute(self.config, {**self.request, 'action': 'observe'})
+                    self.assertFalse(result['cd']['deployed'])
+                    self.assertEqual(result['public_http']['state'], 'not_run')
+                    health.assert_not_called(); site.assert_not_called()
+
+    def test_public_contract_rejects_ambiguous_unbound_or_invalid_expectations_before_push(self):
+        valid = {'url': 'https://app.example/health', 'expected_status': 200}
+        invalid = [{'expected_status': status} for status in (True, '200', 200.0, 206, 500)] + [
+            {'url': url} for url in ('http://app.example/health', 'https://user:secret@app.example/health',
+                                     'https://app.example/wrong', 'https://app.example/health?x=1',
+                                     'https://app.example/health#fragment', 'https://*.example/health')] + [
+            {'expected_json': {}}, {'extra': True}]
+        for index, fields in enumerate(invalid):
+            with self.subTest(fields=fields):
+                self.config['targets']['k3s-aws']['public_http'] = {**valid, **fields}
+                self.calls.clear()
+                request = {**self.request, 'deployment_id': f'invalid-{index}'}
+                with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl') as kube:
+                    result = bridge.execute(self.config, request)
+                self.assertEqual(result['cd']['state'], 'blocked')
+                kube.assert_not_called()
+                self.assertFalse(any('push' in args for args in self.calls))
 
     def test_uncertain_push_is_never_repeated_and_forged_input_never_dispatches(self):
         def failed(args, **kwargs):
@@ -166,12 +351,13 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertFalse(any('push' in args for args in self.calls))
 
-    def test_real_local_http_requires_exact_body_and_never_follows_redirect(self):
+    def test_real_local_http_checks_json_or_bounded_status_and_never_follows_redirect(self):
         class Handler(BaseHTTPRequestHandler):
-            body, redirect = b'{"status":"ready"}', False
+            body, status, calls = b'{"status":"ready"}', 200, []
             def do_GET(self):
-                self.send_response(302 if self.redirect else 200)
-                if self.redirect:
+                self.calls.append(self.path)
+                self.send_response(self.status)
+                if self.status == 302:
                     self.send_header('Location', '/other')
                 self.end_headers(); self.wfile.write(self.body)
             def log_message(self, *_args):
@@ -191,8 +377,19 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(bridge.public_probe(config, '/health')['state'], 'succeeded')
             Handler.body = b'{"status":"wrong"}'
             self.assertEqual(bridge.public_probe(config, '/health')['state'], 'unverified')
-            Handler.body = b'{"status":"ready"}'; Handler.redirect = True
-            self.assertEqual(bridge.public_probe(config, '/health')['state'], 'unverified')
+            status_only = {'url': config['url'], 'expected_status': 200}
+            for body in (b'<html>ready</html>', b'OK', b''):
+                Handler.body = body
+                self.assertEqual(bridge.public_probe(status_only, '/health')['state'], 'succeeded')
+            for status, body in ((206, b'OK'), (500, b'failure'), (200, b'x' * 65537), (302, b'')):
+                with self.subTest(status=status, size=len(body)):
+                    Handler.status, Handler.body = status, body
+                    Handler.calls.clear()
+                    self.assertEqual(bridge.public_probe(status_only, '/health')['state'], 'unverified')
+                    self.assertEqual(Handler.calls, ['/health'])
+                    self.assertFalse(bridge.site_probe(config['url']))
+            Handler.status, Handler.body = 200, b'<html>ready</html>'
+            self.assertTrue(bridge.site_probe(config['url']))
         with self.assertRaises(ValueError):
             bridge.public_probe({'url': local, 'expected_json': {}}, '/health')
 

@@ -19,6 +19,20 @@ YAML
 if [[ -n ${NODE_IP:-} ]]; then
   printf 'node-ip: "%s"\n' "$NODE_IP" >> "$TEMP_DIR/config.yaml"
 fi
+# Native health registration owns this one optional extension. Preserve only its
+# exact reviewed config on repeat installs; arbitrary API arguments still fail cmp.
+if [[ -f $config && -f /etc/rancher/k3s/runtime-healthz-authentication.json ]]; then
+  python3 - "$ROOT_DIR/bootstrap/runtime-healthz.py" "$TEMP_DIR/config.yaml" "$config" <<'PY'
+import json, pathlib, runpy, sys
+health = runpy.run_path(sys.argv[1])
+expected = pathlib.Path(sys.argv[2])
+live = pathlib.Path(sys.argv[3]).read_bytes()
+auth = pathlib.Path(health['AUTH_PATH'])
+if (not auth.is_symlink() and json.loads(auth.read_text()) == health['AUTH']
+        and live == health['desired_config'](expected.read_bytes())):
+    expected.write_bytes(live)
+PY
+fi
 if [[ -e $config ]]; then
   cmp -s "$TEMP_DIR/config.yaml" "$config" || die '기존 K3s 설정과 다릅니다. 기존 클러스터/CNI를 자동으로 변경하지 않습니다. 전용 노드를 사용하세요.'
 else

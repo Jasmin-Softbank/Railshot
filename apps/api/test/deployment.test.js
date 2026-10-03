@@ -10,13 +10,15 @@ import { createDeploymentService } from '../src/github.js';
 import { createAppServer } from '../src/server.js';
 import { archiveFromPath, deploySource, inferredAppName, insideRoot } from '../src/client.js';
 import { fetchPublicGithubSource } from '../src/public-github.js';
+import { readPublished } from '../src/published.js';
+import { readSourceSnapshot, sourceSnapshotLimit } from '../src/source-snapshot.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 
-async function zipOf(files) {
+async function zipOf(files, options = {}) {
   const zip = new yazl.ZipFile();
-  for (const [name, content] of Object.entries(files)) zip.addBuffer(Buffer.from(content), name);
+  for (const [name, content] of Object.entries(files)) zip.addBuffer(Buffer.from(content), name, options[name]);
   zip.end();
   const chunks = [];
   for await (const chunk of zip.outputStream) chunks.push(chunk);
@@ -150,9 +152,18 @@ test('ZIP 경로 이동과 비밀키 파일을 거부한다', async () => {
   await assert.rejects(inspectArchive(Buffer.from(text, 'latin1')), /invalid relative path|안전하지 않은/);
 });
 
+test('ignored dependency symlinks are skipped while application symlinks remain rejected', async () => {
+  const link = 'repo/examples/react/node_modules/.bin/JSONStream';
+  const files = { 'repo/package.json': '{}', 'repo/index.html': 'app', [link]: '../JSONStream/bin.js' };
+  const bytes = await zipOf(files, { [link]: { mode: 0o120777 } });
+  assert.deepEqual((await inspectArchive(bytes, { stripRoot: true })).map((file) => file.path), ['package.json', 'index.html']);
+  await assert.rejects(inspectArchive(await zipOf({ 'repo/app-link': '/etc/passwd' },
+    { 'repo/app-link': { mode: 0o120777 } })), /안전하지 않은 ZIP 경로/);
+});
+
 test('공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 파일 목록으로 변환한다', async () => {
   const sha = 'a'.repeat(40);
-  const zip = await zipOf({ 'sample-a1b2c3/requirements.txt': 'flask', 'sample-a1b2c3/app.py': 'print(1)' });
+  let zip = await zipOf({ 'sample-a1b2c3/requirements.txt': 'flask', 'sample-a1b2c3/app.py': 'print(1)' });
   const calls = [];
   const fakeFetch = async (url, options) => {
     calls.push({ url: String(url), options });
@@ -168,6 +179,10 @@ test('공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 
   assert.deepEqual(result.files.map((file) => file.path), ['requirements.txt', 'app.py']);
   assert.deepEqual(result.source, { type: 'github', repository: 'https://github.com/example/sample', sha });
   assert.ok(calls.every((call) => !call.options.headers.authorization));
+  assert.ok(calls.every((call) => call.options.signal instanceof AbortSignal), 'Every source read has a deadline');
+  zip = await zipOf({ 'sample-a1b2c3/.env': 'private' });
+  await assert.rejects(fetchPublicGithubSource('https://github.com/example/sample', fakeFetch),
+    (error) => error.status === 422 && /GitHub 소스 검사 실패:.*비밀키/.test(error.message));
 });
 
 test('GitHub 입력은 공개 저장소 기본 URL로만 제한한다', async () => {
@@ -188,9 +203,12 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
   const server = createAppServer({ sourceLoader: async (url) => ({
     files: [{ path: 'app.py', content: Buffer.from('print(1)') }],
     source: { type: 'github', repository: url, sha: 'b'.repeat(40) },
-  }), service: {
-    deploy: async (input) => { observed.push(input); return { run_id: 456, app: input.app, tenant: 'demo' }; },
-    status: async (id) => ({ run_id: Number(id), status: 'queued', steps: [] }),
+  }), service: {}, product: {
+    createBuild: async (input, loadSource) => {
+      observed.push(input.files ? input : { ...input, ...await loadSource(input.repository_url) });
+      return { run_id: 456, app: input.app, tenant: 'demo' };
+    },
+    legacyStatus: async (id) => ({ run_id: Number(id), status: 'queued', steps: [] }),
   } });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
@@ -204,7 +222,7 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
     const form = new FormData();
     form.set('app', 'my-app');
     form.set('archive', new Blob([await zipOf({ 'index.js': 'test' })]), 'app.zip');
-    const create = await fetch(`${base}/api/deploy`, { method: 'POST', headers: { 'x-jasmin-request': 'deploy' }, body: form });
+    const create = await fetch(`${base}/api/deploy`, { method: 'POST', headers: { 'x-railshot-request': 'deploy' }, body: form });
     assert.equal(create.status, 202);
     assert.equal((await create.json()).run_id, 456);
     assert.equal(observed[0].app, 'my-app');
@@ -246,16 +264,17 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
   } finally { server.close(); }
 });
 
-function publishedFiles({ attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app' } = {}) {
+function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app', gateResult, sourceSha256 = 'c'.repeat(64) } = {}) {
   const hash = (value) => createHash('sha256').update(value).digest('hex');
-  const verdict = { ok: true, release_eligible: true, status: 'PASS', source_sha256: 'c'.repeat(64),
+  const verdict = { ok: true, release_eligible: true, status: 'PASS', source_sha256: sourceSha256,
     layers: ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'].map((layer) => ({ layer, ok: true, errors: [] })),
     images: { web: 'local/web:gate' }, image_ids: { web: 'sha256:' + 'd'.repeat(64) } };
-  const files = { 'jasmin.yaml': 'app: my-app\n', 'verdict.json': JSON.stringify(verdict),
+  if (gateResult) Object.assign(verdict.layers.find((row) => row.layer === gateResult.layer), gateResult);
+  const files = { [specName]: 'app: my-app\n', 'verdict.json': JSON.stringify(verdict),
     'images.json': JSON.stringify({ web: 'ghcr.io/org/demo-my-app-web@sha256:' + 'e'.repeat(64) }) };
   files['manifest.json'] = JSON.stringify({ version: 1, trust: 'trusted-ci-artifact-not-a-signature',
     source_sha256: verdict.source_sha256, images: { web: { local_ref: verdict.images.web, id: verdict.image_ids.web } },
-    files: { 'jasmin.yaml': hash(files['jasmin.yaml']), 'verdict.json': hash(files['verdict.json']), 'images.tar': 'f'.repeat(64) } });
+    files: { [specName]: hash(files[specName]), 'verdict.json': hash(files['verdict.json']), 'images.tar': 'f'.repeat(64) } });
   files['handoff.json'] = JSON.stringify({ version: 2, status: 'published', run_id: 789, producer_attempt: attempt,
     source_commit: sourceCommit, target_id: targetId, tenant: 'demo', app, bundle_artifact_id: 100,
     registry: { visibility: 'public', verification: 'anonymous_manifest_read',
@@ -263,6 +282,44 @@ function publishedFiles({ attempt = 1, sourceCommit = 'a'.repeat(40), targetId =
     files: Object.fromEntries(Object.entries(files).map(([name, value]) => [name, hash(value)])) });
   return files;
 }
+
+test('canonical and historical publications retain exact filename/hash bindings; ambiguity is rejected', async () => {
+  const identity = { runId: 789, attempt: 1, headSha: 'a'.repeat(40), targetId: 'aws-demo', tenant: 'demo' };
+  const entries = (files) => Object.entries(files).map(([path, content]) => ({ path, content: Buffer.from(content) }));
+  for (const specName of ['railshot.yaml', 'jasmin.yaml']) {
+    const files = publishedFiles({ specName });
+    assert.equal(readPublished(entries(files), identity).status, 'published');
+    const { service } = await publicationService({ files });
+    assert.equal((await service.status('789')).state, 'published');
+    const other = specName === 'railshot.yaml' ? 'jasmin.yaml' : 'railshot.yaml';
+    assert.throws(() => readPublished(entries({ ...files, [other]: files[specName] }), identity));
+    const renamed = { ...files, [other]: files[specName] }; delete renamed[specName];
+    assert.throws(() => readPublished(entries(renamed), identity));
+  }
+});
+
+test('publication accepts quality advisories but rejects runtime, isolation and unknown failures', () => {
+  const identity = { runId: 789, attempt: 1, headSha: 'a'.repeat(40), targetId: 'aws-demo', tenant: 'demo' };
+  const read = (gateResult) => readPublished(Object.entries(publishedFiles({ gateResult }))
+    .map(([path, content]) => ({ path, content: Buffer.from(content) })), identity);
+  const q = { layer: 'Q', ok: false, advisory: true, outcome: 'BLOCKED', blocked: 'NO_TESTS',
+    error: { code: 'GATE_CONFIG_INVALID', phase: 'Q.discovery', outcome: 'BLOCKED' } };
+  assert.equal(read(q).status, 'published');
+  assert.equal(read({ ...q, outcome: 'FAIL', error: { code: 'GATE_CHECK_FAILED', phase: 'Q.unit', outcome: 'FAIL' } }).status, 'published');
+  for (const layer of ['L0', 'L1', 'L2', 'L4', 'L3']) assert.throws(() => read({ ...q, layer }), /gate 단계/);
+  for (const [phase, code, outcome] of [
+    ['Q.snapshot', 'GATE_CONFIG_INVALID', 'BLOCKED'], ['network', 'GATE_ENVIRONMENT_UNAVAILABLE', 'BLOCKED'],
+    ['Q.cleanup', 'GATE_EXECUTION_FAILED', 'UNKNOWN'], ['Q.evidence-write', 'OBSERVATION_WRITE_FAILED', 'UNKNOWN'],
+  ]) assert.throws(() => read({ ...q, outcome, error: { phase, code, outcome } }), /gate 단계/);
+  assert.throws(() => read({ ...q, advisory: false }), /gate 단계/);
+});
+
+test('source ZIP root detection supports either specification name', async () => {
+  for (const spec of ['.railshot/railshot.yaml', '.jasmin/jasmin.yaml']) {
+    const files = await inspectArchive(await zipOf({ [`project/${spec}`]: 'app: demo\n', 'project/server.py': 'pass\n' }));
+    assert.deepEqual(files.map((file) => file.path).sort(), [spec, 'server.py']);
+  }
+});
 
 async function publicationService({ attempt = 1, producer = attempt, files = publishedFiles({ attempt: producer }),
   expired = false, duplicate = false, release = 'success', headSha = 'a'.repeat(40), artifacts = true, jobRows } = {}) {
@@ -402,6 +459,95 @@ test('최신 release가 실패하거나 건너뛰면 옛 성공 artifact를 사�
   }
 });
 
+async function diagnosticService({ artifact = {}, evidence = {}, files, duplicate = false, body, attempt = 1 } = {}) {
+  const data = { passed: false, result: 'blocked: NO_TESTS', status: 'BLOCKED', agent_attempts: 1, repair_scope: 'packaging',
+    error: { code: 'GATE_CONFIG_INVALID', phase: 'Q.discovery', outcome: 'BLOCKED', summary: 'private-secret-value' },
+    attempts: [{ attempt: 0, agent_invoked: false, written: null },
+      { attempt: 1, agent_invoked: true, written: ['Dockerfile', '.dockerignore', '.railshot/railshot.yaml', '.env', '../private-secret-value'] }],
+    ...evidence };
+  const zip = await zipOf(files || { 'evidence.json': JSON.stringify(data) }), calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    const value = new URL(url), path = value.pathname;
+    if (path.endsWith('/actions/runs/789')) return Response.json({ run_attempt: attempt, head_sha: 'a'.repeat(40),
+      status: 'completed', conclusion: 'failure', path: '.github/workflows/railshot-deploy.yml',
+      html_url: 'https://github.com/org/apps/actions/runs/789' });
+    if (path.endsWith(`/attempts/${attempt}/jobs`)) return Response.json({ total_count: 2, jobs: [
+      { name: 'loop', status: 'completed', conclusion: 'failure', steps: [
+        { number: 1, name: 'Validate inputs', status: 'completed', conclusion: 'success' },
+        { number: 2, name: 'Baseline gates, then SDK repair only when eligible', status: 'completed', conclusion: 'failure' },
+        { number: 3, name: 'private-secret-value', status: 'private-secret-value', conclusion: 'private-secret-value' }, null,
+      ] }, { name: 'release', status: 'completed', conclusion: 'skipped' },
+    ] });
+    if (path.endsWith('/runs/789/artifacts')) {
+      assert.equal(value.searchParams.get('name'), `loop-${attempt}`);
+      const row = { id: 201, name: `loop-${attempt}`, expired: false, size_in_bytes: zip.length,
+        workflow_run: { id: 789, head_sha: 'a'.repeat(40) }, archive_download_url: 'https://untrusted.invalid/private-secret-value', ...artifact };
+      return Response.json({ total_count: duplicate ? 2 : 1, artifacts: duplicate ? [row, { ...row, id: 202 }] : [row] });
+    }
+    if (path.endsWith('/actions/artifacts/201/zip')) return new Response(body || zip);
+    throw new Error('private-secret-value');
+  };
+  return { service: createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fetchImpl), calls };
+}
+
+test('failed CI exposes current-attempt NO_TESTS diagnostics and safe job tasks without raw artifact text', async () => {
+  const { service, calls } = await diagnosticService();
+  const result = await service.status('789');
+  assert.equal(result.state, 'failed'); assert.equal(result.publication, null);
+  assert.deepEqual(result.diagnostics, { state: 'ready', run_attempt: 1, artifact_id: 201, reason: 'NO_TESTS',
+    code: 'GATE_CONFIG_INVALID', phase: 'Q.discovery', outcome: 'BLOCKED', agent_attempts: 1,
+    changed_files: ['Dockerfile', '.dockerignore', '.railshot/railshot.yaml'], changed_file_count: 3, repair_scope: 'packaging',
+    message: '실행할 테스트를 찾지 못해 품질 검사가 중단되었습니다.',
+    guidance: '원본 프로젝트에 실행 가능한 테스트와 테스트 명령을 추가한 뒤 다시 배포하세요. 자동 패키징 수정은 테스트를 만들거나 품질 검사를 생략하지 않습니다.' });
+  assert.deepEqual(result.steps[0].tasks, [
+    { number: 1, name: 'Validate inputs', status: 'completed', conclusion: 'success' },
+    { number: 2, name: 'Baseline gates, then SDK repair only when eligible', status: 'completed', conclusion: 'failure' },
+    { number: 3, name: '단계 3', status: 'unknown', conclusion: null },
+  ]);
+  assert.ok(!JSON.stringify(result).includes('private-secret-value'));
+  assert.ok(calls.every((url) => url.startsWith('https://api.github.com/')));
+  const source = await diagnosticService({ evidence: { repair_scope: 'source', attempts: [
+    { attempt: 0, agent_invoked: false, written: null },
+    { attempt: 1, agent_invoked: true, written: ['Dockerfile', 'tests/private-secret-value.test.js', 'src/private-secret-value.js',
+      'tests/private-secret-value.test.js', '../private-secret-value', '.env', '/private-secret-value'] },
+  ] } });
+  const repaired = (await source.service.status('789')).diagnostics;
+  assert.equal(repaired.repair_scope, 'source'); assert.equal(repaired.changed_file_count, 3);
+  assert.deepEqual(repaired.changed_files, ['Dockerfile']);
+  assert.match(repaired.guidance, /소스·테스트 자동 수정을 시도/);
+  assert.ok(!JSON.stringify(repaired).includes('private-secret-value'));
+  assert.ok(!repaired.guidance.includes('테스트를 만들거나'));
+});
+
+test('stale, mismatched, oversized and malicious CI diagnostics fail closed without hiding the failed run', async () => {
+  for (const options of [
+    { attempt: 2, artifact: { name: 'loop-1' } },
+    { artifact: { expired: true } }, { duplicate: true },
+    { artifact: { workflow_run: { id: 788, head_sha: 'a'.repeat(40) } } },
+    { artifact: { workflow_run: { id: 789, head_sha: 'b'.repeat(40) } } },
+    { artifact: { size_in_bytes: 3 * 1024 * 1024 } }, { body: Buffer.alloc(2 * 1024 * 1024 + 1) },
+    { files: { 'evidence.json': '{private-secret-value' } },
+    { files: { 'other/evidence.json': '{}' } }, { evidence: { passed: true } },
+    { evidence: { agent_attempts: 9 } }, { evidence: { status: 'FAIL' } },
+  ]) {
+    const { service, calls } = await diagnosticService(options);
+    const result = await service.status('789');
+    assert.equal(result.state, 'failed'); assert.equal(result.publication, null);
+    assert.equal(result.diagnostics.state, 'unavailable', JSON.stringify(options));
+    assert.ok(!JSON.stringify(result).includes('private-secret-value'));
+    if (options.attempt === 2) assert.ok(calls.every((url) => !url.includes('loop-1') && !url.includes('/artifacts/201/zip')));
+  }
+  const { service } = await diagnosticService({ evidence: { result: 'private-secret-value', repair_scope: 'private-secret-value',
+    error: { code: 'private-secret-value', phase: '/private-secret-value', outcome: 'BLOCKED' } } });
+  const result = await service.status('789');
+  assert.equal(result.diagnostics.state, 'ready');
+  assert.equal(result.diagnostics.reason, 'CI_FAILED'); assert.equal(result.diagnostics.code, 'CI_FAILED');
+  assert.equal(result.diagnostics.phase, null);
+  assert.equal(result.diagnostics.repair_scope, null);
+  assert.ok(!JSON.stringify(result).includes('private-secret-value'));
+});
+
 test('artifact 만료·중복·누락과 source/target/attempt/파일 변조는 게시 확인을 차단한다', async () => {
   const tampered = publishedFiles(); tampered['images.json'] = '{}';
   for (const options of [
@@ -409,12 +555,16 @@ test('artifact 만료·중복·누락과 source/target/attempt/파일 변조는 
     { files: publishedFiles({ sourceCommit: 'b'.repeat(40) }) },
     { files: publishedFiles({ targetId: 'onprem-demo' }) },
     { files: publishedFiles({ attempt: 2 }) },
+    { files: { ...publishedFiles(), 'handoff.json': '{"private-secret-value": INVALID}' } },
+    { files: { ...publishedFiles(), 'private-secret-value.pem': 'private-secret-value' } },
   ]) {
     const { service } = await publicationService(options);
     const result = await service.status('789');
     assert.equal(result.state, 'publication_unverified', JSON.stringify(options));
     assert.equal(result.publication, null);
     assert.equal(result.url, null);
+    assert.ok(!JSON.stringify(result).includes('private-secret-value'));
+    assert.equal(result.message, '게시 산출물의 식별자·무결성·계약을 확인하지 못했습니다. GitHub Actions 기록을 확인하세요.');
   }
 });
 
@@ -499,7 +649,7 @@ test('HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까�
         source_commit: submitted.source_commit, target_id: submitted.target_id } });
     const bundle = join(root, 'bundle'); await mkdir(bundle);
     const files = publishedFiles({ sourceCommit: submitted.source_commit, targetId: submitted.target_id, app: submitted.app });
-    for (const name of ['jasmin.yaml', 'verdict.json', 'manifest.json']) await writeFile(join(bundle, name), files[name]);
+    for (const name of ['railshot.yaml', 'verdict.json', 'manifest.json']) await writeFile(join(bundle, name), files[name]);
     await writeFile(join(root, 'images.json'), files['images.json']);
     const script = fileURLToPath(new URL('../../../ci/scripts/publication.py', import.meta.url));
     // test/ is under apps/api, so the repository is three parents above that directory.
@@ -552,4 +702,117 @@ test('허용된 복수 target도 publication은 접수 target과 정확히 일�
   assert.ok((await service.publishedFiles(accepted.publication)).length);
   assert.equal((await service.status('789', 'aws-demo')).state, 'publication_unverified');
   await assert.rejects(service.status('789', 'unregistered'), /대상/);
+});
+
+function snapshotFixture() {
+  const contents = [{ path: '.railshot', type: 'd', mode: 0o755, size: 0, content: null },
+    ...Object.entries({ '.railshot/railshot.yaml': 'app: my-app\n', 'Dockerfile': 'FROM node:22\n', 'generated.js': 'console.log("final AI repair")\n' })
+      .map(([path, text]) => ({ path, type: 'f', mode: path === 'generated.js' ? 0o755 : 0o644,
+        size: Buffer.byteLength(text), content: Buffer.from(text).toString('base64') }))];
+  const digest = createHash('sha256').update('railshot-source-v1\0');
+  for (const entry of contents) {
+    const header = Buffer.from(JSON.stringify([entry.path, entry.type, entry.mode, entry.size]));
+    const size = Buffer.alloc(8); size.writeBigUInt64BE(BigInt(header.length)); digest.update(size).update(header);
+    if (entry.type === 'f') digest.update(Buffer.from(entry.content, 'base64'));
+  }
+  return { version: 1, source_commit: 'a'.repeat(40), app: 'my-app', tenant: 'demo', target_id: 'aws-demo', run_id: 789,
+    producer_attempt: 1, source_sha256: digest.digest('hex'), entries: contents };
+}
+
+async function sourceService() {
+  const snapshot = snapshotFixture(), files = publishedFiles({ sourceSha256: snapshot.source_sha256 });
+  const publicationZip = await zipOf(files), calls = [];
+  const publication = { ...JSON.parse(files['handoff.json']), images: JSON.parse(files['images.json']), artifact_id: 200, artifact_name: 'published-1' };
+  const f = { snapshot, publication, calls, missing: false, duplicate: false, artifact: {}, redirect: null, zip: null, responseSize: null };
+  const service = createDeploymentService({ token: 'private-server-token', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, async (url, options) => {
+    calls.push({ url: String(url), authorization: options?.headers?.authorization });
+    const parsed = new URL(url);
+    if (parsed.hostname === 'productionresultssa1.blob.core.windows.net') {
+      assert.equal(options.headers, undefined); assert.equal(options.redirect, 'error');
+      return new Response(await zipOf({ 'snapshot.json': JSON.stringify(f.snapshot) }));
+    }
+    assert.equal(parsed.hostname, 'api.github.com');
+    if (parsed.pathname.endsWith('/actions/artifacts/200/zip')) return new Response(publicationZip);
+    if (parsed.pathname.endsWith('/actions/artifacts/201/zip')) {
+      if (f.redirect) return new Response(null, { status: 302, headers: { location: f.redirect } });
+      return new Response(f.zip || await zipOf({ 'snapshot.json': JSON.stringify(f.snapshot) }),
+        { headers: f.responseSize === null ? {} : { 'content-length': String(f.responseSize) } });
+    }
+    assert.ok(parsed.pathname.endsWith('/runs/789/artifacts'));
+    const source = parsed.searchParams.get('name') === 'source-1';
+    assert.equal(parsed.searchParams.get('name'), source ? 'source-1' : 'published-1');
+    const artifact = { id: source ? 201 : 200, name: source ? 'source-1' : 'published-1', expired: false, size_in_bytes: 200,
+      workflow_run: { id: 789, head_sha: 'a'.repeat(40) }, archive_download_url: 'https://hostile.invalid/must-not-follow',
+      ...(source ? f.artifact : {}) };
+    const artifacts = source && f.missing ? [] : source && f.duplicate ? [artifact, { ...artifact, id: 202 }] : [artifact];
+    return Response.json({ total_count: artifacts.length, artifacts });
+  });
+  f.read = () => service.sourceFiles(publication);
+  return f;
+}
+
+test('final gate-tested source is verified through the publication and exact source artifact before returning buffers', async () => {
+  const f = await sourceService(), files = await f.read();
+  assert.deepEqual(files.map((file) => file.path), ['.railshot/railshot.yaml', 'Dockerfile', 'generated.js']);
+  assert.equal(files.at(-1).content.toString(), 'console.log("final AI repair")\n');
+  assert.ok(files.every((file) => Buffer.isBuffer(file.content) && Object.keys(file).join(',') === 'path,content'));
+  assert.match(f.calls[0].url, /name=published-1/);
+  assert.ok(f.calls.every((call) => !call.url.includes('hostile.invalid')));
+  f.redirect = 'https://productionresultssa1.blob.core.windows.net/actions-results/source.zip?sig=private-signed-query';
+  assert.equal((await f.read()).length, 3);
+  assert.equal(f.calls.at(-1).authorization, undefined, 'GitHub token must never reach object storage');
+});
+
+test('only an absent source artifact permits the explicit legacy fallback', async () => {
+  const f = await sourceService(); f.missing = true;
+  await assert.rejects(f.read(), { code: 'SOURCE_NOT_AVAILABLE', status: 404 });
+  for (const change of [
+    (f) => { f.artifact.expired = true; }, (f) => { f.duplicate = true; },
+    (f) => { f.artifact.workflow_run = { id: 790, head_sha: 'a'.repeat(40) }; },
+    (f) => { f.artifact.workflow_run = { id: 789, head_sha: 'b'.repeat(40) }; },
+    (f) => { f.artifact.name = 'source-2'; }, (f) => { f.artifact.size_in_bytes = sourceSnapshotLimit + 1; },
+    (f) => { f.responseSize = sourceSnapshotLimit + 1; },
+    (f) => { f.redirect = 'https://hostile.invalid/private-server-token'; },
+    (f) => { f.redirect = 'http://productionresultssa1.blob.core.windows.net/source.zip'; },
+    (f) => { f.snapshot.producer_attempt = 2; }, (f) => { f.snapshot.run_id = 790; },
+    (f) => { f.snapshot.source_commit = 'b'.repeat(40); }, (f) => { f.snapshot.app = 'other-app'; },
+    (f) => { f.snapshot.tenant = 'other'; }, (f) => { f.snapshot.target_id = 'other'; },
+    (f) => { f.snapshot.entries.at(-1).content = Buffer.from('tampered source').toString('base64'); },
+    (f) => { f.snapshot.entries.at(-1).mode = 0o644; },
+    (f) => { f.publication.bundle_artifact_id = 999; },
+  ]) {
+    const f = await sourceService(); change(f);
+    await assert.rejects(f.read(), (error) => error.code === 'SOURCE_VERIFICATION_FAILED' && error.status === 502
+      && !error.message.includes('private-server-token'));
+  }
+});
+
+test('snapshot rejects private paths, links, malformed trees, duplicate files and noncanonical content', async () => {
+  for (const mutate of [
+    (v) => { v.entries.at(-1).path = '../private'; }, (v) => { v.entries.at(-1).path = '.env'; },
+    (v) => { v.entries.at(-1).path = '.ssh/id_rsa'; }, (v) => { v.entries.at(-1).path = 'node_modules/index.js'; },
+    (v) => { v.entries.at(-1).type = 'l'; }, (v) => { v.entries.at(-1).mode = 0o4755; },
+    (v) => { v.entries.at(-1).path = 'missing/file.js'; }, (v) => { v.entries.push(v.entries.at(-1)); },
+    (v) => { v.entries.reverse(); }, (v) => { v.entries.at(-1).content += '\n'; },
+    (v) => { v.entries.at(-1).path = 'auth.txt'; const text = '-----BEGIN PRIVATE KEY-----'; v.entries.at(-1).content = Buffer.from(text).toString('base64'); v.entries.at(-1).size = text.length; },
+    (v) => { v.entries = Array.from({ length: 2001 }, (_, i) => ({ path: `file${i}`, type: 'f', mode: 0o644, size: 0, content: '' })); },
+  ]) {
+    const value = snapshotFixture(); mutate(value);
+    assert.throws(() => readSourceSnapshot(Buffer.from(JSON.stringify(value)), value, value.source_sha256));
+  }
+  const wrongEntry = await sourceService(); wrongEntry.zip = await zipOf({ 'foreign.json': '{}' });
+  await assert.rejects(wrongEntry.read(), { code: 'SOURCE_VERIFICATION_FAILED' });
+  const extraEntry = await sourceService(); extraEntry.zip = await zipOf({ 'snapshot.json': JSON.stringify(extraEntry.snapshot), 'secret.txt': 'private-canary' });
+  await assert.rejects(extraEntry.read(), { code: 'SOURCE_VERIFICATION_FAILED' });
+});
+
+test('snapshot digest interoperates with Python gate hashing for Unicode names, directory order and executable permissions', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'railshot-source-digest-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const script = `import base64,json,os,stat,sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nfrom gate.bundle import source_digest\np=Path(sys.argv[2]);(p/'a').mkdir();(p/'a'/'한글😀.txt').write_bytes(b'final source');(p/'a.txt').write_bytes(b'sibling');(p/'empty').mkdir();(p/'a.txt').chmod(0o755)\nentries=[]\ndef visit(d):\n for q in sorted(d.iterdir(),key=lambda p:p.name):\n  s=q.lstat();f=q.is_file();entries.append(dict(path=q.relative_to(p).as_posix(),type='f' if f else 'd',mode=stat.S_IMODE(s.st_mode),size=s.st_size if f else 0,content=base64.b64encode(q.read_bytes()).decode() if f else None))\n  if not f:visit(q)\nvisit(p)\nprint(json.dumps(dict(source_sha256=source_digest(p),entries=entries)))`;
+  const scripts = fileURLToPath(new URL('../../../ci/scripts', import.meta.url));
+  const generated = JSON.parse(execFileSync('python3', ['-c', script, scripts, root], { encoding: 'utf8' }));
+  const value = { ...snapshotFixture(), ...generated };
+  const read = readSourceSnapshot(Buffer.from(JSON.stringify(value)), value, value.source_sha256);
+  assert.deepEqual(read.map((file) => file.path), ['a/한글😀.txt', 'a.txt']);
 });

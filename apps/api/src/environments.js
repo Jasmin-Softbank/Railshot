@@ -27,16 +27,16 @@ export class EnvironmentError extends Error {
   }
 }
 
-async function privateJson(path) {
+export async function privateJson(path, { maxBytes = 1024 * 1024 } = {}) {
   try {
     const info = await lstat(path);
     if (!isAbsolute(path) || !info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077)
-        || info.size > 1024 * 1024) throw new Error();
+        || info.size > maxBytes) throw new Error();
     return JSON.parse(await readFile(path, 'utf8'));
   } catch { throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503); }
 }
 
-async function privateDirectory(path) {
+export async function privateDirectory(path) {
   if (!isAbsolute(path)) throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
   await mkdir(path, { recursive: true, mode: 0o700 });
   const info = await lstat(path);
@@ -44,7 +44,7 @@ async function privateDirectory(path) {
       || await realpath(path) !== resolve(path)) throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
 }
 
-async function savePrivate(path, value) {
+export async function savePrivate(path, value) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   const file = await open(temporary, 'wx', 0o600);
   try { await file.writeFile(JSON.stringify(value)); await file.sync(); } finally { await file.close(); }
@@ -181,6 +181,11 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       const { createCdAdapter } = await import('./cd.js');
       const deploy = createCdAdapter({ configPath: join(stateDir, id, 'cd.json'), loadPublished, python });
       return deploy(args);
+    },
+    async observeLogs(id, record) {
+      if (!validId(id)) throw new EnvironmentError('INVALID_ENVIRONMENT_ID', 422);
+      const { createAppLogsObserver } = await import('./logs.js');
+      return createAppLogsObserver({ configPath: join(stateDir, id, 'cd.json'), python })(record);
     },
     async plan(input, { id }) {
       if (!validId(id) || !exact(input, ['name', 'runtime', 'database']) || typeof input.name !== 'string'

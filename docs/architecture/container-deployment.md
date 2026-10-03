@@ -147,7 +147,7 @@ MCP 클라이언트의 command는 `docker`, args는 아래와 같다. `-T`로 �
 compose -f /absolute/path/to/Railshot/deployment/compose.yaml run --rm -T --no-deps mcp
 ```
 
-MCP에는 HTTP 포트가 없다. 로컬 폴더를 배포하려면 필요한 폴더만 `/sources` 같은 경로에 읽기 전용으로 마운트하고 `JASMIN_SOURCE_ROOT=/sources`를 지정한다. 전체 home, Docker socket, cloud 자격을 마운트하지 않는다. 공개 GitHub URL 입력에는 소스 폴더 mount가 필요 없다.
+MCP에는 HTTP 포트가 없다. 로컬 폴더를 배포하려면 필요한 폴더만 `/sources` 같은 경로에 읽기 전용으로 마운트하고 `RAILSHOT_SOURCE_ROOT=/sources`를 지정한다. 전체 home, Docker socket, cloud 자격을 마운트하지 않는다. 공개 GitHub URL 입력에는 소스 폴더 mount가 필요 없다.
 
 ## CI와 이미지 게시
 
@@ -155,13 +155,17 @@ Railshot 자체의 변경 검사는 [railshot-ci.yml](../../.github/workflows/ra
 
 `Platform containers` workflow는 선택된 이미지마다 빌드 후 실제 entrypoint를 실행한다. UI assets, API Host/인증/Secret 파일, MCP 초기화, runner 도구를 검사한다. CI runner의 전용 VM firewall·등록·실제 job과 클라우드 배포는 이 smoke 검사와 별개다.
 
-`Publish platform containers`는 검토한 `main` 또는 `integration/**` ref에서 실행한다. `publish=true`이면 빌드·smoke를 통과한 이미지 tar를 그대로 GHCR에 게시하며 재빌드하지 않는다. 일반 PR은 게시하지 않는다. component별 JSON artifact에는 `ghcr.io/jasmin-softbank/railshot-<component>@sha256:...`가 남는다.
+저장소 Actions 변수 `RAILSHOT_AUTO_RELEASE`가 `true`일 때만 자동 릴리스를 활성화한다. 미설정 또는 `false`이면 CI는 영향받은 이미지 검사만 수행하고 자동 게시용 tar를 내보내거나 GHCR 게시·운영 배포를 시작하지 않는다. 활성화된 `Railshot CI`는 이미지에 영향이 있는 변경이 `RAILSHOT_PLATFORM_VERIFY_REF`와 정확히 같은 브랜치에 push됐을 때 컨테이너 4종을 한 번 빌드·smoke 검사하고 이미지 tar를 보관한다. 선택된 검사와 최종 gate가 모두 통과하면 같은 run의 tar를 `Publish platform containers`에 넘겨 GHCR 게시 → `deployment/platform` 선언 갱신 → Argo·Pod·공개 HTTPS 검증을 자동으로 수행한다. PR, 다른 브랜치, 일반 CI 수동 실행과 문서만 바뀐 push는 운영을 변경하지 않는다. Agent SDK 호출이나 채팅 에이전트의 중계는 필요하지 않다.
 
-플랫폼까지 연결할 때는 **`publish=true`, `deploy=true`와 dashboard·api를 모두 포함한 components**를 지정한다. deploy 기본값은 false다. 저장소 Actions 변수 `RAILSHOT_PLATFORM_TARGET_ID`, `RAILSHOT_PLATFORM_NODE_PORT`가 있어야 하며 등록 target와 30000–32767의 할당 포트인지 실행 전에 검사한다. workflow의 release concurrency는 중간 실행을 취소하지 않고 같은 게시·선언 갱신을 직렬화한다.
+`Publish platform containers` 수동 실행도 유지한다. 검토한 `main` 또는 `integration/**` ref에서 `publish=true`이면 해당 실행에서 빌드·smoke를 통과한 이미지 tar를 그대로 게시한다. 자동 경로는 CI가 만든 tar를 사용하므로 다시 빌드하지 않는다. component별 JSON artifact에는 `ghcr.io/jasmin-softbank/railshot-<component>@sha256:...`가 남으며 이미지 revision label은 실행의 source SHA와 일치해야 한다.
+
+수동으로 플랫폼까지 연결할 때는 **`publish=true`, `deploy=true`와 dashboard·api를 모두 포함한 components**를 지정한다. 수동 deploy 기본값은 false이며 CI의 자동 호출은 둘 다 true다. 저장소 Actions 변수 `RAILSHOT_PLATFORM_TARGET_ID`, `RAILSHOT_PLATFORM_NODE_PORT`가 있어야 하며 등록 target와 30000–32767의 할당 포트인지 실행 전에 검사한다. workflow의 release concurrency는 중간 실행을 취소하지 않고 같은 게시·선언 갱신을 직렬화한다. 선언 갱신 직전 검증한 SHA 이후의 변경을 확인한다. 문서 변경만 추가됐으면 검증된 이미지를 배포하고, 더 최신 컨테이너 변경이나 갈라진 이력이 있으면 이전 실행의 배포를 거절해 새 이미지를 되돌리지 못하게 한다.
+
+등록된 추가 provider가 있으면 선택 Actions 변수 `RAILSHOT_PROVIDER_TARGETS`에 `{"openstack":"k3s-openstack"}` 같은 JSON 매핑을 설정한다. 기본값은 `{}`이며 추가 provider를 활성화하지 않는다. workflow는 매 릴리스에 이 값을 publisher와 renderer의 `--provider-targets`로 전달한다. renderer는 기존 AWS 기본 대상·provider를 보존하고 API의 provider 매핑과 일치하는 `RAILSHOT_TARGET_IDS`를 함께 선언한다. 먼저 해당 대상의 CI/앱 바인딩과 API CD 등록을 완료해야 하며, 설정만으로 인프라·URL 성공을 주장하지 않는다. 로컬 검토 명령에도 같은 옵션을 명시해야 한다. 변수를 비우면 다음 릴리스가 추가 매핑을 제거하므로 API Deployment에만 수동 설정하지 않는다.
 
 deploy job은 같은 workflow run에서 게시한 digest artifact만 합쳐 검토 SHA의 [renderer](../../deployment/scripts/render-platform.py)를 호출한다. [publish-platform.py](../../deployment/scripts/publish-platform.py)는 `deployment/platform` 전용 브랜치의 **`gitops/applications/railshot-platform/workload.json` 한 파일만** commit하고 일반 fast-forward push한다. 브랜치가 없으면 검토한 소스 SHA에서 시작하고, 이미 있으면 다른 파일과 기존 이력을 유지한다. 강제 push·전체 branch 덮어쓰기는 하지 않으며 push 충돌은 실패로 남긴다. AppProject/Application과 운영 Secret·클러스터 자격은 이 출력 경로에 넣지 않는다.
 
-운영자가 최초 등록한 플랫폼 Argo Application은 `deployment/platform`을 감시하고 [공식 자동 sync](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)로 원하는 상태를 적용한다. `prune:false`, `selfHeal:true`이며 삭제 자동화·Namespace/Secret 생성 권한은 켜지 않는다. CI는 Kubernetes·Argo 자격 없이 Git 선언까지만 갱신한다. **workflow deploy 성공은 Git 원하는 상태의 게시 성공이며**, 실제 Argo revision·Synced/Healthy, Pod Ready·image digest, railshot.io HTTP 검증은 별도 인수 결과다. 최초 Application 등록과 저장소 접근·Secret·PVC 준비도 여전히 운영자 작업이다.
+운영자가 최초 등록한 플랫폼 Argo Application은 `deployment/platform`을 감시하고 [공식 자동 sync](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)로 원하는 상태를 적용한다. `prune:false`, `selfHeal:true`이며 삭제 자동화·Namespace/Secret 생성 권한은 켜지 않는다. CI는 Kubernetes·Argo 자격 없이 Git 선언까지만 갱신한다. **workflow deploy 성공은 Git 원하는 상태의 게시 성공이며**, 뒤따르는 verify job이 실제 Argo revision·Synced/Healthy, Pod Ready·image digest, railshot.io HTTP를 확인해야 전체 배포가 성공한다. 게시·배포 선언만 성공하고 verify가 실패하거나 생략된 실행을 운영 반영 완료로 표시하지 않는다. 최초 Application 등록과 저장소 접근·Secret·PVC 준비도 여전히 운영자 작업이다.
 
 아래 명령은 게시 digest의 선언을 로컬에서 검토하는 방법이다. 자동 release에서는 같은 renderer를 사용한다.
 
@@ -193,7 +197,7 @@ python3 deployment/scripts/render-platform.py /private/images.json \
 
 운영 CNI의 목표 소스는 Cilium `1.20.2`이며 기존 Flannel 서버는 [별도 전환 절차](../operations/control-cilium-migration.md)를 따른다. Cilium 사전 검사는 운영 server 한 대와 전용 build agent 한 대의 배치를 허용하고 고객 프로필의 단일 노드 제한은 유지한다. 이는 노드 가입과 Docker/Cilium 공존이 실제로 검증됐다는 뜻은 아니다.
 
-1. 운영자가 `railshot-system` namespace와 해당 namespace의 `ghcr-pull`, `railshot-api` Secret(`token`), `railshot-github` Secret(`token`), `railshot-executors` Secret을 비공개 입력에서 준비한다. 내부 API token은 API UID/GID 1000과 Dashboard UID/GID 101이 각각 읽도록 0440과 각 Pod의 fsGroup으로 mount한다. Nginx가 내부 요청에만 token을 주입하며 브라우저에 전달하지 않는다. GitHub·native 실행 자격은 API에만 준다. rollout 전에 `deployment/apps` 브랜치, 등록 대상의 고객 AppProject/Application, [railshot-product ServiceAccount·권한](../../deployment/manifests/product-access.yaml)을 별도로 bootstrap한다. 권한 선언의 `APPLICATION_REQUIRED`는 등록한 Application 이름으로 치환한다. 제품 API는 그 Application의 get/patch만 허용하므로 최초 생성은 운영자 bootstrap이 담당한다. PVC 바인딩과 init container의 설정 소유권·권한을 확인한다.
+1. 운영자가 `railshot-system` namespace와 해당 namespace의 `ghcr-pull`, `railshot-api` Secret(`token`), `railshot-github` Secret(`token`), `railshot-executors` Secret을 비공개 입력에서 준비한다. 내부 API token은 API UID/GID 1000과 Dashboard UID/GID 101이 각각 읽도록 0440과 각 Pod의 fsGroup으로 mount한다. Nginx가 내부 요청에만 token을 주입하며 브라우저에 전달하지 않는다. GitHub·native 실행 자격은 API에만 준다. rollout 전에 `deployment/apps` 브랜치, 등록 대상의 고객 AppProject/Application, [railshot-product ServiceAccount·권한](../../deployment/manifests/product-access.yaml)을 별도로 bootstrap한다. 권한 선언의 `APPLICATION_REQUIRED`는 등록한 Application 이름, `TARGET_REQUIRED`는 등록한 target ID로 치환한다. 제품 API는 해당 Application의 get/patch와 해당 AppProject의 get, `argocd/railshot-<target ID>` 클러스터 등록 Secret 하나의 get만 허용한다. Application 최초 생성은 운영자 bootstrap이 담당한다. 앱 로그는 이 등록 자격의 TLS 검증을 사용하며 고객 namespace Role에 `pods/log:get`만 추가한다. 브라우저 세션 소유권과 현재 배포 revision·이미지·Pod 소유 관계를 확인한 뒤 제한된 로그만 반환하며 자격은 반환하지 않는다. PVC 바인딩과 init container의 설정 소유권·권한을 확인한다.
 2. Actions의 target·NodePort 변수를 설정하고 검토한 ref에서 `publish=true`, `deploy=true`로 실행해 전용 `deployment/platform` 브랜치와 workload 선언을 만든다. Application의 `targetRevision`은 이 브랜치를 가리킨다. AppProject/Application 파일은 workload 경로 밖에 유지한다.
 3. namespace·저장소 접근·선언 범위를 확인한 뒤 [AppProject/Application](../../gitops/applications/railshot-platform.yaml)을 최초 적용한다. 이후 전용 브랜치 변경은 native Argo 자동 sync가 적용한다. `prune:false`, `selfHeal:true`이며 Namespace/Secret 자동 생성은 허용하지 않는다. API의 한 replica·Recreate·PVC와 초기 requests/limits를 확인한다. 초기 자원값은 측정 전 시작값이므로 운영 노드 여유량과 업로드·native 도구 사용량을 확인한다.
 4. 기본 Service는 모두 ClusterIP다. 우선 승인된 운영 context에서 `kubectl -n railshot-system port-forward service/railshot-dashboard 4181:8080`, API는 `service/railshot-api 4173:4173`으로 검증한다. API readiness는 `configured:true`도 확인하지만 GitHub 자격의 실제 권한을 보증하지 않으므로 실요청 검증이 별도로 필요하다.

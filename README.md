@@ -72,3 +72,7 @@ python3 -m unittest discover -s infrastructure/ansible -p 'test_*.py' -v
 검사 명령과 결과, 남은 인수 항목은 [검증 기록](docs/integration/validation.md)에 정리했습니다. `published`, `runtime_ready`, Argo sync, 공개 HTTP는 각각 확인합니다. 테스트에서 만든 receipt는 로컬 검사 결과로만 사용합니다.
 
 공식 안내는 설계 문서와 실제 데모를 요구하며 최종 슬라이드는 금지합니다. Notion 명세와 실제 AWS/GCP 배포 근거는 위의 최신 기록에서 확인합니다. 초기 CI 활성화 과정은 [실가동 진행 기록](docs/integration/ci-activation.md)에 시점별로 보존합니다. 코드 병합·로컬 검사·이미 배포된 서비스의 검증은 서로 구분합니다.
+
+## 고객 OpenStack 설치 프로그램
+
+고객 측 OpenStack 인증·기능 진단·가상 머신 접근 준비를 수행하는 로컬 설치 프로그램입니다. WireGuard 등록·설치는 제거했으며, 관리 접속 경로는 별도로 준비해야 합니다. 사용법과 제한은 [설치 안내](docs/architecture/client-bootstrap.md), [기존 등록 경로 폐기 안내](docs/api/enrollment-contract.md), [로컬 인증정보 보관](docs/decisions/local-credentials.md), [검증 범위](docs/poc/bootstrap-verification.md)를 확인하십시오. 실제 고객 환경 동작은 아직 검증하지 않았습니다.

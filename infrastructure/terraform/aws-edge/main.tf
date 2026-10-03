@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.7"
   required_providers {
     aws = { source = "hashicorp/aws", version = "~> 5.0" }
   }
@@ -10,18 +10,14 @@ provider "aws" {
 }
 
 locals {
+  active_routes = { for key, route in var.routes : key => route if route.enabled }
+  dns_routes    = { for key, route in var.routes : key => route if route.manage_dns }
   route_hosts_valid = alltrue([for r in values(var.routes) :
     (r.host == var.base_domain && var.apex_certificate_arn != null) ||
     (endswith(r.host, ".${var.base_domain}") && length(split(".", r.host)) == length(split(".", var.base_domain)) + 1)
   ])
-  gcp_targets                  = toset([for r in values(var.routes) : r.target_private_ip if r.provider_kind == "gcp"])
-  wireguard_routing_configured = length(local.gcp_targets) == 0 || (length(var.wireguard_peer_cidrs) > 0 && length(var.wireguard_route_table_ids) > 0)
-  aws_target_rules = { for pair in toset([for r in values(var.routes) : "${r.target_security_group_id}:${r.node_port}" if r.provider_kind == "aws"]) :
+  aws_target_rules = { for pair in toset([for r in values(local.active_routes) : "${r.target_security_group_id}:${r.node_port}" if r.provider_kind == "aws"]) :
     pair => { security_group_id = split(":", pair)[0], port = tonumber(split(":", pair)[1]) }
-  }
-  gcp_ports = toset([for r in values(var.routes) : tostring(r.node_port) if r.provider_kind == "gcp"])
-  private_routes = { for pair in setproduct(var.wireguard_route_table_ids, local.gcp_targets) :
-    "${pair[0]}:${pair[1]}" => { table = pair[0], ip = pair[1] }
   }
 }
 
@@ -42,17 +38,8 @@ locals {
   zone_id      = var.zone_id == null ? aws_route53_zone.app[0].zone_id : data.aws_route53_zone.public[0].zone_id
   name_servers = var.zone_id == null ? aws_route53_zone.app[0].name_servers : data.aws_route53_zone.public[0].name_servers
 }
-data "aws_network_interface" "wireguard" { id = var.wireguard_network_interface_id }
-data "aws_instance" "wireguard" {
-  instance_id = one(data.aws_network_interface.wireguard.attachment).instance_id
-}
-data "aws_route_table" "wireguard" {
-  for_each       = var.wireguard_route_table_ids
-  route_table_id = each.value
-}
-
 # This module exclusively owns all inline rules on the ALB SG. External target
-# and operations SGs are separate rules-only groups attached by their owners.
+# SGs are separate rules-only groups attached by their owners.
 resource "aws_security_group" "alb" {
   name_prefix = "${var.name}-alb-"
   vpc_id      = var.vpc_id
@@ -66,12 +53,32 @@ resource "aws_security_group" "alb" {
     }
   }
   dynamic "egress" {
-    for_each = var.routes
+    for_each = local.active_routes
     content {
       description = ""
       protocol    = "tcp"
       from_port   = egress.value.node_port
       to_port     = egress.value.node_port
+      cidr_blocks = ["${egress.value.target_private_ip}/32"]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.openstack_proxy_egress == null ? [] : [var.openstack_proxy_egress]
+    content {
+      description = "OpenStack HTTPS proxy on existing control node"
+      protocol    = "tcp"
+      from_port   = egress.value.node_port
+      to_port     = egress.value.node_port
+      cidr_blocks = ["${egress.value.target_private_ip}/32"]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.openstack_app_egress == null ? [] : [var.openstack_app_egress]
+    content {
+      description = egress.value.description
+      protocol    = "tcp"
+      from_port   = egress.value.port
+      to_port     = egress.value.port
       cidr_blocks = ["${egress.value.target_private_ip}/32"]
     }
   }
@@ -110,7 +117,7 @@ resource "aws_lb" "app" {
   }
 }
 resource "aws_lb_target_group" "app" {
-  for_each    = var.routes
+  for_each    = local.active_routes
   name_prefix = "rsapp-"
   vpc_id      = var.vpc_id
   protocol    = "HTTP"
@@ -123,12 +130,10 @@ resource "aws_lb_target_group" "app" {
   lifecycle { create_before_destroy = true }
 }
 resource "aws_lb_target_group_attachment" "app" {
-  for_each          = var.routes
-  target_group_arn  = aws_lb_target_group.app[each.key].arn
-  target_id         = each.value.target_private_ip
-  port              = each.value.node_port
-  availability_zone = each.value.provider_kind == "gcp" ? "all" : null
-  depends_on        = [aws_route.gcp]
+  for_each         = local.active_routes
+  target_group_arn = aws_lb_target_group.app[each.key].arn
+  target_id        = each.value.target_private_ip
+  port             = each.value.node_port
 }
 
 # Existing certificates are allowed; otherwise one wildcard serves all app routes.
@@ -191,7 +196,7 @@ resource "aws_lb_listener_certificate" "apex" {
   }
 }
 resource "aws_lb_listener_rule" "app" {
-  for_each     = var.routes
+  for_each     = local.active_routes
   listener_arn = aws_lb_listener.https.arn
   priority     = each.value.priority
   condition {
@@ -203,7 +208,7 @@ resource "aws_lb_listener_rule" "app" {
   }
 }
 resource "aws_route53_record" "app" {
-  for_each = var.routes
+  for_each = local.dns_routes
   zone_id  = local.zone_id
   name     = each.value.host
   type     = "A"
@@ -214,70 +219,31 @@ resource "aws_route53_record" "app" {
   }
 }
 
-# The platform operations node is the WireGuard gateway. Its EC2/ENI stays
-# owned by its provisioning module; this module only associates the edge EIP.
-resource "aws_eip" "wireguard" {
-  domain = "vpc"
-  tags   = { Name = "${var.name}-wireguard" }
+# Retired transport: forget prior ownership without destroying live objects.
+# This is not a cutover or cleanup. Complete the README migration first.
+removed {
+  from = aws_eip.wireguard
+  lifecycle { destroy = false }
 }
-resource "aws_eip_association" "wireguard" {
-  allocation_id        = aws_eip.wireguard.id
-  network_interface_id = var.wireguard_network_interface_id
-  allow_reassociation  = false
-  lifecycle {
-    precondition {
-      condition = (data.aws_network_interface.wireguard.vpc_id == var.vpc_id &&
-        data.aws_network_interface.wireguard.owner_id == var.account_id &&
-        contains(data.aws_network_interface.wireguard.security_groups, var.wireguard_security_group_id) &&
-      data.aws_instance.wireguard.network_interface_id == var.wireguard_network_interface_id)
-      error_message = "WireGuard must use the registered operations node primary ENI with its dedicated rules-only SG attached."
-    }
-    precondition {
-      condition     = local.wireguard_routing_configured && (length(local.gcp_targets) == 0 || !data.aws_instance.wireguard.source_dest_check)
-      error_message = "GCP forwarding requires known peer /32 endpoints, every ALB subnet route table and source_dest_check=false on the operations instance."
-    }
-  }
+removed {
+  from = aws_eip_association.wireguard
+  lifecycle { destroy = false }
 }
-resource "aws_security_group_rule" "wireguard_in" {
-  count             = length(var.wireguard_peer_cidrs) == 0 ? 0 : 1
-  type              = "ingress"
-  protocol          = "udp"
-  from_port         = 51820
-  to_port           = 51820
-  security_group_id = var.wireguard_security_group_id
-  cidr_blocks       = var.wireguard_peer_cidrs
+removed {
+  from = aws_security_group_rule.wireguard_in
+  lifecycle { destroy = false }
 }
-resource "aws_security_group_rule" "wireguard_out" {
-  count             = length(var.wireguard_peer_cidrs) == 0 ? 0 : 1
-  type              = "egress"
-  protocol          = "udp"
-  from_port         = 51820
-  to_port           = 51820
-  security_group_id = var.wireguard_security_group_id
-  cidr_blocks       = var.wireguard_peer_cidrs
+removed {
+  from = aws_security_group_rule.wireguard_out
+  lifecycle { destroy = false }
 }
-# Routed traffic reaches the middlebox with its original ALB subnet source IP.
-resource "aws_security_group_rule" "forward_from_alb" {
-  for_each          = local.gcp_ports
-  type              = "ingress"
-  protocol          = "tcp"
-  from_port         = tonumber(each.value)
-  to_port           = tonumber(each.value)
-  security_group_id = var.wireguard_security_group_id
-  cidr_blocks       = [for s in data.aws_subnet.alb : s.cidr_block]
+removed {
+  from = aws_security_group_rule.forward_from_alb
+  lifecycle { destroy = false }
 }
-resource "aws_route" "gcp" {
-  for_each               = local.private_routes
-  route_table_id         = each.value.table
-  destination_cidr_block = "${each.value.ip}/32"
-  network_interface_id   = var.wireguard_network_interface_id
-  depends_on             = [aws_eip_association.wireguard]
-  lifecycle {
-    precondition {
-      condition     = data.aws_route_table.wireguard[each.value.table].vpc_id == var.vpc_id
-      error_message = "WireGuard routes must be in registered VPC route tables."
-    }
-  }
+removed {
+  from = aws_route.gcp
+  lifecycle { destroy = false }
 }
 
 output "app_urls" { value = { for key, r in var.routes : key => "https://${r.host}" } }
@@ -286,8 +252,5 @@ output "name_servers" { value = sort(local.name_servers) }
 output "target_group_arns" { value = { for key, group in aws_lb_target_group.app : key => group.arn } }
 output "alb_dns_name" { value = aws_lb.app.dns_name }
 output "alb_security_group_id" { value = aws_security_group.alb.id }
-output "wireguard_endpoint" { value = "${aws_eip.wireguard.public_ip}:51820" }
-output "wireguard_public_ip" { value = aws_eip.wireguard.public_ip }
-output "gcp_private_routes" { value = local.private_routes }
 output "certificate_arn" { value = aws_lb_listener.https.certificate_arn }
-output "readiness" { value = "configured-references-only; runtime, tunnel and public HTTP unverified" }
+output "readiness" { value = "configured-references-only; runtime and public HTTP unverified" }

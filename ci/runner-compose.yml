@@ -11,6 +11,10 @@ services:
     restart: "no"
     network_mode: host
     cap_add: [NET_ADMIN]
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:railshot-codex-bwrap
+      - seccomp:/etc/railshot/runner-seccomp.json
     environment:
       RAILSHOT_RUNNER_URL: ${RAILSHOT_RUNNER_URL:?Set the private apps repository URL}
       RAILSHOT_RUNNER_NAME: ${RAILSHOT_RUNNER_NAME:?Set a unique name for this invocation}

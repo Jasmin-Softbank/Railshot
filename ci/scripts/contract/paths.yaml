@@ -8,12 +8,27 @@ writable:
   - "**/Dockerfile"
   - .dockerignore
   - "**/.dockerignore"
-  - .jasmin/**
+  - .railshot/**
+  - .jasmin/**  # Existing uploaded specifications remain repairable; new specs use .railshot.
 
 # Never edit, rename or delete. Listed separately so the gate can give a precise error.
 protected:
   - .github/**
   - .gitlab-ci.yml
+  - CLAUDE.md
+  - AGENTS.md
+  - .claude/**
+  - .cursor/**
+  - .cursorrules
+  - "**/.env*"
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/id_rsa*"
+  - "**/id_ed25519*"
+
+# Source scope validates these separately: existing tests stay immutable,
+# manifests accept additive setup only, and locks come from native tooling.
+packaging_protected:
   - "**/test/**"
   - "**/tests/**"
   - "**/__tests__/**"
@@ -29,15 +44,11 @@ protected:
   - "**/package.json"
   - "**/pyproject.toml"
   - "**/requirements*.txt"
-  - CLAUDE.md
-  - AGENTS.md
-  - .claude/**
-  - .cursor/**
-  - .cursorrules
 
 # Additive only when a trusted operator selects --repair-scope source.
-# Uploaded .jasmin specifications cannot grant this scope.
+# Uploaded workload specifications cannot grant this scope.
 source_writable:
+  - "**/package.json"
   - "**/*.py"
   - "**/*.js"
   - "**/*.mjs"
@@ -86,10 +97,6 @@ source_protected:
   - "**/policy/**"
   - "**/policies/**"
   - "**/contract/**"
-  - "**/test*.*"
-  - "**/*Test.java"
-  - "**/*Tests.java"
-  - "**/Test*.java"
   - "**/fixtures/**"
 
 limits:
@@ -105,6 +112,7 @@ forbidden_patterns:
   - '\bexit\s+0\b'
   - '^\s*HEALTHCHECK\b'
   - '(pytest\.skip|unittest\.skip|it\.skip|describe\.skip|xit\(|@Disabled)'
+  - '(?i:\b(?:test|it|describe)\.(?:skip|todo|only)\b|passWithNoTests|--if-present|--test-name-pattern|testPathIgnorePatterns|coveragePathIgnorePatterns)'
   - '--no-verify'
   - 'trivyignore'
   - '(curl|wget)[^|\n]*\|\s*(ba)?sh'

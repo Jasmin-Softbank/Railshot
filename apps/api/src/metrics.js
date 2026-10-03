@@ -2,7 +2,8 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { APP_NAME, TARGET_ID } from './contract.js';
 
 const STALE_SECONDS = 90;
-const scopes = { pods: 'app_pods', cpu_percent: 'target_node', memory_percent: 'target_node', http: 'app_probe' };
+const scopes = { runtime_healthz: 'target_runtime', pods: 'app_pods', node_up: 'target_node', cpu_percent: 'target_node', memory_percent: 'target_node',
+  disk_percent: 'target_node', network_receive_bytes_per_second: 'target_node', network_transmit_bytes_per_second: 'target_node', http: 'app_probe' };
 const dns = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const instance = /^[a-zA-Z0-9.-]+:[0-9]{1,5}$/;
 function safeUrl(value) {
@@ -17,10 +18,22 @@ function configuration(path) {
   if (config.version !== 1 || !Array.isArray(config.targets) || config.targets.length > 100) throw new Error('Invalid observer targets');
   const seen = new Set();
   for (const target of config.targets) {
-    const key = `${target.target_id}:${target.app}`;
-    if (!TARGET_ID.test(target.target_id || '') || !APP_NAME.test(target.app || '') || !dns.test(target.namespace || '') ||
-        !instance.test(target.node_instance || '') || !instance.test(target.cluster_instance || '') || seen.has(key)) throw new Error('Invalid observer binding');
-    safeUrl(target.prometheus_url); safeUrl(target.probe_url); seen.add(key);
+    const key = `${target.target_id}:${target.app ?? ''}`;
+    if (!TARGET_ID.test(target.target_id || '') || !instance.test(target.node_instance || '') || seen.has(key) ||
+        target.cluster_instance != null && !instance.test(target.cluster_instance)) throw new Error('Invalid observer binding');
+    if (target.app != null) {
+      if (!APP_NAME.test(target.app) || !dns.test(target.namespace || '') || !instance.test(target.cluster_instance || '')) throw new Error('Invalid app observer binding');
+      safeUrl(target.probe_url);
+    } else if (target.namespace != null || target.probe_url != null) throw new Error('App identity required for app observations');
+    if (target.healthz_url != null) {
+      const url = safeUrl(target.healthz_url);
+      if (url.protocol !== 'https:' || url.pathname !== '/healthz') throw new Error('Native runtime health endpoint required');
+    }
+    safeUrl(target.prometheus_url); seen.add(key);
+  }
+  for (const target of config.targets) {
+    if (new Set(config.targets.filter((row) => row.target_id === target.target_id && row.healthz_url)
+      .map((row) => `${row.prometheus_url}|${row.node_instance}|${row.healthz_url}`)).size > 1) throw new Error('Ambiguous runtime health binding');
   }
   let collector;
   if (config.collector) {
@@ -33,20 +46,31 @@ function configuration(path) {
 }
 const selector = (job, address) => `{job=${JSON.stringify(job)},instance=${JSON.stringify(address)}}`;
 const named = (name, expression) => `label_replace((${expression}), "railshot_metric", "${name}", "", "")`;
+// timestamp drops the metric name; keep the two sources distinct until min aggregates them.
+const oldest = (first, second) => `min(${named('first', `timestamp(${first})`)} or ${named('second', `timestamp(${second})`)})`;
 function queries(target) {
   const node = selector('node', target.node_instance), cluster = selector('cluster', target.cluster_instance), http = selector('http', target.probe_url);
+  const disk = `${node.slice(0, -1)},mountpoint="/"}`;
+  const network = `${node.slice(0, -1)},device!="lo"}`;
   const pod = `kube_pod_status_phase{job="cluster",instance=${JSON.stringify(target.cluster_instance)},namespace=${JSON.stringify(target.namespace)},phase="Running"}`;
   const podLabels = `kube_pod_labels{job="cluster",instance=${JSON.stringify(target.cluster_instance)},namespace=${JSON.stringify(target.namespace)},label_app_kubernetes_io_name=${JSON.stringify(target.app)},label_railshot_io_target=${JSON.stringify(target.target_id)}}`;
   const group = (labels, values) => [named('up', `up${labels}`), named('observed', `timestamp(up${labels})`),
     ...Object.entries(values).flatMap(([name, [value, timestamp]]) => [named(name, value), named(`${name}_observed`, timestamp)])].join(' or ');
   return [
-    { names: ['cpu_percent', 'memory_percent'], query: group(node, {
+    { names: Object.keys(scopes).filter((name) => scopes[name] === 'target_node'), query: group(node, {
+      node_up: [`up${node}`, `timestamp(up${node})`],
       cpu_percent: [`100 * (1 - avg(rate(node_cpu_seconds_total${node.slice(0, -1)},mode="idle"}[2m])))`, `min(timestamp(node_cpu_seconds_total${node}))`],
-      memory_percent: [`100 * (1 - node_memory_MemAvailable_bytes${node} / node_memory_MemTotal_bytes${node})`, `min(timestamp(node_memory_MemAvailable_bytes${node}) or timestamp(node_memory_MemTotal_bytes${node}))`],
+      memory_percent: [`100 * (1 - node_memory_MemAvailable_bytes${node} / node_memory_MemTotal_bytes${node})`, oldest(`node_memory_MemAvailable_bytes${node}`, `node_memory_MemTotal_bytes${node}`)],
+      disk_percent: [`max(100 * (1 - node_filesystem_avail_bytes${disk} / node_filesystem_size_bytes${disk}))`, oldest(`node_filesystem_avail_bytes${disk}`, `node_filesystem_size_bytes${disk}`)],
+      network_receive_bytes_per_second: [`sum(rate(node_network_receive_bytes_total${network}[2m]))`, `min(timestamp(node_network_receive_bytes_total${network}))`],
+      network_transmit_bytes_per_second: [`sum(rate(node_network_transmit_bytes_total${network}[2m]))`, `min(timestamp(node_network_transmit_bytes_total${network}))`],
     }) },
     { names: ['pods'], query: group(cluster, { pods: [`sum(${pod} and on(namespace,pod,uid) ${podLabels})`, `min(timestamp(${pod}) and on(namespace,pod,uid) ${podLabels})`] }) },
     { names: ['http'], query: group(http, { http: [`probe_success${http}`, `timestamp(probe_success${http})`] }) },
-  ];
+    { names: ['runtime_healthz'], query: group(selector('runtime_healthz', target.healthz_url), {
+      runtime_healthz: [`probe_success${selector('runtime_healthz', target.healthz_url)}`, `timestamp(probe_success${selector('runtime_healthz', target.healthz_url)})`],
+    }) },
+  ].filter(({ names: [name] }) => name === 'runtime_healthz' ? Boolean(target.healthz_url) : target.app || !['pods', 'http'].includes(name));
 }
 async function query(url, expression, fetchImpl) {
   const endpoint = new URL(`${url.replace(/\/$/, '')}/api/v1/query`);
@@ -65,8 +89,9 @@ async function query(url, expression, fetchImpl) {
   const values = new Map();
   for (const row of result.data.result) {
     const name = row.metric?.railshot_metric, value = Number(row.value?.[1]);
-    if (typeof name !== 'string' || values.has(name) || !Number.isFinite(value)) throw new Error('Ambiguous observer sample');
-    values.set(name, value);
+    if (typeof name !== 'string' || values.has(name) || typeof row.value?.[1] !== 'string' || !row.value[1].trim()) throw new Error('Ambiguous observer sample');
+    // Undefined arithmetic (for example a zero-sized filesystem) does not erase sibling metrics.
+    values.set(name, Number.isFinite(value) ? value : undefined);
   }
   return values;
 }
@@ -76,7 +101,7 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
   return async (record) => {
     const checked = now();
     const metric = (name, state, value = null, observed_at = null) => ({ state, value, observed_at, scope: scopes[name] });
-    const result = { deployment_id: record.id, target_id: record.target_id, app: record.app,
+    const result = { deployment_id: record.id ?? null, target_id: record.target_id, app: record.app ?? null,
       checked_at: new Date(checked).toISOString(), stale_after_seconds: STALE_SECONDS,
       metrics: Object.fromEntries(Object.keys(scopes).map((name) => [name, metric(name, 'not_configured')])) };
     if (!configPath) return result;
@@ -90,18 +115,31 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
         return result;
       }
     }
-    const target = config.targets.find((item) => item.target_id === record.target_id && item.app === record.app);
+    const registered = config.targets.filter((item) => item.target_id === record.target_id);
+    const exact = record.app ? registered.filter((item) => item.app === record.app) : registered;
+    const nodeId = record.environment_target_id ?? record.target_id;
+    const bindings = exact.length ? exact : config.targets.filter((item) => item.target_id === nodeId && item.app == null);
+    // A node-only request cannot choose an arbitrary app or an ambiguous physical target.
+    if (!record.app && new Set(bindings.map((item) => `${item.prometheus_url}|${item.node_instance}`)).size > 1) {
+      for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable');
+      return result;
+    }
+    const selected = bindings.find((item) => item.app == null) || bindings[0];
+    const healthBinding = config.targets.find((item) => item.target_id === nodeId && item.healthz_url);
+    const target = selected && { ...selected, app: selected.app && record.app || null,
+      healthz_url: selected.healthz_url || (healthBinding?.prometheus_url === selected.prometheus_url && healthBinding.node_instance === selected.node_instance ? healthBinding.healthz_url : null) };
+    if (!target?.app) for (const name of ['pods', 'http']) result.metrics[name] = metric(name, 'unsupported');
     if (!target) { for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unsupported'); return result; }
     await Promise.all(queries(target).map(async ({ names, query: expression }) => {
       try {
         const values = await query(target.prometheus_url, expression, fetchImpl);
         for (const name of names) {
-          const times = [values.get('observed'), values.get(`${name}_observed`)];
-          const timestamp = times.every(Number.isFinite) ? Math.min(...times) * 1000 : null;
+          const times = values.get('up') === 0 ? [values.get('observed')] : [values.get('observed'), values.get(`${name}_observed`)];
+          const timestamp = times.every((time) => Number.isFinite(time) && time >= 0 && time <= 8640000000000) ? Math.min(...times) * 1000 : null;
           const fresh = timestamp !== null && checked - timestamp <= STALE_SECONDS * 1000 && timestamp <= checked + 5000;
           const value = values.get(name);
-          const state = values.get('up') === 0 ? 'collection_failed' : values.get('up') !== 1 || timestamp === null ? 'no_data' : !fresh ? 'stale'
-            : value === undefined || value < 0 || (name === 'http' ? ![0, 1].includes(value) : name.endsWith('percent') && value > 100) ? 'no_data' : 'ready';
+          const state = ![0, 1].includes(values.get('up')) || timestamp === null ? 'no_data' : !fresh ? 'stale' : values.get('up') === 0 ? 'collection_failed'
+            : value === undefined || value < 0 || (['http', 'node_up', 'runtime_healthz'].includes(name) ? ![0, 1].includes(value) : name.endsWith('percent') && value > 100) ? 'no_data' : 'ready';
           result.metrics[name] = metric(name, state, state === 'ready' ? value : null, timestamp === null ? null : new Date(timestamp).toISOString());
         }
       } catch { for (const name of names) result.metrics[name] = metric(name, 'unavailable'); }

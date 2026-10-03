@@ -51,7 +51,7 @@ def validate_template(job, policy):
                   pod['hostPID'] is False, pod['hostIPC'] is False, pod['hostNetwork'] is True,
                   pod['nodeSelector'] == {'kubernetes.io/arch': 'amd64', 'kubernetes.io/hostname': policy['node'], 'railshot.io/node-role': 'build'},
                   runner['image'] == policy['image'], runner['name'] == 'runner',
-                  runner['securityContext'] == {'runAsUser': 0, 'runAsGroup': 0, 'privileged': False, 'allowPrivilegeEscalation': False, 'capabilities': {'add': ['NET_ADMIN']}, 'seccompProfile': {'type': 'RuntimeDefault'}},
+                  runner['securityContext'] == {'runAsUser': 0, 'runAsGroup': 0, 'privileged': False, 'allowPrivilegeEscalation': False, 'capabilities': {'add': ['NET_ADMIN']}, 'seccompProfile': {'type': 'Localhost', 'localhostProfile': 'railshot-codex-bwrap.json'}, 'appArmorProfile': {'type': 'Localhost', 'localhostProfile': 'railshot-codex-bwrap'}},
                   env['RAILSHOT_RUNNER_URL'].get('value') == 'https://github.com/' + policy['repository'],
                   env['RAILSHOT_RUNNER_LABELS'].get('value') == 'railshot-ci',
                   set(env) == {'RAILSHOT_RUNNER_URL', 'RAILSHOT_RUNNER_NAME', 'RAILSHOT_RUNNER_LABELS', 'RAILSHOT_POD_NAMESPACE', 'RAILSHOT_POD_NAME', 'RAILSHOT_POD_UID'},

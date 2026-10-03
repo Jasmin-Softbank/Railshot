@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Render one observer VM and one single-node cluster. No network or apply calls."""
 import argparse
+import hashlib
 import ipaddress
 import json
 from pathlib import Path
 import re
 import secrets
+import ssl
 from urllib.parse import urlsplit
 
 HERE = Path(__file__).resolve().parent
@@ -38,8 +40,8 @@ def validate(config):
     if any(type(p) is not int or not 30000 <= p <= 32767 for p in ports) or len(set(ports)) != 2:
         raise ValueError('Use two different NodePorts in 30000..32767')
     urls = config['probe_urls']
-    if not isinstance(urls, list) or not 1 <= len(urls) <= 10 or len(set(urls)) != len(urls):
-        raise ValueError('Provide 1..10 unique operator-approved HTTP probe URLs')
+    if not isinstance(urls, list) or not 0 <= len(urls) <= 10 or len(set(urls)) != len(urls):
+        raise ValueError('Provide 0..10 unique operator-approved HTTP probe URLs')
     for value in urls:
         parsed = urlsplit(value)
         if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username
@@ -69,6 +71,8 @@ def prometheus(config):
              {'source_labels': ['__param_target'], 'target_label': 'instance'},
              {'target_label': '__address__', 'replacement': 'blackbox:9115'}]},
     ]
+    if not config['probe_urls']:
+        jobs = [job for job in jobs if job['job_name'] != 'http']
     if config['argocd_metrics']:
         jobs.append({'job_name': 'argocd', 'static_configs': [{'targets': [config['argocd_metrics']]}],
                      'metric_relabel_configs': [{'source_labels': ['__name__'], 'regex': 'argocd_app_info', 'action': 'keep'}]})
@@ -85,6 +89,16 @@ def obj(kind, name, spec=None, api='v1', namespaced=True, **extra):
     return value
 
 
+def network_policy(config):
+    spec = {'endpointSelector': {}, 'enableDefaultDeny': {'ingress': False, 'egress': False},
+            'egressDeny': [{'toEntities': ['host', 'remote-node'], 'toPorts': [{'ports': [
+                {'port': str(port), 'protocol': 'TCP'} for port in (9100, config['node_metrics_port'])]}]}]}
+    binding = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+    spec['labels'] = [{'key': 'railshot.io/observer-policy-sha256', 'value': binding, 'source': 'unspec'}]
+    return obj('CiliumClusterwideNetworkPolicy', 'railshot-observer-host-metrics', spec,
+               api='cilium.io/v2', namespaced=False)
+
+
 def cluster(config):
     security = {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                 'runAsNonRoot': True, 'runAsUser': 65534,
@@ -96,15 +110,17 @@ def cluster(config):
            'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
            'readinessProbe': {'httpGet': {'path': '/readyz', 'port': 8081}, 'periodSeconds': 10}}
     node = {'name': 'metrics', 'image': 'quay.io/prometheus/node-exporter:v1.12.1',
-            'args': ['--path.procfs=/host/proc', '--path.sysfs=/host/sys', '--path.rootfs=/host/root',
-                     '--collector.disable-defaults', '--collector.cpu', '--collector.meminfo', '--collector.filesystem',
+            'args': ['--web.listen-address=$(HOST_IP):9100',
+                     '--path.procfs=/host/proc', '--path.sysfs=/host/sys', '--path.rootfs=/host/root',
+                     '--collector.disable-defaults', '--collector.cpu', '--collector.meminfo', '--collector.filesystem', '--collector.netdev',
                      '--collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/(docker|containerd|kubelet|rancher))($|/)'],
+            'env': [{'name': 'HOST_IP', 'valueFrom': {'fieldRef': {'fieldPath': 'status.hostIP'}}}],
             'ports': [{'containerPort': 9100}], 'securityContext': security,
             'resources': {'requests': {'cpu': '25m', 'memory': '32Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
             'readinessProbe': {'httpGet': {'path': '/', 'port': 9100}, 'periodSeconds': 10},
             'volumeMounts': [{'name': n, 'mountPath': p, 'readOnly': True, 'mountPropagation': 'HostToContainer'}
                              for n, p in [('proc', '/host/proc'), ('sys', '/host/sys'), ('root', '/host/root')]]}
-    items = [obj('Namespace', NAMESPACE, namespaced=False),
+    items = [network_policy(config), obj('Namespace', NAMESPACE, namespaced=False),
              obj('ServiceAccount', 'cluster-metrics'),
              obj('ClusterRole', 'railshot-observer', api='rbac.authorization.k8s.io/v1', namespaced=False,
                  rules=[{'apiGroups': [''], 'resources': ['nodes', 'pods'], 'verbs': ['list', 'watch']},
@@ -118,6 +134,9 @@ def cluster(config):
         if kind == 'Deployment':
             pod['serviceAccountName'] = 'cluster-metrics'
         else:
+            # netdev reads this network namespace; a Pod namespace would report the exporter itself.
+            # The operator must restrict native 9100 as well as the NodePort before applying.
+            pod.update(hostNetwork=True, dnsPolicy='ClusterFirstWithHostNet')
             pod['automountServiceAccountToken'] = False
             pod['volumes'] = [{'name': n, 'hostPath': {'path': p, 'type': 'Directory'}}
                               for n, p in [('proc', '/proc'), ('sys', '/sys'), ('root', '/')]]
@@ -186,6 +205,32 @@ def write_json(path, value):
     path.chmod(0o644)
 
 
+def blackbox(bindings=None):
+    http = {'method': 'GET', 'follow_redirects': False, 'preferred_ip_protocol': 'ip4',
+            'ip_protocol_fallback': False}
+    modules = {'http_2xx': {'prober': 'http', 'timeout': '5s', 'http': http}}
+    for target, binding in (bindings or {}).items():
+        if (not re.fullmatch(r'[a-z][a-z0-9-]{1,61}[a-z0-9]', target)
+                or set(binding) != {'healthz_url', 'server_name', 'ca_pem'}):
+            raise ValueError('Runtime health binding must contain only endpoint, server name and public CA')
+        url = urlsplit(binding['healthz_url'])
+        address = ipaddress.IPv4Address(binding['server_name'])
+        if (url.scheme != 'https' or not url.hostname or url.username or url.password
+                or url.path != '/healthz' or url.query or url.fragment
+                or any(c.isspace() for c in binding['healthz_url'])
+                or address.is_unspecified or address.is_loopback or address.is_multicast or address.is_link_local):
+            raise ValueError('Runtime health binding requires a verified HTTPS healthz endpoint and node IPv4')
+        _ = url.port
+        if not re.fullmatch(r'(?:-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----\s*)+', binding['ca_pem']):
+            raise ValueError('Runtime health trust must contain only public PEM certificates')
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT).load_verify_locations(cadata=binding['ca_pem'])
+        modules['runtime_healthz_' + target] = {'prober': 'http', 'timeout': '5s', 'http': {
+            **http, 'valid_status_codes': [200], 'tls_config': {
+                'ca_file': '/etc/blackbox/runtime-ca/' + target + '.crt',
+                'server_name': binding['server_name'], 'insecure_skip_verify': False}}}
+    return {'modules': modules}
+
+
 def render_observer(config, output, scrape_config, bind_ip="127.0.0.1"):
     ipaddress.IPv4Address(bind_ip)
     output = Path(output)
@@ -194,9 +239,8 @@ def render_observer(config, output, scrape_config, bind_ip="127.0.0.1"):
     compose = (HERE / 'compose.yaml').read_text().replace('127.0.0.1:9090', bind_ip + ':9090')
     (output / 'compose.yaml').write_text(compose)
     write_json(output / 'prometheus.json', scrape_config)
-    write_json(output / 'blackbox.json', {'modules': {'http_2xx': {'prober': 'http', 'timeout': '5s',
-               'http': {'method': 'GET', 'follow_redirects': False, 'preferred_ip_protocol': 'ip4',
-                        'ip_protocol_fallback': False}}}})
+    write_json(output / 'blackbox.json', blackbox())
+    (output / 'runtime-ca').mkdir(mode=0o755)
     write_json(output / 'dashboards/deployment.json', dashboard(config))
     write_json(output / 'provisioning/datasources/prometheus.yaml', {
         'apiVersion': 1, 'datasources': [{'name': 'Prometheus', 'uid': 'railshot-prometheus',

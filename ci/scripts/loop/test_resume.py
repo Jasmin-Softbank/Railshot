@@ -159,8 +159,8 @@ s.step('agent:1', lambda: os._exit(9))
             return result
         def proposal(*args):
             (self.run / 'work/Dockerfile').write_text('FROM scratch\n')
-            (self.run / 'work/.jasmin').mkdir()
-            (self.run / 'work/.jasmin/jasmin.yaml').write_text('app: sample\n')
+            (self.run / 'work/.railshot').mkdir()
+            (self.run / 'work/.railshot/railshot.yaml').write_text('app: sample\n')
             return 0, {'output': {'status': 'proposed'}, 'written': ['Dockerfile'], 'meta': {'duration_ms': 1, 'sdk_status': 'completed'}}
         with self.gate_result(fail), self.agent_result(side_effect=proposal), \
                 patch.object(RunState, 'step', crash_after_agent):
@@ -178,6 +178,65 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual([a['attempt'] for a in ev['attempts']], [0, 1])
         self.assertEqual(ev['attempts'][1]['role'], 'adapter')
         self.assertEqual(ev['attempts'][1]['repair_scope'], 'packaging')
+
+    def test_every_gate_prefix_failure_reruns_complete_order_after_source_proposal(self):
+        for layer, failure_class in (('L0', 'F5'), ('L1', 'F5'),
+                                     ('L2', 'F3'), ('L4', 'F6'), ('L3', 'F7')):
+            with self.subTest(layer=layer):
+                self.run = self.root / ('run-' + layer)
+                observed = []
+                def gate_result(ws, run, attempt, layers, **options):
+                    observed.append((attempt, layers, options['repair_scope']))
+                    verdict = ({'ok': False, 'status': 'FAIL', 'layers': [{'layer': layer, 'ok': False}],
+                                'failure': {'layer': layer, 'class': failure_class, 'signature': layer,
+                                            'source_repair_eligible': layer == 'Q'}} if attempt == 0 else
+                               {'ok': True, 'release_eligible': True, 'status': 'PASS'})
+                    (run / f'gate-{attempt}').mkdir()
+                    (run / f'gate-{attempt}/verdict.json').write_text(json.dumps(verdict))
+                    return verdict
+                receipt = {'output': {'status': 'proposed'}, 'written': ['app.py'],
+                           'meta': {'sdk_status': 'completed'}}
+                with patch.object(loop, 'gate', side_effect=gate_result), self.agent_result(receipt), redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.cli(False, '--repair-scope', 'source'), 0)
+                self.assertEqual(observed, [(0, ','.join(loop.GATE_ORDER), 'source'),
+                                            (1, ','.join(loop.GATE_ORDER), 'source')])
+                evidence = json.loads((self.run / 'evidence.json').read_text())
+                self.assertEqual(evidence['attempts'][1]['repair_scope'],
+                                 'source' if layer in {'L2', 'L3'} else 'packaging')
+                with patch.object(loop, 'gate', side_effect=AssertionError('gate replayed')), \
+                        patch.object(loop, 'agent', side_effect=AssertionError('agent replayed')), redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.cli(True, '--repair-scope', 'source'), 0)
+
+    def test_safe_rejected_proposal_replans_once_after_resume_then_runs_all_gates(self):
+        failed = {'ok': False, 'status': 'FAIL', 'failure': {'class': 'F5', 'layer': 'L1', 'signature': 'missing-spec'}}
+        error = StateError('SDK_PATCH_REJECTED', component='runner', phase='patch', outcome='FAIL', side_effect='none').as_dict()
+        rejected = {'output': {'status': 'proposed'}, 'written': [], 'error': error,
+                    'meta': {'sdk_status': 'completed', 'status': 'failed'},
+                    'proposal_rejection': {'safe_to_replan': True, 'reason': 'PATH_SCOPE', 'guidance': 'Use writable paths.'}}
+        original_step = RunState.step
+        def crash(state, name, function, **kwargs):
+            result = original_step(state, name, function, **kwargs)
+            if name == 'replan:1':
+                raise KeyboardInterrupt('after durable rejected proposal')
+            return result
+        with self.gate_result(failed), self.agent_result(rejected, rc=1), patch.object(RunState, 'step', crash):
+            with self.assertRaises(KeyboardInterrupt):
+                self.cli()
+        self.assertIn('PATH_SCOPE', (self.run / 'failure.txt').read_text())
+        self.assertEqual('original\n', (self.run / 'work/app.py').read_text())
+        def corrected(*args):
+            self.assertEqual(('fixer', 2), (args[0], args[4]))
+            (self.run / 'work/Dockerfile').write_text('FROM scratch\n')
+            return 0, {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
+                       'meta': {'sdk_status': 'completed', 'status': 'completed'}}
+        with self.agent_result(side_effect=corrected) as agent, self.gate_result({'ok': True, 'release_eligible': True, 'status': 'PASS'}) as gate, redirect_stdout(io.StringIO()):
+            self.assertEqual(self.cli(True), 0)
+            self.assertEqual(1, agent.call_count)
+            self.assertEqual((2, ','.join(loop.GATE_ORDER)), gate.call_args.args[2:4])
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(2, evidence['agent_attempts'])
+        self.assertEqual([], evidence['attempts'][1]['written'])
+        self.assertTrue(evidence['passed'])
 
     def test_binding_tracks_gate_and_schema_but_not_test_files(self):
         from types import SimpleNamespace
@@ -518,6 +577,105 @@ s.step('agent:1', lambda: os._exit(9))
         first = loop.binding(args)
         args.selected_root = 'apps/web'
         self.assertNotEqual(first, loop.binding(args))
+
+    def test_app_identity_reaches_agent_and_gate_and_is_frozen_across_resume(self):
+        app_id = 'fixture-npm-js'
+        observed = []
+        def produce_gate(ws, run, attempt, layers, **options):
+            observed.append((attempt, layers, options['app_id']))
+            verdict = ({'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1', 'class': 'F5', 'signature': 'app-mismatch'}}
+                       if attempt == 0 else {'ok': True, 'release_eligible': True, 'status': 'PASS'})
+            target = run / f'gate-{attempt}'; target.mkdir()
+            (target / 'verdict.json').write_text(json.dumps(verdict))
+            return verdict
+        receipt = {'output': {'status': 'proposed'}, 'written': ['.railshot/railshot.yaml'], 'meta': {'sdk_status': 'completed'}}
+        with patch.object(loop, 'gate', side_effect=produce_gate), self.agent_result(receipt) as agent, redirect_stdout(io.StringIO()):
+            self.assertEqual(self.cli(False, '--app-id', app_id), 0)
+        self.assertEqual(agent.call_args.args[-1], app_id)
+        for role in ('adapter', 'fixer'):
+            prompt = loop.task_text(role, 1, 3, self.run, None, app_id=app_id)
+            self.assertIn('Trusted operator app identity: fixture-npm-js.', prompt)
+            self.assertIn('must equal this exact value', prompt)
+        self.assertEqual(observed, [(0, ','.join(loop.GATE_ORDER), app_id), (1, ','.join(loop.GATE_ORDER), app_id)])
+        with closing(sqlite3.connect(self.run / 'state.sqlite3')) as db:
+            state = json.loads(db.execute('SELECT body FROM state').fetchone()[0])
+        self.assertEqual(state['binding']['app_id'], app_id)
+        with patch.object(loop, 'agent', side_effect=AssertionError('agent replayed')), \
+                patch.object(loop, 'gate', side_effect=AssertionError('gate replayed')), redirect_stdout(io.StringIO()) as stream:
+            self.assertEqual(self.cli(True, '--app-id', app_id), 0)
+            self.assertEqual(self.cli(True, '--app-id', 'other-app'), 1)
+        self.assertEqual(json.loads(stream.getvalue().splitlines()[-1])['error']['code'], 'STATE_BINDING_MISMATCH')
+
+    def test_app_identity_cli_forwarding_and_invalid_identity_never_runs(self):
+        target = self.run / 'gate-0'; target.mkdir(parents=True)
+        verdict = {'ok': False, 'status': 'BLOCKED', 'error': None}
+        (target / 'verdict.json').write_text(json.dumps(verdict))
+        with patch.object(loop, 'run_json', return_value=(1, verdict, '')) as child:
+            loop.gate(self.upload, self.run, 0, 'L0,L1', app_id='fixture-npm-js')
+        command = child.call_args.args[0]
+        self.assertEqual(command[command.index('--app-id') + 1], 'fixture-npm-js')
+        with patch.object(loop, 'execute') as execute, redirect_stdout(io.StringIO()) as stream:
+            self.assertEqual(self.cli(False, '--app-id', 'bad\nidentity'), 1)
+        execute.assert_not_called()
+        self.assertEqual(json.loads(stream.getvalue())['error']['code'], 'STATE_USAGE_INVALID')
+
+
+class AgentObserverTest(unittest.TestCase):
+    def snapshot(self):
+        return {'schema_version': 1, 'run_id': 'run-observer', 'attempt_id': 'run-observer:1',
+                'role': 'fixer', 'provider': 'codex', 'status': 'running', 'sdk_status': 'running',
+                'thread_id': 'thread-observer', 'turn_id': 'turn-observer', 'command': 'sentinel-private-command',
+                'progress': {'elapsed_ms': 1000, 'sdk_event_count': 2, 'last_sdk_event_at_ms': 100000,
+                             'item_counts': {'commandExecution': 1},
+                             'last_item': {'kind': 'commandExecution', 'status': 'completed'}}}
+
+    def test_heartbeat_ages_sdk_activity_without_fabricating_it_and_rejects_stale_binding(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'RAILSHOT_RUN_ID': 'run-observer', 'RAILSHOT_ATTEMPT_ID': 'run-observer:1'}), \
+                patch.object(loop.time, 'monotonic', return_value=10) as clock, \
+                patch.object(loop.time, 'time', return_value=101) as wall, patch.object(sys, 'stderr', output):
+            run = Path(directory); snapshot = run/'fixer-session.json'; data = self.snapshot()
+            snapshot.write_text(json.dumps(data))
+            observer = loop.agent_observer(run, 'fixer', 'codex')
+            observer(); observer()  # No per-tick public log spam.
+            clock.return_value, wall.return_value = 30, 121
+            observer()
+            data['progress']['sdk_event_count'] = 3
+            data['progress']['last_sdk_event_at_ms'] = 140000
+            snapshot.write_text(json.dumps(data))
+            clock.return_value, wall.return_value = 50, 141
+            observer()
+            data['attempt_id'] = 'run-observer:old'
+            snapshot.write_text(json.dumps(data))
+            clock.return_value = 70
+            observer()
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(4, len(events))
+        self.assertTrue(all(event['event_name'] == 'agent.heartbeat' and event['outcome'] == 'RUNNING' for event in events))
+        values = [event['attributes'] for event in events]
+        self.assertEqual([True, False, True, False], [value['sdk_activity_since_previous'] for value in values])
+        self.assertEqual([1000, 21000, 1000, None], [value['last_sdk_event_age_ms'] for value in values])
+        self.assertEqual('unavailable', values[-1]['snapshot_state'])
+        self.assertNotIn('progress', values[-1])
+        self.assertNotIn('sentinel-private', output.getvalue())
+
+    def test_real_child_progress_uses_stderr_without_forwarding_raw_output_or_breaking_json(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+                'RAILSHOT_RUN_ID': 'run-observer', 'RAILSHOT_ATTEMPT_ID': 'run-observer:1'}), patch.object(sys, 'stderr', output):
+            run = Path(directory)
+            (run/'fixer-session.json').write_text(json.dumps(self.snapshot()))
+            result = loop.run_json([sys.executable, '-c',
+                'import sys; print("sentinel-private-stdout"); print("sentinel-private-stderr",file=sys.stderr); print(\'{"ok": true}\')'],
+                phase='agent', observer=loop.agent_observer(run, 'fixer', 'codex'))
+        self.assertEqual((0, {'ok': True}), result[:2])
+        self.assertIn('sentinel-private-stderr', result[2])  # Captured internally, never mirrored to Actions.
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual('agent.heartbeat', events[0]['event_name'])
+        self.assertEqual('agent.observation', events[-1]['event_name'])
+        self.assertFalse(events[-1]['attributes']['process_running'])
+        self.assertNotIn('sentinel-private', output.getvalue())
 
 
 if __name__ == '__main__':

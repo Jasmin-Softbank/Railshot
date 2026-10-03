@@ -1,29 +1,55 @@
-import { readFile, readdir, lstat, realpath } from 'node:fs/promises';
+import { readFile, readdir, lstat, realpath, mkdir, writeFile, rename } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
 import { basename, join, relative, resolve, sep } from 'node:path';
 import yazl from 'yazl';
-import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
+import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from './contract.js';
 import { readApiToken } from './access.js';
+import { cookieToken, SESSION_COOKIE } from './sessions.js';
 
 const skipped = new Set(['.git', 'node_modules', '.DS_Store', '__MACOSX']);
-const defaultUrl = process.env.JASMIN_API_URL || 'http://127.0.0.1:4173';
+const defaultUrl = process.env.RAILSHOT_API_URL || process.env.JASMIN_API_URL || 'http://127.0.0.1:4173';
 
 function authorization() {
   const token = readApiToken();
   return token ? { authorization: `Bearer ${token}` } : {};
 }
 
+async function sessionFetch(url, options = {}) {
+  // Persist per-origin cookies so a later CLI process can observe its own deployment.
+  const directory = process.env.RAILSHOT_CLIENT_SESSION_DIR || join(homedir(), '.local/state/railshot-client');
+  const path = join(directory, createHash('sha256').update(url.origin).digest('hex') + '.cookie');
+  const check = async (file, isDirectory = false) => {
+    const info = await lstat(file);
+    if ((isDirectory ? !info.isDirectory() : !info.isFile()) || info.uid !== process.getuid() || (info.mode & 0o077)) throw new Error('CLI 세션 파일은 소유자만 접근할 수 있어야 합니다.');
+  };
+  let cookie;
+  try {
+    await check(directory, true); await check(path);
+    cookie = (await readFile(path, 'utf8')).trim();
+    if (!cookieToken(cookie)) throw new Error('CLI 세션 파일이 잘못되었습니다.');
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const response = await fetch(url, { ...options, headers: { ...options.headers, ...(cookie && { cookie }) }, redirect: 'error' });
+  const token = cookieToken(response.headers.get('set-cookie'));
+  if (token) {
+    await mkdir(directory, { recursive: true, mode: 0o700 }); await check(directory, true);
+    const temporary = `${path}.${randomUUID()}`;
+    await writeFile(temporary, `${SESSION_COOKIE}=${token}`, { mode: 0o600, flag: 'wx' });
+    await rename(temporary, path);
+  }
+  return response;
+}
+
 export function inferredAppName(source) {
   const raw = /^https?:\/\//i.test(source)
     ? new URL(source).pathname.split('/')[2]?.replace(/\.git$/i, '')
-    : basename(resolve(source)).replace(/\.zip$/i, '');
-  const name = (raw || '').normalize('NFKD').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30).replace(/-+$/g, '');
-  if (!APP_NAME.test(name)) throw new Error(APP_NAME_MESSAGE);
-  return name;
+    : basename(resolve(source));
+  return sourceAppName(raw);
 }
 
 async function sendDeploy(form, baseUrl) {
-  const response = await fetch(new URL('/api/deploy', baseUrl), {
-    method: 'POST', headers: { 'x-jasmin-request': 'deploy', ...authorization() }, body: form, redirect: 'error',
+  const response = await sessionFetch(new URL('/api/deploy', baseUrl), {
+    method: 'POST', headers: { 'x-railshot-request': 'deploy', 'x-jasmin-request': 'deploy', ...authorization() }, body: form, redirect: 'error',
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `API ${response.status}`);
@@ -99,7 +125,7 @@ export async function deploySource({ source, app = inferredAppName(source), targ
 
 export async function getRun(runId, baseUrl = defaultUrl) {
   if (!/^\d+$/.test(String(runId))) throw new Error('run_id는 숫자여야 합니다.');
-  const response = await fetch(new URL(`/api/runs/${runId}`, baseUrl), { headers: authorization(), redirect: 'error' });
+  const response = await sessionFetch(new URL(`/api/runs/${runId}`, baseUrl), { headers: authorization() });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `API ${response.status}`);
   return result;

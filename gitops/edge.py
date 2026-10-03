@@ -57,10 +57,14 @@ def locked(config):
         yield root
 
 
-def base_values(config):
+def base_values(config, *, writable=False):
     values = read_private(config['variables_file'])
-    require(values.get('base_domain') == 'railshot.io' and isinstance(values.get('routes'), dict) and
-            values['routes'], 'existing railshot.io routes required')
+    require(values.get('base_domain') == 'railshot.io' and isinstance(values.get('routes'), dict),
+            'existing railshot.io route map required')
+    if writable:
+        require(all(route.get('provider_kind') == 'aws' for route in values['routes'].values()) and
+                not any(key.startswith('wireguard_') for key in values),
+                'complete the reviewed GCP/WireGuard migration before AWS edge writes')
     return values
 
 
@@ -76,8 +80,9 @@ def prepare(config_path, request):
     """Only the environment registrar calls this with its private provider/profile snapshot."""
     config = config_at(config_path)
     fields = {'target_id', 'tenant', 'app', 'environment_id', 'provider_kind', 'target_private_ip',
-              'namespace', 'health_path', 'expected_json', 'expires_at'}
-    require(isinstance(request, dict) and fields <= set(request) <= fields | {'target_security_group_id'},
+              'namespace', 'health_path', 'expires_at'}
+    require(isinstance(request, dict) and fields <= set(request) <= fields | {
+        'target_security_group_id', 'expected_json', 'expected_status', 'node_port', 'manage_dns'},
             'exact registered route input required')
     for key in ('target_id', 'app', 'namespace'):
         require(isinstance(request[key], str) and re.fullmatch(r'[a-z][a-z0-9-]{0,61}[a-z0-9]|[a-z]', request[key]),
@@ -88,23 +93,30 @@ def prepare(config_path, request):
             re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', request['environment_id']), 'registered environment identity required')
     require(request['namespace'] not in ('default', 'kube-system', 'kube-public', 'kube-node-lease', 'argocd'),
             'dedicated registered namespace required')
-    require(request['provider_kind'] in ('aws', 'gcp'), 'AWS or routed GCP target required')
+    require(request['provider_kind'] == 'aws', 'AWS target required; GCP must use its native L7 entrypoint')
     address = ipaddress.ip_address(request['target_private_ip'])
     require(address.version == 4 and any(address in ipaddress.ip_network(c) for c in
             ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')), 'RFC1918 target required')
     sg = request.get('target_security_group_id')
-    require((request['provider_kind'] == 'aws' and isinstance(sg, str) and re.fullmatch(r'sg-[0-9a-f]{8,17}', sg)) or
-            (request['provider_kind'] == 'gcp' and sg is None), 'provider-specific target security group required')
+    require(isinstance(sg, str) and re.fullmatch(r'sg-[0-9a-f]{8,17}', sg), 'AWS target security group required')
     http_path(request['health_path'])
-    require(isinstance(request['expected_json'], dict) and len(encoded(request['expected_json'])) <= 8192,
-            'bounded app health contract required')
+    require(('expected_json' in request) != ('expected_status' in request), 'one app health contract required')
+    if 'expected_json' in request:
+        require(isinstance(request['expected_json'], dict) and len(encoded(request['expected_json'])) <= 8192,
+                'bounded app health contract required')
+    else:
+        require(type(request['expected_status']) is int and request['expected_status'] == 200, 'exact HTTP 200 contract required')
+    require(type(request.get('manage_dns', True)) is bool, 'explicit DNS ownership required')
+    if 'node_port' in request:
+        require(type(request['node_port']) is int and 30000 <= request['node_port'] <= 32767, 'registered NodePort required')
     require(isinstance(request['expires_at'], str), 'resource expiry required')
     expires = datetime.fromisoformat(request['expires_at'].replace('Z', '+00:00'))
     require(expires.tzinfo is not None and expires > datetime.now(timezone.utc), 'future owned resource expiry required')
     identity = {key: request[key] for key in ('tenant', 'app', 'environment_id')}
     key = 'app-' + digest(identity)[:24]
     with locked(config) as root:
-        values = base_values(config)
+        lifecycle_ready(root)
+        values = base_values(config, writable=True)
         ledger_path = root / 'allocations.json'
         ledger = read_private(ledger_path) if ledger_path.exists() else {}
         if key in ledger:
@@ -122,15 +134,22 @@ def prepare(config_path, request):
         name = service_name(request['app'], request['tenant'], request['environment_id'], values['base_domain'])
         require(key not in values['routes'] and name['hostname'] not in {r['host'] for r in routes}, 'hostname collision')
         seed = int(digest(identity), 16)
+        node_port = request.get('node_port')
+        if node_port is not None:
+            require(not any(r['node_port'] == node_port and r['target_private_ip'] == str(address) for r in routes),
+                    'registered NodePort already routed')
         route = {'host': name['hostname'], 'provider_kind': request['provider_kind'],
                  'target_private_ip': str(address), 'health_path': request['health_path'],
-                 'node_port': free_number(seed, 30000, 32767, {r['node_port'] for r in routes}),
+                 'node_port': node_port if node_port is not None else free_number(seed, 30000, 32767, {r['node_port'] for r in routes}),
                  'priority': free_number(seed, 1000, 49999, {r['priority'] for r in routes})}
+        if request.get('manage_dns') is False:
+            route['manage_dns'] = False
         if sg:
             route['target_security_group_id'] = sg
         row = {'version': 1, 'route_key': key, 'request': request, 'route': route,
                'hostname': route['host'], 'node_port': route['node_port'], 'priority': route['priority'],
-               'public_http': {'url': 'https://' + route['host'] + request['health_path'], 'expected_json': request['expected_json']},
+               'public_http': {'url': 'https://' + route['host'] + request['health_path'],
+                               **{k: request[k] for k in ('expected_json', 'expected_status') if k in request}},
                'phase': 'reserved', 'config_sha256': config['_sha256']}
         ledger[key] = row
         durable_write(ledger_path, encoded(ledger))
@@ -154,17 +173,69 @@ def load(reference):
 
 
 def native(args):
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(('TF_CLI_ARGS', 'TF_VAR_')) and key not in ('TF_DATA_DIR', 'TF_WORKSPACE')}
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=110, check=False,
-                                env={**os.environ, 'AWS_PAGER': '', 'TF_IN_AUTOMATION': '1'})
+                                env={**environment, 'AWS_PAGER': '', 'TF_IN_AUTOMATION': '1'})
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError('edge native outcome requires observation') from exc
     require(result.returncode == 0, 'edge native command did not succeed')
     return result.stdout
 
 
+def lifecycle_ready(root):
+    for path in Path(root).glob('application-lifecycle-*/intent.json'):
+        require(read_private(path).get('phase') in ('planned', 'succeeded'),
+                'application lifecycle requires manual reconciliation')
+
+
+def local_state_file(config):
+    """Bind explicit or implicit local state without ever inventing a new backend."""
+    directory = Path(config['terraform_dir'])
+    metadata = directory / '.terraform/terraform.tfstate'
+    backend = {}
+    if metadata.exists():
+        require(metadata.is_file() and not metadata.is_symlink(), 'regular initialized backend metadata required')
+        backend = json.loads(metadata.read_bytes()).get('backend') or {}
+        require(not backend or backend.get('type') == 'local', 'local edge backend required')
+    for path in directory.glob('*.tf'):
+        kinds = re.findall(r'backend\s+"([^"]+)"\s*\{', path.read_text())
+        require(all(kind == 'local' for kind in kinds) and (not kinds or backend),
+                'uninitialized or remote edge backend forbidden')
+    for path in directory.glob('*.tf.json'):
+        declared = json.loads(path.read_bytes()).get('terraform', {}).get('backend', {})
+        require(not declared or (set(declared) == {'local'} and backend), 'uninitialized or remote edge backend forbidden')
+    state_path = backend.get('config', {}).get('path') or str(directory / 'terraform.tfstate')
+    require(Path(state_path).is_absolute(), 'absolute existing local state required')
+    state = read_private(state_path)
+    require(isinstance(state.get('lineage'), str) and state['lineage'] and type(state.get('serial')) is int,
+            'existing state lineage and serial required')
+    return str(state_path)
+
+
 def terraform(config, *args):
-    return native(['terraform', '-chdir=' + config['terraform_dir'], *args])
+    # Every app writer uses the bundled module, including after lifecycle changes.
+    # The operator directory remains the state authority, never a second source
+    # that can silently ignore enabled=false on the next app publication.
+    source = Path(__file__).resolve().parents[1] / 'infrastructure/terraform/aws-edge'
+    files = {path.name: path.read_bytes() for path in sorted(source.iterdir())
+             if path.is_file() and (path.suffix == '.tf' or path.name == '.terraform.lock.hcl')}
+    state_file = local_state_file(config)
+    files['backend.tf.json'] = encoded({'terraform': {'backend': {'local': {'path': state_file}}}})
+    fingerprint = digest({name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()})
+    work = Path(config['state_dir']) / ('aws-source-' + fingerprint)
+    require(not work.is_symlink(), 'private source directory required')
+    work.mkdir(mode=0o700, exist_ok=True)
+    require(work.stat().st_uid == os.geteuid() and not work.stat().st_mode & 0o077, 'private source directory required')
+    for name, raw in files.items():
+        path = work / name
+        if path.exists():
+            require(not path.is_symlink() and path.read_bytes() == raw, 'bundled source cache changed')
+        else:
+            durable_write(path, raw)
+    native(['terraform', '-chdir=' + str(work), 'init', '-input=false', '-lockfile=readonly'])
+    return native(['terraform', '-chdir=' + str(work), *args])
 
 
 def save(config, row):
@@ -173,6 +244,7 @@ def save(config, row):
 
 def validate_plan(plan, row):
     """Allow only this new route and additive networking. Existing routes never change."""
+    require(row['route']['provider_kind'] == 'aws', 'only AWS routes can be written by this executor')
     require(not plan.get('errored'), 'successful edge plan required')
     actions_by_address = {item['address']: item['change']['actions'] for item in plan.get('resource_changes', [])}
     # Provider refresh can fill computed ALB associations/null collections. No write may accompany that drift.
@@ -183,7 +255,6 @@ def validate_plan(plan, row):
              ('aws_lb_target_group', 'aws_lb_target_group_attachment', 'aws_lb_listener_rule', 'aws_route53_record')}
     exact.add('aws_security_group_rule.target_from_alb[' + json.dumps(
         str(route.get('target_security_group_id')) + ':' + str(route['node_port'])) + ']')
-    exact.add('aws_security_group_rule.forward_from_alb[' + json.dumps(str(route['node_port'])) + ']')
     changed = []
     for item in plan.get('resource_changes', []):
         change, address = item['change'], item['address']
@@ -191,8 +262,6 @@ def validate_plan(plan, row):
         if actions == ['no-op'] or (item.get('mode') == 'data' and actions == ['read']):
             continue
         allowed = address in exact and actions == ['create']
-        if address.startswith('aws_route.gcp[') and actions == ['create'] and route['provider_kind'] == 'gcp':
-            allowed = change['after'].get('destination_cidr_block') == route['target_private_ip'] + '/32'
         if address == 'aws_security_group.alb' and actions == ['update']:
             before, after = change['before'], change['after']
             allowed = {k: v for k, v in before.items() if k != 'egress'} == {k: v for k, v in after.items() if k != 'egress'}
@@ -210,14 +279,16 @@ def validate_plan(plan, row):
 def plan_route(reference):
     config, _ = load(reference)
     with locked(config):
+        lifecycle_ready(config['state_dir'])
         config, row = load(reference)
         require(row['phase'] in ('reserved', 'planned'), 'observe interrupted or already applied routes; never replan automatically')
-        values = base_values(config)
+        values = base_values(config, writable=True)
         for key in read_private(Path(config['state_dir']) / 'allocations.json'):
             require(re.fullmatch(r'app-[a-f0-9]{24}', key), 'registered allocation key required')
             other = read_private(Path(config['state_dir']) / (key + '.json'))
             require(other['phase'] != 'applying', 'another edge apply needs reconciliation')
             if other['phase'] == 'applied' or other['route_key'] == row['route_key']:
+                require(other['route']['provider_kind'] == 'aws', 'migrate the legacy GCP allocation before AWS edge writes')
                 key = other['route_key']
                 require(key not in values['routes'] or values['routes'][key] == other['route'], 'base route ownership conflict')
                 values['routes'][key] = other['route']
@@ -237,8 +308,10 @@ def plan_route(reference):
 def apply_route(reference, plan_sha256):
     config, _ = load(reference)
     with locked(config):
+        lifecycle_ready(config['state_dir'])
         config, row = load(reference)
         require(row['phase'] == 'planned' and row['plan_sha256'] == plan_sha256, 'reviewed saved plan required')
+        base_values(config, writable=True)
         for key in read_private(Path(config['state_dir']) / 'allocations.json'):
             require(re.fullmatch(r'app-[a-f0-9]{24}', key), 'registered allocation key required')
             require(read_private(Path(config['state_dir']) / (key + '.json'))['phase'] != 'applying',

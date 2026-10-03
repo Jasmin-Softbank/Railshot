@@ -12,14 +12,15 @@ python3 -m unittest discover -s . -p 'test_*.py' -v
 운영 전용 `control.sh`도 같은 Cilium 설치기를 사용하며 Pod/Service CIDR은 `10.52/10.53`으로 유지한다.
 신규 설치·재실행·기존 Flannel 거부 조건과 백업/전환/복구는 [운영 Cilium runbook](../../docs/operations/control-cilium-migration.md)을 따른다.
 `test-control-cilium.sh --run`은 임시 namespace에서 실제 DNS/API/NetworkPolicy/NodePort를 검사한다.
-운영 CNI 전환 및 ALB/WireGuard 경로 검증은 별도 유지보수 작업이다.
+운영 CNI 전환, 공급자별 LB 및 관리 경로 검증은 별도 유지보수 작업이다.
 
 ---
 
 # Minimal k3s + Cilium Ansible starter
 
 해커톤용 단일 노드 Kubernetes 설치 구성입니다. 새 Ubuntu 서버 1대에 k3s와 Cilium을 설치하고,
-선택적으로 샘플 웹앱의 NodePort HTTP 응답과 클러스터 내부 DNS 통신을 검사합니다.
+Kubernetes API, Cilium, Node Ready와 CoreDNS를 확인한 뒤 관리자 kubeconfig를 내보냅니다.
+사용자가 지정한 앱은 설치가 끝난 환경에 별도로 배포합니다.
 챗봇 구현, Terraform, Argo CD, GPU/LLM 서빙은 포함하지 않습니다.
 
 ## 구성과 실행 흐름
@@ -32,19 +33,15 @@ flowchart TD
     D --> E["Kubernetes API 준비"]
     E --> CNI["팀 공통 Cilium 설치<br/>Flannel 비활성 · kube-proxy 유지"]
     CNI --> F["Cilium · Node Ready · CoreDNS 확인"]
-    F --> G{"smoke_test_enabled"}
-    G -->|true| H["Nginx 배포<br/>NodePort HTTP + Pod DNS/HTTP 검사"]
-    G -->|false| I["관리자 kubeconfig 내보내기"]
-    H --> I
+    F --> G["관리자 kubeconfig 내보내기"]
 ```
 
 | 파일 | 역할 |
 | --- | --- |
 | `site.yml` | 사전 검사, 설치, 상태 확인, kubeconfig 내보내기 |
-| `group_vars/all.yml` | 버전, 네트워크 대역, 샘플 앱 옵션 |
+| `group_vars/all.yml` | 버전과 네트워크 대역 |
 | `inventory/hosts.example.yml` | 실제 서버 설정을 작성하기 위한 예제 |
-| `templates/` | k3s 설정, systemd unit, 샘플 앱과 검사 Pod |
-| `tasks/smoke.yml` | 앱 배포와 DNS·HTTP 검증 |
+| `templates/` | k3s 설정, systemd unit, kubeconfig |
 | `tests/render.yml` | 서버 없이 실행하는 템플릿 테스트 |
 
 ## 범위와 전제
@@ -96,17 +93,9 @@ export KUBECONFIG="$HOME/.kube/hackathon-k3s/kubeconfig.yaml"
 kubectl get nodes
 kubectl get pods -A
 kubectl -n kube-system get pods -l k8s-app=cilium
-curl http://YOUR_NODE_IP:30080/
 ```
 
 `kubectl`은 실행기에 별도로 필요합니다. 설치와 원격 검증에는 노드의 `k3s kubectl`을 사용합니다.
-외부 공개 없이 로컬에서 확인하려면 API 접근이 가능한 실행기에서 다음을 사용합니다.
-
-```bash
-kubectl -n k3s-smoke port-forward service/web 8080:80
-```
-
-브라우저에서 `http://127.0.0.1:8080`을 엽니다. 이 주소는 다른 사람에게 공개되지 않습니다.
 
 ## 네트워크와 성공 판정
 
@@ -114,7 +103,6 @@ kubectl -n k3s-smoke port-forward service/web 8080:80
 | --- | --- |
 | SSH TCP 22 | 실행기에서 노드로 접근. 설정한 SSH 포트를 쓰면 해당 포트 |
 | Kubernetes TCP 6443 | kubectl/배포 실행기의 IP 또는 VPN 대역에만 허용 |
-| 데모 TCP 30080 | 접근시킬 사용자 대역에서 노드로 허용. 공개 서비스는 TLS/Ingress 별도 |
 | 아웃바운드 | OS 패키지 저장소, GitHub 릴리스, 컨테이너 레지스트리, DNS 접근 |
 | CIDR | Pod `10.42.0.0/16`, Service `10.43.0.0/16`이 LAN/VPC/VPN과 겹치지 않아야 함 |
 
@@ -122,14 +110,13 @@ UFW/보안그룹/NAT는 자동 변경하지 않습니다. 호스트 방화벽은
 6443이나 Cilium 터널 포트를 인터넷 전체에 노출하지 마세요. 이 구성은 단일 노드이므로
 다중 노드용 VXLAN 포트 개방은 필요 없습니다. NAT 뒤 서버의 DNS 레코드만 등록해도 공개되는 것은 아닙니다.
 
-기본 검증은 Cilium status, Node Ready, CoreDNS rollout, 샘플 앱 rollout, **노드 내부에서 NodePort HTTP 확인**,
-**임시 Pod에서 서비스 DNS 이름으로 HTTP 확인**입니다. 인터넷에서 접속 가능한지는 별도입니다.
-실행기에서도 접근 가능하면 `-e smoke_test_from_controller=true`로 HTTP 검증을 추가하세요.
+설치 완료 조건은 Cilium status, Node Ready, CoreDNS rollout입니다. 사용자 앱의 실행과
+공개 URL 접속은 해당 앱 배포 후 별도로 검증합니다.
 
 ## 재실행과 실패 대응
 
 - 설정이 같으면 K3s는 불필요하게 재시작하지 않습니다. 공통 Cilium 설치기는 재실행 시 Helm release를
-  재조정하므로 Ansible changed가 발생할 수 있습니다. DNS 검사 Pod도 매번 다시 만듭니다.
+  재조정하므로 Ansible changed가 발생할 수 있습니다.
 - `ansible-starter.json` 소유권 표시가 없는 기존 k3s는 덮어쓰지 않습니다.
 - 버전, 노드 이름, Pod/Service CIDR, CNI/Cilium 버전 변경은 거부합니다. **과거 Flannel ownership
   marker도 Cilium identity와 다르므로 변경 전에 차단**합니다. 새 VM 또는 별도 이전 절차가 필요합니다.
@@ -148,9 +135,8 @@ sudo k3s kubectl get events -A --sort-by=.lastTimestamp
 sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml /usr/local/lib/railshot-deployment/cilium status
 ```
 
-샘플 앱 제거는 `kubectl delete namespace k3s-smoke`입니다. 재생성을 막으려면 이후 실행에
-`-e smoke_test_enabled=false`를 사용합니다. 이 변수만 바꿔서는 기존 앱을 삭제하지 않습니다.
-챗봇을 올릴 때는 별도 Namespace/Deployment/Service로 추가하세요. GPU 모델 서버는 이 최소 구성의 범위 밖입니다.
+기존 설치에서 생성한 샘플 앱은 이 playbook 변경으로 자동 삭제되지 않습니다. 현재 소유권과
+실제 이미지가 샘플 앱인지 확인한 뒤 별도로 정리합니다. 사용자 앱은 별도 Namespace/Deployment/Service로 배포합니다.
 
 ## 파이프라인 연결
 

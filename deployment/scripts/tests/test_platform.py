@@ -1,4 +1,6 @@
 import importlib.util
+import hashlib
+import json
 import os
 from pathlib import Path
 import unittest
@@ -65,6 +67,52 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(source["targetRevision"], "deployment/platform")
         self.assertEqual(application["spec"]["syncPolicy"]["automated"], {"prune": False, "selfHeal": True})
 
+        # The operator owns metadata isolation; Argo cannot weaken this policy.
+        metadata = yaml.safe_load((ROOT / 'deployment/manifests/product-metadata.yaml').read_text())
+        self.assertEqual(metadata['apiVersion'], 'cilium.io/v2')
+        self.assertEqual(metadata['kind'], 'CiliumClusterwideNetworkPolicy')
+        self.assertEqual(metadata['metadata'], {'name': 'railshot-platform-metadata'})
+        self.assertEqual(len(metadata['specs']), 5)
+        for rule in metadata['specs']:
+            self.assertEqual(set(rule), {'endpointSelector', 'enableDefaultDeny', 'egressDeny'})
+            self.assertEqual(rule['enableDefaultDeny'], {'ingress': False, 'egress': False})
+            self.assertEqual(rule['egressDeny'], [{'toCIDR': ['169.254.169.254/32', 'fd00:ec2::254/128']}])
+        def denied(labels):
+            for rule in metadata['specs']:
+                selector = rule['endpointSelector']
+                if not all(labels.get(key) == value for key, value in selector.get('matchLabels', {}).items()):
+                    continue
+                expressions = selector.get('matchExpressions', [])
+                self.assertTrue(all(expr['operator'] == 'NotIn' for expr in expressions))
+                if all(labels.get(expr['key']) not in expr['values'] for expr in expressions):
+                    return True
+            return False
+        namespace = 'k8s:io.kubernetes.pod.namespace'
+        service_account = 'k8s:io.cilium.k8s.policy.serviceaccount'
+        api = {namespace: 'railshot-system', 'k8s:app': 'railshot-api', service_account: 'railshot-product'}
+        for labels, expected in [(api, False), ({**api, service_account: 'default'}, True),
+                                 ({**api, 'k8s:app': 'railshot-dashboard'}, True),
+                                 ({namespace: 'railshot-system'}, True), ({namespace: 'argocd'}, True),
+                                 ({namespace: 'kube-system', 'k8s:k8s-app': 'kube-dns'}, True),
+                                 ({namespace: 'kube-system', 'k8s:app': 'local-path-provisioner'}, True),
+                                 ({namespace: 'kube-system', 'k8s:k8s-app': 'cilium'}, False),
+                                 ({namespace: 'railshot-build'}, False), ({namespace: 'tenant-demo'}, False)]:
+            with self.subTest(labels=labels):
+                self.assertEqual(denied(labels), expected)
+        # The executor document passed AWS ValidatePolicy on 2026-10-03 (KST).
+        # SSM context/target/document and edge-read simulations were refreshed;
+        # the earlier 57-check receipt applies to the prior policy bytes only.
+        # The exact edge hash below separately passed AWS ValidatePolicy with
+        # zero findings on 2026-10-03. This is not an IAM rollout or proof that a
+        # live principal can execute lifecycle deletes; scope tests are separate.
+        policy = (ROOT / 'infrastructure/terraform/control/product-executor-policy.json').read_bytes()
+        self.assertEqual(hashlib.sha256(policy).hexdigest(),
+                         '0ab96416ae2537a339b5f2fbe7a3d1331b9f7063ca56596c53dedcf66602f814')
+        edge_policy = (ROOT / 'infrastructure/terraform/control/product-edge-policy.json').read_bytes()
+        self.assertEqual(hashlib.sha256(edge_policy).hexdigest(),
+                         'fb401be9f21ee946592cd56f1e2991359df0d60785bca03ddf36decb7a118dfb')
+        self.assertLessEqual(len(json.dumps(json.loads(edge_policy), separators=(',', ':'))), 6144)
+
     @unittest.skipUnless(os.environ.get("RAILSHOT_ARGO_SCHEMA_MANIFEST"),
                          "Set RAILSHOT_ARGO_SCHEMA_MANIFEST to the kubectl kustomize output for native Argo schema validation")
     def test_platform_declarations_match_rendered_upstream_argo_crds(self):
@@ -98,11 +146,22 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(api['spec']['template']['spec']['initContainers'][0]['image'], images['api'])
         self.assertTrue(any(v.get('persistentVolumeClaim') for v in api['spec']['template']['spec']['volumes']))
         environment = {value['name']: value.get('value') for value in container['env']}
+        self.assertNotIn('RAILSHOT_PROVIDER_TARGETS', environment)
+        self.assertNotIn('RAILSHOT_TARGET_IDS', environment)
         self.assertEqual(environment['TMPDIR'], '/var/lib/railshot/tmp')
         self.assertEqual(environment['TF_PLUGIN_CACHE_DIR'], '/var/lib/railshot/provider-cache')
+        for name in ('GOOGLE_APPLICATION_CREDENTIALS', 'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE'):
+            credential = next(value for value in container['env'] if value['name'] == name)
+            self.assertEqual(credential['valueFrom']['configMapKeyRef'],
+                             {'name': 'railshot-environments', 'key': 'google_credentials_file', 'optional': True})
         profiles = next(value for value in container['env'] if value['name'] == 'RAILSHOT_PROFILES_FILE')
         self.assertEqual(profiles['valueFrom']['configMapKeyRef'],
                          {'name': 'railshot-environments', 'key': 'profiles_file', 'optional': True})
+        for entry in (container, api['spec']['template']['spec']['initContainers'][0]):
+            observer = next(value for value in entry['env'] if value['name'] == 'RAILSHOT_OBSERVER_PRODUCT_FILE')
+            self.assertEqual(observer['valueFrom']['configMapKeyRef'],
+                             {'name': 'railshot-environments', 'key': 'observer_file', 'optional': True})
+        self.assertEqual(environment['RAILSHOT_OBSERVER_CONFIG'], '/var/lib/railshot/config/observer.json')
         self.assertIn({'name': 'state', 'mountPath': '/var/lib/railshot'}, container['volumeMounts'])
         self.assertIn("configured", container["readinessProbe"]["exec"]["command"][-1])
         self.assertTrue(all(item["spec"]["type"] == "ClusterIP" for item in output["items"] if item["kind"] == "Service"))
@@ -117,3 +176,22 @@ class PlatformTests(unittest.TestCase):
                 module.render({**images, "api": bad}, "k3s-aws")
         with self.assertRaises(ValueError):
             module.render(images, "../target")
+
+    def test_optional_provider_targets_preserve_aws_and_render_matching_ci_admission(self):
+        images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + 'a' * 64 for name in ('dashboard', 'api')}
+        output = module.render(images, 'k3s-aws', provider_targets={'gcp': 'k3s-gcp', 'openstack': 'k3s-openstack'})
+        containers = {item['metadata']['name']: item['spec']['template']['spec']['containers'][0]
+                      for item in output['items'] if item['kind'] == 'Deployment'}
+        entries = containers['railshot-api']['env']
+        env = {item['name']: item.get('value') for item in entries}
+        self.assertEqual(len(entries), len(env))
+        self.assertEqual(env['RAILSHOT_TARGET_ID'], 'k3s-aws')
+        self.assertEqual(env['RAILSHOT_TARGET_PROVIDER'], 'aws')
+        self.assertEqual(json.loads(env['RAILSHOT_PROVIDER_TARGETS']), {'gcp': 'k3s-gcp', 'openstack': 'k3s-openstack'})
+        self.assertEqual(env['RAILSHOT_TARGET_IDS'], 'k3s-aws,k3s-gcp,k3s-openstack')
+        self.assertFalse(any(item['name'] in {'RAILSHOT_PROVIDER_TARGETS', 'RAILSHOT_TARGET_IDS'}
+                             for item in containers['railshot-dashboard'].get('env', [])))
+        for invalid in ([], 'openstack', {'unknown': 'k3s-unknown'}, {'openstack': '../target'}, {'openstack': 1},
+                        {'aws': 'replacement'}, {'openstack': 'k3s-aws'}, {'openstack': 'shared', 'proxmox': 'shared'}):
+            with self.subTest(provider_targets=invalid), self.assertRaises(ValueError):
+                module.render(images, 'k3s-aws', provider_targets=invalid)

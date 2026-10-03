@@ -330,7 +330,7 @@ sudo ./deployment/scripts/deploy.sh --mode offline --bundle /var/lib/railshot-de
 | `online` | 외부 artifact/registry 접근을 요구하고 승인된 버전을 유지합니다. 자동 airgap 전환은 하지 않습니다. |
 | `offline` | 외부 capability 검사와 외부 URL 접근을 생략하고 bundle만 사용합니다. 내부 Kubernetes 통신은 계속 필요합니다. |
 
-DNS(이름 해석)·HTTPS 443·버전 고정 K3s/GitHub/Cilium chart 주소·quay·Docker Hub·registry.k8s.io·필요한 workload registry를 검사합니다. GHCR은 해당 workload를 쓰는 경우 필수입니다. 개별 검사 제한은 기본 3초이며 병렬 실행합니다. Cloudflare TCP/TLS 7844는 선택 검사입니다. 인증된 WireGuard UDP 51820이나 QUIC 검증을 수행했다고 주장하지 않습니다. 불명확/미검사 capability는 `null`입니다. 실제 방화벽 규칙 변경은 Runtime 기능이 아닙니다.
+DNS(이름 해석)·HTTPS 443·버전 고정 K3s/GitHub/Cilium chart 주소·quay·Docker Hub·registry.k8s.io·필요한 workload registry를 검사합니다. GHCR은 해당 workload를 쓰는 경우 필수입니다. 개별 검사 제한은 기본 3초이며 병렬 실행합니다. Cloudflare TCP/TLS 7844는 선택 검사입니다. WireGuard는 지원 경로와 capability 목록에서 제거했습니다. QUIC 검증을 수행했다고 주장하지 않습니다. 불명확/미검사 capability는 `null`입니다. 실제 방화벽 규칙 변경은 Runtime 기능이 아닙니다.
 
 ### 새 JSON 계약과 기존 consumer 호환성
 

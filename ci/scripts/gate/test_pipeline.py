@@ -36,6 +36,40 @@ def imported_workspace(tmp, files):
 
 
 class PipelineTest(unittest.TestCase):
+    def test_trusted_app_identity_fails_at_l1_then_all_gates_accept_corrected_spec(self):
+        spec = {"apiVersion": "railshot/v0", "app": "calculator", "services": [
+            {"name": "web", "build": {"dockerfile": "Dockerfile"}, "port": 8080, "health": "/", "route": "/"}]}
+        files = {".railshot/railshot.yaml": gate.yaml.safe_dump(spec), ".dockerignore": ".git\n.env*\n",
+                 "Dockerfile": 'FROM node:22.23.3-bookworm-slim\nUSER 65532\nEXPOSE 8080\nCMD ["node", "app.js"]\n'}
+        image_id = "sha256:" + "c" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = imported_workspace(tmp, files)
+            with patch.object(gate, "run_quality") as quality_check:
+                failed = gate.run_gate(ws, Path(tmp) / "failed", list(gate.ORDER), app_id="fixture-npm-js")
+                quality_check.assert_not_called()
+            self.assertEqual([r["layer"] for r in failed["layers"]], ["L0", "L1"])
+            self.assertEqual((failed["status"], failed["failure"]["class"]), ("FAIL", "F5"))
+            self.assertIn("trusted app identity is fixture-npm-js", failed["failure"]["excerpt"])
+            self.assertIsNone(loop.decide(failed, None, set()))
+            self.assertEqual("calculator", gate.yaml.safe_load((ws / ".railshot/railshot.yaml").read_text())["app"])
+            spec["app"] = "fixture-npm-js"
+            (ws / ".railshot/railshot.yaml").write_text(gate.yaml.safe_dump(spec))
+            original_shell = gate.sh
+            def shell(cmd, **kwargs):
+                return SimpleNamespace(stdout=image_id) if cmd[:3] == ["docker", "image", "inspect"] else original_shell(cmd, **kwargs)
+            with patch.object(gate, "run_quality", return_value={"ok": True}), patch.object(gate, "require_ci_network"), \
+                    patch.object(gate, "docker_ok", return_value=True), \
+                    patch.object(gate, "l2", return_value=([], {"web": "test:identity"})), \
+                    patch.object(gate, "sh", side_effect=shell), \
+                    patch.object(gate, "l4", return_value=[]), patch.object(gate, "l3", return_value=[]):
+                passed = gate.run_gate(ws, Path(tmp) / "passed", list(gate.ORDER), app_id="fixture-npm-js")
+            self.assertTrue(passed["release_eligible"])
+            self.assertEqual(passed["app_id"], "fixture-npm-js")
+            self.assertEqual([r["layer"] for r in passed["layers"]], list(gate.ORDER))
+            invalid = gate.run_gate(ws, Path(tmp) / "invalid", list(gate.ORDER), app_id="../other")
+            self.assertEqual(invalid["status"], "BLOCKED")
+            self.assertEqual(invalid["layers"][0]["blocked"], "INVALID_APP_ID")
+
     def test_imported_ignored_source_is_tracked_and_policy_checked(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = imported_workspace(tmp, {".gitignore": "app.py\n", "app.py": "print('before')\n"})
@@ -150,15 +184,35 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(verdict["error"]["retry_policy"], "after_reconcile")
         self.assertFalse(verdict["release_eligible"])
 
-    def test_quality_prevents_build(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.object(gate, "l0", return_value=([], [])), \
-                patch.object(gate, "l1", return_value=([], {"services": []})), \
-                patch.object(gate, "require_ci_network"), \
-                patch.object(gate, "run_quality", return_value=quality.blocked("NO_TESTS")), patch.object(gate, "l2") as build:
-            verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.ORDER))
-        build.assert_not_called()
-        self.assertEqual([r["layer"] for r in verdict["layers"]], ["L0", "L1", "Q"])
-        self.assertEqual(verdict["layers"][-1]["blocked"], "NO_TESTS")
+    def test_quality_advisories_continue_but_runtime_and_boundary_failures_stop(self):
+        missing = quality.blocked("NO_TESTS")
+        failed = quality.quality_failure("assert actual == expected", 204)
+        cleanup = quality.blocked("QUALITY_CLEANUP_FAILED", error=gate.OperationError(
+            "GATE_EXECUTION_FAILED", component="gate", phase="Q.cleanup", outcome="UNKNOWN"))
+        for result, build_errors, runtime_errors, expected in (
+                (missing, [], [], "PASS"), (failed, [], [], "PASS"),
+                (missing, ["COPY failed"], [], "FAIL"), (missing, [], ["health returned 500"], "FAIL"),
+                (cleanup, [], [], "UNKNOWN")):
+            with self.subTest(expected=expected, result=result), tempfile.TemporaryDirectory() as tmp, \
+                    patch.object(gate, "l0", return_value=([], [])), \
+                    patch.object(gate, "l1", return_value=([], {"services": []})), \
+                    patch.object(gate, "require_ci_network"), patch.object(gate, "docker_ok", return_value=True), \
+                    patch.object(gate, "run_quality", return_value=result), \
+                    patch.object(gate, "l2", return_value=(build_errors, {})) as build, \
+                    patch.object(gate, "l4", return_value=[]), patch.object(gate, "l3", return_value=runtime_errors) as runtime:
+                verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.ORDER))
+            self.assertEqual(verdict["status"], expected)
+            self.assertEqual(verdict["release_eligible"], expected == "PASS")
+            q = verdict["layers"][2]
+            self.assertFalse(q["ok"])
+            self.assertEqual(q["advisory"], expected != "UNKNOWN")
+            self.assertEqual(build.call_count, int(expected != "UNKNOWN"))
+            self.assertEqual(runtime.call_count, int(not build_errors and expected != "UNKNOWN"))
+            if build_errors:
+                self.assertEqual(verdict["failure"]["layer"], "L2")
+                self.assertIsNone(loop.decide(verdict, None, set(), "source"))
+            if expected == "PASS":
+                self.assertEqual(loop.decide(verdict, None, set()), "passed")
 
     def test_missing_manifest_or_lock_never_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,12 +258,12 @@ class PipelineTest(unittest.TestCase):
         verdict["failure"]["class"] = "F2"
         self.assertEqual(loop.decide(verdict, None, {"q"}), "stop: same failure twice")
 
-    def test_approved_source_scope_only_repairs_actual_quality_failures(self):
+    def test_quality_never_triggers_source_repair(self):
         failure = {"layer": "Q", "class": "QUALITY", "signature": "lint-1", "source_repair_eligible": True}
         verdict = {"ok": False, "failure": failure, "layers": [{"layer": "Q", "ok": False}]}
         self.assertIn("reviewed application", loop.decide(verdict, None, set()))
-        self.assertIsNone(loop.decide(verdict, None, set(), "source"))
-        self.assertEqual(loop.decide(verdict, None, {"lint-1"}, "source"), "stop: same failure twice")
+        self.assertIn("reviewed application", loop.decide(verdict, None, set(), "source"))
+        self.assertIn("reviewed application", loop.decide(verdict, None, {"lint-1"}, "source"))
         verdict["layers"][0]["blocked"] = "MISSING_LOCK"
         self.assertIn("blocked", loop.decide(verdict, None, set(), "source"))
 
@@ -227,9 +281,12 @@ class PipelineTest(unittest.TestCase):
         allowed, denied = gate.writable_rules("contract/paths.yaml", scope="source")
         self.assertTrue(gate.path_ok("src/service.ts", allowed, denied))
         self.assertTrue(gate.path_ok("app.py", allowed, denied))
-        for path in ("tests/test_app.py", "src/app.test.ts", "eslint.config.js", "migrations/0001.py",
-                     "schemas/customer.ts", "generated/api.ts", "package.json", ".github/workflows/check.yml"):
+        for path in ("eslint.config.js", "migrations/0001.py",
+                     "schemas/customer.ts", "generated/api.ts", ".github/workflows/check.yml"):
             self.assertFalse(gate.path_ok(path, allowed, denied), path)
+        # These paths have additional content/original-byte checks at writer and L0.
+        for path in ("tests/test_app.py", "src/app.test.ts", "package.json"):
+            self.assertTrue(gate.path_ok(path, allowed, denied), path)
         default_allow, default_deny = gate.writable_rules("contract/paths.yaml")
         self.assertFalse(gate.path_ok("src/service.ts", default_allow, default_deny))
 
@@ -305,8 +362,8 @@ class GateObservationTest(unittest.TestCase):
         secret = "schema-private-canary-c17e"
         with tempfile.TemporaryDirectory() as tmp:
             ws = workspace(tmp)
-            (ws / ".jasmin").mkdir()
-            (ws / ".jasmin/jasmin.yaml").write_text("apiVersion: " + secret)
+            (ws / ".railshot").mkdir()
+            (ws / ".railshot/railshot.yaml").write_text("apiVersion: " + secret)
             verdict = gate.run_gate(ws, Path(tmp) / "run", ["L1"])
         self.assertEqual(verdict["status"], "FAIL")
         self.assertEqual(verdict["failure"]["class"], "F5")

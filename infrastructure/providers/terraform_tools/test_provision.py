@@ -97,6 +97,25 @@ class ProvisionTest(unittest.TestCase):
                 self.assertEqual(applied['readiness'], 'unverified')
                 self.assertEqual(work.parent, self.state / (provider + '-test'))
 
+    def test_wireguard_inputs_are_rejected_before_state_or_commands(self):
+        for provider in ('aws', 'gcp', 'azure'):
+            for value in ([], ['192.0.2.1/32']):
+                target = self.target_for(provider)
+                target['variables']['wireguard_peer_public_cidrs'] = value
+                self.target.write_text(json.dumps(target))
+                with self.assertRaisesRegex(ValueError, 'WireGuard provisioning is retired'):
+                    provision.execute('plan', self.target, self.state)
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.state.exists())
+
+    def test_state_detachment_requires_maintenance_without_claiming_deletion(self):
+        result = provision.review({'resource_changes': [
+            {'address': 'google_compute_firewall.wireguard_ingress[0]',
+             'change': {'actions': ['forget']}}]})
+        self.assertEqual(result['changes'][0]['risk'], 'forget')
+        self.assertTrue(result['maintenance_required'])
+        self.assertFalse(result['destructive'])
+
     def test_changed_plan_target_sources_and_workspace_are_rejected(self):
         mutations = ('plan', 'target', 'source', 'workspace', 'variables')
         for mutation in mutations:

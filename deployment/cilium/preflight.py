@@ -60,7 +60,7 @@ def kube(*args):
     return json.loads(raw) if raw.strip() else None
 
 
-def check_cluster(pod_cidr, service_cidr, wait_seconds=300, profile='customer'):
+def check_cluster(pod_cidr, service_cidr, wait_seconds=300, profile='customer', expected_agent=None):
     if profile not in ('customer', 'control'):
         raise ValueError('expected customer or control profile')
     pod_pool, service_pool = ipaddress.ip_network(pod_cidr), ipaddress.ip_network(service_cidr)
@@ -126,8 +126,10 @@ def check_cluster(pod_cidr, service_cidr, wait_seconds=300, profile='customer'):
                 raise ValueError(f'existing Cilium {key} differs; implicit migration/upgrade refused')
     daemon = kube('-n', 'kube-system', 'get', 'daemonset', 'cilium', '--ignore-not-found', '-o', 'json')
     if daemon:
-        pinned = json.loads((Path(__file__).resolve().parents[1] / 'airgap/versions.json').read_text())['cilium_images']['agent']
-        images = [c['image'] for c in daemon['spec']['template']['spec']['containers'] if c['name'] == 'cilium-agent']
+        pinned = expected_agent or json.loads((Path(__file__).resolve().parents[1] / 'airgap/versions.json').read_text())['cilium_images']['agent']
+        # This guard also runs standalone on the node, before any upgrade code is installed.
+        images = [re.sub(r':[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(?=@sha256:[a-f0-9]{64}$)', '', c['image'])
+                  for c in daemon['spec']['template']['spec']['containers'] if c['name'] == 'cilium-agent']
         if not config or images != [pinned]:
             raise ValueError('existing Cilium agent differs from the pinned release; explicit upgrade required')
     # The operations smoke uses this validated server, not NodeList ordering.

@@ -173,6 +173,37 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(env['ANSIBLE_HOST_KEY_CHECKING'], 'True')
         self.assertNotIn('AWS_SECRET_ACCESS_KEY', env); self.assertNotIn('SSH_AUTH_SOCK', env)
 
+    def test_openstack_relay_changes_only_connection_and_pins_the_original_guest(self):
+        self.request['target']['provider'] = 'openstack'
+        before = copy.deepcopy(self.request)
+        node = self.request['inventory']['control_plane'][0]
+        node['ssh'].update(connect_host='172.31.0.172', port=10022)
+        adapter.validate(self.request)
+        host = adapter.build_inventory(self.request)['all']['children']['k3s_server']['hosts'][node['id']]
+        self.assertEqual((host['ansible_host'], host['ansible_port']), ('172.31.0.172', 10022))
+        for flag in ('HostKeyAlias=' + node['private_ipv4'], 'StrictHostKeyChecking=yes',
+                     'ProxyCommand=none', 'ProxyJump=none', 'IdentityAgent=none'):
+            self.assertIn(flag, host['ansible_ssh_common_args'])
+        self.assertEqual(adapter.lock_keys(self.request), adapter.lock_keys(before))
+        for key in ('id', 'resource_id', 'private_ipv4'):
+            self.assertEqual(node[key], before['inventory']['control_plane'][0][key])
+        variables = adapter.playbook_variables(self.request)
+        self.assertEqual(variables['railshot_node_ip'], node['private_ipv4'])
+        self.assertEqual(variables['k3s_api_host'], node['private_ipv4'])
+        self.assertEqual(variables, adapter.playbook_variables(before))
+        for provider in ('aws', 'gcp', 'azure', 'proxmox'):
+            invalid = copy.deepcopy(self.request); invalid['target']['provider'] = provider
+            with self.subTest(provider=provider), self.assertRaises(adapter.ContractError):
+                adapter.validate(invalid)
+        for address in ('127.0.0.1', '203.0.113.1', '::1', 'relay.example.test', '172.31.0.172 -o StrictHostKeyChecking=no', None):
+            invalid = copy.deepcopy(self.request)
+            invalid['inventory']['control_plane'][0]['ssh']['connect_host'] = address
+            with self.subTest(address=address), self.assertRaises(adapter.ContractError):
+                adapter.validate(invalid)
+        node['ssh'].update(port=22, transport_ref='ssm:ap-northeast-2:i-0123456789abcdef0')
+        with self.assertRaisesRegex(adapter.ContractError, 'without transport_ref'):
+            adapter.validate(self.request)
+
     def test_key_permissions_block_before_execution(self):
         Path(self.request['inventory']['control_plane'][0]['ssh']['identity_file']).chmod(0o644)
         result = adapter.run(self.request, runner=lambda *_: self.fail('must not run'))
@@ -211,8 +242,14 @@ class AdapterTests(unittest.TestCase):
         import transport
         process = MagicMock(pid=12345)
         process.poll.return_value = None
+        session_id = 'fixture-owned-0123456789abcdef0'
+        def launch(*args, **kwargs):
+            kwargs['stdout'].write(('\nStarting session with SessionId: ' + session_id + '\n').encode())
+            kwargs['stdout'].flush()
+            return process
         with patch.object(transport.shutil, 'which', side_effect=lambda name: '/trusted/' + name), \
-                patch.object(transport.subprocess, 'Popen', return_value=process) as start, \
+                patch.object(transport.subprocess, 'Popen', side_effect=launch) as start, \
+                patch.object(transport.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps({'SessionId': session_id}).encode())) as cleanup, \
                 patch.object(transport.socket, 'create_connection'), patch.object(transport.os, 'killpg') as stop:
             with self.assertRaises(RuntimeError):
                 with transport.forwarded_port('ssm:ap-northeast-2:i-0123456789abcdef0', transport.time.monotonic() + 30) as port:
@@ -221,6 +258,8 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual([args.args for args in stop.call_args_list],
                          [(12345, transport.signal.SIGTERM), (12345, transport.signal.SIGKILL)])
         self.assertEqual(start.call_args.kwargs['env']['AWS_PAGER'], '')
+        self.assertEqual(cleanup.call_args.args[0][1:3], ['ssm', 'terminate-session'])
+        self.assertEqual(cleanup.call_args.args[0][6], session_id)
 
     def test_terraform_descriptors_only_convert_bound_cloud_references(self):
         ssh = self.request['inventory']['control_plane'][0]['ssh']

@@ -15,8 +15,9 @@
           <button class="nav-item active" type="button" data-view="deploy" aria-current="page">새 배포</button>
           <button class="nav-item" type="button" data-view="monitor">환경 모니터링</button>
           <button class="nav-item" type="button" data-view="history">배포 내역</button>
+          <button class="nav-item" type="button" data-view="connections">인프라 연결 정보</button>
         </nav>
-        <div class="sidebar-footer">One Action, Infinite Clouds</div>
+        <div class="sidebar-footer"><p id="session-note" role="status">브라우저 세션을 준비하고 있습니다.</p>One Action, Infinite Clouds</div>
       </aside>
 
       <main class="content">
@@ -25,6 +26,12 @@
             <span class="eyebrow">NEW DEPLOYMENT</span>
             <h1 id="deploy-title">앱 배포하기</h1>
           </header>
+
+          <section class="panel update-context" id="update-context" aria-labelledby="update-title" hidden>
+            <div class="review-heading"><h2 id="update-title">기존 앱 업데이트</h2><button class="text-button" id="cancel-update" type="button">새 배포로 돌아가기</button></div>
+            <p id="update-identity"></p>
+            <p class="field-note">앱과 배포 환경은 유지됩니다. 파일·폴더·저장소 이름을 바꿔도 앱 이름은 바뀌지 않습니다.</p>
+          </section>
 
           <form class="panel deploy-form" id="deploy-form" novalidate>
             <section class="form-section" aria-labelledby="source-title">
@@ -50,7 +57,7 @@
               </div>
             </section>
 
-            <section class="form-section" aria-labelledby="target-title">
+            <section class="form-section" id="target-section" aria-labelledby="target-title">
               <div class="section-heading">
                 <span class="section-number">02</span>
                 <h2 id="target-title">배포 환경</h2>
@@ -60,7 +67,7 @@
                 <label class="target-option">
                   <input type="radio" name="environment" value="cloud" checked />
                   <span class="target-icon" aria-hidden="true">☁</span>
-                  <span class="target-copy"><strong>클라우드</strong><small>RailShot AWS</small></span>
+                  <span class="target-copy"><strong>클라우드</strong><small>AWS · Google Cloud</small></span>
                   <span class="radio-mark" aria-hidden="true"></span>
                 </label>
                 <label class="target-option">
@@ -70,6 +77,13 @@
                   <span class="radio-mark" aria-hidden="true"></span>
                 </label>
               </fieldset>
+              <div class="provider-field" id="cloud-provider-field">
+                <label class="field-label" for="cloud-provider">클라우드 종류</label>
+                <select id="cloud-provider">
+                  <option value="aws">AWS</option>
+                  <option value="gcp">Google Cloud</option>
+                </select>
+              </div>
               <div class="provider-field" id="provider-field" hidden>
                 <label class="field-label" for="provider">인프라 종류</label>
                 <select id="provider" name="provider">
@@ -84,7 +98,8 @@
                 <select id="deployment-database"><option value="none">DB 없음</option><option value="patroni">PostgreSQL HA 포함</option></select>
                 <p class="field-note" id="deployment-database-note"></p>
               </div>
-              <p class="field-note" id="connection-status" role="status">인프라 연결을 확인하고 있습니다.</p>
+              <p class="field-note" id="runtime-connection-status" role="status">런타임 연결을 확인하고 있습니다.</p>
+              <p class="field-note" id="connection-status" role="status">앱 배포 설정을 확인하고 있습니다.</p>
             </section>
 
             <div class="form-bottom">
@@ -100,9 +115,18 @@
             </div>
             <dl class="review-list">
               <div><dt>소스</dt><dd id="review-source"></dd></div>
+              <div><dt>앱 이름</dt><dd id="review-app"></dd></div>
               <div><dt>배포 환경</dt><dd id="review-target"></dd></div>
             </dl>
             <p class="review-note" id="review-note">선택 내용을 확인하세요.</p>
+            <div id="update-review" hidden>
+              <p class="review-note">선택한 소스 전체로 교체합니다. 기존 파일 중 이번 소스에 없는 파일은 삭제됩니다.</p>
+              <p id="update-baseline" class="field-note"></p>
+              <p id="update-origin" class="field-note"></p>
+              <p id="update-diff-summary" role="status"></p>
+              <div id="update-changes" class="update-changes"></div>
+              <label id="rebuild-field" class="rebuild-choice" hidden><input id="update-rebuild" type="checkbox" /> 변경이 없어도 다시 검사·빌드·배포</label>
+            </div>
             <p class="form-error" id="request-error" role="alert" hidden></p>
             <button class="primary-button" id="deploy-button" type="button" disabled>배포 시작</button>
           </section>
@@ -115,24 +139,76 @@
             <p class="field-note" id="run-freshness" role="status"></p>
             <pre class="execution-binding" id="run-binding"></pre>
             <ul id="run-steps"></ul>
+            <div id="run-application-actions" class="history-actions" aria-label="선택한 앱 관리"></div>
             <a id="application-link" target="_blank" rel="noopener noreferrer" hidden>배포한 앱 열기</a>
             <a id="actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 로그</a>
             <button class="text-button" id="stop-polling" type="button" hidden>상태 조회 중지</button>
             <button class="text-button" id="refresh-run" type="button" hidden>상태 다시 조회</button>
+            <button class="secondary-button" id="resume-run" type="button" hidden>게시된 이미지로 배포 이어가기</button>
+            <p class="form-error" id="resume-error" role="alert" hidden></p>
           </section>
         </section>
 
         <section class="view" id="history-view" aria-labelledby="history-title" hidden>
-          <header class="page-header"><span class="eyebrow">DEPLOYMENTS</span><h1 id="history-title">배포 내역</h1></header>
-          <div class="panel empty-state"><span class="empty-icon" aria-hidden="true">↗</span><h2 id="history-summary">아직 배포 내역이 없습니다</h2><p id="history-detail">이 브라우저에서 마지막으로 요청한 실행을 다시 조회합니다.</p></div>
+          <header class="page-header"><span class="eyebrow">DEPLOYMENTS</span><h1 id="history-title">배포·빌드 내역</h1></header>
+          <section class="panel application-panel applications-panel" aria-labelledby="applications-title">
+            <div class="review-heading"><h2 id="applications-title">이 세션의 앱</h2><button id="applications-refresh" class="secondary-button" type="button">앱 목록 새로고침</button></div>
+            <p class="field-note">중지는 실행을 멈추고 데이터를 보존합니다. 삭제는 앱 전용 자원과 데이터를 영구 삭제합니다. 진행 중인 배포를 삭제하면 배포 중단을 확인한 뒤 앱 자원을 정리합니다.</p>
+            <p id="applications-message" class="field-note" role="status"></p>
+            <ul id="applications-list" class="saved-list"></ul>
+            <button id="applications-more" class="text-button" type="button" hidden>앱 더 보기</button>
+            <section id="application-detail" class="application-detail" aria-labelledby="application-detail-title" hidden>
+              <h3 id="application-detail-title" tabindex="-1">앱 상세</h3>
+              <p id="application-detail-message" role="status"></p>
+              <div id="application-versions"></div>
+              <button id="application-update" class="primary-button" type="button">이 앱 업데이트</button>
+              <div id="detail-application-actions" class="history-actions" aria-label="선택한 앱 관리"></div>
+            </section>
+          </section>
+          <div class="panel">
+            <div class="data-toolbar"><label>실행 종류<select id="history-kind"><option value="deployments">배포</option><option value="builds">빌드</option></select></label><button id="history-refresh" class="secondary-button" type="button">최신 내역</button></div>
+            <h2 id="history-summary">실행 내역을 불러오는 중입니다</h2><p id="history-detail" role="status"></p>
+            <ul id="history-list" class="saved-list"></ul>
+            <nav class="pagination" aria-label="실행 내역 페이지"><button id="history-prev" class="secondary-button" type="button" disabled>이전</button><span id="history-page" role="status"></span><button id="history-next" class="secondary-button" type="button" disabled>다음</button></nav>
+          </div>
+        </section>
+
+        <section class="view" id="connections-view" aria-labelledby="connections-title" hidden>
+          <header class="page-header"><span class="eyebrow">INFRASTRUCTURE</span><h1 id="connections-title">인프라 연결 정보</h1></header>
+          <form class="panel connection-form" id="connection-form">
+            <h2>OpenStack 콘솔</h2>
+            <p class="field-note">이 세션에 연결 정보를 보관합니다. 저장만으로 인프라 연결이나 배포가 시작되지는 않습니다.</p>
+            <label class="field-label" for="connection-label">이름</label><input id="connection-label" required maxlength="80" placeholder="팀 OpenStack" />
+            <label class="field-label" for="connection-url">콘솔 주소</label><input id="connection-url" type="url" required maxlength="2048" placeholder="https://openstack.example/dashboard/" />
+            <label class="field-label" for="connection-username">접속 ID (선택)</label><input id="connection-username" maxlength="256" autocomplete="off" />
+            <label class="field-label" for="connection-password">접속 비밀번호 (선택)</label><input id="connection-password" type="password" maxlength="4096" autocomplete="new-password" />
+            <p class="field-note">비밀번호는 암호화해 저장하고 다시 표시하지 않습니다. 수정 시 비워두면 기존 비밀번호를 유지합니다.</p>
+            <label class="field-note"><input id="connection-clear-password" type="checkbox" /> 저장된 비밀번호 삭제</label>
+            <div class="source-buttons"><button class="primary-button" id="connection-save" type="submit">저장</button><button class="text-button" id="connection-cancel" type="button" hidden>수정 취소</button></div>
+            <p id="connection-message" role="status"></p>
+          </form>
+          <div class="panel"><h2>저장한 연결</h2><ul id="connection-list" class="saved-list"></ul></div>
         </section>
 
         <section class="view" id="monitor-view" aria-labelledby="monitor-title" hidden>
           <header class="page-header"><span class="eyebrow">ENVIRONMENT</span><h1 id="monitor-title">환경 모니터링</h1></header>
+          <section class="panel environment-panel" aria-labelledby="environment-heading">
+            <div class="data-toolbar"><label>클라우드<select id="monitor-provider"><option value="">전체</option><option value="aws">AWS</option><option value="gcp">GCP</option><option value="openstack">OpenStack</option></select></label><label class="environment-filter">환경<select id="monitor-target"><option value="">전체 환경</option></select></label><button id="monitor-refresh" class="secondary-button" type="button">지표 새로고침</button></div>
+            <h2 id="environment-heading">등록된 실행 환경</h2>
+            <p class="field-note">공용 환경과 이 세션의 환경만 표시합니다. 런타임 연결은 앱과 독립적인 /healthz로 30초마다 확인합니다. 노드 지표와 앱 응답은 별도로 관측합니다.</p>
+            <div id="environment-summary" class="environment-summary" aria-label="환경 상태 요약"></div>
+            <p id="environment-message" role="status"></p>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="환경 지표 표"><table class="environment-table"><caption class="sr-only">환경별 실제 관측 지표</caption><thead><tr><th scope="col">환경 / 앱</th><th scope="col">런타임 연결</th><th scope="col">CPU</th><th scope="col">메모리</th><th scope="col">디스크</th><th scope="col">앱 HTTP</th><th scope="col">연결 확인 시각</th></tr></thead><tbody id="environment-list"></tbody></table></div>
+            <div id="environment-detail"></div>
+            <p class="field-note metric-scope">CPU·메모리·디스크·네트워크는 대상 노드 전체입니다. HTTP는 관측 서버에서 확인한 앱 응답입니다. 수집된 현재 값만 표시합니다.</p>
+          </section>
+          <h2 class="execution-heading">선택한 실행의 상세·로그</h2>
+          <p class="field-note execution-note">배포·빌드 내역에서 실행을 선택하면 아래에 표시합니다. 위 환경 필터와 독립적으로 유지됩니다.</p>
+          <div id="monitor-application-actions" class="history-actions" aria-label="선택한 앱 관리"></div>
           <div class="monitor-grid">
             <div class="monitor-left">
-              <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2 id="monitor-state">연결된 배포 없음</h2><p>이미지 게시, 앱 적용, 공개 URL 확인 결과를 구분해 표시합니다.</p></div></div>
-              <div class="panel stages-panel"><h2>배포 단계</h2><ol id="monitor-steps"><li>소스 접수</li><li>앱 검사 및 수정</li><li>이미지 빌드</li><li>GitOps 반영</li><li>URL 및 앱 상태 확인</li></ol><a id="monitor-application-link" target="_blank" rel="noopener noreferrer" hidden>배포한 앱 열기</a></div>
+              <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2 id="monitor-state">연결된 배포 없음</h2><p id="monitor-message">이미지 게시, 앱 적용, 공개 URL 확인 결과를 구분해 표시합니다.</p><a id="monitor-actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 로그</a></div></div>
+              <div class="panel stages-panel"><h2>배포 단계</h2><ol id="monitor-steps"><li>소스 접수</li><li>앱 검사 및 수정</li><li>검증 이미지 게시</li><li>GitOps 반영</li><li>URL 및 앱 상태 확인</li></ol><a id="monitor-application-link" target="_blank" rel="noopener noreferrer" hidden>배포한 앱 열기</a></div>
             </div>
             <div class="console panel">
               <div class="console-heading"><h2>배포 환경 콘솔</h2><span id="observation-status" role="status">연결 대기 · 읽기 전용</span></div>
@@ -148,7 +224,23 @@
             </div>
           </div>
         </section>
+        <section class="panel lifecycle-operation" id="lifecycle-operation" aria-labelledby="lifecycle-operation-title" hidden>
+          <h2 id="lifecycle-operation-title">앱 관리 실행</h2>
+          <p id="lifecycle-operation-state" role="status" aria-live="polite"></p>
+          <p id="lifecycle-operation-message"></p><ol id="lifecycle-operation-steps"></ol>
+          <div id="lifecycle-residuals" hidden><h3>남아 있는 리소스</h3><ul id="lifecycle-residual-list"></ul></div>
+          <button id="lifecycle-operation-refresh" class="secondary-button" type="button">실행 상태 다시 조회</button>
+        </section>
       </main>
     </div>
+    <dialog id="lifecycle-dialog" aria-labelledby="lifecycle-title" aria-describedby="lifecycle-description">
+      <form id="lifecycle-form">
+        <h2 id="lifecycle-title">앱 관리 계획</h2><p id="lifecycle-description"></p>
+        <p id="lifecycle-expiry" class="field-note"></p>
+        <div class="lifecycle-preview"><section><h3>변경할 리소스</h3><ul id="lifecycle-resources"></ul></section><section><h3>보존할 리소스</h3><ul id="lifecycle-retained"></ul></section></div>
+        <p id="lifecycle-error" class="form-error" role="alert" hidden></p>
+        <div class="lifecycle-dialog-actions"><button id="lifecycle-cancel" class="secondary-button" type="button" autofocus>취소</button><button id="lifecycle-confirm" class="primary-button" type="submit" disabled>계획 확인 중</button></div>
+      </form>
+    </dialog>
   </body>
 </html>

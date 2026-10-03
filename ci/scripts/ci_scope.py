@@ -13,12 +13,13 @@ COMPONENTS = ('dashboard', 'api', 'mcp', 'ci-runner')
 SHA = re.compile(r'[0-9a-f]{40}')
 # Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
 API_NATIVE_FILES = {
-    'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml',
+    'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml', 'observability/runtime_health.py',
     'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
-    'gitops/edge.py', 'gitops/service_name.py',
+    'gitops/edge.py', 'gitops/service_name.py', 'gitops/logs.py',
+    'gitops/dns.py', 'gitops/gcp_routes.py', 'gitops/openstack_routes.py', 'gitops/application_cleanup.py',
     'ci/scripts/execution.py', 'ci/scripts/observability.py', 'ci/scripts/process.py',
     'ci/scripts/publication.py', 'ci/scripts/storage.py', 'ci/scripts/gate/bundle.py',
-    'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/jasmin.schema.json',
+    'ci/scripts/runner/runtime_boundary.py', 'ci/scripts/runner/replenish.py', 'ci/scripts/schemas/railshot.schema.json',
     'ci/requirements-dev.txt', 'ci/requirements-test.txt',
     'infrastructure/ansible/run.py', 'infrastructure/ansible/transport.py',
     'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/guest.yml',
@@ -29,13 +30,18 @@ API_NATIVE_FILES = {
     'infrastructure/ansible/application_database.py', 'infrastructure/ansible/database.yml',
     'infrastructure/ansible/application-database.yml',
     'deployment/scripts/common.sh', 'deployment/scripts/environment.py', 'deployment/bootstrap/preflight.sh',
-    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh',
+    'deployment/scripts/applications.py', 'deployment/scripts/application_release.py', 'deployment/scripts/application_routes.py',
+    'deployment/scripts/openstack_route_worker.py', 'deployment/scripts/application_lifecycle.py',
+    'deployment/scripts/lifecycle_runtime.py',
+    'deployment/cloudflared/register.py', 'deployment/cloudflared/render.py',
+    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
 }
 API_NATIVE_PREFIXES = ('infrastructure/ansible/roles/', 'infrastructure/ansible/playbooks/',
                        'infrastructure/providers/terraform_tools/',
-                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/', 'infrastructure/terraform/aws-edge/')
+                       'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/',
+                       'infrastructure/terraform/aws-edge/', 'infrastructure/terraform/gcp-edge/')
 
 
 def api_native_dependency(path):
@@ -46,6 +52,12 @@ def documentation(path):
     return (path.startswith('docs/') and PurePosixPath(path).suffix in
             {'.md', '.txt', '.svg', '.png', '.jpg', '.jpeg', '.pdf', '.drawio', '.mmd'}
             or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
+
+
+def release_required(paths):
+    """Release common runtime/worker/IaC policy too; only proven docs-only diffs skip."""
+    return paths is None or any(not path or path.startswith('/') or '..' in PurePosixPath(path).parts
+                                or not documentation(path) for path in paths)
 
 
 def container_components(paths):
@@ -75,7 +87,7 @@ def container_components(paths):
                       'deployment/manifests/platform.yaml',
                       'gitops/applications/railshot-platform.yaml'}:
             components.update(('dashboard', 'api', 'mcp'))
-        elif (path.startswith(('ci/', 'deployment/', 'infrastructure/ansible/',
+        elif (path.startswith(('apps/agent/', 'ci/', 'deployment/', 'infrastructure/ansible/',
                                'infrastructure/providers/openstack/',
                                'infrastructure/providers/terraform_tools/',
                                'infrastructure/terraform/', 'gitops/', 'observability/',
@@ -107,6 +119,11 @@ def select(paths):
             continue  # Container job below checks all affected image contexts.
         elif path.startswith(('apps/api/', 'apps/dashboard/', 'ci/browser/')):
             selected.add('api-browser')
+        elif path.startswith(('apps/agent/', 'deployment/bootstrap/client_setup/',
+                              'deployment/bootstrap/templates/')) or path in {
+                'deployment/bootstrap/install.sh', 'deployment/bootstrap/uninstall.sh',
+                'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/requirements.lock'}:
+            selected.add('openstack')
         elif path.startswith('infrastructure/providers/openstack/'):
             selected.update(('openstack', 'contracts'))
         elif path.startswith('infrastructure/providers/terraform_tools/'):
@@ -133,6 +150,8 @@ def select(paths):
             selected.update(JOBS)
         if api_native_dependency(path):
             selected.add('api-browser')
+        if path == 'apps/api/src/metrics.js':
+            selected.add('observability')
     selected.discard('containers')
     if container_components(paths):
         selected.add('containers')
@@ -200,9 +219,16 @@ def main():
     paths = changed_paths(os.environ['GITHUB_EVENT_NAME'], event, Path.cwd())
     selected = set(JOBS) if paths is None else select(paths)
     components = set(COMPONENTS) if paths is None else container_components(paths)
+    release = release_required(paths)
+    # A trusted automatic release exports all images once, even when only the
+    # native runtime/edge/worker source changes. The gate must require that job.
+    if release and os.environ.get('AUTO_RELEASE') == 'true':
+        selected.add('containers')
+        components = set(COMPONENTS)
     result = json.dumps([job for job in JOBS if job in selected])
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         stream.write(f'selected={result}\n')
+        stream.write(f'release={str(release).lower()}\n')
         stream.write('container_components=' + json.dumps([name for name in COMPONENTS if name in components]) + '\n')
         for job in JOBS:
             stream.write(f'{job}={str(job in selected).lower()}\n')

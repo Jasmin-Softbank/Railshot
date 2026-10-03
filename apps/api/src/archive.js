@@ -66,11 +66,13 @@ export async function inspectArchive(bytes, { stripRoot = false } = {}) {
         const name = entry.fileName.replaceAll('\\', '/');
         const parts = name.split('/');
         const mode = (entry.externalFileAttributes >>> 16) & 0o170000;
-        if (name.startsWith('/') || parts.includes('..') || parts.includes('.') || name.includes('\0') || mode === 0o120000) {
+        if (name.startsWith('/') || parts.includes('..') || parts.includes('.') || name.includes('\0')) {
           throw new Error(`안전하지 않은 ZIP 경로: ${name}`);
         }
-        if (name.endsWith('/')) { zip.readEntry(); return; }
         if (!name || parts.some((part) => part === '.git' || part === 'node_modules' || part === '__MACOSX')) { zip.readEntry(); return; }
+        // Excluded dependencies are never opened; their executable symlinks are not application files.
+        if (mode === 0o120000) throw new Error(`안전하지 않은 ZIP 경로: ${name}`);
+        if (name.endsWith('/')) { zip.readEntry(); return; }
         if (parts.some((part) => /^\.env(?:\.|$)/i.test(part) || /\.(?:pem|key|p12|pfx)$/i.test(part))) {
           throw new Error(`비밀키로 보이는 파일을 ZIP에서 제거하세요: ${name}`);
         }
@@ -96,7 +98,7 @@ export async function inspectArchive(bytes, { stripRoot = false } = {}) {
     && files.every((file) => file.path.length > top.length + 1);
   if (stripRoot && !commonRoot) throw new Error('GitHub 소스의 최상위 폴더를 확인할 수 없습니다.');
   const hasWrapper = commonRoot
-    && files.some((file) => ['package.json', 'Dockerfile', '.jasmin/jasmin.yaml'].includes(file.path.slice(top.length + 1)));
+    && files.some((file) => ['package.json', 'Dockerfile', '.railshot/railshot.yaml', '.jasmin/jasmin.yaml'].includes(file.path.slice(top.length + 1)));
   const normalized = files.map((file) => ({ ...file, path: stripRoot || hasWrapper ? file.path.slice(top.length + 1) : file.path }));
   return validateFiles(normalized);
 }

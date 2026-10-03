@@ -209,33 +209,16 @@ resource "google_compute_firewall" "host_deny_other" {
   log_config { metadata = "EXCLUDE_ALL_METADATA" }
 }
 
-# Only the explicitly registered gateway endpoint(s) may exchange WireGuard UDP.
-# Keys, peer routes and runtime configuration belong to the guest management step.
-resource "google_compute_firewall" "wireguard_ingress" {
-  count                   = length(var.wireguard_peer_public_cidrs) == 0 ? 0 : 1
-  name                    = "${var.name}-wireguard-in"
-  network                 = local.network_ref
-  direction               = "INGRESS"
-  source_ranges           = var.wireguard_peer_public_cidrs
-  target_service_accounts = [google_service_account.node.email]
-  allow {
-    protocol = "udp"
-    ports    = ["51820"]
-  }
+# Retire state ownership without interrupting the existing app/Argo tunnel.
+# Delete retained rules only after the separate native-L7 and management cutover.
+removed {
+  from = google_compute_firewall.wireguard_ingress
+  lifecycle { destroy = false }
 }
 
-resource "google_compute_firewall" "wireguard_egress" {
-  count                   = length(var.wireguard_peer_public_cidrs) == 0 ? 0 : 1
-  name                    = "${var.name}-wireguard-out"
-  network                 = local.network_ref
-  direction               = "EGRESS"
-  priority                = 1000
-  destination_ranges      = var.wireguard_peer_public_cidrs
-  target_service_accounts = [google_service_account.node.email]
-  allow {
-    protocol = "udp"
-    ports    = ["51820"]
-  }
+removed {
+  from = google_compute_firewall.wireguard_egress
+  lifecycle { destroy = false }
 }
 
 # Existing network ownership remains with the environment/operator, not each VM.

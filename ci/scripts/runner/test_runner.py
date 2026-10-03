@@ -4,6 +4,7 @@ import errno
 import io
 import json
 import os
+import subprocess
 from importlib.metadata import version
 import tempfile
 import tomllib
@@ -13,12 +14,19 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import run_agent
+from runner import native_preflight
 
 
-def native_turn(status='completed', response='{"status":"proposed"}', identity='turn-test', message='synthetic error', before=None):
+def native_turn(status='completed', response='{"status":"proposed"}', identity='turn-test', message='synthetic error', before=None, command=None):
     from openai_codex.models import Notification, ItemCompletedNotification, TurnCompletedNotification
     def stream():
         if before: before()
+        if command is not None:
+            yield Notification('item/completed', ItemCompletedNotification.model_validate({
+                'threadId':'thread-test','turnId':identity,'completedAtMs':1,
+                'item':{'id':'command-test','type':'commandExecution','status':'completed',
+                        'command':'cat contract','commandActions':[],'cwd':'/workspace',
+                        'aggregatedOutput':command[0],'exitCode':command[1]}}))
         if response:
             yield Notification('item/completed', ItemCompletedNotification.model_validate({
                 'threadId':'thread-test','turnId':identity,'completedAtMs':1,
@@ -46,13 +54,13 @@ class RunnerTest(unittest.TestCase):
                 run_agent.apply_files(ws, [{'path':'Dockerfile','content':'ok'},
                     {'path':'escape/Dockerfile','content':'bad'}], allow, deny)
             self.assertFalse((ws/'Dockerfile').exists())
-            self.assertEqual(run_agent.apply_files(ws, [{'path':'.jasmin/test','content':'x'}], allow, deny), ['.jasmin/test'])
+            self.assertEqual(run_agent.apply_files(ws, [{'path':'.railshot/test','content':'x'}], allow, deny), ['.railshot/test'])
 
     def test_sdk_contract(self):
         import openai_codex
         profile = run_agent.load_yaml(run_agent.PLATFORM / 'runner/profiles.yaml')
         cfg = profile['providers']['codex']
-        self.assertEqual(cfg['model'], 'gpt-5.6-sol')
+        self.assertEqual(cfg['model'], 'gpt-6.1-sol')
         self.assertEqual(cfg['reasoning_effort'], 'xhigh')
         result = SimpleNamespace(status='completed', final_response='{"status":"proposed"}', id='turn-test')
         observed = []
@@ -60,7 +68,9 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(observed[-1], ('turn.started', {'turn_id': 'turn-test'}))
             return result
         thread = SimpleNamespace(id='thread-test', turn=Mock(return_value=native_turn(before=complete)))
-        with tempfile.TemporaryDirectory() as d, patch.object(openai_codex, 'Codex') as sdk, patch.dict('os.environ', {'RAILSHOT_AUTH_MODE':'subscription', 'RAILSHOT_CODEX_HOME':'/tmp/operator-auth', 'CODEX_API_KEY':'', 'OPENAI_API_KEY':''}):
+        with tempfile.TemporaryDirectory() as d, patch.object(openai_codex, 'Codex') as sdk, \
+                patch.object(run_agent, 'codex_preflight', return_value={'status':'PASS','model_calls':0}) as preflight, \
+                patch.dict('os.environ', {'RAILSHOT_AUTH_MODE':'subscription', 'RAILSHOT_CODEX_HOME':'/tmp/operator-auth', 'CODEX_API_KEY':'', 'OPENAI_API_KEY':''}):
             sdk.return_value.__enter__.return_value.thread_start.return_value = thread
             out, meta = run_agent.run_codex(cfg, 'policy', 'task', {'type':'object','properties':{}}, Path(d), Path(d),
                                           emit=lambda kind, **fields: observed.append((kind, fields)))
@@ -69,6 +79,7 @@ class RunnerTest(unittest.TestCase):
             args = sdk.return_value.__enter__.return_value.thread_start.call_args.kwargs
             self.assertNotIn('sandbox', args)  # legacy sandbox would override the read profile
             config = sdk.call_args.args[0]
+            self.assertEqual(preflight.call_args.args[1], config.config_overrides)
             self.assertIn('default_permissions="railshot_read"', config.config_overrides)
             encoded = next(item.split('=', 1)[1] for item in config.config_overrides if item.startswith('permissions.railshot_read.filesystem='))
             rules = tomllib.loads('rules=' + encoded)['rules']
@@ -78,14 +89,16 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(rules['glob_scan_max_depth'], 32)
             self.assertEqual(args['approval_mode'], openai_codex.ApprovalMode.deny_all)
             self.assertTrue(args['ephemeral'])
-            self.assertEqual(args['model'], 'gpt-5.6-sol')
+            self.assertEqual(args['model'], 'gpt-6.1-sol')
             thread.turn.assert_called_once()
             self.assertEqual(thread.turn.call_args.kwargs['effort'], 'xhigh')
-            self.assertEqual(meta['requested_model'], 'gpt-5.6-sol')
+            self.assertEqual(meta['requested_model'], 'gpt-6.1-sol')
             self.assertEqual(meta['requested_reasoning_effort'], 'xhigh')
             self.assertEqual(meta['session_id'], 'thread-test')
             self.assertEqual(meta['turn_id'], 'turn-test')
-            self.assertEqual([event for event, _ in observed], ['session.starting', 'session.started', 'turn.started', 'session.finished'])
+            self.assertEqual([event for event, _ in observed if event != 'turn.progress'],
+                             ['sandbox.checked', 'session.starting', 'session.started', 'turn.started', 'session.finished'])
+            self.assertTrue(any(event == 'turn.progress' for event, _ in observed))
 
     def test_claude_sdk_offline_contract_and_read_guards(self):
         import claude_agent_sdk
@@ -314,7 +327,9 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(record['output'], {})
             self.assertEqual(record['error']['code'], 'SDK_OUTPUT_INVALID')
             self.assertEqual(record['error']['outcome'], 'FAIL')
-            self.assertEqual(record['error']['side_effect'], 'completed')
+            self.assertEqual(record['error']['side_effect'], 'none')
+            self.assertEqual(record['meta']['sdk_status'], 'completed')
+            self.assertTrue(record['proposal_rejection']['safe_to_replan'])
             self.assertEqual(record['error']['causes'][0]['type'], 'jsonschema.exceptions.ValidationError')
 
     def test_lifecycle_rejects_unapproved_native_attributes(self):
@@ -359,7 +374,7 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual(run_agent.main(), 1)
             error = json.loads((run/'fixer.json').read_text())['error']
             self.assertEqual((error['code'], error['phase'], error['outcome'], error['side_effect']),
-                             ('SDK_PATCH_REJECTED', 'patch', 'FAIL', 'completed'))
+                             ('SDK_PATCH_REJECTED', 'patch', 'FAIL', 'none'))
             self.assertEqual(error['causes'][0]['type'], 'builtins.ValueError')
             self.assertNotIn('sentinel-private', (run/'fixer-events.jsonl').read_text())
 
@@ -406,7 +421,8 @@ class RunnerTest(unittest.TestCase):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
                 result = SimpleNamespace(id='turn-fixture', status=status, final_response=response)
                 thread = SimpleNamespace(id='thread-fixture', turn=lambda *a, **kw: native_turn(status,response,result.id))
-                with patch.object(openai_codex, 'Codex') as sdk, patch.dict(os.environ, {
+                with patch.object(openai_codex, 'Codex') as sdk, \
+                        patch.object(run_agent, 'codex_preflight', return_value={'status':'PASS','model_calls':0}), patch.dict(os.environ, {
                         'RAILSHOT_AUTH_MODE':'subscription', 'RAILSHOT_CODEX_HOME':'/tmp/operator-auth',
                         'CODEX_API_KEY':'', 'OPENAI_API_KEY':''}), self.assertRaises(run_agent.OperationError) as error:
                     sdk.return_value.__enter__.return_value.thread_start.return_value = thread
@@ -414,6 +430,68 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual((error.exception.code, error.exception.outcome, error.exception.side_effect),
                                  (code, 'FAIL', 'completed'))
                 self.assertNotIn('sentinel-invalid-json', json.dumps(error.exception.as_dict()))
+
+    def test_completed_turn_with_native_sandbox_failure_cannot_apply_proposal(self):
+        import openai_codex
+        profile = run_agent.load_yaml(run_agent.PLATFORM / 'runner/profiles.yaml')
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); workspace = base/'workspace'; workspace.mkdir()
+            run = base/'run'; run.mkdir(); task = base/'task'; task.write_text('package source')
+            response = json.dumps({'status':'proposed','files':[{'path':'Dockerfile','content':'FROM scratch'}]})
+            thread = SimpleNamespace(id='thread-test', turn=Mock(return_value=native_turn(
+                response=response, command=('bwrap: No permissions to create a new namespace\nsentinel-private', 1))))
+            args = SimpleNamespace(role='adapter', provider='codex', workspace=str(workspace), run=str(run),
+                                   task=str(task), repair_scope='packaging', resume_session_id=None)
+            with patch.object(openai_codex, 'Codex') as sdk, \
+                    patch.object(run_agent, 'codex_preflight', return_value={'status':'PASS','model_calls':0}), \
+                    patch.dict(os.environ, {'RAILSHOT_AUTH_MODE':'subscription','RAILSHOT_CODEX_HOME':'/tmp/operator-auth',
+                                             'CODEX_API_KEY':'','OPENAI_API_KEY':''}), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                sdk.return_value.__enter__.return_value.thread_start.return_value = thread
+                self.assertEqual(run_agent.execute(args), 1)
+            record = json.loads((run/'adapter.json').read_text())
+            self.assertEqual((record['error']['code'], record['error']['outcome'], record['error']['retry_policy']),
+                             ('SDK_SANDBOX_UNAVAILABLE', 'BLOCKED', 'after_configuration'))
+            self.assertFalse((workspace/'Dockerfile').exists())
+            self.assertEqual(record['written'], [])
+            self.assertEqual(record['meta']['sandbox_preflight']['status'], 'PASS')
+            self.assertNotIn('sentinel-private', json.dumps(record))
+            self.assertEqual(record['instructions_sha256'], __import__('hashlib').sha256(
+                sdk.return_value.__enter__.return_value.thread_start.call_args.kwargs['developer_instructions'].encode()).hexdigest()[:12])
+            self.assertIn((run_agent.PLATFORM/'agents/DONT.md').read_text(),
+                          sdk.return_value.__enter__.return_value.thread_start.call_args.kwargs['developer_instructions'])
+        success = run_agent.collect_codex_turn(native_turn(command=('No permissions to create a new namespace', 0)))
+        self.assertFalse(run_agent.codex_sandbox_failure(success))  # Merely reading this text is not a failed tool.
+
+    def test_preflight_failure_prevents_model_start(self):
+        import openai_codex
+        cfg = run_agent.load_yaml(run_agent.PLATFORM/'runner/profiles.yaml')['providers']['codex']
+        failure = run_agent.OperationError('SDK_SANDBOX_UNAVAILABLE', component='runner', phase='sandbox.preflight',
+                                           retry_policy='after_configuration')
+        with tempfile.TemporaryDirectory() as directory, patch.object(openai_codex, 'Codex') as sdk, \
+                patch.object(run_agent, 'codex_preflight', side_effect=failure), \
+                patch.dict(os.environ, {'RAILSHOT_AUTH_MODE':'subscription','RAILSHOT_CODEX_HOME':'/tmp/operator-auth',
+                                       'CODEX_API_KEY':'','OPENAI_API_KEY':''}), self.assertRaises(run_agent.OperationError):
+            run_agent.run_codex(cfg, 'policy', 'task', {'type':'object'}, Path(directory), Path(directory))
+        sdk.assert_not_called()
+
+    def test_preflight_rejects_disabled_sandbox_and_timeout_without_exposing_output(self):
+        execute = native_preflight._execute
+        def without_sandbox(command, **kwargs):
+            if command[0] == '/probe-codex':
+                command = command[command.index('--') + 1:]
+            return execute(command, **kwargs)
+        for effect in (without_sandbox, subprocess.TimeoutExpired('native-sandbox', 10, stderr='sentinel-private')):
+            with self.subTest(effect=type(effect).__name__), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve(); workspace=base/'workspace'; workspace.mkdir()
+                run=base/'run'; run.mkdir()
+                with patch.object(native_preflight, '_execute', side_effect=effect), self.assertRaises(run_agent.OperationError) as caught:
+                    native_preflight.check('/probe-codex', (), workspace, run, base/'auth')
+                receipt=json.loads((run/'codex-sandbox-preflight.json').read_text())
+                self.assertEqual(receipt['status'], 'BLOCKED')
+                self.assertEqual(caught.exception.code, 'SDK_SANDBOX_UNAVAILABLE')
+                self.assertNotIn('sentinel-private', json.dumps(receipt)+json.dumps(caught.exception.as_dict()))
+                self.assertEqual(list(run.iterdir()), [run/'codex-sandbox-preflight.json'])
 
     def test_native_failed_run_raises_but_public_stream_preserves_terminal_evidence(self):
         from openai_codex import TurnHandle
@@ -478,7 +556,9 @@ class RunnerTest(unittest.TestCase):
     def test_partial_atomic_patch_is_preserved_in_failure_receipt(self):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
-            return {'status':'proposed', 'summary':'offline', 'files_changed':[], 'assumptions':[], 'confidence':'high',
+            return {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
+                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in ('L0','L1','Q','L2','L4','L3')],
+                    'files_changed':[{'path':name,'why':'fixture repair'} for name in ('Dockerfile','.dockerignore')], 'assumptions':[], 'confidence':'high',
                     'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}, {}
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve(); workspace=base/'workspace'; workspace.mkdir()
@@ -501,6 +581,28 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual((workspace/'Dockerfile').stat().st_mode & 0o777, 0o755)
             self.assertEqual((receipt['error']['phase'], receipt['error']['retry_policy']), ('patch','after_reconcile'))
             self.assertNotIn('private sentinel', json.dumps(receipt))
+            self.assertNotIn('proposal_rejection', receipt)
+
+    def test_validation_only_rejection_has_safe_replan_guidance_without_source_writes(self):
+        def provider(cfg, system, task, schema, workspace, run, deny, emit):
+            emit('session.finished', sdk_status='completed', session_id='offline-fixture')
+            return {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
+                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in ('L0','L1','Q','L2','L4','L3')],
+                    'files_changed':[{'path':'../private-canary.py','why':'invalid fixture'}], 'assumptions':[], 'confidence':'high',
+                    'files':[{'path':'../private-canary.py','content':'wrong'}]}, {}
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory); workspace=base/'work'; workspace.mkdir()
+            run, task=base/'run', base/'task.md'; task.write_text('fixture')
+            argv=['runner','fixer','--workspace',str(workspace),'--run',str(run),'--task',str(task)]
+            with patch.object(run_agent, 'run_codex', side_effect=provider), patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(run_agent.main(), 1)
+            receipt=json.loads((run/'fixer.json').read_text())
+            self.assertEqual([], receipt['written'])
+            self.assertEqual('none', receipt['error']['side_effect'])
+            self.assertEqual('PATH_SCOPE', receipt['proposal_rejection']['reason'])
+            self.assertTrue(receipt['proposal_rejection']['safe_to_replan'])
+            self.assertNotIn('private-canary', json.dumps(receipt['proposal_rejection']))
+            self.assertFalse((base/'private-canary.py').exists())
 
     def test_private_directory_refuses_foreign_owner_and_auth_route_has_no_secret(self):
         from runtime_boundary import private_directory, effective_auth_route
@@ -512,6 +614,58 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(route['mode'], 'subscription')
         self.assertEqual(route['credential_home'], '/offline/account')
         self.assertNotIn('synthetic-never-log', json.dumps(route))
+
+
+class SDKProgressTest(unittest.TestCase):
+    def test_native_stream_progress_is_bounded_typed_and_content_free(self):
+        from openai_codex.models import Notification, ThreadTokenUsageUpdatedNotification
+        from openai_codex.generated.v2_all import ReasoningTextDeltaNotification
+        def stream():
+            for index in range(40):
+                yield Notification('item/reasoning/textDelta', ReasoningTextDeltaNotification.model_validate({
+                    'threadId': 'thread-test', 'turnId': 'turn-test', 'itemId': 'reasoning-test',
+                    'contentIndex': 0, 'delta': 'sentinel-private-reasoning'}))
+            tokens = {'inputTokens': 100, 'cachedInputTokens': 40, 'outputTokens': 20,
+                      'reasoningOutputTokens': 10, 'totalTokens': 120}
+            yield Notification('thread/tokenUsage/updated', ThreadTokenUsageUpdatedNotification.model_validate({
+                'threadId': 'thread-test', 'turnId': 'turn-test', 'tokenUsage': {'total': tokens, 'last': tokens}}))
+            yield Notification('item/reasoning/textDelta', ReasoningTextDeltaNotification.model_validate({
+                'threadId': 'other-thread', 'turnId': 'other-turn', 'itemId': 'other-item',
+                'contentIndex': 0, 'delta': 'sentinel-private-unrelated'}))
+            yield from native_turn(command=('sentinel-private-command-output', 0),
+                                   response='sentinel-private-response').stream()
+        with tempfile.TemporaryDirectory() as directory, patch.object(run_agent.time, 'monotonic', return_value=10):
+            run = Path(directory)
+            state, emit = run_agent.lifecycle(run, 'fixer', 'codex', 'gpt-6.1-sol')
+            emit('turn.started', sdk_status='running', turn_id='turn-test')
+            result = run_agent.collect_codex_turn(SimpleNamespace(id='turn-test', stream=stream), emit=emit)
+            self.assertEqual(result.status.value, 'completed')
+            events = [json.loads(line) for line in (run/'fixer-events.jsonl').read_text().splitlines()]
+            progress_events = [event for event in events if event['event_name'] == 'turn.progress']
+            self.assertEqual(2, len(progress_events))  # Burst is coalesced; terminal metadata is flushed.
+            progress = state['progress']
+            self.assertEqual(44, progress['sdk_event_count'])
+            self.assertEqual({'commandExecution': 1, 'agentMessage': 1}, progress['item_counts'])
+            self.assertEqual({'kind': 'agentMessage', 'status': 'completed'}, progress['last_item'])
+            self.assertEqual(120, progress['token_usage']['total_tokens'])
+            self.assertTrue(all(event['outcome'] == 'RUNNING' for event in progress_events))
+            self.assertNotIn('sentinel-private', (run/'fixer-events.jsonl').read_text())
+            self.assertNotIn('sentinel-private', (run/'fixer-session.json').read_text())
+
+    def test_progress_rejects_unknown_fields_and_invalid_counters(self):
+        valid = {'elapsed_ms': 100, 'sdk_event_count': 1, 'last_sdk_event_at_ms': 1000, 'item_counts': {}}
+        for mutation in ({'command': 'sentinel-private'}, {'sdk_event_count': True},
+                         {'item_counts': {'sentinel-private': 1}}, {'token_usage': {'prompt': 'sentinel-private'}},
+                         {'last_item': {'kind': 'reasoning', 'status': 'completed', 'text': 'sentinel-private'}},
+                         {'token_usage': {'total_tokens': -1}}):
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                run_agent.validated_progress({**valid, **mutation})
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            _, emit = run_agent.lifecycle(run, 'fixer', 'codex', 'gpt-6.1-sol')
+            with self.assertRaises(ValueError):
+                emit('turn.progress', progress={**valid, 'raw': 'sentinel-private'})
+            self.assertEqual('', (run/'fixer-events.jsonl').read_text())
 
 
 if __name__ == '__main__':

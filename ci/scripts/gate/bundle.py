@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -19,7 +20,7 @@ import tarfile
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from execution import GATE_ORDER
+from execution import GATE_ORDER, quality_advisory
 from observability import OperationError, event_record
 from process import run_bounded
 from storage import durable_write
@@ -29,7 +30,9 @@ HEX = r"[0-9a-f]{64}"
 ID = rf"sha256:{HEX}"
 REPO = r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]{1,5})?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*"
 TAG = r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"
-FILES = {"jasmin.yaml", "verdict.json", "images.tar"}
+FILES = {"railshot.yaml", "verdict.json", "images.tar"}
+SPEC_NAMES = ("railshot.yaml", "jasmin.yaml")
+SOURCE_SPECS = (".railshot/railshot.yaml", ".jasmin/jasmin.yaml")
 TRUST = "trusted-ci-artifact-not-a-signature"
 LAYERS = list(GATE_ORDER)
 
@@ -37,6 +40,22 @@ LAYERS = list(GATE_ORDER)
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def spec_name(names):
+    """Read historical artifact names without rewriting their bound bytes/hashes."""
+    present = set(names).intersection(SPEC_NAMES)
+    require(len(present) == 1, "exactly one Railshot or legacy Jasmin spec is required")
+    return present.pop()
+
+
+def source_spec(workspace):
+    paths = [Path(workspace) / name for name in SOURCE_SPECS]
+    present = [path for path in paths if path.exists() or path.is_symlink()]
+    require(len(present) == 1, "exactly one .railshot/railshot.yaml or legacy .jasmin/jasmin.yaml is required")
+    path, = present
+    require(path.is_file() and not path.is_symlink() and not path.parent.is_symlink(), "spec must be a regular file")
+    return path
 
 
 def file_hash(path):
@@ -74,6 +93,21 @@ def source_digest(workspace):
     return digest.hexdigest()
 
 
+def stage_source(workspace, destination):
+    """Readable Q/build input inside a private parent; never chmod the original."""
+    before = source_digest(workspace)  # Reject symlinks/special files before copying.
+    destination = Path(destination)
+    shutil.copytree(workspace, destination, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+    if source_digest(destination) != before or source_digest(workspace) != before:
+        raise ValueError("source changed while staging")
+    # Both the non-root quality checker and Docker COPY consume this snapshot.
+    # Its caller owns a 0700 temporary parent, outside source and run evidence.
+    for path in (destination, *destination.rglob("*")):
+        mode = path.lstat().st_mode
+        path.chmod(0o755 if stat.S_ISDIR(mode) or mode & 0o111 else 0o644)
+    return destination
+
+
 def docker(*args, timeout=900):
     result = run_bounded(["docker", *args], timeout=timeout)
     require(result.returncode == 0, "Docker operation failed: " + " ".join(args[:2]))
@@ -90,14 +124,14 @@ def contract(spec_bytes, verdict_bytes):
     import jsonschema
     import yaml
     spec, verdict = yaml.safe_load(spec_bytes), json.loads(verdict_bytes)
-    schema = json.loads((Path(__file__).resolve().parents[1] / "schemas/jasmin.schema.json").read_text())
+    schema = json.loads((Path(__file__).resolve().parents[1] / "schemas/railshot.schema.json").read_text())
     jsonschema.validate(spec, schema)
     require(isinstance(verdict, dict) and verdict.get("release_eligible") is True and
             verdict.get("ok") is True and verdict.get("status") == "PASS", "full release verdict required")
     layers = verdict.get("layers", [])
     require([row.get("layer") for row in layers] == LAYERS and
-            all(row.get("ok") is True and not row.get("blocked") and not row.get("errors") for row in layers),
-            "all release layers must pass")
+            all(quality_advisory(row) or row.get("ok") is True and not row.get("blocked") and not row.get("errors") for row in layers),
+            "all required release layers must pass")
     require(isinstance(verdict.get("source_sha256"), str) and re.fullmatch(HEX, verdict["source_sha256"]), "source digest required")
     services = [service["name"] for service in spec["services"]]
     for service in spec["services"]:
@@ -118,7 +152,7 @@ def export(workspace, verdict_path, outdir):
     require(not outdir.resolve().is_relative_to(workspace.resolve()), "bundle output must be outside workspace")
     require(not outdir.exists() and not outdir.is_symlink(), "bundle output must not exist")
     source = source_digest(workspace)
-    spec_bytes = (workspace / ".jasmin/jasmin.yaml").read_bytes()
+    spec_bytes = source_spec(workspace).read_bytes()
     require(not verdict_path.is_symlink() and verdict_path.is_file(), "verdict must be a regular file")
     verdict_bytes = verdict_path.read_bytes()
     verdict = contract(spec_bytes, verdict_bytes)
@@ -126,7 +160,7 @@ def export(workspace, verdict_path, outdir):
     images = {svc: {"local_ref": ref, "id": inspect(ref)["Id"]} for svc, ref in verdict["images"].items()}
     require(verdict["image_ids"] == {svc: item["id"] for svc, item in images.items()}, "image changed since gate")
     outdir.mkdir(parents=True)
-    (outdir / "jasmin.yaml").write_bytes(spec_bytes)
+    (outdir / "railshot.yaml").write_bytes(spec_bytes)
     (outdir / "verdict.json").write_bytes(verdict_bytes)
     docker("image", "save", "--output", str((outdir / "images.tar").resolve()), *sorted({item["id"] for item in images.values()}))
     require(source_digest(workspace) == source, "source changed during export")
@@ -139,14 +173,17 @@ def export(workspace, verdict_path, outdir):
 def verify(bundle):
     bundle = Path(bundle)
     require(not bundle.is_symlink() and bundle.is_dir(), "bundle must be a real directory")
-    require({p.name for p in bundle.iterdir()} == FILES | {"manifest.json"}, "unexpected bundle contents")
+    names = {p.name for p in bundle.iterdir()}
+    name = spec_name(names)
+    files = {name, "verdict.json", "images.tar"}
+    require(names == files | {"manifest.json"}, "unexpected bundle contents")
     file_hash(bundle / "manifest.json")
     manifest = json.loads((bundle / "manifest.json").read_bytes())
     require(manifest.get("version") == 1 and manifest.get("trust") == TRUST, "unsupported bundle contract")
-    require(set(manifest.get("files", {})) == FILES, "missing bundle hashes")
-    for name in FILES:
-        require(file_hash(bundle / name) == manifest["files"][name], "bundle hash mismatch: " + name)
-    verdict = contract((bundle / "jasmin.yaml").read_bytes(), (bundle / "verdict.json").read_bytes())
+    require(set(manifest.get("files", {})) == files, "missing bundle hashes")
+    for filename in files:
+        require(file_hash(bundle / filename) == manifest["files"][filename], "bundle hash mismatch: " + filename)
+    verdict = contract((bundle / name).read_bytes(), (bundle / "verdict.json").read_bytes())
     require(manifest.get("source_sha256") == verdict["source_sha256"], "manifest/verdict source mismatch")
     images = manifest.get("images", {})
     require(set(images) == set(verdict["images"]), "manifest service/image mismatch")

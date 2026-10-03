@@ -6,7 +6,7 @@
 python gitops/handoff.py /private/published /private/target.json /private/handoff-review
 ```
 
-입력은 신뢰된 GitHub CI artifact 채널에서 받은 `images.json`, `jasmin.yaml`, `verdict.json`, `manifest.json`, `handoff.json`입니다. `handoff.json`은 **version 2**여야 하며 run/producer attempt/bundle artifact ID와 `registry` 접근 검증 결과를 출력 receipt에 유지합니다. registry 결과의 `images_sha256`은 `images.json` 해시와 같아야 합니다. v1은 private pull 계약을 표현하지 못하므로 거부합니다. 게시 artifact 자체의 ID는 receipt 본문에 없으며 API가 GitHub 응답에서 별도로 검증합니다. 이 CLI는 GitHub 조회를 수행하지 않으므로 신뢰된 게시 채널에서 확인한 파일만 전달해야 합니다. 파일 해시는 무결성 검사이며 서명이 아닙니다. 임의 업로드 artifact를 신뢰하지 않습니다. 원래 이미지 tar는 이 선언 생성 단계에서 재빌드하거나 실행하지 않습니다.
+입력은 신뢰된 GitHub CI artifact 채널에서 받은 `images.json`, `railshot.yaml`, `verdict.json`, `manifest.json`, `handoff.json`입니다. `handoff.json`은 **version 2**여야 하며 run/producer attempt/bundle artifact ID와 `registry` 접근 검증 결과를 출력 receipt에 유지합니다. registry 결과의 `images_sha256`은 `images.json` 해시와 같아야 합니다. v1은 private pull 계약을 표현하지 못하므로 거부합니다. 게시 artifact 자체의 ID는 receipt 본문에 없으며 API가 GitHub 응답에서 별도로 검증합니다. 이 CLI는 GitHub 조회를 수행하지 않으므로 신뢰된 게시 채널에서 확인한 파일만 전달해야 합니다. 파일 해시는 무결성 검사이며 서명이 아닙니다. 임의 업로드 artifact를 신뢰하지 않습니다. 원래 이미지 tar는 이 선언 생성 단계에서 재빌드하거나 실행하지 않습니다.
 
 target JSON은 운영자가 제공합니다. 필수 필드는 `id`, `namespace`, `argocd_namespace`, 제한된 AppProject `project`, `architecture: amd64`, `repo_url`, Kubernetes API `cluster_server`, config repo `path`, 그 경로를 검토한 Git commit SHA `revision`, 할당한 `node_port`, 실제 라우팅 원본 `ingress_cidrs`, CPU(m)/memory(Mi) requests·limits `resources`입니다. 예시는 `test_handoff.py`의 target을 참고하세요. CI S/M/L을 운영 리소스 값으로 임의 변환하지 않습니다.
 
@@ -16,7 +16,7 @@ Private 이미지는 target에 `"image_pull_secret": {"namespace": "tenant-demo"
 
 앱 하나의 지원 범위는 단일 HTTP 서비스와 선택적 PostgreSQL 연결, 명시한 route·health endpoint, immutable image, linux/amd64입니다. `/health` 같은 절대 경로는 허용하며 prefix를 제거하거나 다시 쓰지 않습니다. `http` receipt의 `route`, `health_path`, `container_port`, `node_port`를 edge 연결에 사용합니다. ALB health check는 `health_path`를 그대로 사용하고 앱 요청 경로도 그대로 전달합니다. query·fragment·percent escaping·상위 경로 이동은 이 초기 계약에서 차단합니다. 임의 앱 secret·외부 egress·다중 서비스·arm64는 지원하지 않습니다. 여러 앱은 각각의 review 디렉터리와 Application으로 처리합니다. 같은 클러스터의 앱들은 서로 다른 NodePort를 할당해야 합니다.
 
-Public registry는 `anonymous_manifest_read`와 null Secret 참조, private registry는 `authenticated_manifest_read`와 위 Secret 참조를 요구합니다. 이 결과는 CI에서 digest manifest에 접근한 증거이며 대상 노드에서 image layers를 pull한 증거가 아닙니다. renderer는 registry나 클러스터에 접속하지 않습니다. NetworkPolicy는 ingress CIDR/서비스 포트만 허용하고 egress를 차단합니다. NodePort는 `externalTrafficPolicy: Local`이며 **ALB target node에 실제 Pod가 있어야 합니다**. Cilium의 source IP 관측/정책 적용과 SG/WireGuard 라우팅은 실제 환경에서 함께 검증합니다.
+Public registry는 `anonymous_manifest_read`와 null Secret 참조, private registry는 `authenticated_manifest_read`와 위 Secret 참조를 요구합니다. 이 결과는 CI에서 digest manifest에 접근한 증거이며 대상 노드에서 image layers를 pull한 증거가 아닙니다. renderer는 registry나 클러스터에 접속하지 않습니다. NetworkPolicy는 ingress CIDR/서비스 포트만 허용하고 egress를 차단합니다. NodePort는 `externalTrafficPolicy: Local`이며 **ALB target node에 실제 Pod가 있어야 합니다**. Cilium의 source IP 관측/정책 적용과 등록된 클라우드의 SG·라우팅은 실제 환경에서 함께 검증합니다.
 
 ## PostgreSQL 연결과 마이그레이션
 
@@ -122,7 +122,7 @@ python -m unittest discover -s gitops -p 'test_*.py'
 
 ### 신규 앱 주소와 공유 edge 연결
 
-`edge.py`는 기존 `service_name.py`와 `infrastructure/terraform/aws-edge`를 재사용합니다. HTTP API가 아니며, 환경 등록 helper가 검증한 provider descriptor와 운영자 profile로 만든 비공개 JSON만 받습니다. 공개 요청의 IP·URL·SG·명령·파일 경로를 직접 전달하지 않습니다. profile wrapper는 `{version:1, cd:{...}, registration:{state_dir,source_repository,pull_secret_file,edge_config_file,expires_at,...}}`이며, 환경 등록 helper가 `registration.edge_config_file`로 준비한 뒤 `envhome/cd.json`의 해당 target row에 `edge.json.reference`를 넣습니다.
+`edge.py`는 AWS 앱에 한해 기존 `service_name.py`와 `infrastructure/terraform/aws-edge`를 재사용합니다. HTTP API가 아니며, 환경 등록 helper가 검증한 provider descriptor와 운영자 profile로 만든 비공개 JSON만 받습니다. 공개 요청의 IP·URL·SG·명령·파일 경로를 직접 전달하지 않습니다. profile wrapper는 `{version:1, cd:{...}, registration:{state_dir,source_repository,pull_secret_file,edge_config_file,expires_at,...}}`이며, 환경 등록 helper가 `registration.edge_config_file`로 준비한 뒤 `envhome/cd.json`의 해당 target row에 `edge.json.reference`를 넣습니다.
 
 운영자 edge 설정 예시(0600, 경로는 실행 host 기준):
 
@@ -136,7 +136,7 @@ python -m unittest discover -s gitops -p 'test_*.py'
 }
 ```
 
-`terraform_dir`는 **기존 공유 ALB의 backend/state로 초기화한 전용 checkout**입니다. 새 state로 초기화하면 전체 인프라 생성 계획이 나와 차단됩니다. `variables_file`에는 기존 고객 3앱·apex·wildcard/apex 인증서·zone·WireGuard 설정을 모두 보존합니다. 실행기는 base routes에 이미 적용한 자체 할당과 이번 route만 더하며 기존 route를 수정·삭제하지 않습니다. 운영 state/자격을 API 컨테이너로 이전할 때는 원래 writer를 먼저 멈추고 한 writer와 동일 backend만 유지해야 합니다. 로컬 `flock`은 서로 다른 host의 동시 writer를 조율하지 않습니다.
+`terraform_dir`는 **기존 공유 ALB의 backend/state로 초기화한 전용 checkout**입니다. 새 state로 초기화하면 전체 인프라 생성 계획이 나와 차단됩니다. `variables_file`에는 AWS 앱·apex·wildcard/apex 인증서·zone 설정을 보존합니다. 기존 GCP route 또는 `wireguard_*` 입력이 남으면 신규 prepare/plan/apply를 차단합니다. [AWS edge 이전 절차](../infrastructure/terraform/aws-edge/README.md#기존-wireguard-경로의-이전)에 따라 GCP native L7·DNS·Argo 관리 경로를 먼저 인계합니다. 기존 설정의 읽기 전용 관측은 유지합니다. 실행기는 base routes에 이미 적용한 자체 할당과 이번 route만 더하며 기존 route를 수정·삭제하지 않습니다. 운영 state/자격을 API 컨테이너로 이전할 때는 원래 writer를 먼저 멈추고 한 writer와 동일 backend만 유지해야 합니다. 로컬 `flock`은 서로 다른 host의 동시 writer를 조율하지 않습니다.
 
 등록 helper가 만드는 요청 예시:
 
@@ -151,7 +151,7 @@ python -m unittest discover -s gitops -p 'test_*.py'
 }
 ```
 
-GCP는 `target_security_group_id`를 생략하고 기존 WireGuard로 도달 가능한 RFC1918 주소를 사용합니다. namespace와 앱 이름은 기존 등록 대상과 일치해야 합니다. hostname identity는 `(tenant, app, environment_id)`이며 deployment ID나 image revision이 바뀌어도 유지합니다. 다른 identity의 hostname 충돌은 거부하고 NodePort(30000–32767)·priority(1000–49999)는 기존 값과 모든 영속 예약을 피해 할당합니다. 같은 물리 주소·namespace·앱을 다른 환경이 점유하지 못합니다. 등록 helper는 클러스터의 기존 Service 전체에서도 NodePort 충돌을 확인해야 합니다. 만료일은 소유권과 정리 인수용 기록이며 자동 삭제 예약을 대신하지 않습니다.
+신규 등록은 `provider_kind: aws`와 전용 `target_security_group_id`가 필요합니다. GCP·온프레 등록을 이 AWS ALB 실행기에 보내지 않습니다. namespace와 앱 이름은 기존 등록 대상과 일치해야 합니다. hostname identity는 `(tenant, app, environment_id)`이며 deployment ID나 image revision이 바뀌어도 유지합니다. 다른 identity의 hostname 충돌은 거부하고 NodePort(30000–32767)·priority(1000–49999)는 기존 값과 모든 영속 예약을 피해 할당합니다. 같은 물리 주소·namespace·앱을 다른 환경이 점유하지 못합니다. 등록 helper는 클러스터의 기존 Service 전체에서도 NodePort 충돌을 확인해야 합니다. 만료일은 소유권과 정리 인수용 기록이며 자동 삭제 예약을 대신하지 않습니다.
 
 ```sh
 python3 gitops/edge.py prepare --config /private/edge.json \
@@ -166,15 +166,15 @@ python3 gitops/edge.py apply --reference /private/reference.json \
   --plan-sha256 <reviewed-plan-receipt-hash> --out /private/apply-receipt.json
 ```
 
-계획은 새 route의 target group/attachment/host rule/DNS, 정확한 NodePort SG, 해당 GCP `/32` route 생성만 허용합니다. 공유 ALB SG는 기존 규칙을 그대로 보존한 정확한 사설IP/NodePort egress 추가만 허용합니다. 기존 자원 변경·삭제·교체는 차단합니다. provider refresh가 null collection이나 계산된 ALB 연결을 채운 경우에도 해당 자원의 실행 action이 `no-op`이어야 합니다. plan bytes의 SHA256을 대조하고 외부 apply 전에 `applying`을 영속 저장합니다. 중단·부분 실패 시 자동 replan/reapply 없이 같은 route의 실제 상태를 조회합니다. 소유자가 수동 정리를 완료하기 전에는 예약·불명확 상태를 지우지 않습니다.
+계획은 새 route의 target group/attachment/host rule/DNS, 정확한 AWS NodePort SG 생성만 허용합니다. 공유 ALB SG는 기존 규칙을 그대로 보존한 정확한 사설IP/NodePort egress 추가만 허용합니다. 기존 자원 변경·삭제·교체·state 소유권 해제(`forget`)는 차단합니다. provider refresh가 null collection이나 계산된 ALB 연결을 채운 경우에도 해당 자원의 실행 action이 `no-op`이어야 합니다. plan bytes의 SHA256을 대조하고 외부 apply 전에 `applying`을 영속 저장합니다. 중단·부분 실패 시 자동 replan/reapply 없이 같은 route의 실제 상태를 조회합니다. 소유자가 수동 정리를 완료하기 전에는 예약·불명확 상태를 지우지 않습니다.
 
 플랫폼 담당이 실행 host·state·자격·단일 writer를 인수한 설정에서만 `auto_apply:true`를 사용합니다. bridge 최초 apply는 Git/Argo 전달 뒤 saved plan을 만들고 검사·적용합니다. 반복 `observe`는 변경을 수행하지 않습니다. `auto_apply:false`에서는 운영자 saved-plan 적용을 기다리며 URL 성공을 반환하지 않습니다. 설정 내용이 바뀌면 이전 reference가 거부되므로 설정을 바꿔 이미 접수한 배포를 새 대상으로 돌리지 않습니다.
 
 `reserved/planned/applied`는 공개 사이트 성공이 아닙니다. bridge가 정확한 ALB host/priority/target, Route53 alias, target의 `healthy`, 기본 CA 검증을 사용하는 HTTPS health JSON의 정확한 일치, 실제 앱 route의 HTTPS 200을 모두 관측해야 `public_http.state=succeeded`입니다. redirect·환경 proxy를 사용하지 않습니다. 결과는 검증한 health `url`, 앱 `site_url`, deployment/target/app/tenant/environment/source commit/Git revision/image digest/route digest/plan digest/namespace/expiry가 묶인 `receipt`를 포함합니다. 응답 body·자격·native stderr는 반환하지 않습니다. 실패하면 URL은 null이며 이전 성공 receipt를 현재 성공으로 재사용하지 않습니다.
 
-AWS 경로는 private IP+SG로 ALB에서 접근합니다. GCP도 같은 할당/검증 계약을 쓰지만 WireGuard peer/AllowedIPs·guest forwarding·GCP 방화벽·복귀 경로를 준비하는 기능은 포함하지 않습니다. 다른 클라우드 DB 연결 역시 별도 네트워크 계약입니다. target healthy와 실제 공개 HTTP가 확인되지 않은 GCP 경로를 지원 완료로 표시하지 않습니다.
+AWS 경로는 private IP+SG로 ALB에서 접근합니다. GCP의 신규 공개 경로는 native L7 담당이 구성·검증하며 이 실행기는 GCP route를 생성하지 않습니다. 기존 GCP WireGuard 경로를 읽어 관측할 수 있다는 사실은 새 경로의 준비 완료를 뜻하지 않습니다. 다른 클라우드 DB 연결도 별도 네트워크 계약입니다.
 
-온프레·cloudflared 자동 공개는 현재 지원하지 않습니다. 승민 원본 `feature/deployment-runtime-seungmin@ec6a9df0258eee9843aa457bc10703aa7026db40`와 통합본의 `deployment/cloudflared/README.md`는 자동 설치가 없는 선택 모듈임을 명시합니다. `deployment/scripts/exposure.py`의 `cloudflare-tunnel`은 운영자가 이미 만든 HTTPS URL을 검사하는 hook이며 tunnel/DNS/자격을 생성하지 않습니다. 따라서 제품 신규 앱 할당은 AWS/GCP ALB로만 진행하고 다른 provider를 차단합니다. 기존 cloudflared URL hook을 ALB hostname의 별도 writer로 연결하지 않습니다. 향후 온프레 connector를 추가할 때는 운영자 route 소유권에서 ALB와 tunnel 중 하나를 명시적으로 선택하고 기존 hostname·NodePort 점유와 중복되지 않게 검증해야 합니다.
+온프레는 [Named Tunnel → 사설 Octavia HTTPS](../deployment/cloudflared/README.md) 선언을 운영자가 준비·배포합니다. 제품의 신규 앱 등록과 자동 연결은 별도 작업이며 이 AWS executor는 온프레를 받지 않습니다. 기존 Route53/ALB hostname과 Cloudflare hostname의 소유권을 중복하지 않게 인계해야 합니다. Named Tunnel 공개 HTTP 성공은 GCP Argo API 6443 관리 경로의 연결 증거가 아닙니다.
 
 형식 근거: [Terraform saved plan JSON](https://developer.hashicorp.com/terraform/internals/json-format), [AWS target health 조회](https://docs.aws.amazon.com/cli/latest/reference/elbv2/describe-target-health.html). 로컬 검사는 `python -m unittest discover -s gitops -p 'test_*.py'`이며 네이티브 경계 모의 검사와 실제 cloud 검증은 별도 증거입니다.
 

@@ -2,7 +2,7 @@
 
 runner는 **Ubuntu 24.04 amd64 전용 빌드 노드**에서 앱 저장소의 `railshot-deploy.yml` job을 한 번 실행합니다. 목표 배치는 운영 K3s의 build agent 위 [일회성 Job](../../../deployment/manifests/build-runner.yaml)이며, 기존 독립 VM은 `ci/runner-compose.yml`을 유지합니다. 일반 운영 노드나 고객 runtime에는 설치하지 않습니다. GitHub 공식 `actions/actions-runner:2.337.0` 이미지를 digest로 고정하고 Python·호스트 방화벽 확인 도구만 추가합니다. workflow의 `setup-python`이 Python 3.13을 설치하며 사용자 코드의 테스트는 기존 제한 컨테이너에서 실행합니다. 이미지 게시 job은 GitHub-hosted runner에 남깁니다. 아래 설정은 실제 노드 가입·고객 job 검증을 대신하지 않습니다.
 
-이 컨테이너는 신뢰된 CI 실행기를 포장합니다. **전용 VM이 기존 root 신뢰 경계**입니다. 같은 VM의 Docker socket과 host network, Docker 기본 capability에 추가한 `NET_ADMIN`이 필요합니다. socket은 CI VM의 root 권한에 해당하며 운영 호스트 socket과 공유할 수 없습니다. `NET_ADMIN`은 기존 root-owned helper의 실제 nftables 정책 검증에, host network는 격리된 L3 컨테이너 IP의 HTTP 검사에 필요합니다. runner에는 `privileged: true`나 host PID, `SYS_ADMIN`, seccomp 해제를 추가하지 않습니다. 사용자 코드에는 socket·runner 인증·운영 자격을 전달하지 않고 기존의 비root/읽기전용/자원제한 Q 컨테이너와 제한된 BuildKit/L3 네트워크를 유지합니다.
+이 컨테이너는 신뢰된 CI 실행기를 포장합니다. **전용 VM이 기존 root 신뢰 경계**입니다. 같은 VM의 Docker socket과 host network, Docker 기본 capability에 추가한 `NET_ADMIN`이 필요합니다. socket은 CI VM의 root 권한에 해당하며 운영 호스트 socket과 공유할 수 없습니다. `NET_ADMIN`은 기존 root-owned helper의 실제 nftables 정책 검증에, host network는 격리된 L3 컨테이너 IP의 HTTP 검사에 필요합니다. runner는 `privileged: false`, host PID 비공유, `SYS_ADMIN` 미부여, 권한 상승 금지를 유지합니다. Codex의 읽기 제한 sandbox가 만드는 user/mount/PID/network/IPC namespace만 허용하는 전용 seccomp·AppArmor 프로필을 사용합니다. 사용자 코드에는 socket·runner 인증·운영 자격을 전달하지 않고 기존의 비root/읽기전용/자원제한 Q 컨테이너와 제한된 BuildKit/L3 네트워크를 유지합니다.
 
 BuildKit은 새로 만들지 않습니다. 먼저 `infrastructure/ansible/ci.yml`을 실행한 기존 bootstrap이 `railshot-buildkit` 컨테이너와 `railshot-quality` bridge/firewall을 준비하고 실제 네트워크 검증 receipt를 남겨야 합니다. runner는 자신만의 Docker config에 remote Buildx 연결 정보만 만들고 같은 gate 코드로 기존 BuildKit의 이미지·network·자원제한·실행 flags를 확인합니다. bootstrap의 기존 BuildKit 권한 설정은 이 패키징에서 변경하지 않습니다.
 
@@ -119,6 +119,7 @@ GitHub 앱 저장소에는 기존 workflow의 변수도 설정합니다.
 | `RAILSHOT_RUN_ROOT` | `/var/lib/railshot-runner/runs`; `_work`·`RUNNER_TEMP`와 분리된 재시도 상태 |
 | `QUALITY_NETWORK` | `railshot-quality` |
 | `PLATFORM_REF` | 설치한 executor 계약과 같은 검토된 platform commit 40자리 SHA |
+| `RAILSHOT_MAX_REPAIR_ATTEMPTS` | 선택적 자동 코드 수정 횟수 0–3, 기본 3. 0이면 모델 인증·SDK 없이 결정적 baseline 검사·빌드·게시만 실행한다. 게이트 실패를 성공으로 바꾸거나 검사를 생략하지 않는다. |
 | `AGENT_PROVIDER`, `AGENT_AUTH_MODE` | 기존 workflow 계약의 provider와 `subscription` 또는 `api-key` |
 | `RAILSHOT_CODEX_HOME` | subscription일 때 `/var/lib/railshot-runner/codex`; 운영자가 해당 전용 디렉터리에 `auth.json` 준비 |
 
@@ -139,6 +140,16 @@ python3 -m unittest discover -s ci/scripts/runner -p test_container.py
 bash -n ci/scripts/runner/entrypoint.sh ci/scripts/runner/prepare-host.sh
 ```
 
-실제 완료 판정에는 전용 Linux VM에서 bootstrap 네트워크 검증, ephemeral GitHub job, SDK의 native 읽기 제한, Q/L2/L4/L3를 통과한 evidence가 필요합니다. 컨테이너 기본 seccomp 때문에 SDK sandbox가 실행되지 않으면 실패를 보존하고 VM에서 원인을 확인하며 sandbox를 비활성화하지 않습니다. Argo CD와 K3s 고객 runtime은 기존 `gitops/` 및 `deployment/` 구성으로 관리합니다.
+실제 완료 판정에는 전용 Linux VM에서 bootstrap 네트워크 검증, ephemeral GitHub job, SDK의 native 읽기 제한, Q/L2/L4/L3를 통과한 evidence가 필요합니다. 실제 runner Pod에서 SDK sandbox 사전검사가 실패하면 모델을 호출하기 전에 `SDK_SANDBOX_UNAVAILABLE`로 중단합니다. 동일 정책으로 모델 호출을 반복하지 않으며, 검토된 설정을 적용한 새 Pod에서 사전검사가 통과한 뒤 원래 입력을 다시 실행합니다. Argo CD와 K3s 고객 runtime은 기존 `gitops/` 및 `deployment/` 구성으로 관리합니다.
 
 공식 근거: [Actions runner 2.337.0 Dockerfile](https://github.com/actions/runner/blob/v2.337.0/images/Dockerfile), [ephemeral runner와 업데이트 운영](https://docs.github.com/en/actions/reference/runners/self-hosted-runners).
+
+## Codex namespace 충돌과 실행 전 검사
+
+`RuntimeDefault`의 namespace 생성 차단은 Codex 0.159.3의 파일 읽기 제한과 충돌합니다. 전용 빌드 노드에서만 `prepare-host.sh`가 root 소유 프로필을 설치합니다. Kubernetes는 `Localhost` 프로필을 사용하고 Compose는 같은 seccomp 파일과 AppArmor 이름을 사용합니다. 이미지와 host 프로필을 함께 갱신하고, 기존 Job이 종료된 뒤 controller template을 새 이미지로 교체합니다. 프로필이 없으면 시작을 거부합니다.
+
+seccomp는 containerd의 실행 중 amd64 기본 정책에서 기본 거부와 기존 syscall 규칙을 보존합니다. 추가 허용은 Codex bwrap의 정확한 `clone` flags `0x78020011`, `mount`, `pivot_root`, `umount2(MNT_DETACH)`입니다. `unshare`, `setns`, `SYS_ADMIN`, privileged, host PID는 추가하지 않습니다. mount는 호스트 namespace에서 여전히 kernel capability 검사로 거부되고, AppArmor는 bwrap의 `/tmp`, `/newroot`, `/oldroot`와 root 전환 경로로 대상을 제한합니다. 기존 `/proc`·`/sys` 보호도 유지합니다. 고객 코드 Q/L3 컨테이너의 정책은 변경하지 않습니다.
+
+SDK 실행 직전에는 같은 프로세스 환경과 permission profile로 허용된 읽기, 금지된 읽기·쓰기·네트워크를 실제 검사합니다. SDK turn이 완료됐더라도 내부 명령이 sandbox 생성 오류로 실패하면 인프라 오류로 기록하고 파일 제안을 적용하지 않습니다. `agents/DONT.md`는 adapter/fixer의 실제 instructions에 합성됩니다.
+
+프로필 원형은 [containerd AppArmor template](https://github.com/containerd/containerd/blob/main/contrib/apparmor/template.go)와 실제 OCI 기본 seccomp입니다. Copyright The Docker Authors, The Moby Authors, The containerd Authors. Apache-2.0 라이선스 사본은 [LICENSE.apache-2.0](LICENSE.apache-2.0)에 있습니다. RAILSHOT 변경은 위에 기술한 namespace·mount 범위에 한정합니다. [Codex 0.159.3의 filesystem sandbox](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/linux-sandbox/README.md)는 읽기 거부 정책에서 bubblewrap을 요구하므로 legacy Landlock나 sandbox 비활성화로 대체하지 않습니다.

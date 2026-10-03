@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one Jasmin agent role through an agent API (Claude Agent SDK or Codex SDK).
+"""Run one Railshot agent role through an agent API (Claude Agent SDK or Codex SDK).
 
 usage:
   run_agent.py ROLE --provider claude|codex --workspace DIR --run DIR --task FILE
@@ -17,6 +17,7 @@ from functools import lru_cache
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,7 @@ PLATFORM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLATFORM))
 from observability import OperationError, event_record
 from runner.runtime_boundary import effective_auth_route, private_directory
+from runner.native_preflight import check as codex_preflight, sandbox_failure
 
 
 def validate_read_roots(roots, deny):
@@ -42,6 +44,35 @@ def validate_read_roots(roots, deny):
             rel = path.relative_to(root).as_posix() if path != root else root.name
             if path.is_symlink() or not path_ok(rel, ["**"], deny) or len(Path(rel).parts) > 32:
                 raise OperationError("SDK_POLICY_DENIED", component="runner", phase="policy")
+
+
+PROGRESS_ITEMS = {'userMessage', 'hookPrompt', 'agentMessage', 'functionCallOutput', 'plan', 'reasoning',
+                  'commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall', 'collabAgentToolCall',
+                  'subAgentActivity', 'webSearch', 'imageView', 'sleep', 'imageGeneration',
+                  'enteredReviewMode', 'exitedReviewMode', 'contextCompaction', 'other'}
+PROGRESS_STATUSES = {'inProgress', 'completed', 'failed', 'declined', 'interrupted', 'unknown'}
+PROGRESS_TOKENS = {'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens',
+                   'reasoning_output_tokens', 'total_tokens'}
+
+
+def validated_progress(value):
+    """Exact content-free contract shared with the parent process's log projection."""
+    required = {'elapsed_ms', 'sdk_event_count', 'last_sdk_event_at_ms', 'item_counts'}
+    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - {'last_item', 'token_usage'}:
+        raise ValueError('invalid SDK progress fields')
+    number = lambda v: type(v) is int and 0 <= v <= 2**53 - 1
+    if not all(number(value[k]) for k in required - {'item_counts'}):
+        raise ValueError('invalid SDK progress count')
+    for key, allowed in (('item_counts', PROGRESS_ITEMS), ('token_usage', PROGRESS_TOKENS)):
+        values = value.get(key, {})
+        if not isinstance(values, dict) or values.keys() - allowed or not all(number(v) for v in values.values()):
+            raise ValueError('invalid SDK progress counters')
+    if 'last_item' in value:
+        item = value['last_item']
+        if (not isinstance(item, dict) or set(item) != {'kind', 'status'}
+                or item['kind'] not in PROGRESS_ITEMS or item['status'] not in PROGRESS_STATUSES):
+            raise ValueError('invalid SDK item metadata')
+    return copy.deepcopy(value)
 
 
 def lifecycle(run, role, provider, model):
@@ -67,14 +98,18 @@ def lifecycle(run, role, provider, model):
 
     def emit(kind, *, error=None, **fields):
         nonlocal seq
-        allowed = {"status", "sdk_status", "session_id", "thread_id", "turn_id", "sdk_failure"}
+        allowed = {"status", "sdk_status", "session_id", "thread_id", "turn_id", "sdk_failure", "sandbox_preflight", "progress"}
         if set(fields) - allowed:
             raise OperationError("INTERNAL_ERROR", component="runner", phase="observation")
+        if 'progress' in fields:
+            fields['progress'] = validated_progress(fields['progress'])
         state.update(fields)
         seq += 1
         attributes = {key: state[key] for key in ("role", "provider", "model", "status", "sdk_status",
                       "session_id", "thread_id", "turn_id", "conversation_resume", "resume_reason")}
         if state.get("sdk_failure"): attributes["sdk_failure"] = state["sdk_failure"]
+        if state.get("sandbox_preflight"): attributes["sandbox_preflight"] = state["sandbox_preflight"]
+        if state.get("progress"): attributes["progress"] = state["progress"]
         sdk_finished = kind == "session.finished"
         outcome = error.outcome if error else "PASS" if state["status"] == "completed" or sdk_finished else "RUNNING"
         phase = error.phase if error else "invoke" if kind.startswith(("session.", "turn.")) else "agent"
@@ -120,7 +155,75 @@ def writable_rules(spec, scope="packaging"):
         return spec, []
     paths = load_yaml(PLATFORM / spec)
     return (paths["writable"] + (paths.get("source_writable", []) if scope == "source" else []),
-            paths["protected"] + paths.get("source_protected", []))
+            paths["protected"] + paths.get("source_protected", []) +
+            (paths.get("packaging_protected", []) if scope == "packaging" else []))
+
+
+def source_change_allowed(rel, content, previous):
+    """Additional source authority never permits rewriting an existing oracle/config."""
+    is_test = path_ok(rel, ["**/test/**", "**/tests/**", "**/__tests__/**", "**/test*.*", "**/*_test.*",
+                           "**/*.test.*", "**/*.spec.*", "**/*Test.java", "**/*Tests.java", "**/Test*.java"], [])
+    if is_test:
+        if previous is not None:
+            if content != previous:
+                raise ValueError("existing tests are immutable: " + rel)
+            return
+        # A structural minimum, not proof of coverage: real execution still must
+        # report positive tests. Never accept assert-true-only smoke as unit tests.
+        reference_pattern = (r"(?:from\s+(?!unittest|pytest)\w+\s+import|import\s+(?!unittest|pytest)\w+)" if rel.endswith(".py") else
+                             r"new\s+[A-Z]\w*\(" if rel.endswith(".java") else
+                             r"(?:from\s+['\"]\.{1,2}/|require\(['\"]\.{1,2}/|import\s*\(?['\"]\.{1,2}/|"
+                             r"import\s*\(\s*new\s+URL\s*\(\s*['\"]\.{1,2}/|"
+                             r"\.ssrLoadModule\s*\(\s*['\"](?:\.{1,2}/|/src/))")
+        reference = re.search(reference_pattern, content)
+        named_assertions = []
+        if re.search(r"\.[cm]?[jt]sx?$", rel):
+            for imports in re.findall(r"import\s*\{([^}]+)\}\s*from\s*['\"]node:assert(?:/strict)?['\"]", content):
+                named_assertions.extend(name.strip() for name in imports.split(',')
+                                        if name.strip() in {"strictEqual", "deepStrictEqual", "throws", "rejects", "equal", "ok"})
+        named_pattern = "|".join(named_assertions) or r"(?!)"
+        assertion = re.search(r"\b(?:assert\s+(?!True\b|true\b|1\b)|assert\.(?:strictEqual|deepStrictEqual|throws|rejects|equal|ok)\s*\(|expect\s*\(|assert[A-Z]\w*\s*\(|(?:" + named_pattern + r")\s*\()", content)
+        if not reference:
+            raise ValueError("new tests need a supported local application import: " + rel)
+        if not assertion:
+            raise ValueError("new tests need supported behavioral assertions: " + rel)
+        if re.search(r"\.[cm]?[jt]sx?$", rel):
+            actuals = re.findall(r"\b(?:assert\.(?:strictEqual|deepStrictEqual|equal|ok)|expect|(?:" + named_pattern + r"))\s*\(([^,\n]*)", content)
+            constant = r"\s*(?:true|false|null|undefined|[\d.]+|['\"][^'\"]*['\"])(?:\s*(?:\)|,|$))"
+            behavioral = any(not re.match(constant, argument) for argument in actuals)
+            behavioral |= bool(re.search(r"\bassert\.(?:throws|rejects)\s*\(", content)) or any(
+                name in {"throws", "rejects"} and re.search(r"\b" + name + r"\s*\(", content) for name in named_assertions)
+            if not behavioral:
+                raise ValueError("constant-only assertions do not test application behavior: " + rel)
+    if PurePosixPath(rel).name == "package.json":
+        if previous is None:
+            raise ValueError("cannot create a new package manifest")
+        old, new = json.loads(previous), json.loads(content)
+        for field in set(old) | set(new):
+            if old.get(field) == new.get(field):
+                continue
+            if field == "scripts":
+                before, after = old.get(field, {}), new.get(field, {})
+                placeholder = before.get("test") in {'', 'echo "Error: no test specified" && exit 1', "echo 'Error: no test specified' && exit 1"}
+                if not isinstance(after, dict) or any(after.get(k) != v for k, v in before.items() if k != "test" or not placeholder):
+                    raise ValueError("existing scripts are immutable")
+                if not (set(after) - set(before)) <= {"test", "typecheck"}:
+                    raise ValueError("only missing test/typecheck scripts can be added")
+                if ("test" not in before or placeholder) and (not after.get("test") or not re.fullmatch(
+                        r"(?:node --test(?: [\w./*?\[\]-]+\.[cm]?js)*|vitest(?: run)?(?: --environment (?:jsdom|node))?|jest)", after["test"])):
+                    raise ValueError("use a supported test runner without filters or wrappers")
+                if "typecheck" not in before and after.get("typecheck") not in (None, "tsc --noEmit", "tsc -b"):
+                    raise ValueError("use the full TypeScript checker")
+            elif field in {"dependencies", "devDependencies"}:
+                before, after = old.get(field, {}), new.get(field, {})
+                if not isinstance(after, dict) or any(after.get(k) != v for k, v in before.items()):
+                    raise ValueError("existing dependency declarations are immutable")
+                for name in set(after) - set(before):
+                    if (not re.fullmatch(r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", name) or
+                            not isinstance(after[name], str) or not re.fullmatch(r"\d+\.\d+\.\d+(?:-[\w.-]+)?", after[name])):
+                        raise ValueError("new dependencies need exact public package versions")
+            else:
+                raise ValueError("package metadata and quality configuration are immutable")
 
 
 def path_ok(rel, allow, deny):
@@ -143,7 +246,8 @@ def path_ok(rel, allow, deny):
 
 
 def instructions(profile, role_cfg):
-    text = (PLATFORM / profile["instructions_prefix"]).read_text() + "\n\n" + (PLATFORM / role_cfg["instructions"]).read_text()
+    text = "\n\n".join((PLATFORM / path).read_text() for path in
+                       (profile["instructions_prefix"], "agents/DONT.md", role_cfg["instructions"]))
     text += ("\n\n## How to return files\nYou cannot edit files. Return the full content of every file you create or "
              "change in the `files` array of your JSON output, with paths relative to the workspace root. "
              "Files you do not list stay unchanged.\n")
@@ -291,7 +395,7 @@ def codex_permissions(workspace, run, credential_home, read_deny):
     rules["glob_scan_max_depth"] = 32
     rules[str(bundled_codex_path().resolve())] = "read"
     rules[str((bundled_path_dir() / "rg").resolve())] = "read"
-    for name in ("cat", "ls", "sed"):
+    for name in ("cat", "ls", "sed", "rg", "jq"):
         executable = shutil.which(name)
         if executable:
             rules[str(Path(executable).resolve())] = "read"
@@ -330,22 +434,77 @@ def codex_failure_diagnostic(error):
             "message_sha256": hashlib.sha256(message.encode()).hexdigest()}
 
 
-def collect_codex_turn(turn):
+def codex_sandbox_failure(result):
+    """Native tool failures outrank a model's completed/proposed status."""
+    from openai_codex.generated.v2_all import CommandExecutionThreadItem
+    for wrapped in result.items:
+        item = wrapped.root if hasattr(wrapped, "root") else wrapped
+        if (isinstance(item, CommandExecutionThreadItem) and item.exit_code != 0
+                and sandbox_failure(item.aggregated_output)):
+            return {"category": "sandbox_unavailable", "exit_code": item.exit_code,
+                    "output_sha256": hashlib.sha256((item.aggregated_output or "").encode()).hexdigest(),
+                    "command_sha256": hashlib.sha256(item.command.encode()).hexdigest(),
+                    "message": "A native command could not start the required sandbox; repair the runner configuration."}
+    message = getattr(result.error, "message", "") or ""
+    if sandbox_failure(message):
+        return {"category": "sandbox_unavailable", "message_sha256": hashlib.sha256(message.encode()).hexdigest(),
+                "message": "The native runtime could not start the required sandbox; repair the runner configuration."}
+    return None
+
+
+def collect_codex_turn(turn, emit=None):
     """Use public typed stream notifications: run() raises before returning failed turns."""
     from openai_codex import TurnResult
-    from openai_codex.models import ItemCompletedNotification, ThreadTokenUsageUpdatedNotification, TurnCompletedNotification
-    from openai_codex.generated.v2_all import AgentMessageThreadItem, MessagePhase
+    from openai_codex.models import ItemStartedNotification, ItemCompletedNotification, ThreadTokenUsageUpdatedNotification, TurnCompletedNotification
+    from openai_codex.generated.v2_all import (AgentMessageThreadItem, MessagePhase, AgentMessageDeltaNotification,
+        CommandExecutionOutputDeltaNotification, ReasoningTextDeltaNotification, ReasoningSummaryTextDeltaNotification,
+        PlanDeltaNotification, FileChangeOutputDeltaNotification)
     completed = None; items = []; usage = None
+    started = time.monotonic()
+    last_emitted = None
+    progress = {'elapsed_ms': 0, 'sdk_event_count': 0, 'last_sdk_event_at_ms': 0, 'item_counts': {}}
+    delta_types = (AgentMessageDeltaNotification, CommandExecutionOutputDeltaNotification,
+                   ReasoningTextDeltaNotification, ReasoningSummaryTextDeltaNotification,
+                   PlanDeltaNotification, FileChangeOutputDeltaNotification)
+
+    def observed(payload, terminal=False):
+        nonlocal last_emitted
+        now = time.monotonic()
+        progress['elapsed_ms'] = max(0, int((now - started) * 1000))
+        progress['sdk_event_count'] += 1
+        progress['last_sdk_event_at_ms'] = int(time.time() * 1000)
+        if isinstance(payload, (ItemStartedNotification, ItemCompletedNotification)):
+            item = payload.item.root
+            kind = item.type if item.type in PROGRESS_ITEMS else 'other'
+            status = getattr(item, 'status', 'completed' if isinstance(payload, ItemCompletedNotification) else 'inProgress')
+            status = getattr(status, 'value', status)
+            progress['last_item'] = {'kind': kind, 'status': status if status in PROGRESS_STATUSES else 'unknown'}
+            if isinstance(payload, ItemCompletedNotification):
+                progress['item_counts'][kind] = progress['item_counts'].get(kind, 0) + 1
+        elif isinstance(payload, ThreadTokenUsageUpdatedNotification):
+            progress['token_usage'] = {key: count for key in PROGRESS_TOKENS
+                                      if type(count := getattr(payload.token_usage.total, key, None)) is int and 0 <= count <= 2**53 - 1}
+        # Deltas prove native SDK activity; never inspect or serialize their text.
+        # Bound durable writes even when the provider sends a token-by-token stream.
+        if emit is not None and (last_emitted is None or now - last_emitted >= 5 or terminal):
+            emit('turn.progress', progress=progress)
+            last_emitted = now
+
     stream = turn.stream()
     try:
         for event in stream:
             payload = event.payload
             if isinstance(payload, ItemCompletedNotification) and payload.turn_id == turn.id:
                 items.append(payload.item)
+                observed(payload)
+            elif isinstance(payload, (ItemStartedNotification, *delta_types)) and payload.turn_id == turn.id:
+                observed(payload)
             elif isinstance(payload, ThreadTokenUsageUpdatedNotification) and payload.turn_id == turn.id:
                 usage = payload.token_usage
+                observed(payload)
             elif isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn.id:
                 completed = payload.turn
+                observed(payload, terminal=True)
     finally:
         stream.close()
     if completed is None:
@@ -366,6 +525,7 @@ def collect_codex_turn(turn):
 
 def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=None):
     from importlib.metadata import version
+    from codex_cli_bin import bundled_codex_path
     from openai_codex import ApprovalMode, Codex, CodexConfig
 
     if version("openai-codex") != "0.159.3":
@@ -390,12 +550,15 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
     t = time.time()
     with tempfile.TemporaryDirectory(prefix="railshot-codex-auth-") as temporary:
         auth_home = temporary if mode == "api-key" else home
+        overrides = ('project_doc_max_bytes=0', 'web_search="disabled"',
+                     'shell_environment_policy.inherit="none"',
+                     *codex_permissions(workspace, run, auth_home, read_deny))
+        preflight = codex_preflight(bundled_codex_path(), overrides, workspace, run, auth_home)
+        emit("sandbox.checked", sandbox_preflight=preflight)
         config = CodexConfig(cwd=str(workspace),
             env={"CODEX_HOME": auth_home,
                  "OPENAI_API_KEY": "", "CODEX_API_KEY": ""},
-            config_overrides=('project_doc_max_bytes=0', 'web_search="disabled"',
-                              'shell_environment_policy.inherit="none"',
-                              *codex_permissions(workspace, run, auth_home, read_deny)))
+            config_overrides=overrides)
         with Codex(config) as codex:
             if mode == "api-key":
                 codex.login_api_key(key)
@@ -408,11 +571,15 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
             emit("session.started", session_id=thread.id, thread_id=thread.id)
             turn = thread.turn(task, effort=cfg["reasoning_effort"], output_schema=strict_variant(schema))
             emit("turn.started", turn_id=turn.id)
-            result = collect_codex_turn(turn)
+            result = collect_codex_turn(turn, emit=emit)
             status = getattr(result.status, "value", result.status)
             failure = OperationError("SDK_EXECUTION_FAILED", component="runner", phase="invoke",
                                      outcome="FAIL", side_effect="completed") if status != "completed" else None
-            diagnostic = codex_failure_diagnostic(result.error) if failure else None
+            sandbox_diagnostic = codex_sandbox_failure(result)
+            if sandbox_diagnostic:
+                failure = OperationError("SDK_SANDBOX_UNAVAILABLE", component="runner", phase="sandbox.command",
+                                         retry_policy="after_configuration", side_effect="completed")
+            diagnostic = sandbox_diagnostic or (codex_failure_diagnostic(result.error) if failure else None)
             emit("session.finished", turn_id=result.id, sdk_status=status, error=failure,
                  **({"sdk_failure": diagnostic} if diagnostic else {}))
             if failure:
@@ -437,7 +604,7 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
             return output, meta
 
 
-def apply_files(workspace, files, allow, protect, *, applied=None):
+def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope="packaging"):
     """Validate the whole proposal before writing any file, including symlink parents."""
     workspace = workspace.resolve()
     if len(files) > 8 or sum(len(f["content"].encode()) for f in files) > 20000:
@@ -451,6 +618,11 @@ def apply_files(workspace, files, allow, protect, *, applied=None):
             raise ValueError(f"rejected patch path: {rel}")
         if rel in [p for p, _ in targets]:
             raise ValueError(f"duplicate patch path: {rel}")
+        if repair_scope == "source":
+            source_change_allowed(rel, f["content"], dest.read_text() if dest.exists() else None)
+        policies = load_yaml(PLATFORM / "contract/paths.yaml")
+        if any(re.search(pattern, f["content"], re.M) for pattern in policies["forbidden_patterns"]):
+            raise ValueError("proposal contains a forbidden bypass pattern")
         targets.append((rel, f["content"]))
     applied = [] if applied is None else applied
     if not targets:
@@ -475,6 +647,57 @@ def apply_files(workspace, files, allow, protect, *, applied=None):
             finally:
                 os.close(fd)
     return applied
+
+
+def record_plan(run, role, output):
+    """A durable proposal precedes application; it never asserts execution success."""
+    from execution import GATE_ORDER
+    files = output.get("files", [])
+    if not files:
+        return
+    plan = output.get("gate_plan", [])
+    if [step.get("gate") for step in plan] != list(GATE_ORDER):
+        raise ValueError("proposal requires a plan for every gate in execution order")
+    if {item["path"] for item in output.get("files_changed", [])} != {item["path"] for item in files}:
+        raise ValueError("planned files must match proposed files")
+    if output.get("status") != "proposed" or role == "fixer" and not output.get("root_cause"):
+        raise ValueError("file proposal needs an evidence-backed root cause")
+    receipt = {"status": "planned", "execution_verified": False,
+               **{key: output.get(key) for key in ("root_cause", "addresses_failure", "gate_plan", "files_changed", "assumptions")},
+               "files_sha256": {item["path"]: hashlib.sha256(item["content"].encode()).hexdigest() for item in files}}
+    with (run / f"{role}-plan.json").open("x") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        json.dump(receipt, stream, ensure_ascii=False)
+        stream.flush(); os.fsync(stream.fileno())
+    descriptor = os.open(run, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def proposal_rejection(exc):
+    """Only registered guidance enters the next prompt; never echo invalid output."""
+    reasons = {
+        "proposal requires a plan": ("PLAN_REQUIRED", "Plan every gate in execution order before returning files."),
+        "planned files": ("PLAN_FILES_MISMATCH", "List the exact proposed file paths and reasons in files_changed."),
+        "file proposal needs": ("ROOT_CAUSE_REQUIRED", "Return an evidence-backed root_cause for the proposal."),
+        "existing tests": ("TEST_IMMUTABLE", "Preserve existing test bytes; fix application source instead."),
+        "new tests need a supported local": ("TEST_REFERENCE_REQUIRED", "Load real application code using a literal relative import/require, import(new URL('../src/module.mjs', import.meta.url)), or Vite server.ssrLoadModule('/src/module.ts'). No external or computed module paths."),
+        "new tests need supported behavioral": ("ASSERTION_REQUIRED", "Use assert.strictEqual/deepStrictEqual/equal/ok/throws/rejects or expect(...) against actual application results; named imports of those functions from node:assert/strict are also supported."),
+        "new tests": ("BEHAVIOR_TEST_REQUIRED", "Import application code and assert its expected behavior."),
+        "constant-only": ("BEHAVIOR_TEST_REQUIRED", "Replace constant-only tests with assertions against application behavior."),
+        "use a supported test runner": ("TEST_SCRIPT_UNSUPPORTED", "Use exactly node --test (optional .js/.mjs/.cjs test paths), vitest, vitest run (optional --environment node or jsdom), or jest. Runtime flags such as --experimental-strip-types, shell wrappers and filters are unsupported. For TypeScript with existing Vite, use a .test.mjs that loads real modules via Vite ssrLoadModule; keep the script node --test."),
+        "use the full TypeScript checker": ("TYPECHECK_SCRIPT_UNSUPPORTED", "Add only tsc --noEmit or tsc -b as a missing typecheck script; preserve existing scripts and compiler configuration."),
+        "proposal exceeds": ("PATCH_LIMIT", "Keep the proposal within eight files and 20000 bytes."),
+        "rejected patch path": ("PATH_SCOPE", "Return only clean relative paths within the trusted writable scope."),
+        "duplicate patch path": ("DUPLICATE_PATH", "Return each file path only once."),
+        "proposal contains": ("BYPASS_FORBIDDEN", "Remove bypasses; correct the application without weakening checks."),
+    }
+    for prefix, (code, guidance) in reasons.items():
+        if str(exc).startswith(prefix):
+            return {"reason": code, "guidance": guidance}
+    return {"reason": "PROPOSAL_CONTRACT", "guidance": "Follow the complete JSON schema, additive manifest rules and trusted repair scope."}
 
 
 def main():
@@ -524,7 +747,7 @@ def execute(a):
 
     state, emit = lifecycle(run, a.role, provider, profile["providers"][provider].get("model"))
     emit("agent.started", status="running")
-    written, rejected, out, meta, error, phase = [], [], {}, {}, None, "config"
+    written, rejected, out, meta, error, phase, rejection = [], [], {}, {}, None, "config", None
     try:
         if a.resume_session_id:
             raise OperationError("SDK_RESUME_UNSUPPORTED", component="runner", phase="config")
@@ -541,17 +764,23 @@ def execute(a):
         import jsonschema
         phase = "output"
         jsonschema.validate(out, schema)
+        record_plan(run, a.role, out)
         phase = "patch"
-        written = apply_files(workspace, out.get("files", []), allow, protect, applied=written)
+        written = apply_files(workspace, out.get("files", []), allow, protect, applied=written, repair_scope=a.repair_scope)
     except Exception as exc:
         if isinstance(exc, OperationError):
             error = exc
+            if exc.code == "SDK_OUTPUT_INVALID" and state["sdk_status"] == "completed" and not written and exc.outcome == "FAIL":
+                rejection = proposal_rejection(exc)
+                error = OperationError(exc.code, component="runner", phase="output", outcome="FAIL", side_effect="none", cause=exc)
         elif phase == "patch" and isinstance(exc, OSError):
             error = OperationError("INTERNAL_ERROR", component="runner", phase="patch", outcome="FAIL",
                                    retry_policy="after_reconcile", side_effect="possible", cause=exc)
         elif phase in ("output", "patch"):
+            if not written and isinstance(exc, (ValueError, jsonschema.ValidationError)) and state["sdk_status"] == "completed":
+                rejection = proposal_rejection(exc)
             error = OperationError("SDK_OUTPUT_INVALID" if phase == "output" else "SDK_PATCH_REJECTED",
-                                   component="runner", phase=phase, outcome="FAIL", side_effect="completed", cause=exc)
+                                   component="runner", phase=phase, outcome="FAIL", side_effect="none" if rejection else "completed", cause=exc)
         elif state["sdk_status"] == "running":
             error = OperationError("SDK_OUTCOME_UNKNOWN", component="runner", phase="invoke", outcome="UNKNOWN",
                                    retry_policy="after_reconcile", side_effect="unknown", cause=exc)
@@ -566,6 +795,7 @@ def execute(a):
     meta.update({key: state[key] for key in ("run_id", "attempt_id", "session_id", "thread_id", "turn_id",
                                            "conversation_resume", "resume_reason")})
     if state.get("sdk_failure"): meta["sdk_failure"] = state["sdk_failure"]
+    if state.get("sandbox_preflight"): meta["sandbox_preflight"] = state["sandbox_preflight"]
     meta.update(status=status, sdk_status=state["sdk_status"], events_file=f"{a.role}-events.jsonl",
                 session_file=f"{a.role}-session.json")
     record = {"role": a.role, "repair_scope": a.repair_scope, "provider": provider, "model": profile["providers"][provider].get("model"),
@@ -574,6 +804,8 @@ def execute(a):
               "output": {k: v for k, v in out.items() if k != "files"} if isinstance(out, dict) else {}}
     if error:
         record["error"] = error.as_dict()
+    if rejection:
+        record["proposal_rejection"] = {"safe_to_replan": True, **rejection}
     record_path = run / f"{a.role}.json"
     try:
         with record_path.open("w") as stream:
@@ -592,7 +824,7 @@ def execute(a):
 
 def self_test():
     allow, protect = writable_rules("contract/paths.yaml")
-    ok = ["Dockerfile", "api.Dockerfile", "backend/Dockerfile", ".dockerignore", ".jasmin/jasmin.yaml"]
+    ok = ["Dockerfile", "api.Dockerfile", "backend/Dockerfile", ".dockerignore", ".railshot/railshot.yaml"]
     bad = ["../x", "/etc/passwd", "app.py", ".github/workflows/x.yml", "tests/Dockerfile", "AGENTS.md", "~/x", ""]
     assert all(path_ok(p, allow, protect) for p in ok), [p for p in ok if not path_ok(p, allow, protect)]
     assert not any(path_ok(p, allow, protect) for p in bad), [p for p in bad if path_ok(p, allow, protect)]

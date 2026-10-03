@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register one operator-bound AWS/GCP runtime and application after runtime_ready."""
+"""Register one operator-bound runtime and application after runtime_ready."""
 import argparse
 import base64
 from contextlib import contextmanager
@@ -52,17 +52,68 @@ def label(value):
     return isinstance(value, str) and re.fullmatch(argo.LABEL, value)
 
 
+def registered_node(selected, target_id, request_id, *, timeout_seconds=None):
+    """Resolve the existing Ansible registry without claiming live cloud readiness."""
+    timeout = selected.get('timeout_seconds', 1200) if timeout_seconds is None else timeout_seconds
+    if 'server_file' in selected:
+        fields = {'resource_id', 'project_id', 'management_network', 'placement',
+                  'architecture', 'initialization', 'ssh'}
+        argo.require(fields | {'server_file'} <= set(selected)
+                     and not set(selected) - fields - {'server_file', 'purpose', 'timeout_seconds', 'management_endpoint'},
+                     'OpenStack registry fields differ')
+        server = read_private(selected['server_file'])
+        request = ansible.from_openstack(server, request_id=request_id, operation='guest.check',
+            target_id=target_id, **{key: selected[key] for key in fields}, timeout_seconds=timeout)
+        node = request['inventory']['control_plane'][0]
+        # This is a verified resource binding, not a fabricated Terraform descriptor.
+        # Retain all source/connection inputs in the private registration identity.
+        resource = {'target_id': target_id, 'provider_kind': 'openstack', 'resource_id': node['resource_id'],
+                    'addresses': {'private': node['private_ipv4']}, 'openstack_server': server,
+                    'registered_request': request}
+        connect_host = node['ssh'].get('connect_host', node['private_ipv4'])
+        if connect_host != node['private_ipv4']:
+            resource['addresses']['metrics'] = connect_host
+        if 'management_endpoint' in selected:
+            endpoint = selected['management_endpoint']
+            argo.require(isinstance(endpoint, str), 'registered HTTPS management endpoint required')
+            parsed = urlsplit(endpoint)
+            argo.require(parsed.scheme == 'https' and parsed.hostname == connect_host
+                         and parsed.port is not None and 1 <= parsed.port <= 65535
+                         and parsed.netloc == f'{connect_host}:{parsed.port}'
+                         and not parsed.path and not parsed.query and not parsed.fragment,
+                         'management endpoint must match the registered private connection host')
+            resource['management_endpoint'] = endpoint
+    else:
+        resource = read_private(selected['descriptor_file'])
+        argo.require(resource['target_id'] == target_id, 'descriptor identity mismatch')
+        request = ansible.from_descriptor(resource, request_id=request_id, operation='guest.check',
+            ssh=selected['ssh'], timeout_seconds=timeout)
+        resource.pop('management_endpoint', None)  # Descriptor metadata cannot select a management route.
+        resource['addresses'].pop('metrics', None)
+        if 'management_endpoint' in selected:
+            argo.require(request['target']['provider'] == 'gcp', 'management endpoint override requires GCP or OpenStack')
+            public = ipaddress.IPv4Address(resource['addresses'].get('public', ''))
+            argo.require(public.is_global and not public.is_multicast
+                         and selected['management_endpoint'] == f'https://{public}:6443',
+                         'GCP management endpoint must match the provisioned public IPv4 API')
+            resource['management_endpoint'] = selected['management_endpoint']
+            resource['addresses']['metrics'] = str(public)
+    for key in ('identity_file', 'known_hosts_file'):
+        ansible.private_file(selected['ssh'][key], identity=key == 'identity_file')
+    return request, resource
+
+
 def load(registry_file, target_id, config_file, binding_file=None):
     registry, config = read_private(registry_file), read_private(config_file)
+    return load_configuration(registry, target_id, config, binding_file)
+
+
+def load_configuration(registry, target_id, config, binding_file=None):
+    """Validate already-read operator files without writing a temporary configuration."""
     argo.require(registry.get('version') == 1 and isinstance(registry.get('targets'), dict), 'registry v1 required')
     selected = registry['targets'][target_id]
     argo.require(selected['purpose'] == 'runtime', 'registered runtime required')
-    descriptor = read_private(selected['descriptor_file'])
-    argo.require(descriptor['target_id'] == target_id, 'descriptor identity mismatch')
-    request = ansible.from_descriptor(descriptor, request_id='registration.' + target_id,
-        operation='guest.check', ssh=selected['ssh'], timeout_seconds=selected.get('timeout_seconds', 1200))
-    for key in ('identity_file', 'known_hosts_file'):
-        ansible.private_file(selected['ssh'][key], identity=key == 'identity_file')
+    request, descriptor = registered_node(selected, target_id, 'registration.' + target_id)
     argo.require(set(config) == {'version', 'cd', 'registration'} and config['version'] == 1, 'registration config v1 required')
     cd, settings = config['cd'], config['registration']
     argo.require(set(cd) == {'version', 'state_dir', 'repository', 'branch', 'context', 'targets'} and cd['version'] == 1
@@ -72,6 +123,8 @@ def load(registry_file, target_id, config_file, binding_file=None):
                  'registration settings differ')
     argo.require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', settings['source_repository']), 'source repository required')
     if settings.get('edge_config_file'):
+        argo.require(descriptor['provider_kind'] == 'aws',
+                     'AWS edge is AWS-only; GCP requires a provider-local public URL and verified management route')
         expiry = settings.get('expires_at')
         argo.require(isinstance(expiry, str) and expiry.endswith('Z')
                      and datetime.fromisoformat(expiry.replace('Z', '+00:00')) > datetime.now(timezone.utc),
@@ -87,8 +140,11 @@ def load(registry_file, target_id, config_file, binding_file=None):
                  and target['namespace'] not in {'default', 'argocd', 'kube-system', 'kube-public', 'kube-node-lease'},
                  'dedicated application namespace required')
     expected_server = 'https://' + descriptor['addresses']['private'] + ':6443'
-    argo.require(target.get('cluster_server', expected_server) == expected_server and target['architecture'] == 'amd64',
-                 'cluster endpoint must match the provisioned private runtime')
+    if request['target']['provider'] in ('openstack', 'gcp'):
+        expected_server = descriptor.get('management_endpoint', expected_server)
+    argo.require(target.get('cluster_server', expected_server) == expected_server
+                 and target['architecture'] == request['target']['architecture'] == 'amd64',
+                 'cluster endpoint must match the registered private runtime')
     target['cluster_server'] = expected_server
     path = PurePosixPath(target['path'])
     argo.require(not path.is_absolute() and '..' not in path.parts and str(path) not in ('', '.')
@@ -135,7 +191,7 @@ def load(registry_file, target_id, config_file, binding_file=None):
 @contextmanager
 def runtime_kubectl(request):
     node = request['inventory']['control_plane'][0]
-    with ansible.forwarded_port(node['ssh']['transport_ref'], time.monotonic() + 540) as port:
+    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 540) as port:
         host = next(iter(ansible.build_inventory(request, port)['all']['children']['k3s_server']['hosts'].values()))
         prefix = ['ssh', *shlex.split(host['ansible_ssh_common_args']), '-i', host['ansible_ssh_private_key_file'],
                   '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15', host['ansible_user'] + '@' + host['ansible_host']]
@@ -169,6 +225,7 @@ def runtime_documents(target, owner, pull, binding):
     rules = [{'apiGroups': [group], 'resources': resources, 'verbs': verbs} for group, resources in (
         ('apps', ['deployments']), ('', ['services']), ('networking.k8s.io', ['networkpolicies']))]
     rules.extend([{'apiGroups': [''], 'resources': ['pods', 'events'], 'verbs': ['get', 'list', 'watch']},
+                  {'apiGroups': [''], 'resources': ['pods/log'], 'verbs': ['get']},
                   {'apiGroups': ['apps'], 'resources': ['replicasets'], 'verbs': ['get', 'list', 'watch']},
                   {'apiGroups': [''], 'resources': ['serviceaccounts/token'], 'resourceNames': [SA], 'verbs': ['create']}])
     if binding:
@@ -193,7 +250,7 @@ def runtime_documents(target, owner, pull, binding):
     return result
 
 
-def register_argo(kube, cd, registered, target_id, owner, binding):
+def register_argo(kube, cd, registered, target_id, owner, binding, *, tls_server_name=None):
     target = registered['target']; namespace = target['namespace']
     control = lambda ns, *args, **kwargs: argo.kubectl(cd['context'], ns, *args, **kwargs)
     app = {'metadata': {'namespace': 'argocd', 'name': target_id}, 'spec': {'project': target['project'],
@@ -224,6 +281,8 @@ def register_argo(kube, cd, registered, target_id, owner, binding):
     renewal = {'secret': 'railshot-' + target_id, 'target_id': target_id, 'server': target['cluster_server'],
                'project': target['project'], 'namespaces': [namespace], 'service_account': {'name': SA, 'namespace': namespace, 'uid': sa['metadata']['uid']},
                'ca_sha256': hashlib.sha256(ca).hexdigest(), 'audiences': audiences}
+    if tls_server_name is not None:
+        renewal['tls_server_name'] = tls_server_name
     credentials.validate_policy({'version': 1, 'targets': [renewal]})
     credentials.claims(token, renewal, time.time())
     for ns, resource, group, verb, allowed in [(namespace, 'deployments', 'apps', 'create', True),
@@ -231,10 +290,139 @@ def register_argo(kube, cd, registered, target_id, owner, binding):
             ('', 'clusterroles', 'rbac.authorization.k8s.io', 'create', False)]:
         access = credentials.customer(target['cluster_server'], ca, token, '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews',
             {'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectAccessReview', 'spec': {
-                'resourceAttributes': {'namespace': ns, 'resource': resource, 'group': group, 'verb': verb}}})
+                'resourceAttributes': {'namespace': ns, 'resource': resource, 'group': group, 'verb': verb}}},
+            **({'server_name': tls_server_name} if tls_server_name is not None else {}))
         argo.require(access['status']['allowed'] is allowed, 'runtime credential scope differs')
-    argo.register_cluster([review], cd['context'], {'bearerToken': token, 'tlsClientConfig': {'caData': ca_data, 'insecure': False}})
-    return renewal, token_response['status']['expirationTimestamp']
+    tls_config = {'caData': ca_data, 'insecure': False}
+    if tls_server_name is not None:
+        tls_config['serverName'] = tls_server_name
+    argo.register_cluster([review], cd['context'], {'bearerToken': token, 'tlsClientConfig': tls_config},
+                          application_credential=bool(re.fullmatch(r'app-[a-f0-9]{24}', target_id)))
+    stored = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', renewal['secret'], '-o', 'json')
+    stored_config, _ = credentials.registration(stored, renewal, time.time())
+    expiration = credentials.claims(stored_config['bearerToken'], renewal, time.time())['exp']
+    return renewal, datetime.fromtimestamp(expiration, timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def shared_cluster_policy(cd, registered, environment_id):
+    """The operator's existing renewal row owns the one real cluster connection."""
+    argo.require(label(environment_id) and not environment_id.startswith('app-'), 'environment cluster identity required')
+    cm = argo.kubectl(cd['context'], 'argocd', 'get', 'configmap', 'railshot-credentials', '-o', 'json')
+    policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    selected = next((row for row in policy['targets'] if row['target_id'] == environment_id), None)
+    argo.require(selected is not None and selected['server'] == registered['target']['cluster_server']
+                 and selected['secret'] == 'railshot-' + environment_id, 'existing environment cluster registration required')
+    argo.require('previous_scope' not in selected, 'environment cluster transition requires reconciliation')
+    return cm, policy, selected
+
+
+def shared_cluster_snapshot(cd, registered, environment_id):
+    cm, policy, selected = shared_cluster_policy(cd, registered, environment_id)
+    secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', selected['secret'], '-o', 'json')
+    config, ca = credentials.registration(secret, selected, time.time())
+    argo.require(not secret['metadata'].get('ownerReferences') and not secret['metadata'].get('deletionTimestamp'),
+                 'environment cluster is not available')
+    return cm, policy, selected, secret, config, ca
+
+
+def share_application_cluster(kube, cd, registered, environment_id):
+    """Keep one Argo server cache and append only this app's exact namespace."""
+    target = registered['target']; app_id = target['id']; namespace = target['namespace']
+    argo.require(re.fullmatch(r'app-[a-f0-9]{24}', app_id) and namespace == target['project'] == app_id,
+                 'application cluster scope differs')
+    cm, policy, selected, secret, config, ca = shared_cluster_snapshot(cd, registered, environment_id)
+    app_row = next((row for row in policy['targets'] if row['target_id'] == app_id), None)
+    argo.require(app_row is not None and app_row['server'] == selected['server']
+                 and app_row['ca_sha256'] == selected['ca_sha256']
+                 and app_row.get('tls_server_name') == selected.get('tls_server_name')
+                 and app_row['project'] == app_id and app_row['namespaces'] == [namespace], 'app credential binding differs')
+    app_secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', app_row['secret'], '-o', 'json')
+    credentials.registration(app_secret, app_row, time.time())
+    labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': app_id}
+    live_namespace = kube('default', 'get', 'namespace', namespace, '-o', 'json')
+    argo.require(not live_namespace['metadata'].get('ownerReferences') and all(
+        live_namespace['metadata'].get('labels', {}).get(k) == v for k, v in labels.items()), 'app namespace owner differs')
+    anchor = selected['service_account']
+    sa = kube(anchor['namespace'], 'get', 'serviceaccount', anchor['name'], '-o', 'json')
+    argo.require(sa['metadata']['uid'] == anchor['uid'], 'environment service account was replaced')
+    binding = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding',
+        'metadata': {'name': 'railshot-environment-argocd', 'namespace': namespace, 'labels': labels},
+        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': SA},
+        'subjects': [{'kind': 'ServiceAccount', 'name': anchor['name'], 'namespace': anchor['namespace']}]}
+    existing = kube(namespace, 'get', 'rolebinding', binding['metadata']['name'], '--ignore-not-found', '-o', 'json')
+    if existing:
+        argo.require(not existing['metadata'].get('ownerReferences') and all(
+            existing['metadata'].get('labels', {}).get(k) == v for k, v in labels.items())
+            and all(existing.get(k) == binding[k] for k in ('roleRef', 'subjects')), 'environment app RoleBinding differs')
+    else:
+        owned_apply(kube, binding)
+    tls = {'server_name': selected['tls_server_name']} if 'tls_server_name' in selected else {}
+    for ns, resource, group, verb, allowed in [(namespace, 'deployments', 'apps', 'create', True),
+            (namespace, 'secrets', '', 'get', False), ('kube-system', 'deployments', 'apps', 'create', False)]:
+        access = credentials.customer(selected['server'], ca, config['bearerToken'],
+            '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', {'apiVersion': 'authorization.k8s.io/v1',
+            'kind': 'SelfSubjectAccessReview', 'spec': {'resourceAttributes': {
+                'namespace': ns, 'resource': resource, 'group': group, 'verb': verb}}}, **tls)
+        argo.require(access['status']['allowed'] is allowed, 'shared environment credential scope differs')
+    updated = {**selected, 'project': '', 'namespaces': sorted(set(selected['namespaces']) | {namespace})}
+    replacement = {**policy, 'targets': [updated if row['target_id'] == environment_id else row for row in policy['targets']]}
+    credentials.validate_policy(replacement)
+    wanted_data = {**secret['data'], 'project': base64.b64encode(b'').decode(),
+                   'namespaces': base64.b64encode(','.join(updated['namespaces']).encode()).decode()}
+    if updated != selected:
+        # Keep renewal valid through a crash between the two Kubernetes objects.
+        # Only the exact old/new scopes are authorized during this transition.
+        transition = {**updated, 'previous_scope': {key: selected[key] for key in ('project', 'namespaces')}}
+        transitional_policy = {**policy, 'targets': [transition if row['target_id'] == environment_id else row for row in policy['targets']]}
+        credentials.validate_policy(transitional_policy)
+        cm['data']['policy.json'] = json.dumps(transitional_policy)
+        cm = argo.kubectl(cd['context'], 'argocd', 'replace', '-f', '-', '-o', 'json', document=cm)
+        argo.require(json.loads(cm['data']['policy.json']) == transitional_policy, 'cluster transition readback differs')
+        patch = [{'op': 'test', 'path': '/metadata/uid', 'value': secret['metadata']['uid']},
+                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': secret['metadata']['resourceVersion']},
+                 *[{'op': 'replace', 'path': '/data/' + key, 'value': wanted_data[key]} for key in ('project', 'namespaces')]]
+        argo.kubectl(cd['context'], 'argocd', 'patch', 'secret', selected['secret'], '--type=json',
+                     '--patch-file=/dev/stdin', '-o', 'json', document=patch)
+        cm['data']['policy.json'] = json.dumps(replacement)
+        argo.kubectl(cd['context'], 'argocd', 'replace', '-f', '-', '-o', 'json', document=cm)
+    # Old completed registrations retain their private credential, but stop announcing
+    # a second Argo cluster for the same server. Token renewal patches data only.
+    if app_secret['metadata']['labels'].get('argocd.argoproj.io/secret-type') == 'cluster':
+        patch = [{'op': 'test', 'path': '/metadata/uid', 'value': app_secret['metadata']['uid']},
+                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': app_secret['metadata']['resourceVersion']},
+                 {'op': 'replace', 'path': '/metadata/labels/argocd.argoproj.io~1secret-type', 'value': 'railshot-application'}]
+        argo.kubectl(cd['context'], 'argocd', 'patch', 'secret', app_row['secret'], '--type=json',
+                     '--patch-file=/dev/stdin', '-o', 'json', document=patch)
+    _, _, observed, live, _, _ = shared_cluster_snapshot(cd, registered, environment_id)
+    argo.require(observed == updated and live['metadata']['uid'] == secret['metadata']['uid']
+                 and {k: v for k, v in live['data'].items() if k != 'config'} == {
+                     k: v for k, v in wanted_data.items() if k != 'config'}, 'shared cluster readback differs')
+    private_secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', app_row['secret'], '-o', 'json')
+    credentials.registration(private_secret, app_row, time.time())
+    argo.require(private_secret['metadata']['uid'] == app_secret['metadata']['uid']
+                 and {k: v for k, v in private_secret['data'].items() if k != 'config'} == {
+                     k: v for k, v in app_secret['data'].items() if k != 'config'}
+                 and private_secret['metadata']['labels'].get('argocd.argoproj.io/secret-type') == 'railshot-application',
+                 'private app credential readback differs')
+    return {'secret': selected['secret'], 'uid': secret['metadata']['uid'], 'environment_id': environment_id,
+            'service_account': anchor, 'namespace': namespace}
+
+
+def preflight_renewal(cd, registered, target_id, *, allow_existing=False):
+    """Reject capacity/identity conflicts before creating any runtime or Argo object."""
+    cm = argo.kubectl(cd['context'], 'argocd', 'get', 'configmap', 'railshot-credentials', '-o', 'json')
+    policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    target = registered['target']
+    expected = {'secret': 'railshot-' + target_id, 'target_id': target_id, 'server': target['cluster_server'],
+                'project': target['project'], 'namespaces': [target['namespace']]}
+    previous = next((item for item in policy['targets'] if item['target_id'] == target_id), None)
+    if previous is not None:
+        argo.require(allow_existing and all(previous[key] == value for key, value in expected.items())
+                     and previous['service_account']['name'] == SA
+                     and previous['service_account']['namespace'] == target['namespace'], 'renewal target binding conflict')
+    else:
+        # Existing credentials.validate_policy contract has a 20-target ceiling.
+        argo.require(len(policy['targets']) < 20, 'renewal target capacity exhausted')
 
 
 def install_renewal(cd, renewal):
@@ -248,7 +436,15 @@ def install_renewal(cd, renewal):
     policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
     previous = next((t for t in policy['targets'] if t['target_id'] == renewal['target_id']), None)
     argo.require(previous is None or previous == renewal, 'renewal target binding conflict')
+    # Recheck the complete candidate immediately before writes; preflight is not a reservation.
+    if previous is None:
+        policy['targets'].append(renewal)
+    credentials.validate_policy(policy)
     role = control('get', 'role', 'railshot-credentials', '-o', 'json')
+    empty_role = not (role.get('rules') or [])
+    if empty_role:
+        argo.require(not policy['targets'] or policy['targets'] == [renewal], 'renewal role differs')
+        role['rules'] = [{'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get', 'patch'], 'resourceNames': []}]
     argo.require(len(role['rules']) == 1 and role['rules'][0]['apiGroups'] == ['']
                  and role['rules'][0]['resources'] == ['secrets'] and role['rules'][0]['verbs'] == ['get', 'patch'], 'renewal role differs')
     names = role['rules'][0]['resourceNames']
@@ -256,7 +452,6 @@ def install_renewal(cd, renewal):
         names.append(renewal['secret'])
         control('replace', '-f', '-', '-o', 'json', document=role)  # resourceVersion prevents lost updates.
     if previous is None:
-        policy['targets'].append(renewal); credentials.validate_policy(policy)
         cm['data']['policy.json'] = json.dumps(policy)
         control('replace', '-f', '-', '-o', 'json', document=cm)
     observed = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
@@ -264,7 +459,7 @@ def install_renewal(cd, renewal):
     argo.require(renewal['secret'] in control('get', 'role', 'railshot-credentials', '-o', 'json')['rules'][0]['resourceNames'], 'renewal role readback differs')
 
 
-def grant_control_objects(cd, registered, target_id):
+def grant_control_objects(cd, registered, target_id, *, environment_id=None):
     """Append snapshot-derived names to one bootstrap-owned Role, under the registration lock."""
     namespace, name = 'argocd', 'railshot-product-registrations'
     expected = {('argoproj.io', 'appprojects'): registered['target']['project'],
@@ -276,19 +471,28 @@ def grant_control_objects(cd, registered, target_id):
     for rule in rules:
         argo.require(set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
                      and len(rule['apiGroups']) == len(rule['resources']) == 1
-                     and rule['verbs'] == ['get', 'patch'] and rule['resourceNames']
+                     and rule['verbs'] in (['get', 'patch'], ['delete']) and rule['resourceNames']
                      and all(label(value) for value in rule['resourceNames']), 'registration Role must contain exact names only')
         key = (rule['apiGroups'][0], rule['resources'][0])
-        argo.require(key in expected and key not in seen, 'registration Role kind differs')
-        seen.add(key)
+        grant = (*key, tuple(rule['verbs']))
+        argo.require(key in expected and grant not in seen, 'registration Role kind differs')
+        seen.add(grant)
+        if rule['verbs'] == ['delete']:
+            pattern = {'applications': r'app-[a-f0-9]{24}-[a-z0-9-]+', 'appprojects': r'app-[a-f0-9]{24}',
+                       'secrets': r'railshot-app-[a-f0-9]{24}'}[key[1]]
+            argo.require(all(re.fullmatch(pattern, value) for value in rule['resourceNames']), 'app-only deletion grants required')
     original = copy.deepcopy(rules)
     for (group, resource), resource_name in expected.items():
-        rule = next((r for r in rules if r['apiGroups'] == [group] and r['resources'] == [resource]), None)
+        rule = next((r for r in rules if r['apiGroups'] == [group] and r['resources'] == [resource] and r['verbs'] == ['get', 'patch']), None)
         if rule is None:
             rule = {'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch'], 'resourceNames': []}
             rules.append(rule)
         if resource_name not in rule['resourceNames']:
             rule['resourceNames'].append(resource_name)
+        if resource == 'secrets' and environment_id is not None:
+            argo.require(label(environment_id) and not environment_id.startswith('app-'), 'environment cluster identity required')
+            if 'railshot-' + environment_id not in rule['resourceNames']:
+                rule['resourceNames'].append('railshot-' + environment_id)
     if rules != original:
         role['rules'] = rules
         argo.kubectl(cd['context'], namespace, 'replace', '-f', '-', '-o', 'json', document=role)
@@ -371,6 +575,7 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                 argo.require(record['cd_sha256'] == hashlib.sha256(read_private(home / 'cd.json', raw=True)).hexdigest(), 'CD_REGISTRATION_CHANGED')
                 return record
         registered = cd['targets'][target_id]; target = registered['target']
+        preflight_renewal(cd, registered, target_id, allow_existing=record_path.exists())
         record.update(status='running', app=registered['app'], namespace=target['namespace'], cluster_server=target['cluster_server'])
         def checkpoint(stage):
             record['stage'] = stage; save(record_path, record)
@@ -410,7 +615,11 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                     owned_apply(kube, document)
                 complete('namespace')
                 checkpoint('argo')
-                renewal, expiration = register_argo(kube, cd, registered, target_id, owner, binding)
+                tls_options = {}
+                if (request['target']['provider'] == 'openstack' and request['inventory']['control_plane'][0]['ssh'].get('connect_host')
+                        or request['target']['provider'] == 'gcp' and identity['descriptor'].get('management_endpoint')):
+                    tls_options['tls_server_name'] = identity['descriptor']['addresses']['private']
+                renewal, expiration = register_argo(kube, cd, registered, target_id, owner, binding, **tls_options)
                 save(home / 'renewal.json', renewal); complete('argo')
             checkpoint('credentials')
             install_renewal(cd, renewal)
@@ -424,7 +633,7 @@ def register(registry_file, target_id, config_file, state_dir, binding_file=None
                 save(home / 'observability-request.json', observation)
                 rc = ansible.execute([sys.executable, str(ROOT / 'observability/register.py'),
                     '--config', settings['observability_config_file'], '--request', str(home / 'observability-request.json'),
-                    '--out', str(home / 'observability.json')], 300, dict(os.environ))
+                    '--out', str(home / 'observability.json')], 900, dict(os.environ))
                 argo.require(rc == 0, 'observability registration did not complete')
                 observed = read_private(home / 'observability.json')
                 argo.require(observed.get('status') == 'succeeded' and observed.get('target_id') == target_id

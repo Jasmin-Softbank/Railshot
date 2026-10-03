@@ -1,7 +1,7 @@
 import { archiveLimits, inspectArchive } from './archive.js';
 import { ServiceError } from './github.js';
 
-const headers = { accept: 'application/vnd.github+json', 'user-agent': 'jasmin-entrypoints-poc' };
+const headers = { accept: 'application/vnd.github+json', 'user-agent': 'railshot-api' };
 
 function parseRepositoryUrl(input) {
   let url;
@@ -17,8 +17,8 @@ function parseRepositoryUrl(input) {
 }
 
 async function githubJson(fetchImpl, path) {
-  const response = await fetchImpl(`https://api.github.com${path}`, { headers, redirect: 'manual' });
-  if (response.status === 404) throw new ServiceError('공개 저장소를 찾을 수 없습니다. 비공개 저장소는 지원하지 않습니다.', 404);
+  const response = await fetchImpl(`https://api.github.com${path}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) });
+  if (response.status === 404) throw new ServiceError('GitHub에서 공개 소스를 찾을 수 없습니다. 저장소 주소와 기본 브랜치를 확인하거나 ZIP·폴더로 업로드하세요. 비공개 저장소 URL은 지원하지 않습니다.', 422, 'SOURCE_NOT_FOUND');
   if (response.status === 403 || response.status === 429) throw new ServiceError('GitHub의 공개 API 요청 한도에 도달했습니다. 잠시 후 다시 시도하세요.', 503);
   if (!response.ok) throw new ServiceError(`GitHub 공개 API 요청 실패 (${response.status}).`, 502);
   return response.json();
@@ -49,13 +49,16 @@ export async function fetchPublicGithubSource(input, fetchImpl = fetch) {
   if (!metadata.default_branch) throw new ServiceError('저장소의 기본 브랜치를 확인할 수 없습니다.', 400);
   const commit = await githubJson(fetchImpl, `${path}/commits/${encodeURIComponent(metadata.default_branch)}`);
   if (!/^[0-9a-f]{40}$/i.test(commit.sha || '')) throw new ServiceError('저장소의 커밋 SHA를 확인할 수 없습니다.', 502);
-  const archive = await fetchImpl(`https://api.github.com${path}/zipball/${commit.sha}`, { headers, redirect: 'manual' });
+  const archive = await fetchImpl(`https://api.github.com${path}/zipball/${commit.sha}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) });
   if (![301, 302, 303, 307, 308].includes(archive.status)) throw new ServiceError(`GitHub 소스 다운로드 요청 실패 (${archive.status}).`, 502);
   let downloadUrl;
   try { downloadUrl = new URL(archive.headers.get('location')); } catch { throw new ServiceError('GitHub 소스 다운로드 주소가 잘못되었습니다.', 502); }
   if (downloadUrl.protocol !== 'https:' || downloadUrl.hostname !== 'codeload.github.com' || downloadUrl.username || downloadUrl.password || downloadUrl.port) {
     throw new ServiceError('GitHub 소스 다운로드 주소가 허용되지 않습니다.', 502);
   }
-  const bytes = await limitedBytes(await fetchImpl(downloadUrl, { redirect: 'manual', headers: { 'user-agent': headers['user-agent'] } }));
-  return { files: await inspectArchive(bytes, { stripRoot: true }), source: { type: 'github', repository, sha: commit.sha } };
+  const bytes = await limitedBytes(await fetchImpl(downloadUrl, { redirect: 'manual', headers: { 'user-agent': headers['user-agent'] }, signal: AbortSignal.timeout(30_000) }));
+  let files;
+  try { files = await inspectArchive(bytes, { stripRoot: true }); }
+  catch (error) { throw new ServiceError(`GitHub 소스 검사 실패: ${error.message}`, 422); }
+  return { files, source: { type: 'github', repository, sha: commit.sha } };
 }

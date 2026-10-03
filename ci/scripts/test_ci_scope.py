@@ -1,30 +1,85 @@
 """Run with: python3 -m unittest discover -s ci/scripts -p test_ci_scope.py -v."""
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import shlex
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import ci_scope
 
 
 class ScopeTests(unittest.TestCase):
+    def test_release_scope_covers_non_image_policy_and_excludes_only_documentation(self):
+        for path in ('deployment/scripts/platform_workers.py', 'deployment/scripts/runtime-update.py',
+                     'deployment/airgap/versions.json', 'deployment/cilium/preflight.py',
+                     'infrastructure/terraform/gcp-edge/main.tf', 'infrastructure/terraform/openstack-edge/main.tf',
+                     'infrastructure/ansible/runtime.yml', 'gitops/credentials.py',
+                     'observability/register.py', 'ci/workflows/railshot-deploy.yml',
+                     'deployment/scripts/tests/test_runtime_update.py', 'docs/api/ansible.openapi.json',
+                     'new-scope/policy.json', '../README.md'):
+            with self.subTest(path=path):
+                self.assertTrue(ci_scope.release_required([path]))
+        for paths in ([], ['README.md'], ['docs/operations/release.md', 'apps/api/README.md']):
+            self.assertFalse(ci_scope.release_required(paths))
+        self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
+
+    def test_automatic_release_selects_all_same_run_images_and_gate_requires_them(self):
+        for automatic in (False, True):
+            for paths in (['deployment/scripts/platform_workers.py'], ['infrastructure/terraform/gcp-edge/main.tf'],
+                          ['docs/operations/release.md'], [], None):
+                with self.subTest(automatic=automatic, paths=paths), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    (root / 'event').write_text('{}')
+                    env = {'AUTO_RELEASE': str(automatic).lower(), 'GITHUB_EVENT_NAME': 'push',
+                           'GITHUB_EVENT_PATH': str(root / 'event'), 'GITHUB_OUTPUT': str(root / 'output'),
+                           'GITHUB_STEP_SUMMARY': str(root / 'summary')}
+                    with patch.dict(os.environ, env), patch('sys.argv', ['ci_scope.py', 'select']), \
+                            patch.object(ci_scope, 'changed_paths', return_value=paths):
+                        ci_scope.main()
+                    values = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
+                    release = ci_scope.release_required(paths)
+                    self.assertEqual(values['release'], str(release).lower())
+                    selected = set(json.loads(values['selected']))
+                    expected = set(ci_scope.JOBS) if paths is None else ci_scope.select(paths)
+                    if automatic and release:
+                        expected.add('containers')
+                        self.assertEqual(json.loads(values['container_components']), list(ci_scope.COMPONENTS))
+                    self.assertEqual(selected, expected)
+                    checks = {job: {'result': 'success' if job in selected else 'skipped'} for job in ci_scope.JOBS}
+                    checks['changes'] = {'result': 'success', 'outputs': values}
+                    ci_scope.validate_gate(checks)
+                    if automatic and release:
+                        checks['containers']['result'] = 'skipped'
+                        with self.assertRaises(ValueError):
+                            ci_scope.validate_gate(checks)
+
     def test_directory_dependencies_and_document_fixtures(self):
         cases = {
             'docs/architecture/README.md': set(),
             'README.md': set(),
             'AGENT.md': set(),
             'apps/api/src/server.js': {'api-browser', 'containers'},
+            'apps/api/src/metrics.js': {'api-browser', 'observability', 'containers'},
             'apps/dashboard/app.js': {'api-browser', 'containers'},
             'ci/browser/smoke.test.mjs': {'api-browser'},
             'package.json': {'api-browser', 'containers'},
             'package-lock.json': {'api-browser', 'containers'},
             '.dockerignore': {'containers'},
             'infrastructure/providers/openstack/pyproject.toml': {'contracts', 'openstack'},
+            'apps/agent/sender.py': {'openstack'},
+            'deployment/bootstrap/client_setup/main.py': {'openstack'},
+            'deployment/bootstrap/templates/wg-client.conf.tmpl': {'openstack'},
+            'deployment/bootstrap/install.sh': {'openstack'},
+            'deployment/bootstrap/uninstall.sh': {'openstack'},
+            'deployment/bootstrap/install_payload.py': {'openstack'},
+            'deployment/bootstrap/requirements.lock': {'openstack'},
             'infrastructure/providers/terraform_tools/costs.py': {'contracts', 'terraform', 'api-browser', 'containers'},
             'infrastructure/terraform/aws-edge/main.tf': {'contracts', 'terraform', 'api-browser', 'containers'},
+            'infrastructure/terraform/openstack-edge/main.tf': {'contracts', 'terraform'},
             'infrastructure/ansible/runtime.yml': {'contracts', 'database-ansible', 'api-browser', 'containers'},
             'infrastructure/ansible/ci.yml': {'contracts', 'database-ansible', 'terraform', 'containers'},
             'deployment/manifests/build-runner.yaml': {'contracts', 'containers'},
@@ -57,6 +112,7 @@ class ScopeTests(unittest.TestCase):
             'apps/dashboard/styles.css': {'dashboard', 'api'},
             'apps/dashboard/package.json': {'dashboard', 'api', 'mcp'},
             'apps/api/src/server.js': {'api', 'mcp'},
+            'apps/agent/sender.py': set(),
             'apps/api/package.json': {'dashboard', 'api', 'mcp'},
             'package-lock.json': {'dashboard', 'api', 'mcp'},
             '.dockerignore': set(ci_scope.COMPONENTS),

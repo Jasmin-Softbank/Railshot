@@ -3,6 +3,17 @@ GATE_ORDER = ("L0", "L1", "Q", "L2", "L4", "L3")
 APP_UID = 65532
 
 
+def quality_advisory(row):
+    """Only completed quality checks/discovery may be non-blocking, never execution boundaries."""
+    error = row.get("error") or {}
+    return (row.get("layer") == "Q" and row.get("advisory") is True
+            and row.get("ok") is False and row.get("outcome") in {"FAIL", "BLOCKED"}
+            and error.get("outcome") == row.get("outcome")
+            and ((error.get("code") == "GATE_CONFIG_INVALID" and error.get("phase") == "Q.discovery")
+                 or (error.get("code") in {"GATE_CHECK_FAILED", "GATE_ENVIRONMENT_UNAVAILABLE"}
+                     and error.get("phase") in {"Q", "Q.discovery", "Q.prepare", "Q.lint", "Q.type", "Q.unit", "Q.report"})))
+
+
 def pod_security(uid=APP_UID):
     return {"runAsNonRoot": True, "runAsUser": uid, "runAsGroup": uid, "fsGroup": uid,
             "seccompProfile": {"type": "RuntimeDefault"}}

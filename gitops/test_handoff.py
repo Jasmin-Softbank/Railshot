@@ -13,14 +13,14 @@ class HandoffTest(unittest.TestCase):
     def test_digest_target_and_unsupported_workload_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            spec = {'apiVersion': 'jasmin/v0', 'app': 'demo', 'services': [
+            spec = {'apiVersion': 'railshot/v0', 'app': 'demo', 'services': [
                 {'name': 'web', 'build': {'dockerfile': 'Dockerfile'}, 'port': 8080, 'route': '/', 'health': '/health'}]}
             verdict = {'release_eligible': True, 'ok': True, 'status': 'PASS', 'source_sha256': 'a' * 64,
                        'layers': [{'layer': x, 'ok': True} for x in GATE_ORDER],
                        'images': {'web': 'local/web:test'}, 'image_ids': {'web': 'sha256:' + 'b' * 64}}
 
             def prepare():
-                data = {'jasmin.yaml': json.dumps(spec), 'verdict.json': json.dumps(verdict),
+                data = {'railshot.yaml': json.dumps(spec), 'verdict.json': json.dumps(verdict),
                         'images.json': json.dumps({'web': 'ghcr.io/example/web@sha256:' + 'c' * 64})}
                 manifest = {'version': 1, 'trust': TRUST, 'source_sha256': verdict['source_sha256'],
                             'images': {'web': {'id': verdict['image_ids']['web'], 'local_ref': 'local/web:test'}},
@@ -43,6 +43,21 @@ class HandoffTest(unittest.TestCase):
                       'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
             receipt = prepare()
             result = render(root, target)
+            # Historical artifacts keep the old filename and hash bindings.
+            (root / 'railshot.yaml').rename(root / 'jasmin.yaml')
+            legacy_manifest = json.loads((root / 'manifest.json').read_bytes())
+            legacy_manifest['files']['jasmin.yaml'] = legacy_manifest['files'].pop('railshot.yaml')
+            (root / 'manifest.json').write_text(json.dumps(legacy_manifest))
+            legacy_receipt = copy.deepcopy(receipt)
+            legacy_receipt['files']['jasmin.yaml'] = legacy_receipt['files'].pop('railshot.yaml')
+            legacy_receipt['files']['manifest.json'] = hashlib.sha256((root / 'manifest.json').read_bytes()).hexdigest()
+            (root / 'handoff.json').write_text(json.dumps(legacy_receipt))
+            self.assertEqual(render(root, target)['workload'], result['workload'])
+            (root / 'railshot.yaml').write_bytes((root / 'jasmin.yaml').read_bytes())
+            with self.assertRaisesRegex(ValueError, 'exactly one'):
+                render(root, target)
+            (root / 'jasmin.yaml').unlink()
+            receipt = prepare()
             self.assertFalse(result['deployed'])
             self.assertEqual(result['bundle_artifact_id'], 2)
             self.assertEqual(result['producer_attempt'], 1)

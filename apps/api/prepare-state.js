@@ -8,11 +8,15 @@ for (const directory of [config, '/var/lib/railshot/tmp', '/var/lib/railshot/pro
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
 }
-for (const name of readdirSync('/run/config').filter((value) => !value.startsWith('.'))) {
-  const destination = `${config}/${name}`;
-  if (existsSync(destination) && !lstatSync(destination).isFile()) throw new Error('Private config must be a regular file');
-  writeFileSync(destination, readFileSync(`/run/config/${name}`), { mode: 0o600 });
-  chmodSync(destination, 0o600);
+for (const source of ['/run/config', '/run/dns'].filter(existsSync)) {
+  for (const name of readdirSync(source).filter((value) => !value.startsWith('.'))) {
+    // After handoff the registrar owns the live target list; a legacy Secret must not restore it.
+    if (name === 'observer.json' && process.env.RAILSHOT_OBSERVER_PRODUCT_FILE) continue;
+    const destination = `${config}/${name}`;
+    if (existsSync(destination) && !lstatSync(destination).isFile()) throw new Error('Private config must be a regular file');
+    writeFileSync(destination, readFileSync(`${source}/${name}`), { mode: 0o600 });
+    chmodSync(destination, 0o600);
+  }
 }
 const repository = '/var/lib/railshot/repository';
 const git = (...args) => execFileSync('git', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 }).toString().trim();

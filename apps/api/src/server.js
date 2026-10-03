@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import yazl from 'yazl';
 import { createDeploymentService, ServiceError } from './github.js';
 import { archiveLimits, inspectArchive, validateFiles } from './archive.js';
 import { fetchPublicGithubSource } from './public-github.js';
@@ -11,11 +12,13 @@ import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
 import { createProductService, ProductError, idempotencyKey } from './product.js';
 import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
 import { createEnvironmentAdapter, EnvironmentError } from './environments.js';
+import { DashboardError, cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/contracts/application.mjs', ['../../contracts/application.mjs', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
 ]);
 function json(response, code, data, headers = {}) {
@@ -39,7 +42,7 @@ function normalizedRepository(value) {
   return `https://github.com/${match[1].toLowerCase()}/${match[2].toLowerCase()}`;
 }
 // Parse without fetching GitHub: an idempotency replay must retain its first source snapshot.
-async function uploadedSource(request, strict = false, allowSelection = false) {
+async function uploadedSource(request, strict = false, allowSelection = false, sourceOnly = false) {
   const contentType = request.headers['content-type'] || '';
   if (!/^multipart\/form-data\s*;/i.test(contentType)) throw new ServiceError('multipart/form-data 요청이 필요합니다.', 415);
   const body = await readLimited(request, archiveLimits.maxBytes + 1024 * 1024);
@@ -48,6 +51,7 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
   catch { throw new ServiceError('multipart 요청 형식이 잘못되었습니다.', 400); }
   const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
   const allowed = new Set(['app', 'target_id', 'plan_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
+  if (sourceOnly) for (const name of ['app', 'target_id', 'plan_id']) allowed.delete(name);
   if (allowSelection) for (const name of ['environment', 'provider', 'source_name']) allowed.add(name);
   for (const key of form.keys()) {
     if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
@@ -55,17 +59,17 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
   }
   const selecting = allowSelection && (form.has('environment') || form.has('provider'));
   const app = form.has('app') ? form.get('app') : undefined;
-  if (!selecting && (typeof app !== 'string' || !APP_NAME.test(app))) fail(APP_NAME_MESSAGE);
+  if (!selecting && !sourceOnly && (typeof app !== 'string' || !APP_NAME.test(app))) fail(APP_NAME_MESSAGE);
   const target_id = form.has('target_id') ? form.get('target_id') : undefined;
   if (target_id !== undefined && (typeof target_id !== 'string' || !target_id)) fail('대상 ID가 잘못되었습니다.');
-  if (strict && !selecting && !target_id) fail('대상 ID가 필요합니다.');
+  if (strict && !selecting && !sourceOnly && !target_id) fail('대상 ID가 필요합니다.');
   const plan_id = form.has('plan_id') ? form.get('plan_id') : undefined;
   if (plan_id !== undefined && (!allowSelection || typeof plan_id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(plan_id))) fail('환경 계획 ID가 잘못되었습니다.');
   let selected = {};
   if (selecting) {
     const environment = form.get('environment'), provider = form.get('provider');
     if (form.has('app') || form.has('target_id') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
-    if (!(environment === 'cloud' && provider === 'aws' || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
+    if (!(environment === 'cloud' && ['aws', 'gcp'].includes(provider) || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
     const source_name = form.has('source_name') ? form.get('source_name') : undefined;
     if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
     selected = { deployment_selection: { environment, provider }, source_name };
@@ -80,7 +84,7 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
     if (typeof form.get('repository_url') !== 'string') fail('공개 GitHub 저장소 URL이 필요합니다.');
     let repository_url;
     try { repository_url = normalizedRepository(form.get('repository_url')); } catch { fail('공개 GitHub 저장소 기본 URL이 필요합니다.'); }
-    return { app, target_id, ...(plan_id ? { plan_id } : {}), ...selected, source_type, repository_url };
+    return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, source_type, repository_url };
   }
   try {
     if (source_type === 'folder') {
@@ -90,11 +94,11 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
         if (!file || typeof file.arrayBuffer !== 'function') fail('폴더 파일이 잘못되었습니다.');
         return { path: paths[index], content: Buffer.from(await file.arrayBuffer()) };
       }));
-      return { app, target_id, ...(plan_id ? { plan_id } : {}), ...selected, source_type, files: validateFiles(files) };
+      return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, source_type, files: validateFiles(files) };
     }
     const file = form.get('archive');
     if (!file || typeof file.arrayBuffer !== 'function' || !file.name?.toLowerCase().endsWith('.zip')) fail('ZIP 파일이 필요합니다.');
-    return { app, target_id, ...(plan_id ? { plan_id } : {}), ...selected, ...(selecting && !selected.source_name ? { source_name: file.name } : {}), source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
+    return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, ...(selecting && !selected.source_name ? { source_name: file.name } : {}), source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
   } catch { fail('소스 파일 목록·경로·크기를 확인하세요. 비밀 파일은 보낼 수 없습니다.'); }
 }
 async function jsonInput(request) {
@@ -117,58 +121,85 @@ async function jsonInput(request) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ServiceError('JSON 객체가 필요합니다.', 422);
   return value;
 }
-function page(items, parameters) {
+function pagination(parameters) {
   for (const key of parameters.keys()) if (!['limit', 'marker'].includes(key) || parameters.getAll(key).length !== 1) throw new ServiceError('조회 조건이 잘못되었습니다.', 422);
   const rawLimit = parameters.get('limit') ?? '20';
   if (!/^[1-9]\d?$|^100$/.test(rawLimit)) throw new ServiceError('limit는 1–100이어야 합니다.', 422);
   const marker = parameters.get('marker');
+  if (marker !== null && (!/^[A-Za-z0-9._-]{1,128}$/.test(marker))) throw new ServiceError('marker가 잘못되었습니다.', 422);
+  return { limit: Number(rawLimit), marker };
+}
+function page(items, parameters) {
+  const { limit, marker } = pagination(parameters);
   const start = marker === null ? 0 : items.findIndex((item) => item.id === marker) + 1;
   if (marker !== null && start === 0) throw new ServiceError('marker가 잘못되었습니다.', 422);
-  const visible = items.slice(start, start + Number(rawLimit));
+  const visible = items.slice(start, start + limit);
   return { items: visible, next_marker: start + visible.length < items.length ? visible.at(-1).id : null };
 }
 function apiError(response, error, requestId, versioned) {
   const status = error instanceof EnvironmentError && error.status === 400 ? 422 : Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
   const codes = { 400: 'INVALID_INPUT', 401: 'UNAUTHENTICATED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 405: 'METHOD_NOT_ALLOWED', 409: 'CONFLICT', 413: 'PAYLOAD_TOO_LARGE', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'INVALID_INPUT', 502: 'UPSTREAM_FAILURE', 503: 'UPSTREAM_UNAVAILABLE' };
-  const message = error instanceof ServiceError || error instanceof ProductError ? error.message : '요청을 처리하지 못했습니다.';
+  const message = error instanceof ServiceError || error instanceof ProductError || error instanceof DashboardError ? error.message : '요청을 처리하지 못했습니다.';
   const headers = { 'X-Request-ID': requestId, ...(error.allow ? { Allow: error.allow } : {}), ...(error.retryable ? { 'Retry-After': '2' } : {}) };
   const code = error instanceof EnvironmentError && error.status === 400 ? 'INVALID_INPUT'
-    : (error instanceof ProductError || error instanceof EnvironmentError) && error.code || codes[status] || 'INTERNAL_ERROR';
+    : (error instanceof ServiceError || error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError) && error.code || codes[status] || 'INTERNAL_ERROR';
+  // Correlate the safe error envelope without persisting source URLs, credentials or request bodies.
+  console.error(JSON.stringify({ event: 'api.request_failed', request_id: requestId, status, code }));
   json(response, status, versioned ? { error: { code, message,
-    request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown) } } : { error: message }, headers);
+    request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown),
+    ...(error instanceof ProductError && error.admission ? { admission: error.admission } : {}) } } : { error: message }, headers);
 }
 function requestKey(request) {
   const count = request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'idempotency-key').length;
   if (count !== 1) throw new ServiceError('Idempotency-Key 하나만 입력하세요.', 422);
   return idempotencyKey(request.headers['idempotency-key']);
 }
-function accepted(response, kind, record, requestId) {
+function accepted(response, kind, record, requestId, action = 'create') {
   const terminal = !['queued', 'running'].includes(record.status);
-  json(response, terminal ? 200 : 202, terminal ? record : { resource_id: record.id, action: 'create', status: 'accepted', request_id: requestId },
+  json(response, terminal ? 200 : 202, terminal || kind === 'operations' ? record : { resource_id: record.id, action, status: 'accepted', request_id: requestId },
     { Location: `/api/v1/${kind}/${record.id}`, 'X-Request-ID': requestId, ...(!terminal ? { 'Retry-After': '2' } : {}) });
+}
+
+async function sourceArchive(files) {
+  const zip = new yazl.ZipFile();
+  for (const file of validateFiles(files)) zip.addBuffer(file.content, file.path);
+  zip.end();
+  const chunks = []; let size = 0;
+  for await (const chunk of zip.outputStream) {
+    size += chunk.length;
+    if (size > archiveLimits.maxBytes + 1024 * 1024) throw new ServiceError('소스 다운로드 크기가 허용 범위를 초과했습니다.', 413);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
   service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({ token: process.env.GITHUB_TOKEN,
-    owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.JASMIN_TENANT,
+    owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.RAILSHOT_TENANT || process.env.JASMIN_TENANT,
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
-  deployPublished, environmentAdapter, observeMetrics, product, pollInterval,
-  target = { provider: process.env.RAILSHOT_TARGET_PROVIDER },
+  deployPublished, environmentAdapter, applicationAdapter, observeMetrics, observeLogs, product, pollInterval,
+  target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
 } = {}) {
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
     if (product) return product;
-    if (!service?.targetId && !environmentAdapter && !process.env.RAILSHOT_PROFILES_FILE) return null;
     let cd = deployPublished;
     if (!cd && service && process.env.RAILSHOT_CD_CONFIG) {
       const { createCdAdapter } = await import('./cd.js');
       cd = await createCdAdapter({ configPath: process.env.RAILSHOT_CD_CONFIG, loadPublished: service.publishedFiles });
     }
     const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments'), loadPublished: service?.publishedFiles }) : undefined);
+    const { createApplicationAdapter } = await import('./applications.js');
+    const applications = applicationAdapter || (process.env.RAILSHOT_APPLICATIONS_FILE ? await createApplicationAdapter({ configPath: process.env.RAILSHOT_APPLICATIONS_FILE, ciIdentity: service?.identity, loadPublished: service?.publishedFiles }) : undefined);
     const { createMetricsObserver } = await import('./metrics.js');
-    const observer = observeMetrics || createMetricsObserver({ configPath: process.env.RAILSHOT_OBSERVER_CONFIG });
-    return createProductService({ observeMetrics: observer, service, target, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, pollInterval });
+    const observer = observeMetrics || createMetricsObserver({
+      configPath: process.env.RAILSHOT_OBSERVER_PRODUCT_FILE || process.env.RAILSHOT_OBSERVER_CONFIG,
+    });
+    const selections = providerTargets ?? (process.env.RAILSHOT_PROVIDER_TARGETS === undefined ? undefined : JSON.parse(process.env.RAILSHOT_PROVIDER_TARGETS));
+    const { createAppLogsObserver } = await import('./logs.js');
+    const logs = observeLogs || createAppLogsObserver({ configPath: process.env.RAILSHOT_CD_CONFIG });
+    return createProductService({ observeMetrics: observer, observeLogs: logs, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
@@ -183,61 +214,183 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       versioned = url.pathname.startsWith('/api/v1');
       if (request.method === 'GET' && url.pathname === '/healthz') {
         // Liveness remains local; readiness also requires usable durable state and operator config.
-        const configured = Boolean(await productReady.catch(() => null));
+        const configured = Boolean(await productReady.catch(() => null))
+          && Boolean(product || service?.targetId || environmentAdapter || process.env.RAILSHOT_PROFILES_FILE);
         json(response, 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
       if (url.pathname.startsWith('/api/')) {
+        if (request.headers['sec-fetch-site'] === 'cross-site') throw new ServiceError('다른 사이트에서 보낸 요청은 허용되지 않습니다.', 403);
         if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);
         }
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
+        // Public visitors are anonymous cookie sessions. Existing localhost maintenance clients
+        // without a cookie retain their private maintenance channel and legacy contracts.
+        const dashboardRoute = /^\/api\/v1\/(sessions|preferences|connections)(?:\/|$)/.test(url.pathname);
+        const scoped = access.remote || access.publicDemo || dashboardRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
+        const session = scoped ? products.dashboard.session(cookieToken(request.headers.cookie)) : null;
+        const sessionId = session?.id ?? null;
+        if (session?.token) response.setHeader('Set-Cookie', sessionCookie(session.token, access.remote));
+        response.setHeader('Vary', 'Cookie');
         if (versioned) {
+          if (dashboardRoute) {
+            const route = /^\/api\/v1\/(sessions|preferences|connections)(?:\/([a-f0-9-]{36}))?$/.exec(url.pathname);
+            if (!route) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+            const [, kind, id] = route;
+            if (id && kind !== 'connections') throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+            const methods = kind === 'preferences' ? ['GET', 'PUT'] : id ? ['GET', 'PUT', 'DELETE'] : ['GET', 'POST'];
+            if (!methods.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = methods.join(', '); throw error; }
+            if ([...url.searchParams].length && !(kind === 'connections' && !id && request.method === 'GET')) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (kind === 'sessions' && !id && ['GET', 'POST'].includes(request.method)) {
+              json(response, request.method === 'POST' && session.token ? 201 : 200, { expires_at: session.expires_at }, { 'X-Request-ID': requestId }); return;
+            }
+            if (kind === 'preferences' && !id && ['GET', 'PUT'].includes(request.method)) {
+              json(response, 200, products.dashboard.preferences(sessionId, request.method === 'PUT' ? await jsonInput(request) : undefined)); return;
+            }
+            if (kind === 'connections') {
+              if (!id && request.method === 'GET') { json(response, 200, page(products.dashboard.connections(sessionId), url.searchParams)); return; }
+              if (id && request.method === 'GET') {
+                const connection = products.dashboard.connections(sessionId).find((row) => row.id === id);
+                if (!connection) throw new DashboardError('이 세션에서 자원을 찾을 수 없습니다.', 404, 'NOT_FOUND');
+                json(response, 200, connection); return;
+              }
+              if (!id && request.method === 'POST' || id && request.method === 'PUT') {
+                const connection = products.dashboard.saveConnection(sessionId, id, await jsonInput(request));
+                json(response, id ? 200 : 201, connection, id ? {} : { Location: `/api/v1/connections/${connection.id}` }); return;
+              }
+              if (id && request.method === 'DELETE') {
+                products.dashboard.deleteConnection(sessionId, id); response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return;
+              }
+            }
+            throw new ServiceError('지원하지 않는 메서드입니다.', 405);
+          }
           if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
           }
-          const routes = /^(?:\/api\/v1\/(targets|builds|deployments|profiles|plans|environments))(?:\/([A-Za-z0-9._-]+))?$/.exec(url.pathname);
+          const updateRoute = /^\/api\/v1\/applications\/([A-Za-z0-9._-]+)\/updates$/.exec(url.pathname);
+          if (updateRoute) {
+            if (request.method !== 'POST') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'POST'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            // Authorize before reading an upload or resolving a remote repository.
+            products.getApplication(updateRoute[1], sessionId);
+            const key = requestKey(request);
+            const record = await products.createUpdate(updateRoute[1], await uploadedSource(request, true, false, true), key, sourceLoader, sessionId);
+            accepted(response, 'deployments', record, requestId); return;
+          }
+          const startRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/start$/.exec(url.pathname);
+          if (startRoute) {
+            if (request.method !== 'POST') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'POST'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            const input = await jsonInput(request);
+            if (Object.keys(input).some((key) => key !== 'rebuild') || input.rebuild !== undefined && typeof input.rebuild !== 'boolean') throw new ServiceError('rebuild는 true 또는 false로 입력하세요.', 422);
+            accepted(response, 'deployments', await products.startUpdate(startRoute[1], input, sessionId), requestId); return;
+          }
+          const sourceRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/source$/.exec(url.pathname);
+          if (sourceRoute) {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            if ([...url.searchParams.keys()].some((key) => key !== 'variant') || url.searchParams.getAll('variant').length > 1) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            const variant = url.searchParams.get('variant') || 'submitted';
+            if (!['submitted', 'deployed'].includes(variant)) throw new ServiceError('소스 종류를 확인하세요.', 422);
+            const bytes = await sourceArchive(await products.sourceFiles(sourceRoute[1], variant, sessionId));
+            response.writeHead(200, { 'content-type': 'application/zip', 'content-length': bytes.length,
+              'content-disposition': `attachment; filename="railshot-${sourceRoute[1]}-${variant}.zip"`,
+              'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(bytes); return;
+          }
+          const eventRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/events$/.exec(url.pathname);
+          if (eventRoute) {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+            json(response, 200, await products.getDeploymentEvents(eventRoute[1], sessionId)); return;
+          }
+          const observationRoute = /^\/api\/v1\/targets\/([A-Za-z0-9._-]+)\/observations$/.exec(url.pathname);
+          if (observationRoute) {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            json(response, 200, await products.getTargetObservation(observationRoute[1], sessionId)); return;
+          }
+          const logRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/logs$/.exec(url.pathname);
+          if (logRoute) {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+            json(response, 200, await products.getDeploymentLogs(logRoute[1], sessionId)); return;
+          }
+          const lifecycle = /^\/api\/v1\/applications\/([A-Za-z0-9._-]+)\/(plans|operations)$/.exec(url.pathname);
+          const operation = /^\/api\/v1\/operations\/([A-Za-z0-9._-]+)$/.exec(url.pathname);
+          if (lifecycle || operation) {
+            const allowed = lifecycle ? 'POST' : 'GET';
+            if (request.method !== allowed) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = allowed; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+            if (operation) { json(response, 200, products.getOperation(operation[1], sessionId)); return; }
+            if (lifecycle[2] === 'plans') {
+              json(response, 201, await products.createApplicationPlan(lifecycle[1], await jsonInput(request), sessionId)); return;
+            }
+            const key = requestKey(request);
+            accepted(response, 'operations', await products.createApplicationOperation(lifecycle[1], await jsonInput(request), key, sessionId), requestId); return;
+          }
+          const actionRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/actions$/.exec(url.pathname);
+          if (actionRoute) {
+            if (request.method !== 'POST') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'POST'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+            const input = await jsonInput(request);
+            if (!input || Array.isArray(input) || typeof input !== 'object'
+                || Object.keys(input).length !== 1 || input.action !== 'resume') throw new ServiceError('action=resume만 입력하세요.', 422);
+            accepted(response, 'deployments', await products.resumeDeployment(actionRoute[1], sessionId), requestId, 'resume'); return;
+          }
+          const routes = /^(?:\/api\/v1\/(targets|applications|builds|deployments|profiles|plans|environments))(?:\/([A-Za-z0-9._-]+))?$/.exec(url.pathname);
           if (!routes) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
           const [, kind, id] = routes;
-          const methods = id ? ['builds', 'deployments', 'plans', 'environments'].includes(kind) ? ['GET'] : [] : ['targets', 'profiles'].includes(kind) ? ['GET'] : ['POST'];
+          const methods = id ? ['builds', 'deployments', 'plans', 'environments', 'applications'].includes(kind) ? ['GET'] : [] : ['targets', 'profiles', 'applications'].includes(kind) ? ['GET'] : ['GET', 'POST'];
           if (!methods.length) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
           if (!methods.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = methods.join(', '); throw error; }
+          if (kind === 'applications') {
+            if (id && [...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            json(response, 200, id ? products.getApplication(id, sessionId) : page(products.applications(sessionId), url.searchParams)); return;
+          }
           if (['targets', 'profiles'].includes(kind)) {
-            json(response, 200, page(products ? await products[kind]() : [], url.searchParams)); return;
+            json(response, 200, page(products ? await products[kind](sessionId) : [], url.searchParams)); return;
+          }
+          if (!id && request.method === 'GET') {
+            json(response, 200, kind === 'plans' ? page(products.list(kind, sessionId), url.searchParams)
+              : products.list(kind, sessionId, pagination(url.searchParams))); return;
           }
           if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
           if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
           if (request.method === 'GET') {
             const getter = { builds: 'getBuild', deployments: 'getDeployment', plans: 'getPlan', environments: 'getEnvironment' }[kind];
-            json(response, 200, await products[getter](id)); return;
+            json(response, 200, await products[getter](id, sessionId)); return;
           }
           if (kind === 'builds') {
-            const result = await products.createBuild(await uploadedSource(request, true), sourceLoader);
+            const result = await products.createBuild(await uploadedSource(request, true), sourceLoader, sessionId);
             accepted(response, kind, { id: String(result.run_id), status: 'queued' }, requestId); return;
           }
           if (kind === 'deployments') {
             const key = requestKey(request);
-            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true, true), key, sourceLoader), requestId); return;
+            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true, true), key, sourceLoader, sessionId), requestId); return;
           }
           if (kind === 'plans') {
-            const plan = await products.createPlan(await jsonInput(request));
+            const plan = await products.createPlan(await jsonInput(request), sessionId);
             json(response, 201, plan, { Location: `/api/v1/plans/${plan.id}` }); return;
           }
           const key = requestKey(request);
-          accepted(response, kind, await products.createEnvironment(await jsonInput(request), key), requestId); return;
+          accepted(response, kind, await products.createEnvironment(await jsonInput(request), key, sessionId), requestId); return;
         }
         if (!service) throw new ServiceError('CI 실행 기능이 설정되지 않았습니다.', 503);
         if (request.method === 'POST' && url.pathname === '/api/deploy') {
-          if (request.headers['x-jasmin-request'] !== 'deploy') throw new ServiceError('요청 헤더가 필요합니다.', 403);
+          if ((request.headers['x-railshot-request'] ?? request.headers['x-jasmin-request']) !== 'deploy') throw new ServiceError('요청 헤더가 필요합니다.', 403);
           const input = await uploadedSource(request);
           input.target_id ??= service.targetId;
-          const result = products ? await products.createBuild(input, sourceLoader) : await service.deploy(input.files ? input : { ...input, ...await sourceLoader(input.repository_url) });
+          const result = products ? await products.createBuild(input, sourceLoader, sessionId) : await service.deploy(input.files ? input : { ...input, ...await sourceLoader(input.repository_url) });
           json(response, 202, result); return;
         }
         const match = request.method === 'GET' && /^\/api\/runs\/(\d+)$/.exec(url.pathname);
-        if (match) { json(response, 200, products ? await products.legacyStatus(match[1]) : await service.status(match[1])); return; }
+        if (match) { json(response, 200, products ? await products.legacyStatus(match[1], sessionId) : await service.status(match[1])); return; }
         throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
       }
       const asset = request.method === 'GET' && assets.get(url.pathname);

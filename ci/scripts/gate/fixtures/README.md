@@ -98,13 +98,18 @@ selects a nonexistent npm checker command or removes a Java wrapper.
 Maven); `no-tests` removes test files to verify rejection. These deliberate test
 inputs are not a permission for the product fixer to change policy or tests.
 
-Use `--stacks npm-js --cases private-source --mode quality` to reproduce the
+Use `--stacks npm-js --cases private-source --mode full` to reproduce the
 ephemeral runner's `umask 077`: the upload/intake retain directories `0700` and
-files `0600` (executables `0700`). Q copies validated application input, excluding
-`.git`, into a temporary snapshot under the private runner temp directory. Only
-that snapshot is readable by the existing UID `65532` Docker checker and mounted
-read-only; original source, credentials and run records stay private. The case
-must pass native Q and preserve the original source digest, including its modes.
+files `0600` (executables `0700`). Q and L2 use the same validated source snapshot
+helper, excluding `.git`, beneath a private temporary directory. Snapshot
+directories and executable files are `0755`; other files are `0644`. Q mounts its
+snapshot read-only for UID `65532`; L2 supplies the snapshot to the existing
+restricted BuildKit builder so Docker COPY retains readable application files.
+L2 also physically removes `.env*` from its snapshot regardless of ignore-file
+negations. Original source, credentials and run records keep their private modes.
+The full case must pass Q, build, scan and non-root runtime health while preserving
+the original source digest, including its modes. `--mode quality` runs Q alone and
+does not establish that the built application's runtime can read its source.
 
 JavaScript's `type` case and Python's `missing-tool` case are explicitly
 `NOT_APPLICABLE`; the latter needs a separately native-generated Python lock

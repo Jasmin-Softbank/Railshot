@@ -14,6 +14,7 @@ WORKDIR /app/apps/api
 COPY --from=dependencies /app/node_modules /app/node_modules
 COPY apps/api/package.json ./package.json
 COPY apps/api/src/ ./src/
+COPY contracts/application.mjs /app/contracts/application.mjs
 USER 1000:1000
 
 FROM base AS api
@@ -24,18 +25,22 @@ COPY apps/api/prepare-state.js ./
 COPY ci/requirements-dev.txt ci/requirements-test.txt /app/ci/
 COPY gitops/bridge.py gitops/argo.py gitops/handoff.py /app/gitops/
 COPY gitops/edge.py gitops/service_name.py /app/gitops/
-COPY gitops/credentials.py /app/gitops/
-COPY observability/register.py observability/bootstrap.py observability/render.py observability/compose.yaml /app/observability/
+COPY gitops/dns.py gitops/gcp_routes.py /app/gitops/
+COPY gitops/openstack_routes.py /app/gitops/
+COPY gitops/application_cleanup.py /app/gitops/
+COPY gitops/credentials.py gitops/logs.py /app/gitops/
+COPY observability/register.py observability/bootstrap.py observability/render.py observability/compose.yaml observability/runtime_health.py /app/observability/
 COPY ci/scripts/execution.py ci/scripts/observability.py ci/scripts/process.py ci/scripts/publication.py ci/scripts/storage.py /app/ci/scripts/
 COPY ci/scripts/gate/bundle.py /app/ci/scripts/gate/
 COPY ci/scripts/runner/runtime_boundary.py /app/ci/scripts/runner/
 COPY ci/scripts/runner/replenish.py /app/ci/scripts/runner/
-COPY ci/scripts/schemas/jasmin.schema.json /app/ci/scripts/schemas/
+COPY ci/scripts/schemas/railshot.schema.json /app/ci/scripts/schemas/
 COPY infrastructure/providers/terraform_tools/provision.py infrastructure/providers/terraform_tools/capabilities.py infrastructure/providers/terraform_tools/costs.py infrastructure/providers/terraform_tools/access.py /app/infrastructure/providers/terraform_tools/
 COPY infrastructure/providers/terraform_tools/budget.py /app/infrastructure/providers/terraform_tools/
 COPY infrastructure/terraform/aws/ /app/infrastructure/terraform/aws/
 COPY infrastructure/terraform/gcp/ /app/infrastructure/terraform/gcp/
 COPY infrastructure/terraform/aws-edge/ /app/infrastructure/terraform/aws-edge/
+COPY infrastructure/terraform/gcp-edge/ /app/infrastructure/terraform/gcp-edge/
 COPY infrastructure/ansible/run.py infrastructure/ansible/transport.py infrastructure/ansible/ansible.cfg infrastructure/ansible/guest.yml infrastructure/ansible/runtime.yml /app/infrastructure/ansible/
 COPY infrastructure/ansible/cluster.py infrastructure/ansible/database.py infrastructure/ansible/inputs.py infrastructure/ansible/application_database.py infrastructure/ansible/database.yml infrastructure/ansible/application-database.yml /app/infrastructure/ansible/
 COPY infrastructure/ansible/playbooks/ /app/infrastructure/ansible/playbooks/
@@ -44,7 +49,11 @@ COPY infrastructure/ansible/tasks/guest-checks.yml /app/infrastructure/ansible/t
 COPY infrastructure/ansible/group_vars/all.yml /app/infrastructure/ansible/group_vars/
 COPY contracts/ansible-request.schema.json contracts/ansible-job.schema.json /app/contracts/
 COPY deployment/scripts/common.sh deployment/scripts/environment.py /app/deployment/scripts/
-COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh /app/deployment/bootstrap/
+COPY deployment/scripts/applications.py deployment/scripts/application_release.py deployment/scripts/application_routes.py /app/deployment/scripts/
+COPY deployment/scripts/application_lifecycle.py deployment/scripts/lifecycle_runtime.py /app/deployment/scripts/
+COPY deployment/scripts/openstack_route_worker.py /app/deployment/scripts/
+COPY deployment/cloudflared/register.py deployment/cloudflared/render.py /app/deployment/cloudflared/
+COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh deployment/bootstrap/runtime-healthz.py /app/deployment/bootstrap/
 COPY deployment/cilium/install.sh deployment/cilium/preflight.py deployment/cilium/health.sh /app/deployment/cilium/
 COPY deployment/airgap/versions.json /app/deployment/airgap/
 RUN RAILSHOT_CONTAINER_BUILD=1 bash runtime-install.sh

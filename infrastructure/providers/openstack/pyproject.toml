@@ -23,7 +23,10 @@ packages = ["src/control_plane"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --import-mode=importlib"
+# Qualify the bootstrap package as infrastructure.providers.openstack, not the SDK's openstack.
+consider_namespace_packages = true
+pythonpath = ["../../..", "."]
 
 [tool.ruff]
 target-version = "py312"
@@ -37,6 +40,8 @@ ignore = ["B008"]
 python_version = "3.12"
 strict = true
 files = ["src/control_plane"]
+explicit_package_bases = true
+mypy_path = "$MYPY_CONFIG_FILE_DIR/src"
 
 [[tool.mypy.overrides]]
 module = ["openstack.*", "keystoneauth1.*"]

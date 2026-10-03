@@ -92,6 +92,9 @@ def installed(rows):
         run('openssl', 'version')
         for script in ['observability/register.py', 'observability/bootstrap.py', 'gitops/bridge.py', 'gitops/edge.py',
                        'gitops/credentials.py', 'deployment/scripts/environment.py', 'ci/scripts/runner/replenish.py',
+                       'deployment/scripts/applications.py', 'deployment/scripts/application_routes.py',
+                       'deployment/scripts/application_lifecycle.py',
+                       'deployment/cloudflared/register.py',
                        'infrastructure/providers/terraform_tools/provision.py', 'infrastructure/ansible/run.py',
                        'infrastructure/providers/terraform_tools/budget.py',
                        'infrastructure/ansible/cluster.py', 'infrastructure/providers/terraform_tools/access.py']:
@@ -99,11 +102,12 @@ def installed(rows):
         # Ansible builtin task imports and all runtime copy sources must actually be packaged.
         for script in ['guest.yml', 'runtime.yml', 'database.yml', 'application-database.yml']:
             run('ansible-playbook', '-i', 'localhost,', str(ROOT / 'infrastructure/ansible' / script), '--syntax-check')
-        for relative in ['ci/scripts/schemas/jasmin.schema.json', 'contracts/ansible-request.schema.json',
+        for relative in ['ci/scripts/schemas/railshot.schema.json', 'contracts/ansible-request.schema.json',
                          'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/group_vars/all.yml',
                          'infrastructure/ansible/tasks/guest-checks.yml',
                          'deployment/scripts/common.sh', 'deployment/bootstrap/preflight.sh', 'deployment/bootstrap/install-k3s.sh',
-                         'deployment/bootstrap/health.sh', 'deployment/cilium/install.sh', 'deployment/cilium/preflight.py', 'deployment/cilium/health.sh']:
+                         'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py', 'observability/runtime_health.py',
+                         'deployment/cilium/install.sh', 'deployment/cilium/preflight.py', 'deployment/cilium/health.sh']:
             if not (ROOT / relative).is_file():
                 raise ValueError('Missing native runtime source: ' + relative)
         for provider in ['aws', 'gcp']:

@@ -47,13 +47,30 @@ python3 observability/register.py --config /private/observer-config.json \
 
 request에는 `version,target_id,environment_id,app,namespace,node_ip,probe_url,registry_file,context`만 둔다.
 registrar가 검증한 descriptor와 edge allocation에서 생성하며, 관측 helper가 target/private IP를 다시 대조한다.
-같은 target을 다른 환경·앱·물리 자원으로 바꾸는 요청은 거부한다. 기존 NodePort나 관측 소유권이 다른
+노드만 등록할 때는 `app,namespace,probe_url`을 생략한다. 같은 target의 앱 행은 함께 보관하되 물리 자원 변경은 거부한다. 기존 NodePort나 관측 소유권이 다른
 동명 Kubernetes 자원을 덮어쓰지 않는다.
+
+앱을 포함한 등록도 독립적인 노드 행을 남기며, 앱 제거 후에도 런타임 연결 관측을 유지한다.
+관리 소유권과 버전을 확인한 K3s에 경로 제한 `AuthenticationConfiguration`을 적용해 `/healthz`만
+인증 없이 확인한다. 기존 노드 배포 잠금 아래 설정을 백업하고 필요한 경우 K3s를 재시작한다.
+`/healthz=200`, 일반 API `401`, 기존 workload 식별자·설정 보존을 검증하고 실패 시 원복한다.
+control/API 노드는 이 변경 대상이 아니다. 관측기에는 공개 CA 인증서와 정확한 TLS 서버 이름만
+전달하며 앱 토큰·관리자 인증서는 복사하지 않는다. 기존 Blackbox가 `runtime_healthz` job으로
+30초마다 검사하고, API의 `healthz_url` 바인딩으로 실제 샘플을 읽는다. 관리 API의 기존 네트워크
+접근 제한을 유지하며 사용자 입력 URL이나 앱 URL로 이 검사를 대신하지 않는다.
 
 native worker는 기존 Cilium의 NetworkPolicy를 사용하는 exporter manifest를 적용하고, 공유 Prometheus
 설정에 기존 모든 대상을 보존하며 새 대상을 추가한 다음 SIGHUP으로 다시 읽게 한다. Promtool 검증이
 실패하면 이전 파일을 복원한다. API의 `RAILSHOT_OBSERVER_CONFIG`는 `state_dir/product.json`을 가리킨다.
 이 파일은 원자적으로 교체되며 API가 요청마다 읽기 때문에 API 재시작 없이 새 target/app을 관측한다.
+
+플랫폼에서는 `state_dir`를 `/var/lib/railshot/state/` 하위에 둔다. 검증된 private import의
+profiles → deployment → `observability_config_file`을 따라 bootstrap이 이 `product.json` 경로를
+`railshot-environments` ConfigMap의 `observer_file`에 한 번 등록한다. API와 초기화 컨테이너는
+optional `RAILSHOT_OBSERVER_PRODUCT_FILE`로 같은 경로를 받는다. 이후 초기화는 오래된 Secret의
+`observer.json`을 다시 복사하지 않으며, 동적 파일이 없거나 잘못되면 이전 정상값으로 대체하지 않는다.
+관측 등록 설정이 없는 기존 설치는 `RAILSHOT_OBSERVER_CONFIG`의 정적 파일을 계속 사용한다.
+기존 ConfigMap에는 새 key만 추가할 수 있고, 이미 지정된 경로를 바꾸려면 운영자가 별도로 이행해야 한다.
 
 하나의 파일 lock이 공유 대상 목록을 보호한다. 외부 변경 전에 `desired.json`과 unknown receipt를 저장한다.
 collector 전송 실패 이후 다른 등록이 들어와도 이전 의도를 목록에서 지우지 않는다. unknown 작업의

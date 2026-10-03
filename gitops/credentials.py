@@ -5,6 +5,8 @@ import base64
 import copy
 from datetime import datetime, timezone
 import hashlib
+from http.client import HTTPConnection, HTTPSConnection
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -18,31 +20,76 @@ from argo import LABEL, native, require
 
 LIFETIME = 21600
 LABELS = {'argocd.argoproj.io/secret-type': 'cluster', 'app.kubernetes.io/managed-by': 'railshot'}
+APPLICATION_ID = r'app-[a-f0-9]{24}'
+
+
+def credential_labels_match(labels, target_id, project, namespaces):
+    """An app credential may leave Argo discovery, but never widen its app scope."""
+    application = isinstance(target_id, str) and re.fullmatch(APPLICATION_ID, target_id)
+    if application and (project != target_id or namespaces != [target_id]):
+        return False
+    expected = dict(LABELS)
+    if isinstance(labels, dict) and labels.get('argocd.argoproj.io/secret-type') == 'railshot-application':
+        if not application:
+            return False
+        expected['argocd.argoproj.io/secret-type'] = 'railshot-application'
+    return isinstance(labels, dict) and all(labels.get(key) == value for key, value in expected.items())
+
+
+def tls_name(value):
+    require(isinstance(value, str), 'registered TLS name must be an RFC1918 IPv4')
+    address = ipaddress.IPv4Address(value)
+    require(any(address in ipaddress.IPv4Network(network) for network in
+                ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')), 'registered TLS name must be an RFC1918 IPv4')
+    return value
 
 
 def validate_policy(policy):
     require(set(policy) == {'version', 'targets'} and policy['version'] == 1, 'invalid renewal policy')
     targets = policy['targets']
-    require(isinstance(targets, list) and 1 <= len(targets) <= 20, 'registered targets required')
+    require(isinstance(targets, list) and 0 <= len(targets) <= 20, 'registered targets required')
     for target in targets:
-        require(set(target) == {'secret', 'target_id', 'server', 'project', 'namespaces',
-                               'service_account', 'ca_sha256', 'audiences'}, 'invalid registration binding')
-        for key in ('secret', 'target_id', 'project'):
+        required = {'secret', 'target_id', 'server', 'project', 'namespaces', 'service_account', 'ca_sha256', 'audiences'}
+        require(required <= set(target) <= required | {'tls_server_name', 'previous_scope'}, 'invalid registration binding')
+        for key in ('secret', 'target_id'):
             require(isinstance(target[key], str) and re.fullmatch(LABEL, target[key]), 'invalid registration name')
+        require(isinstance(target['project'], str) and (target['project'] == '' or re.fullmatch(LABEL, target['project'])),
+                'invalid registration project')
         require(target['secret'] == 'railshot-' + target['target_id'] and target['project'] != 'default',
                 'Railshot project registration required')
         url = urlsplit(target['server'])
-        require(url.scheme == 'https' and url.hostname and url.port == 6443 and not url.username and
+        require(url.scheme == 'https' and url.hostname and url.port is not None and 1 <= url.port <= 65535 and not url.username and
                 not url.password and not url.path and not url.query and not url.fragment, 'explicit TLS API required')
+        if 'tls_server_name' in target:
+            tls_name(target['tls_server_name'])
         require(re.fullmatch(r'[a-f0-9]{64}', target['ca_sha256']), 'registered CA fingerprint required')
         namespaces = target['namespaces']
         require(isinstance(namespaces, list) and namespaces and len(set(namespaces)) == len(namespaces) and
                 all(isinstance(n, str) and re.fullmatch(LABEL, n) and n not in
                     {'default', 'argocd', 'kube-system', 'kube-public', 'kube-node-lease'} for n in namespaces),
                 'dedicated namespaces required')
+        if re.fullmatch(APPLICATION_ID, target['target_id']):
+            require(target['project'] == target['target_id'] and namespaces == [target['target_id']],
+                    'application credential must retain its exact project and namespace')
         sa = target['service_account']
         require(set(sa) == {'name', 'namespace', 'uid'} and sa['namespace'] in namespaces and
                 re.fullmatch(LABEL, sa['name']) and re.fullmatch(r'[a-f0-9-]{36}', sa['uid']), 'registered SA required')
+        if 'previous_scope' in target:
+            previous = target['previous_scope']
+            require(not re.fullmatch(APPLICATION_ID, target['target_id']) and target['project'] == ''
+                    and isinstance(previous, dict) and set(previous) == {'project', 'namespaces'},
+                    'only a shared environment cluster may transition scope')
+            require(isinstance(previous['project'], str) and previous['project'] != 'default'
+                    and (previous['project'] == '' or re.fullmatch(LABEL, previous['project'])), 'invalid previous project')
+            old_namespaces = previous['namespaces']
+            require(isinstance(old_namespaces, list) and old_namespaces and all(isinstance(n, str) and re.fullmatch(LABEL, n)
+                        and n not in {'default', 'argocd', 'kube-system', 'kube-public', 'kube-node-lease'} for n in old_namespaces)
+                    and len(set(old_namespaces)) == len(old_namespaces) and sa['namespace'] in old_namespaces
+                    and (set(old_namespaces) <= set(namespaces) or set(namespaces) <= set(old_namespaces))
+                    and all(re.fullmatch(APPLICATION_ID, n) for n in set(namespaces) ^ set(old_namespaces)),
+                    'scope transition must retain its SA and grow or shrink only app namespaces')
+            require(previous['project'] != target['project'] or set(old_namespaces) != set(namespaces),
+                    'scope transition must change project or namespaces')
         require(isinstance(target['audiences'], list) and target['audiences'] and
                 len(set(target['audiences'])) == len(target['audiences']) and
                 all(isinstance(a, str) and 0 < len(a) < 256 for a in target['audiences']), 'API audiences required')
@@ -69,17 +116,41 @@ class NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
-def customer(server, ca, token, path, document=None):
+class RegisteredHTTPSConnection(HTTPSConnection):
+    """Connect to the relay while verifying the registered guest's certificate name."""
+    def __init__(self, host, port, *, server_name, context, timeout):
+        super().__init__(host, port, context=context, timeout=timeout)
+        self.server_name = tls_name(server_name)
+
+    def connect(self):
+        HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.server_name)
+
+
+def customer(server, ca, token, path, document=None, *, server_name=None):
     context = ssl.create_default_context(cadata=ca.decode('ascii'))
-    opener = request.build_opener(request.ProxyHandler({}), request.HTTPSHandler(context=context), NoRedirect())
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}
     body = None if document is None else json.dumps(document).encode()
     if body is not None:
         headers['Content-Type'] = 'application/json'
-    req = request.Request(server + path, data=body, headers=headers)
-    with opener.open(req, timeout=15) as response:
-        require(response.status in (200, 201), 'customer API request failed')
-        raw = response.read(2_000_001)
+    if server_name is not None:
+        endpoint = urlsplit(server)
+        require(endpoint.scheme == 'https' and endpoint.hostname and endpoint.port and not endpoint.username and
+                not endpoint.password and not endpoint.path and not endpoint.query and not endpoint.fragment, 'explicit TLS API required')
+        connection = RegisteredHTTPSConnection(endpoint.hostname, endpoint.port, server_name=server_name, context=context, timeout=15)
+        try:
+            connection.request('GET' if body is None else 'POST', path, body=body, headers=headers)
+            response = connection.getresponse()
+            require(response.status in (200, 201), 'customer API request failed')
+            raw = response.read(2_000_001)
+        finally:
+            connection.close()
+    else:
+        opener = request.build_opener(request.ProxyHandler({}), request.HTTPSHandler(context=context), NoRedirect())
+        req = request.Request(server + path, data=body, headers=headers)
+        with opener.open(req, timeout=15) as response:
+            require(response.status in (200, 201), 'customer API request failed')
+            raw = response.read(2_000_001)
     require(len(raw) <= 2_000_000, 'customer response too large')
     return json.loads(raw)
 
@@ -90,17 +161,27 @@ def platform(*args, document=None):
 
 
 def registration(secret, target, now):
+    if 'previous_scope' in target:
+        validate_policy({'version': 1, 'targets': [target]})
     meta = secret['metadata']
-    require(secret['kind'] == 'Secret' and meta['name'] == target['secret'] and meta['namespace'] == 'argocd' and
-            all(meta.get('labels', {}).get(k) == v for k, v in LABELS.items()), 'registration owner differs')
+    require(secret['kind'] == 'Secret' and meta['name'] == target['secret'] and meta['namespace'] == 'argocd',
+            'registration owner differs')
     data = {k: base64.b64decode(v, validate=True).decode() for k, v in secret['data'].items()}
+    require(credential_labels_match(meta.get('labels'), target['target_id'], data['project'], data['namespaces'].split(',')),
+            'registration owner or application scope differs')
+    scopes = [target] + ([target['previous_scope']] if 'previous_scope' in target else [])
+    namespaces = data['namespaces'].split(',')
     require(data['name'] == target['target_id'] and data['server'] == target['server'] and
-            data['project'] == target['project'] and data['clusterResources'] == 'false' and
-            set(data['namespaces'].split(',')) == set(target['namespaces']), 'registration scope differs')
+            data['clusterResources'] == 'false' and any(data['project'] == scope['project'] and
+                len(namespaces) == len(scope['namespaces']) and set(namespaces) == set(scope['namespaces']) for scope in scopes),
+            'registration scope differs')
     config = json.loads(data['config'])
+    tls_fields = {'caData', 'insecure'} | ({'serverName'} if 'tls_server_name' in target else set())
     require(set(config) == {'bearerToken', 'tlsClientConfig'} and
-            set(config['tlsClientConfig']) == {'caData', 'insecure'} and
+            set(config['tlsClientConfig']) == tls_fields and
             config['tlsClientConfig']['insecure'] is False, 'CA-verified bearer configuration required')
+    if 'tls_server_name' in target:
+        require(config['tlsClientConfig']['serverName'] == tls_name(target['tls_server_name']), 'registered TLS name differs')
     ca = base64.b64decode(config['tlsClientConfig']['caData'], validate=True)
     require(hashlib.sha256(ca).hexdigest() == target['ca_sha256'], 'registered CA differs')
     claims(config['bearerToken'], target, now)
@@ -111,11 +192,12 @@ def renew(target, now=None):
     now = time.time() if now is None else now
     old = platform('get', 'secret', target['secret'], '-o', 'json')
     config, ca = registration(old, target, now)
+    tls = {'server_name': target['tls_server_name']} if 'tls_server_name' in target else {}
     sa = target['service_account']
     path = f"/api/v1/namespaces/{sa['namespace']}/serviceaccounts/{sa['name']}/token"
     response = customer(target['server'], ca, config['bearerToken'], path, {
         'apiVersion': 'authentication.k8s.io/v1', 'kind': 'TokenRequest',
-        'spec': {'audiences': target['audiences'], 'expirationSeconds': LIFETIME}})
+        'spec': {'audiences': target['audiences'], 'expirationSeconds': LIFETIME}}, **tls)
     token = response['status']['token']
     new_claims = claims(token, target, now)
     expiration = datetime.fromisoformat(response['status']['expirationTimestamp'].replace('Z', '+00:00'))
@@ -125,10 +207,10 @@ def renew(target, now=None):
     # Decoding JWT claims is only a binding check. The API authenticates the new
     # token against the original CA and proves the exact principal and scope.
     who = customer(target['server'], ca, token, '/apis/authentication.k8s.io/v1/selfsubjectreviews',
-                   {'apiVersion': 'authentication.k8s.io/v1', 'kind': 'SelfSubjectReview'})['status']['userInfo']
+                   {'apiVersion': 'authentication.k8s.io/v1', 'kind': 'SelfSubjectReview'}, **tls)['status']['userInfo']
     require(who['username'] == new_claims['sub'] and who['uid'] == sa['uid'], 'new token authentication differs')
     for namespace in target['namespaces']:
-        pods = customer(target['server'], ca, token, f'/api/v1/namespaces/{namespace}/pods?limit=1')
+        pods = customer(target['server'], ca, token, f'/api/v1/namespaces/{namespace}/pods?limit=1', **tls)
         require(pods['kind'] == 'PodList' and isinstance(pods['items'], list), 'namespace read verification failed')
     updated = copy.deepcopy(config); updated['bearerToken'] = token
     encoded = base64.b64encode(json.dumps(updated, separators=(',', ':')).encode()).decode()
@@ -168,7 +250,7 @@ def render(policy, image):
         {'apiVersion': 'v1', 'kind': 'ServiceAccount', 'metadata': meta, 'automountServiceAccountToken': False},
         {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role', 'metadata': meta, 'rules': [
             {'apiGroups': [''], 'resources': ['secrets'], 'resourceNames': [t['secret'] for t in policy['targets']],
-             'verbs': ['get', 'patch']}]},
+             'verbs': ['get', 'patch']}] if policy['targets'] else []},
         {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding', 'metadata': meta,
          'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': name},
          'subjects': [{'kind': 'ServiceAccount', 'name': name, 'namespace': 'argocd'}]},

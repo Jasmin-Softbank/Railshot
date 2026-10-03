@@ -25,7 +25,30 @@ variable "account_id" {
     error_message = "Use the existing registered AWS account."
   }
 }
+variable "enable_product_executor" {
+  type        = bool
+  default     = false
+  description = "Operator opt-in for the reviewed product executor. Bootstrap must verify the fixed Cilium metadata deny policy before applying this setting."
+}
+variable "product_metadata_hop_limit" {
+  type        = number
+  default     = 2
+  description = "Verified control-node pod return path. Use 3 only for an extra Cilium routing hop; the metadata deny policy remains required."
+  validation {
+    condition     = contains([2, 3], var.product_metadata_hop_limit)
+    error_message = "Use only the verified two- or three-hop control path."
+  }
+}
 variable "vpc_id" { type = string }
+variable "registered_runtime_instance_ids" {
+  type        = set(string)
+  default     = []
+  description = "Existing runtime instances explicitly handed to app registration. Do not retag their ownership to grant access."
+  validation {
+    condition     = length(var.registered_runtime_instance_ids) <= 20 && alltrue([for id in var.registered_runtime_instance_ids : can(regex("^i-[0-9a-f]{17}$", id))])
+    error_message = "Use at most 20 exact existing instance IDs."
+  }
+}
 variable "subnet_id" {
   type        = string
   description = "Exact existing operations-node subnet; do not select a new default subnet."
@@ -84,13 +107,33 @@ locals {
   ]
 }
 
+variable "openstack_app_ingress" {
+  description = "Existing ALB-to-OpenStack relay rule on the inline-owned control SG; preserve its live source SG, port and description."
+  type = object({
+    source_security_group_id = string
+    port                     = number
+    description              = string
+  })
+  default = null
+  validation {
+    condition = var.openstack_app_ingress == null ? true : (
+      can(regex("^sg-[a-f0-9]{8,17}$", var.openstack_app_ingress.source_security_group_id)) &&
+      var.openstack_app_ingress.port >= 1 && var.openstack_app_ingress.port <= 65535 &&
+      floor(var.openstack_app_ingress.port) == var.openstack_app_ingress.port &&
+      length(var.openstack_app_ingress.description) > 0 && length(var.openstack_app_ingress.description) <= 255 &&
+      length(regexall("[\\r\\n]", var.openstack_app_ingress.description)) == 0
+    )
+    error_message = "Bind the existing ALB SG, integer TCP port and single-line ingress description, or leave null."
+  }
+}
+
 resource "aws_security_group" "control" {
   name        = local.name
   description = "Administrator PoC: no ingress; SSM and HTTPS outbound"
   vpc_id      = var.vpc_id
   # Keep rules inline with the existing owner; do not mix standalone SG rules.
   # Empty by default. A reviewed peer only opens node overlay/health and API.
-  ingress = [for rule in concat(local.build_peer_health, local.build_peer_api) : {
+  ingress = concat([for rule in concat(local.build_peer_health, local.build_peer_api) : {
     description      = rule.description
     from_port        = rule.from_port
     to_port          = rule.to_port
@@ -100,7 +143,17 @@ resource "aws_security_group" "control" {
     ipv6_cidr_blocks = []
     prefix_list_ids  = []
     self             = false
-  }]
+    }], var.openstack_app_ingress == null ? [] : [{
+    description      = var.openstack_app_ingress.description
+    from_port        = var.openstack_app_ingress.port
+    to_port          = var.openstack_app_ingress.port
+    protocol         = "tcp"
+    security_groups  = [var.openstack_app_ingress.source_security_group_id]
+    cidr_blocks      = []
+    ipv6_cidr_blocks = []
+    prefix_list_ids  = []
+    self             = false
+  }])
   dynamic "egress" {
     for_each = local.build_peer_health
     content {
@@ -141,6 +194,23 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.control.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
+resource "aws_iam_role_policy" "registered_runtimes" {
+  count = var.enable_product_executor && length(var.registered_runtime_instance_ids) > 0 ? 1 : 0
+  role  = aws_iam_role.control.id
+  name  = "railshot-registered-runtimes"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "ssm:StartSession"
+      Resource = [for id in var.registered_runtime_instance_ids : "arn:aws:ec2:${var.region}:${var.account_id}:instance/${id}"]
+      Condition = {
+        StringEquals = { "aws:RequestedRegion" = var.region }
+        BoolIfExists = { "ssm:SessionDocumentAccessCheck" = "true" }
+      }
+    }]
+  })
+}
 resource "aws_iam_role_policy" "codex_auth" {
   role = aws_iam_role.control.id
   name = "read-single-operator-auth"
@@ -162,6 +232,31 @@ resource "aws_iam_role_policy" "codex_auth" {
     }]
   })
 }
+resource "aws_iam_role_policy" "product_executor" {
+  count  = var.enable_product_executor ? 1 : 0
+  role   = aws_iam_role.control.id
+  name   = "railshot-product-executor"
+  policy = file("${path.module}/product-executor-policy.json")
+  lifecycle {
+    precondition {
+      condition     = var.account_id == "721622471953" && var.region == "ap-northeast-2" && var.vpc_id == "vpc-085e5a8268cf2b206"
+      error_message = "The reviewed executor policy is bound to the existing registered account, region and VPC."
+    }
+  }
+}
+# Kept separate: the reviewed VM policy plus edge would exceed the role's
+# aggregate inline-policy quota. This document fits one managed policy.
+resource "aws_iam_policy" "product_edge" {
+  count       = var.enable_product_executor ? 1 : 0
+  name        = "railshot-product-edge"
+  description = "Registered Railshot app routes; native edge plan validation is required"
+  policy      = file("${path.module}/product-edge-policy.json")
+}
+resource "aws_iam_role_policy_attachment" "product_edge" {
+  count      = var.enable_product_executor ? 1 : 0
+  role       = aws_iam_role.control.name
+  policy_arn = aws_iam_policy.product_edge[0].arn
+}
 resource "aws_iam_instance_profile" "control" {
   name = local.name
   role = aws_iam_role.control.name
@@ -179,7 +274,7 @@ resource "aws_instance" "control" {
   credit_specification { cpu_credits = "standard" }
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = 1
+    http_put_response_hop_limit = var.enable_product_executor ? var.product_metadata_hop_limit : 1
   }
   root_block_device {
     volume_type           = "gp3"
@@ -191,7 +286,7 @@ resource "aws_instance" "control" {
   # reconstruct legacy cloud-init/Ansible/accounts files in their old layout.
   user_data_replace_on_change = false
   tags                        = { Name = local.name }
-  depends_on                  = [aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.codex_auth]
+  depends_on                  = [aws_iam_role_policy_attachment.ssm, aws_iam_role_policy.codex_auth, aws_iam_role_policy.product_executor, aws_iam_role_policy_attachment.product_edge]
   lifecycle {
     prevent_destroy = true
     ignore_changes  = [user_data, user_data_base64]
