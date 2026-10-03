@@ -56,17 +56,22 @@ def module(name):
     return result
 
 
-def validate(manifest, config):
-    require(set(manifest) == {'version', 'source_sha', 'platform_revision', 'images', 'runtime_policy', 'provider_targets', 'edge_modules', 'edge_kinds'}
+def validate(manifest, config, scope='multicloud'):
+    require(scope in {'ci-runtime', 'multicloud'}, 'RELEASE_SCOPE_INVALID')
+    core = {'version', 'source_sha', 'platform_revision', 'images'}
+    require(set(manifest) == core | (set() if scope == 'ci-runtime' else {'runtime_policy', 'provider_targets', 'edge_modules', 'edge_kinds'})
             and manifest['version'] == 1, 'RELEASE_MANIFEST_INVALID')
     for key in ('source_sha', 'platform_revision'):
         require(isinstance(manifest[key], str) and re.fullmatch('[a-f0-9]{40}', manifest[key]), 'RELEASE_SHA_INVALID')
-    require(set(manifest['edge_kinds']) == PROVIDERS, 'EDGE_KINDS_INVALID')
-    require(set(manifest['edge_modules']) == PROVIDERS, 'EDGE_MODULE_PINS_REQUIRED')
     require(set(manifest['images']) == COMPONENTS, 'ALL_PLATFORM_IMAGES_REQUIRED')
     for name, image in manifest['images'].items():
         require(isinstance(image, str) and re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-' + name + r'@sha256:[a-f0-9]{64}', image),
                 'IMMUTABLE_PLATFORM_IMAGES_REQUIRED')
+    if scope == 'ci-runtime':
+        require(config.get('version') == 1 and {'version', 'state_dir', 'workers', 'apps'} <= set(config), 'RELEASE_CONFIG_INVALID')
+        return []  # CI promotion requires no provider inventory, edge state or node policy.
+    require(set(manifest['edge_kinds']) == PROVIDERS, 'EDGE_KINDS_INVALID')
+    require(set(manifest['edge_modules']) == PROVIDERS, 'EDGE_MODULE_PINS_REQUIRED')
     require(set(manifest['provider_targets']) == PROVIDERS and
             len(set(manifest['provider_targets'].values())) == 3 and
             all(isinstance(v, str) and re.fullmatch('[a-z][a-z0-9-]{0,62}', v) for v in manifest['provider_targets'].values()),
@@ -195,19 +200,38 @@ def update_target(target, manifest, config, verify_only=False):
     return {**proof, 'provider': target['provider'], 'target_id': target['target_id'], 'source_sha': manifest['source_sha']}
 
 
-def execute(config, manifest, *, workers=None, target_runner=None, target_verifier=None, platform_verify=None, promote=None):
-    targets = validate(manifest, config)
+def execute(config, manifest, *, scope='multicloud', workers=None, target_runner=None, target_verifier=None, platform_verify=None, promote=None):
+    targets = validate(manifest, config, scope)
     home = Path(config['state_dir'])
     require(home.is_absolute() and home.resolve() == home, 'RELEASE_STATE_PATH_INVALID')
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     require(home.stat().st_uid == os.geteuid() and not home.stat().st_mode & 0o077, 'PRIVATE_RELEASE_STATE_REQUIRED')
     with (home / 'release.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        ci_state = home / 'ci-runtime' / manifest['source_sha']
+        worker_module = workers or module('platform_workers')
+        if scope == 'ci-runtime':
+            home = home / 'ci-runtime'; home.mkdir(mode=0o700, exist_ok=True)
+            # Node configuration changes must not invalidate a completed CI rollout.
+            config = {key: config[key] for key in ('version', 'state_dir', 'workers', 'apps')}
+            config['workers'] = worker_module.scoped_config(config['workers'], 'ci')
         state = home / manifest['source_sha']; state.mkdir(mode=0o700, exist_ok=True)
         receipt_path = state / 'receipt.json'
         identity = digest({'manifest': manifest, 'config': config})
-        worker_module = workers or module('platform_workers')
         verification = platform_verify or module('verify-platform').local
+        reuse_ci = scope == 'multicloud' and (ci_state / 'receipt.json').exists()
+        if reuse_ci:
+            ci_receipt = private(ci_state / 'receipt.json')
+            ci_manifest = {key: manifest[key] for key in ('version', 'source_sha', 'platform_revision', 'images')}
+            ci_config = {key: config[key] for key in ('version', 'state_dir', 'workers', 'apps')}
+            ci_config['workers'] = worker_module.scoped_config(ci_config['workers'], 'ci')
+            require(ci_receipt.get('status') == 'verified' and ci_receipt.get('input_sha256') ==
+                    digest({'manifest': ci_manifest, 'config': ci_config}), 'CI_RELEASE_NOT_VERIFIED')
+            ci_proof = worker_module.verify_workers(ci_state / 'workers.json')
+            require(ci_proof.get('status') == 'verified' and ci_proof.get('executable_verification') is True,
+                    'CI_RELEASE_NOT_VERIFIED')
+        worker_state = state / 'workers.json'
+        apps_state = (ci_state if reuse_ci else state) / 'apps.json'
         if receipt_path.exists():
             previous = private(receipt_path)
             require(previous['input_sha256'] == identity, 'RELEASE_INPUT_CHANGED')
@@ -218,7 +242,7 @@ def execute(config, manifest, *, workers=None, target_runner=None, target_verifi
             require(current['input_sha256'] == identity and last_attempt['input_sha256'] == identity,
                     'RELEASE_SUPERSEDED_RECONCILIATION_REQUIRED')
             verification(manifest['platform_revision'], {k: manifest['images'][k] for k in ('dashboard', 'api')})
-            worker_proof = worker_module.verify_workers(state / 'workers.json')
+            worker_proof = worker_module.verify_workers(worker_state)
             require(worker_proof.get('status') == 'verified' and worker_proof.get('executable_verification') is True, 'WORKER_EXECUTION_NOT_VERIFIED')
             if target_verifier is None:
                 target_verifier = lambda target, release: update_target(target, release, config, True)
@@ -228,7 +252,7 @@ def execute(config, manifest, *, workers=None, target_runner=None, target_verifi
                         and proof.get('provider') == target['provider'] and proof.get('target_id') == target['target_id']
                         and proof.get('scope') == target.get('scope')
                         for target, proof in zip(targets, checked)), 'RELEASE_LIVE_READBACK_FAILED')
-            worker_module.verify_apps(state / 'apps.json')
+            worker_module.verify_apps(apps_state)
             return {**previous, 'targets': checked, 'reverified_at': datetime.now(timezone.utc).isoformat()}
         if (home / 'last-attempt.json').exists():
             last = private(home / 'last-attempt.json')
@@ -238,14 +262,23 @@ def execute(config, manifest, *, workers=None, target_runner=None, target_verifi
             require(prior.get('status') == 'verified' and prior.get('input_sha256') == last.get('input_sha256')
                     and private(home / 'current.json').get('input_sha256') == last.get('input_sha256'),
                     'PRIOR_RELEASE_RECONCILIATION_REQUIRED')
-        receipt = {'version': 1, 'source_sha': manifest['source_sha'], 'input_sha256': identity,
+        receipt = {'version': 1, 'scope': scope, 'source_sha': manifest['source_sha'], 'input_sha256': identity,
                    'status': 'running', 'stage': 'preflight', 'targets': [], 'started_at': datetime.now(timezone.utc).isoformat()}
         save(state / 'manifest.json', manifest); save(receipt_path, receipt)
         save(home / 'last-attempt.json', {'source_sha': manifest['source_sha'], 'input_sha256': identity})
         try:
             receipt['platform'] = verification(manifest['platform_revision'], {k: manifest['images'][k] for k in ('dashboard', 'api')})
             receipt['stage'] = 'workers'; save(receipt_path, receipt)
-            receipt['workers'] = worker_module.apply_workers(config['workers'], manifest['images'], manifest['source_sha'], state / 'workers.json')
+            promotion = promote or worker_module.promote_apps
+            def before_resume(prepared):
+                receipt['stage'] = 'promotion'; save(receipt_path, receipt)
+                receipt['apps'] = promotion(config['apps'], manifest['source_sha'],
+                    {**receipt, 'status': 'prepared', 'workers': prepared}, apps_state)
+                receipt['stage'] = 'worker-verification'; save(receipt_path, receipt)
+            # CI owns only build replenishment; provider credential renewal remains in the full release.
+            receipt['workers'] = worker_module.apply_workers(config['workers'], manifest['images'], manifest['source_sha'], worker_state,
+                **({'before_resume': before_resume, 'scope': 'ci'} if scope == 'ci-runtime' else
+                   {'scope': 'credentials'} if reuse_ci else {}))
             require(receipt['workers'].get('status') == 'verified' and receipt['workers'].get('executable_verification') is True, 'WORKER_EXECUTION_NOT_VERIFIED')
             receipt['stage'] = 'targets'; save(receipt_path, receipt)
             if target_runner is None:
@@ -265,11 +298,12 @@ def execute(config, manifest, *, workers=None, target_runner=None, target_verifi
                                  'status': 'unknown', 'code': 'TARGET_READBACK_REQUIRED'}
                     receipt['targets'].append(proof); save(receipt_path, receipt)
             receipt['targets'].sort(key=lambda row: row['provider'])
-            require(len(receipt['targets']) == 3 and all(t.get('status') == 'verified' for t in receipt['targets']), 'THREE_PROVIDER_VERIFICATION_FAILED')
+            require(len(receipt['targets']) == len(targets) and all(t.get('status') == 'verified' for t in receipt['targets']), 'THREE_PROVIDER_VERIFICATION_FAILED')
             receipt['stage'] = 'promotion'; save(receipt_path, receipt)
             verified = {**receipt, 'status': 'verified'}
-            promotion = promote or worker_module.promote_apps
-            receipt['apps'] = promotion(config['apps'], manifest['source_sha'], verified, state / 'apps.json')
+            if scope != 'ci-runtime':
+                receipt['apps'] = (worker_module.verify_apps(apps_state) if reuse_ci else
+                    promotion(config['apps'], manifest['source_sha'], verified, apps_state))
             receipt.update(status='verified', stage='complete', completed_at=datetime.now(timezone.utc).isoformat())
             save(receipt_path, receipt); save(home / 'current.json', receipt)
         except Exception as error:
