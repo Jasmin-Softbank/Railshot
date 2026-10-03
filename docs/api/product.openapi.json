@@ -3196,9 +3196,7 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": [
-                  "linkage_token"
-                ],
+                "required": ["linkage_token"],
                 "properties": {
                   "linkage_token": {
                     "type": "string",
@@ -3217,32 +3215,18 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": [
-                    "registration_id",
-                    "status",
-                    "claimed_at"
-                  ],
+                  "required": ["registration_id", "status", "claimed_at"],
                   "properties": {
-                    "registration_id": {
-                      "type": "string",
-                      "format": "uuid"
-                    },
-                    "status": {
-                      "const": "claimed"
-                    },
-                    "claimed_at": {
-                      "type": "string",
-                      "format": "date-time"
-                    }
+                    "registration_id": { "type": "string", "format": "uuid" },
+                    "status": { "const": "claimed" },
+                    "claimed_at": { "type": "string", "format": "date-time" }
                   },
                   "additionalProperties": false
                 }
               }
             }
           },
-          "401": {
-            "description": "Invalid, expired, or already used token"
-          }
+          "401": { "description": "Invalid, expired, or already used token" }
         }
       }
     },
@@ -3316,9 +3300,7 @@
             "description": "Python script",
             "content": {
               "text/x-python": {
-                "schema": {
-                  "type": "string"
-                }
+                "schema": { "type": "string" }
               }
             }
           }
