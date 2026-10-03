@@ -96,3 +96,71 @@ requests. Deployment/template/selector, ReplicaSet and Pod owner UIDs, immutable
 image digests, observed generation and readiness must agree. Reasons such as
 OOMKilled are recorded without free-form Pod messages. Failed observation remains
 unavailable and does not override the bridge's deployment decision.
+
+## Focused first-read context
+
+Responsibilities are deliberately small:
+
+| Owner | Responsibility |
+| --- | --- |
+| CI `diagnostics.py` | Capture and redact facts, bind source/policy, persist bounded originals. No model calls. |
+| API `diagnostics.js` | Validate archive, source/run binding and evidence hashes. |
+| API `diagnostic-context.js` | Deterministically select the failed layer's evidence under shared byte budgets. No I/O, retries or decisions. |
+| API `deployment-diagnostics.js` | Authorize, coalesce collection/current-attempt checks, reserve a durable classification. |
+| API `classifier.js` | Adapt the packet to Jev's typed choices and validate its response. |
+| CI `runner/repair_evidence.py` | Prepare repair evidence and verify proposal references against the unchanged source and policy. |
+| CI `runner/run_agent.py` | Supply initial evidence, run the repair SDK and enforce proposal validation. |
+
+`contract/telemetry.json:diagnostic_context` is the shared stage naming and budget
+contract. L0/L1/Q/L2/L3/L4 map to package.policy/package.spec/source.quality/
+image.build/image.runtime/image.scan. SOURCE/CONFIG/EVIDENCE describe preparation,
+configuration and integrity failures; they are not application bugs by default.
+
+Jev receives the failure excerpt (at most 3,000 UTF-8 bytes), at most three logs
+from the failed layer (1,800 bytes each), check outcomes, missing-evidence markers
+and exact case/source identifiers. Failed or unknown commands precede successful
+commands, with recent commands first. A successful docker.logs command remains
+eligible because its output may describe a failed application. Exact error-code
+context is preferred; otherwise use the tail. Identical excerpts are omitted.
+Selection metadata reports truncation; reference hashes still identify complete
+captured artifacts, not clipped text. The request remains bounded to 32,000 bytes.
+Unicode is sent directly rather than expanded into ASCII escapes. These byte
+budgets are not token counts or a demonstrated latency improvement.
+
+The repair SDK receives a separate compact projection from the same verified
+case: failure summary, original failure hash, source locations, same-layer log
+index, check outcomes and missing evidence. It does not receive the full source
+inventory in its initial prompt. Additional source files/logs/case inventory remain
+available through existing read tools when needed. Mandatory safety/policy
+instructions and reference validation remain in effect. Jev categorizes causes;
+the existing repair SDK proposes file changes only within configured scope.
+
+The API shares concurrent freshness checks, including unsuccessful checks, and
+never substitutes old cached evidence after a changed attempt. Artifact downloads
+already verify the attempt before and after retrieval. Classification does not
+repeat that network check immediately. This is not an atomic transaction with
+GitHub: the local operation identity is rechecked at durable reservation, and the
+model has no deployment authority.
+
+## Execution boundaries and remaining work
+
+Diagnostic stage names do not create execution checkpoints or guarantee that
+rerunning a stage has no side effects.
+
+| Execution unit | Current owner | Replay boundary and AI role |
+| --- | --- | --- |
+| Source registration / CI dispatch | API github/product | Reconcile an ambiguous dispatch against its existing run before resending. No source repair from transport failure alone. |
+| Packaging and gates | CI loop / runner / gate | Proposal bound to source and policy; rerun the active gate order after an accepted edit. Focused evidence enters here. |
+| Image/bundle publication | CI bundle / publisher | Respect the existing receipt/journal and verify published digests before replay. Jev does not publish. |
+| Manifest commit / Argo sync | API cd / Python bridge | Use deployment identity and the recorded Git revision; reconcile commit/push/sync outcomes before repeating side effects. |
+| Workload / public observation | Argo and API/CD observers | Repeated observation is read-only; observed failure does not authorize redeployment. |
+
+Gate execution still has a coarse checkpoint. Existing-destination bundle exports
+and ambiguous GitOps/sync recovery require their own state-machine review; this
+change does not make them independently resumable. CD observations stay in the
+operation timeline and are not forced into a fabricated CI diagnostic case.
+Separate CD failure packets and automatic case retrieval are not implemented here.
+Start with persisted case IDs, stage/error indexes and measured model usage before
+adding a graph database. Measure input tokens, selection coverage and time to a
+validated fix on representative failures; smaller input alone does not establish
+better diagnosis.

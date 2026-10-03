@@ -53,6 +53,22 @@ class RepairEvidenceTest(unittest.TestCase):
             with self.assertRaises(ValueError): check(output)
             self.assertEqual((ws/'app.py').read_text(),'print(1)\n')
 
+    def test_initial_context_is_bounded_and_retains_original_reference_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ws, run = Path(directory)/'work', Path(directory)/'run'; ws.mkdir()
+            (ws/'app.py').write_text('print(1)\n')
+            case = json.loads(case_fixture(ws, run))
+            case['failure']['excerpt'] = '실패 TS2322 ' * 2000
+            case['source']['files']['irrelevant.txt'] = {'sha256': 'a'*64, 'bytes': 999, 'lines': 5}
+            raw = json.dumps(case).encode()
+            context = repair_evidence.context(raw)
+            self.assertLessEqual(len(context['failure']['excerpt'].encode()), 3000)
+            self.assertNotIn('irrelevant.txt', json.dumps(context))
+            self.assertEqual(context['stage'], 'image.build')
+            self.assertEqual(context['evidence_binding']['case_sha256'], repair_evidence.sha(raw))
+            self.assertEqual(context['failure_reference']['sha256'], repair_evidence.sha(case['failure']['excerpt'].encode()))
+            self.assertGreater(context['failure']['excerpt_omitted_bytes'], 0)
+
     def test_all_profiles_bind_exact_plan_and_policy(self):
         from runner.run_agent import record_plan, with_files
         for order in RELEASE_ORDERS:

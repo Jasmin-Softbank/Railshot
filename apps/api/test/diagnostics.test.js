@@ -175,3 +175,60 @@ test('restart marks a persisted in-flight classification unknown without replayi
   assert.equal(store.read().operations.dep.classification.code, 'CLASSIFICATION_INTERRUPTED');
   assert.equal(store.read().operations.dep.classification.outcome_unknown, true); await store.close();
 });
+
+test('focused input prefers the failed layer beyond the first six processes and preserves terminal errors', () => {
+  const diagnostic = fixture().read();
+  diagnostic.processes = Array.from({ length: 8 }, (_, i) => ({
+    id: `process-${i + 1}`, layer: i === 7 ? 'L2' : 'Q', outcome: i === 7 ? 'FAIL' : 'PASS',
+  }));
+  diagnostic.logs = diagnostic.processes.map((p) => ({
+    process_id: p.id, path: `${p.id}.log`, sha256: 'c'.repeat(64),
+    text: p.layer === 'L2' ? 'download complete\n'.repeat(400) + 'error TS2322 app.ts:1:3 extra context' : 'unrelated quality log',
+  }));
+  const input = classificationInput(diagnostic), state = JSON.parse(input.body).state;
+  assert.equal(state.stage, 'image.build');
+  assert.match(state.evidence['process-8'], /TS2322/);
+  assert.equal(Object.keys(state.evidence).length, 2);
+  assert.equal(input.references.find((r) => r.id === 'process-8').sha256, 'c'.repeat(64));
+  diagnostic.checks[0].duration_ms += 999;
+  assert.equal(classificationInput(diagnostic).input_sha256, input.input_sha256);
+});
+
+test('runtime output is retained even when log collection succeeds; Unicode and no-code tails are bounded', () => {
+  const diagnostic = fixture().read();
+  diagnostic.failure.layer = 'L3'; diagnostic.failure.code = null;
+  diagnostic.failure.excerpt = '시작 실패'.repeat(5000);
+  diagnostic.processes[0].layer = 'L3'; diagnostic.processes[0].outcome = 'PASS';
+  diagnostic.logs[0].text = '준비 중'.repeat(5000) + '\nError: application stopped';
+  const input = classificationInput(diagnostic), state = JSON.parse(input.body).state;
+  assert.match(state.evidence['process-1'], /application stopped/);
+  assert.ok(Buffer.byteLength(state.evidence.failure) <= 3000);
+  assert.ok(Buffer.byteLength(state.evidence['process-1']) <= 1800);
+  assert.ok(Buffer.byteLength(input.body) < 32000);
+  assert.equal(input.body.includes('�'), false);
+});
+
+test('concurrent cached classification checks share one freshness lookup and stale evidence never spends a call', async () => {
+  const { createDeploymentDiagnostics } = await import('../src/deployment-diagnostics.js');
+  const diagnostic = fixture().read();
+  const row = { id: 'dep', session_id: 'session', app: 'demo-app', target_id: 'demo', source_commit: 'a'.repeat(40),
+    ci: { run_id: '123' }, status: 'failed', diagnostic_evidence: diagnostic };
+  const state = { operations: { dep: row }, bindings: { '123': {
+    operation_id: 'dep', app: row.app, target_id: row.target_id, source_commit: row.source_commit,
+  } } };
+  let checks = 0, calls = 0, release, stale = false;
+  let waiting = new Promise((resolve) => { release = resolve; });
+  const controller = createDeploymentDiagnostics({
+    store: { read: () => state, transaction: async (fn) => fn(state) }, find: () => row,
+    service: { diagnosticCurrent: async () => { checks++; await waiting; if (stale) throw new Error('attempt changed'); } },
+    classifier: async () => { calls++; return { state: 'succeeded' }; },
+  });
+  const pending = Array.from({ length: 6 }, () => controller.classify('dep', 'session'));
+  release(); await Promise.all(pending); await controller.close();
+  assert.equal(checks, 1); assert.equal(calls, 1);
+  stale = true; waiting = new Promise((resolve) => { release = resolve; });
+  const rejected = Array.from({ length: 6 }, () => controller.classify('dep', 'session'));
+  release();
+  for (const result of await Promise.all(rejected)) assert.equal(result.state, 'unavailable');
+  assert.equal(checks, 2); assert.equal(calls, 1);
+});

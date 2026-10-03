@@ -24,17 +24,23 @@ export function createDeploymentDiagnostics({ store, find, service, classifier, 
   async function collect(id, sessionId) {
     const record = find('deployments', id, sessionId), expected = identity(record), bound = binding(record);
     if (!['failed', 'blocked', 'unknown'].includes(record.status)) return { state: 'not_failed' };
-    if (fresh(record.diagnostic_evidence)) {
-      if (service?.diagnosticCurrent) {
-        try { await service.diagnosticCurrent(record.diagnostic_evidence); }
-        catch { return { state: 'unavailable', reason: 'attempt_changed_or_unavailable', checked_at: new Date().toISOString() }; }
-        current(id, sessionId, expected);
-      }
-      return record.diagnostic_evidence;
+    // Coalesce both cached-attempt checks and downloads. Return the actual result:
+    // a failed freshness check must never fall back to a previously cached artifact.
+    if (collecting.has(id)) {
+      const value = await collecting.get(id);
+      current(id, sessionId, expected);
+      return value;
     }
-    if (!service?.diagnostics) return { state: 'unavailable', reason: 'not_configured' };
-    if (collecting.has(id)) { await collecting.get(id); return current(id, sessionId, expected).diagnostic_evidence || { state: 'unavailable' }; }
     const work = (async () => {
+      if (fresh(record.diagnostic_evidence)) {
+        if (service?.diagnosticCurrent) {
+          try { await service.diagnosticCurrent(record.diagnostic_evidence); }
+          catch { return { state: 'unavailable', reason: 'attempt_changed_or_unavailable', checked_at: new Date().toISOString() }; }
+          current(id, sessionId, expected);
+        }
+        return record.diagnostic_evidence;
+      }
+      if (!service?.diagnostics) return { state: 'unavailable', reason: 'not_configured' };
       let diagnostic;
       try { diagnostic = await service.diagnostics(bound.runId, bound); }
       catch { diagnostic = { state: 'unavailable', reason: 'evidence_not_verified', checked_at: new Date().toISOString() }; }
@@ -57,11 +63,9 @@ export function createDeploymentDiagnostics({ store, find, service, classifier, 
     const diagnostic = await collect(id, sessionId); current(id, sessionId, expected);
     if (!fresh(diagnostic)) return { state: 'unavailable', reason: 'evidence_not_verified' };
     if (!classifier) return { state: 'not_configured' };
-    if (service.diagnosticCurrent) {
-      try { await service.diagnosticCurrent(diagnostic); }
-      catch { return { state: 'unavailable', reason: 'attempt_changed_or_unavailable' }; }
-      current(id, sessionId, expected);
-    }
+    // collect verifies cached attempts; diagnostics verifies before/after download.
+    // A second remote lookup here adds latency without making reservation atomic
+    // with GitHub. Local operation identity is checked again inside the transaction.
     if (diagnostic.verification.release_eligible || !['FAIL', 'BLOCKED', 'UNKNOWN'].includes(diagnostic.verification.gate_outcome)) return { state: 'not_failed' };
     const input = classificationInput(diagnostic), key = input.input_sha256;
     const reserved = await store.transaction((state) => {

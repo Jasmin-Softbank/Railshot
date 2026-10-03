@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 
 from source_snapshot import capture, entries_digest
+from diagnostics import bounded
 
 
 def sha(data):
@@ -18,6 +19,32 @@ def load(run):
     if path.is_symlink() or path.stat().st_size > 1024 * 1024:
         raise ValueError('repair evidence invalid')
     return path.read_bytes()
+
+
+
+def context(raw):
+    """Project host evidence for the first read; retain full artifacts for drill-down."""
+    case = json.loads(raw)
+    contract = json.loads((Path(__file__).resolve().parents[1] / 'contract/telemetry.json').read_text())
+    selection = contract['diagnostic_context']
+    failure = case['failure']
+    excerpt, omitted = bounded(failure['excerpt'], selection['failure_bytes'])
+    binding = {'case_id': case['case_id'], 'case_sha256': sha(raw),
+               'source_sha256': case['source']['tested_sha256'], 'policy_sha256': case['policy_sha256']}
+    # Only source locations already verified by the producer enter the initial
+    # packet. The complete source inventory remains in case.json, not the prompt.
+    return {
+        'context_version': selection['version'],
+        'stage': selection['stages'].get(failure['layer'], 'unknown'),
+        'evidence_binding': binding,
+        'failure': {**failure, 'excerpt': excerpt,
+                    'excerpt_omitted_bytes': failure['excerpt_omitted_bytes'] + omitted},
+        'failure_reference': {'kind': 'log', 'id': 'failure', 'sha256': sha(failure['excerpt'].encode())},
+        'logs': [{'id': p['id'], 'command_kind': p['command_kind'], 'outcome': p['outcome'],
+                  **p['log']} for p in case['processes'] if p['layer'] == failure['layer'] and p.get('log')],
+        'checks': [{k: v for k, v in row.items() if k != 'duration_ms'} for row in case['checks']],
+        'missing_evidence': case['missing_evidence'],
+    }
 
 
 def verify(run, workspace, output, gate_order, repair_scope, expected):
