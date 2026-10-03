@@ -529,7 +529,9 @@ export async function createProductService({ service, directory, target, provide
                 state.operations[reserved.record.id].deletion_requested ? { status: 'deleting' } : {}); });
             } catch (error) {
               const unknown = error.outcomeUnknown !== false;
-              await store.transaction((state) => { state.applications[appId].status = unknown ? 'unknown' : 'blocked'; });
+              // This read-only preflight precedes the native registration intent; only a new explicit request may retry it.
+              const unstarted = error.code === 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED' && error.outcomeUnknown === false;
+              await store.transaction((state) => { state.applications[appId].status = unstarted ? 'queued' : unknown ? 'unknown' : 'blocked'; });
               await update(reserved.record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(error.code || 'APPLICATION_REGISTRATION_FAILED', unknown) });
               return;
             }

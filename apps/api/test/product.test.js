@@ -1251,3 +1251,45 @@ test('HTTP deployment actions accepts exact resume input and returns the same re
   assert.equal(result.status, 'succeeded'); assert.equal(result.resume_count, 1);
   assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 2);
 });
+
+test('known AWS route preflight leaves registration unstarted and only a new explicit upload may retry it', async (t) => {
+  const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+  const register = f.adapter.register;
+  let calls = 0;
+  f.adapter.register = async (application) => {
+    calls++;
+    if (calls === 1) throw new EnvironmentError('APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED', 409, false);
+    return register(application);
+  };
+  const first = await f.product.createDeployment(applicationSource('calculator'), 'preflight-failure', undefined, owner);
+  const blocked = await settle(() => f.product.getDeployment(first.id, owner));
+  assert.equal(blocked.status, 'blocked'); assert.equal(blocked.stage, 'registration');
+  assert.equal(blocked.error.code, 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED'); assert.equal(blocked.error.outcome_unknown, false);
+  assert.equal(f.product.getApplication(first.application_id, owner).status, 'queued');
+  assert.equal(calls, 1); assert.equal(f.submissions.length, 0); assert.equal(f.deliveries.length, 0);
+  assert.equal((await f.product.createDeployment(applicationSource('calculator'), 'preflight-failure', undefined, owner)).id, first.id);
+  assert.equal(calls, 1); assert.equal(f.submissions.length, 0);
+  const second = await f.product.createDeployment(applicationSource('calculator'), 'corrected-preflight', undefined, owner);
+  assert.notEqual(second.id, first.id); assert.equal(second.application_id, first.application_id);
+  const completed = await settle(() => f.product.getDeployment(second.id, owner));
+  assert.equal(completed.status, 'succeeded'); assert.equal(f.product.getApplication(first.application_id, owner).status, 'ready');
+  assert.equal(calls, 2); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 1);
+  assert.equal((await f.product.getDeployment(first.id, owner)).status, 'blocked', 'the original failed operation remains evidence');
+});
+
+test('other blocked or uncertain registration failures never gain the preflight retry exception', async (t) => {
+  for (const [code, unknown, status] of [
+    ['APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED', true, 'unknown'],
+    ['APPLICATION_NAMESPACE_CONFLICT', false, 'blocked'],
+  ]) await t.test(`${code}:${status}`, async (t) => {
+    const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+    let calls = 0;
+    f.adapter.register = async () => { calls++; throw new EnvironmentError(code, 409, unknown); };
+    const first = await f.product.createDeployment(applicationSource('calculator'), 'registration-failure', undefined, owner);
+    assert.equal((await settle(() => f.product.getDeployment(first.id, owner))).status, status);
+    assert.equal(f.product.getApplication(first.application_id, owner).status, status);
+    await assert.rejects(f.product.createDeployment(applicationSource('calculator'), 'retry', undefined, owner),
+      { code: 'APPLICATION_RECONCILE_REQUIRED' });
+    assert.equal(calls, 1); assert.equal(f.submissions.length, 0); assert.equal(f.deliveries.length, 0);
+  });
+});
