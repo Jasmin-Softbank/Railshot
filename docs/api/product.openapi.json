@@ -2891,21 +2891,11 @@
                 "type": "object",
                 "required": [
                   "provider",
-                  "project_id",
-                  "user_id",
                   "enrollment_key"
                 ],
                 "properties": {
                   "provider": {
                     "const": "openstack"
-                  },
-                  "project_id": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
-                  },
-                  "user_id": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
                   },
                   "enrollment_key": {
                     "type": "string",
@@ -2928,8 +2918,6 @@
                   "required": [
                     "id",
                     "provider",
-                    "project_id",
-                    "user_id",
                     "status",
                     "created_at",
                     "claimed_at",
@@ -2943,12 +2931,6 @@
                     },
                     "provider": {
                       "const": "openstack"
-                    },
-                    "project_id": {
-                      "type": "string"
-                    },
-                    "user_id": {
-                      "type": "string"
                     },
                     "status": {
                       "enum": [
@@ -6991,8 +6973,6 @@
         "required": [
           "id",
           "provider",
-          "project_id",
-          "user_id",
           "status",
           "created_at",
           "claimed_at"
@@ -7004,12 +6984,6 @@
           },
           "provider": {
             "const": "openstack"
-          },
-          "project_id": {
-            "type": "string"
-          },
-          "user_id": {
-            "type": "string"
           },
           "status": {
             "enum": [

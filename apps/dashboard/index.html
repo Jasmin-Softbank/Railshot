@@ -100,11 +100,7 @@
               </div>
               <div class="provider-field" id="openstack-install-field" hidden>
                 <strong>OpenStack 인프라 등록</strong>
-                <p class="field-note">프로젝트·사용자 ID와 연계 키만 등록합니다. Keystone 인증정보는 고객 노드에서 직접 설정합니다.</p>
-                <label class="field-label" for="openstack-project-id">프로젝트 ID</label>
-                <input id="openstack-project-id" type="text" autocomplete="off" spellcheck="false" />
-                <label class="field-label" for="openstack-user-id">사용자 ID</label>
-                <input id="openstack-user-id" type="text" autocomplete="off" spellcheck="false" />
+                <p class="field-note">연계 키로 등록 요청을 만들고 일회성 토큰을 발급합니다. OpenStack 프로젝트·인증 정보는 고객 노드에서 직접 설정합니다.</p>
                 <label class="field-label" for="openstack-enrollment-key">임의의 연계 키 (16~256자)</label>
                 <input id="openstack-enrollment-key" type="password" autocomplete="new-password" spellcheck="false" minlength="16" maxlength="256" />
                 <button class="secondary-button" id="prepare-openstack-install" type="button">등록하고 설치 파일 받기</button>

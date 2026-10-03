@@ -7,16 +7,13 @@ export function initializeOpenStackInstaller() {
 
   async function prepareOpenStackInstaller() {
     const button = document.querySelector('#prepare-openstack-install');
-    const projectId = document.querySelector('#openstack-project-id').value.trim();
-    const userId = document.querySelector('#openstack-user-id').value.trim();
     const enrollmentKey = openstackEnrollmentKey.value;
     openstackInstallResult.hidden = true;
     document.querySelector('#openstack-linkage-token').value = '';
     openstackInstallStatus.textContent = '';
-    if (![projectId, userId].every((value) => /^[A-Za-z0-9._-]{1,255}$/.test(value))
-        || enrollmentKey.length < 16 || enrollmentKey.length > 256 || enrollmentKey.trim() !== enrollmentKey
+    if (enrollmentKey.length < 16 || enrollmentKey.length > 256 || enrollmentKey.trim() !== enrollmentKey
         || /[\x00-\x1f\x7f]/.test(enrollmentKey)) {
-      openstackInstallStatus.textContent = '프로젝트·사용자 ID와 16~256자의 연계 키를 확인하세요.';
+      openstackInstallStatus.textContent = '16~256자의 연계 키를 확인하세요.';
       return;
     }
     button.disabled = true;
@@ -29,8 +26,7 @@ export function initializeOpenStackInstaller() {
           || !/^[a-f0-9]{64}$/.test(installer.bundle_sha256)) throw new Error('설치 파일 응답을 확인하지 못했습니다.');
       const { data: registration } = await request('/api/v1/registrations', { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: 'openstack', project_id: projectId, user_id: userId,
-          enrollment_key: enrollmentKey }) });
+        body: JSON.stringify({ provider: 'openstack', enrollment_key: enrollmentKey }) });
       if (!/^[a-f0-9-]{36}$/.test(registration.id || '')
           || !/^rsl_[A-Za-z0-9_-]{43}$/.test(registration.linkage_token || '')
           || !Number.isFinite(Date.parse(registration.token_expires_at))) throw new Error('등록 결과를 확인하지 못했습니다.');
