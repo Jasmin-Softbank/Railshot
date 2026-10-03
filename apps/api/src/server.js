@@ -117,6 +117,13 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
           }
+          if (url.pathname === '/api/v1/applications/resolve') {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            const keys = ['environment', 'provider', 'app'];
+            if ([...url.searchParams.keys()].some((key) => !keys.includes(key)) || keys.some((key) => url.searchParams.getAll(key).length !== 1))
+              throw new ServiceError('환경·공급자·앱 이름을 하나씩 입력하세요.', 422);
+            json(response, 200, products.resolveApplication(Object.fromEntries(url.searchParams), sessionId)); return;
+          }
           const updateRoute = /^\/api\/v1\/applications\/([A-Za-z0-9._-]+)\/updates$/.exec(url.pathname);
           if (updateRoute) {
             if (request.method !== 'POST') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'POST'; throw error; }

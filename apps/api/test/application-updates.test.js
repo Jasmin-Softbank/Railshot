@@ -58,6 +58,22 @@ async function fixture(t, { legacy = false } = {}) {
   return f;
 }
 
+test('same-name resolution uses the exact environment and owner without dispatching or exposing another session', async (t) => {
+  const f = await fixture(t);
+  const selection = { environment: 'cloud', provider: 'aws', app: 'demo-app' };
+  const resolved = f.product.resolveApplication(selection, f.owner);
+  assert.equal(resolved.application.id, f.app);
+  assert.equal(resolved.application.current_deployment.id, f.base.id);
+  assert.equal(resolved.environment_target_id, 'runtime-aws');
+  assert.ok(!('session_id' in resolved.application));
+  for (const owner of [f.other, null]) assert.throws(() => f.product.resolveApplication(selection, owner), { code: 'APPLICATION_OWNERSHIP_CONFLICT' });
+  assert.equal(f.product.resolveApplication({ ...selection, app: 'another-app' }, f.owner).application, null);
+  assert.throws(() => f.product.resolveApplication({ ...selection, provider: 'gcp' }, f.owner), { code: 'CAPABILITY_UNAVAILABLE' });
+  assert.throws(() => f.product.resolveApplication({ ...selection, environment: 'onprem' }, f.owner), { status: 422 });
+  assert.throws(() => f.product.resolveApplication({ ...selection, app: '../invalid' }, f.owner), { status: 422 });
+  assert.equal(f.submissions.length, 1); assert.equal(f.sourceReads(), 0);
+});
+
 test('preview uses verified deployed source, persists exact GitHub snapshot, and starts once after restart', async (t) => {
   const f = await fixture(t);
   f.service.deployedSource = [file('app.js', 'agent-fixed'), file('remove.txt', 'old'), file('agent-test.js', 'assert app')];

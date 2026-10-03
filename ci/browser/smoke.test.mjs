@@ -215,6 +215,8 @@ test('application detail keeps update and lifecycle controls while active deploy
 
 test('rejected admission stays unsubmitted while a lost response preserves the same deployment key', { timeout: 45000 }, async (t) => {
   const { page, origin, errors } = await start(t, { service: null });
+  await page.route('**/api/v1/applications/resolve?*', (route) => route.fulfill({ contentType: 'application/json',
+    body: JSON.stringify({ app: 'todomvc', environment_target_id: 'runtime-aws', application: null }) }));
   await page.route('**/api/v1/options', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [
     { id: 'cloud-aws', environment: 'cloud', provider: 'aws', available: true, label: '클라우드 · AWS' },
   ] }) }));
@@ -515,13 +517,14 @@ test('a second session resolves an app name collision through the optional name 
   await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('URL 확인'));
   await page.locator('#repository-url').fill('https://github.com/example/beta-queue');
   await page.locator('#deploy-form button[type="submit"]').click();
-  await page.locator('#deploy-button').click();
-  await page.waitForFunction(() => !document.querySelector('#request-error').hidden);
-  assert.match(await page.locator('#request-error').innerText(), /다른 세션.*다른 이름/);
+  await page.waitForFunction(() => !document.querySelector('#form-error').hidden);
+  assert.match(await page.locator('#form-error').innerText(), /다른 세션.*다른 이름/);
+  assert.equal(await page.locator('#review-panel').isVisible(), false);
   assert.equal(f.submissions.length, 1, 'name collision cannot dispatch or overwrite the original app');
   await page.getByLabel('앱 이름 (선택)').fill('second-calculator');
   assert.equal(await page.locator('#review-panel').isVisible(), false, 'renaming requires a fresh review and request key');
   await page.locator('#deploy-form button[type="submit"]').click();
+  await page.locator('#review-panel').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#review-app').innerText(), 'second-calculator');
   const response = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/v1/deployments' && r.request().method() === 'POST');
   await page.locator('#deploy-button').click();
@@ -536,6 +539,50 @@ test('a second session resolves an app name collision through the optional name 
   assert.equal((await f.read(original)).app, 'beta-queue');
   assert.deepEqual(f.errors, []);
   await context.close();
+});
+
+test('new deployment of the same owned GitHub or ZIP app becomes an update and retains the service identity', { timeout: 45000 }, async (t) => {
+  const f = await queuedBrowser(t), { page, origin, stateDirectory } = f;
+  await page.locator('#repository-url').fill('https://github.com/example/beta-queue');
+  const original = await f.submit();
+  const baseline = await f.until(original, (row) => row.status === 'succeeded');
+  // The exact server lookup must not depend on the currently loaded inventory page.
+  await page.route('**/api/v1/applications?*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{"items":[]}' }));
+  await page.locator('[data-view="deploy"]').click();
+  await page.locator('#deploy-form button[type="submit"]').click();
+  await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
+  assert.equal(await page.locator('#deploy-title').innerText(), '앱 업데이트하기');
+  assert.equal(await page.locator('#repository-url').inputValue(), 'https://github.com/example/beta-queue');
+  assert.match(await page.locator('#update-diff-summary').innerText(), /변경된 파일이 없습니다/);
+  assert.equal(await page.locator('#deploy-button').innerText(), '변경 없음으로 완료');
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent.includes('변경 없음'));
+  assert.equal(f.submissions.length, 1, 'identical deployed source does not rebuild');
+
+  await page.locator('[data-view="deploy"]').click();
+  const directory = join(stateDirectory, 'updated-source'); await mkdir(directory);
+  await writeFile(join(directory, 'app.js'), 'updated ZIP source');
+  const zip = await archiveFromPath(directory);
+  await page.locator('#archive').setInputFiles({ name: 'beta-queue.zip', mimeType: 'application/zip', buffer: zip.bytes });
+  const previewResponse = page.waitForResponse((r) => new URL(r.url()).pathname === `/api/v1/applications/${baseline.application_id}/updates` && r.request().method() === 'POST');
+  await page.locator('#deploy-form button[type="submit"]').click();
+  const preview = await (await previewResponse).json();
+  assert.equal(preview.application_id, baseline.application_id);
+  assert.equal(preview.base_deployment_id, original);
+  assert.deepEqual(preview.changes.modified, ['app.js']);
+  assert.equal(preview.no_changes, false);
+  await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
+  assert.equal(await page.locator('#deploy-button').innerText(), '업데이트 시작');
+  await page.locator('#deploy-button').click();
+  const updated = await f.until(preview.id, (row) => row.status === 'succeeded');
+  assert.equal(updated.application_id, baseline.application_id);
+  assert.equal(updated.target_id, baseline.target_id);
+  assert.equal(updated.public_http.url, baseline.public_http.url);
+  assert.equal(f.submissions.length, 2);
+  assert.equal(f.submissions[1].files[0].content.toString(), 'updated ZIP source');
+  for (const query of ['app=beta-queue', 'environment=cloud&provider=aws&app=beta-queue&app=other', 'environment=cloud&provider=aws&app=beta-queue&extra=1'])
+    assert.equal((await page.request.get(`${origin}/api/v1/applications/resolve?${query}`)).status(), 422);
+  assert.deepEqual(f.errors, []);
 });
 
 test('browser accepts overlapping GitHub ZIP and folder uploads and the real HTTP queue dispatches FIFO once', { timeout: 45000 }, async (t) => {
@@ -653,6 +700,7 @@ test('original dashboard cards submit three source types through backend selecti
   const run = () => page.locator('#deploy-button').click();
   await page.locator('#repository-url').fill('https://github.com/example/browser-demo.git/');
   await review();
+  await page.locator('#review-panel').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#review-app').innerText(), 'browser-demo');
   await page.getByRole('radio', { name: /온프레미스/ }).check();
   assert.equal(await page.locator('#review-panel').isVisible(), false, 'changing environment invalidates the reviewed request');
@@ -685,6 +733,7 @@ test('original dashboard cards submit three source types through backend selecti
   const zip = await archiveFromPath(files);
   await page.locator('#archive').setInputFiles({ name: 'archive-app.zip', mimeType: 'application/zip', buffer: zip.bytes });
   await review();
+  await page.locator('#review-panel').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#review-app').innerText(), 'archive-app');
   await run();
   await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('archive-app') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
@@ -692,6 +741,7 @@ test('original dashboard cards submit three source types through backend selecti
   await writeFile(join(files, 'index.js'), 'source from folder');
   await page.locator('#folder').setInputFiles(files);
   await review();
+  await page.locator('#review-panel').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#review-app').innerText(), 'fixture');
   await run();
   await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('fixture') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
@@ -812,12 +862,14 @@ test('each provider selection keeps the assigned CI and CD target through reload
     assert.equal(await page.locator(provider === 'openstack' ? '#provider' : '#cloud-provider').inputValue(), provider);
     await page.locator('#repository-url').fill('https://github.com/example/provider-fixture');
     await page.locator('#deploy-form button[type="submit"]').click();
+    await page.locator('#review-panel').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#review-app').innerText(), 'provider-fixture');
     await page.locator('#deploy-button').click();
     await page.waitForFunction(() => document.querySelector('#request-error').textContent.includes('전용입니다'));
     assert.equal(submissions.length, 0); assert.equal(deliveries.length, 0);
     await page.locator('#repository-url').fill(`https://github.com/example/${app}`);
     await page.locator('#deploy-form button[type="submit"]').click();
+    await page.locator('#review-panel').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#review-app').innerText(), app);
     await page.locator('#deploy-button').click();
     await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');

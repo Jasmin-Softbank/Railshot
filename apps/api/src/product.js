@@ -182,8 +182,13 @@ export async function createProductService({ service, directory, target, provide
   }
   function checkUncertainResource(state, candidate, except = null) {
     const target = candidate.environment_target_id || candidate.target_id;
+    // CI writes a shared app source path. Once publication is bound, CD affects
+    // the registered environment only; another environment has a distinct app ID.
+    const separateDelivery = (row) => row.application_id && row.ci?.state === 'published'
+      && ['cd', 'http'].includes(row.stage) && row.environment_target_id && candidate.environment_target_id
+      && row.environment_target_id !== candidate.environment_target_id;
     const blocker = Object.values(state.operations).find((row) => row.id !== except && row.status === 'unknown'
-      && (row.app && row.app === candidate.app
+      && (row.app && row.app === candidate.app && !separateDelivery(row)
         || (row.kind === 'environments' || row.stage === 'environment')
           && (!target || (row.environment_target_id || row.target_id || state.plans[row.plan_id]?.private?.profile?.target?.target_id) === target)));
     if (blocker) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 또는 환경의 이전 실행 결과를 먼저 확인해야 합니다. 다른 앱은 대기열에 접수할 수 있습니다.');
@@ -633,6 +638,18 @@ export async function createProductService({ service, directory, target, provide
     dashboard: store.dashboard,
     registrations: store.registrations,
     createUpdate, startUpdate,
+    resolveApplication({ environment, provider, app }, sessionId = null) {
+      if (typeof app !== 'string' || !APP_NAME.test(app)) throw invalid('앱 이름을 확인하세요.');
+      const selected = resolveSelection({ deployment_selection: { environment, provider }, source_name: app });
+      const state = store.read();
+      const identity = applicationAdapter?.targets?.[selected.target_id]
+        ? applicationAdapter.describe(selected.target_id, selected.app) : null;
+      const application = identity && state.applications[identity.id];
+      if (application && application.session_id !== sessionId)
+        throw new ProductError(409, 'APPLICATION_OWNERSHIP_CONFLICT', '같은 환경의 이 앱 이름은 다른 세션에 등록되어 있습니다. 다른 이름을 사용하세요.');
+      return { app: selected.app, environment_target_id: selected.target_id,
+        application: application ? publicApplication(state, application) : null };
+    },
     async sourceFiles(id, variant, sessionId = null) {
       const record = find('deployments', id, sessionId);
       if (!['submitted', 'deployed'].includes(variant)) throw invalid('지원하지 않는 소스 종류입니다.');

@@ -45,3 +45,11 @@ UI 개발은 `npm run dev`(Vite 4181), 정적 빌드는 `npm run build`다. Vite
 
 앱+DB 브라우저 검사는 같은 카드에서 DB 계획 식별자, 필수 DB, DB 없는 사양, 비용 표시,
 예산·만료·불일치 차단을 localhost fixture로 확인한다. 실제 클라우드는 호출하지 않는다.
+
+## Repeated app submissions
+
+The new-deployment form resolves the source-derived or explicit app name through `GET /api/v1/applications/resolve` using the selected provider's registered environment. The lookup is server-owned and independent of the visible application inventory page. A successful app owned by the same session opens the existing update preview with the selected GitHub/ZIP/folder source preserved; the app ID, target, namespace and public address stay fixed. The user reviews added/modified/deleted files before starting. Verified identical source can finish unchanged without CI, or be explicitly rebuilt.
+
+Another session's matching name remains an ownership conflict. Different names/environments are separate apps; repository URL alone does not select an app because one repository may have multiple deployments. Stopped/deleted/pending apps are not silently recreated. A ready registration with no successful baseline can retry normal deployment. The explicit app-detail update flow still supports source files whose archive/repository name changes.
+
+An uncertain published CD/HTTP result fences its registered environment, so a GCP route reconciliation does not block a same-named AWS application. Uncertain CI/registration or missing environment bindings keep the conservative name-level fence because CI source paths are shared. The affected environment still requires reconciliation; this does not retry it or alter its resources.
