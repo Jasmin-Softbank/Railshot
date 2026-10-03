@@ -6,9 +6,12 @@
 
 - UI 기준은 `006ad34`의 소스 → 클라우드/온프레미스 → 선택 내용 확인 → 배포 시작이다.
   기존 카드·OpenStack/Proxmox 선택·콘솔 탭을 유지한다. 화면은
-  `/api/v1/options`에서 준비 상태를 읽고 소스와 environment/provider만
-  deployments API에 보낸다. 등록 대상의 ID·앱 이름 결정과 실행 가능 여부 검사는 서버가 수행한다.
+  `/api/v1/options`에서 준비 상태를 읽고 소스와 environment/provider를
+  deployments API에 보낸다. OpenStack 배포에는 선택한 연결 토큰도 보낸다.
+  등록 대상의 ID·앱 이름 결정과 실행 가능 여부 검사는 서버가 수행한다.
   미연결 provider는 명확히 차단하며 다른 대상에 배포하지 않는다.
+- OpenStack 새 연결 등록에는 unscoped 토큰만 입력한다. 등록 응답의 RailShot 연결 토큰은
+  한 번만 표시하고, 브라우저 저장소에는 보관하지 않는다.
 - 202의 `Location`과 자원 ID를 확인한 뒤 15초마다 상태를 조회한다. 이미지 게시와
   앱 배포 성공을 구분한다. 배포 성공 및 HTTP 검증 시각이 있을 때만 앱 링크를 표시한다.
 - localStorage에는 마지막 실행의 종류·ID·앱 이름만 저장한다. 새로고침 시 서버의 영속

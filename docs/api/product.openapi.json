@@ -3,7 +3,7 @@
   "info": {
     "title": "RAILSHOT shared workspace product API",
     "version": "1.0.0",
-    "description": "Implemented local contract. Public demo requires exact configured Host/Origin and no login or browser bearer. Server-only provider/GitHub/Ansible credentials are never request fields. Private operator mode may require its existing internal bearer. One API process on one host, durable private state, one unfinished operation; no multi-replica scheduler. Legacy POST /api/deploy and GET /api/runs/{run_id} preserve response shape and use the same durable run binding. Local contract tests are not cloud deployment evidence."
+    "description": "Implemented local contract. Public demo requires exact configured Host/Origin and no login or browser bearer. OpenStack connection registration accepts one unscoped token; other provider/GitHub/Ansible credentials remain server-side. Private operator mode may require its existing internal bearer. One API process on one host, durable private state, one unfinished operation; no multi-replica scheduler. Legacy POST /api/deploy and GET /api/runs/{run_id} preserve response shape and use the same durable run binding. Local contract tests are not cloud deployment evidence."
   },
   "servers": [
     {
@@ -12,6 +12,96 @@
   ],
   "security": [],
   "paths": {
+    "/api/v1/connections": {
+      "post": {
+        "operationId": "createConnection",
+        "summary": "Register one OpenStack project from an unscoped token",
+        "description": "Requires an operator-configured HTTPS Keystone v3 endpoint and encryption key. The returned RailShot connection token is only displayed once. An operator-configured project is selected when accessible; otherwise multiple available projects are rejected.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "unscoped_token"
+                ],
+                "properties": {
+                  "unscoped_token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192,
+                    "writeOnly": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Connection registered; connection_token is returned only in this response.",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "provider",
+                    "project_name",
+                    "connection_token"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "provider": {
+                      "const": "openstack"
+                    },
+                    "project_name": {
+                      "type": "string"
+                    },
+                    "connection_token": {
+                      "type": "string",
+                      "writeOnly": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "operationId": "listTargets",
@@ -2084,6 +2174,11 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -2116,6 +2211,11 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -2155,6 +2255,11 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -2556,6 +2661,11 @@
                 "minLength": 1,
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$"
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [
@@ -2619,6 +2729,11 @@
                 "minLength": 1,
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$"
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [
@@ -2689,6 +2804,11 @@
                 "minLength": 1,
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$"
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [
