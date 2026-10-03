@@ -320,6 +320,58 @@ class AWSLifecycleTest(unittest.TestCase):
         self.assertEqual(rows['aws_lb.app']['id'], 'shared-alb')
         self.assertEqual(rows['aws_security_group.alb']['ingress'], [{'from_port': 443}])
 
+    def refreshed_document(self, candidate):
+        document = self.document(candidate)
+        document['resource_drift'] = []
+        for row in document['resource_changes']:
+            kind = row['address'].split('.')[0]
+            change = row['change']
+            if kind not in ('aws_lb_listener_rule', 'aws_lb_target_group') or not change.get('before'):
+                continue
+            stale = {**change['before'], 'tags': None}
+            observed = {**stale, 'tags': {}}
+            if kind == 'aws_lb_target_group':
+                stale['load_balancer_arns'] = []
+                observed['load_balancer_arns'] = ['shared-alb']
+            document['resource_drift'].append({'address': row['address'], 'type': kind, 'mode': 'managed',
+                'change': {'actions': ['update'], 'before': stale, 'after': observed}})
+            change['before'] = observed
+            if change['actions'] == ['no-op']:
+                change['after'] = observed
+        return document
+
+    def test_aws_metadata_refresh_does_not_block_stop_start_delete(self):
+        original = self.document
+        refreshed = self.refreshed_document
+        def observed(candidate):
+            with patch.object(self, 'document', original):
+                return refreshed(candidate)
+        with patch.object(self, 'document', side_effect=observed):
+            self.test_stop_start_delete_last_app_from_real_writer_ledger_shape()
+
+    def test_refresh_still_rejects_configuration_identity_and_foreign_alb_drift(self):
+        base = self.refreshed_document(self.values)
+        cleanup.unchanged(base)
+        mutations = {
+            'tag value': lambda row: row['change']['after'].update(tags={'Owner': 'someone-else'}),
+            'port': lambda row: row['change']['after'].update(port=9999),
+            'identity': lambda row: row['change']['after'].update(id='foreign-resource'),
+            'foreign ALB': lambda row: row['change']['after'].update(load_balancer_arns=['other-alb']),
+            'second ALB': lambda row: row['change']['after'].update(load_balancer_arns=['shared-alb', 'other-alb']),
+            'replacement': lambda row: row['change'].update(replace_paths=[['port']]),
+            'import': lambda row: row['change'].update(importing={'id': 'foreign-resource'}),
+            'deposed': lambda row: row.update(deposed='old-instance'),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                document = copy.deepcopy(base)
+                drift = next(row for row in document['resource_drift'] if row['type'] == 'aws_lb_target_group')
+                mutate(drift)
+                planned = next(row['change'] for row in document['resource_changes'] if row['address'] == drift['address'])
+                planned['before'] = planned['after'] = copy.deepcopy(drift['change']['after'])
+                with self.assertRaises(ValueError):
+                    cleanup.unchanged(document)
+
     def test_implicit_backend_and_next_writer_use_current_bundle_not_old_module(self):
         import edge
         config = cleanup.read_private(self.config_path)
