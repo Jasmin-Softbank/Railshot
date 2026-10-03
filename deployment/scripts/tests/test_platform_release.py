@@ -77,7 +77,7 @@ class PlatformReleaseTests(unittest.TestCase):
     def test_trust_checks_remain_in_the_deployment_job(self):
         name = 'Validate publication and deployment inputs'
         self.assertEqual(self.run_step('deploy', name).returncode, 0)
-        for overrides in ({'PUBLISH': 'false'}, {'COMPONENTS': '["dashboard"]'},
+        for overrides in ({'PUBLISH': 'false'}, {'COMPONENTS': '["mcp"]'},
                           {'PLATFORM_TARGET': ''}, {'PLATFORM_PORT': '443'},
                           {'GITHUB_REF': 'refs/heads/feature/unreviewed'},
                           {'COMPONENTS': '["dashboard","api","api"]'},
@@ -86,6 +86,8 @@ class PlatformReleaseTests(unittest.TestCase):
                           {'PROVIDER_TARGETS': '{"openstack":"k3s-aws"}'}):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.run_step('deploy', name, overrides).returncode, 0)
+        for component in ('dashboard', 'api'):
+            self.assertEqual(self.run_step('deploy', name, {'COMPONENTS': json.dumps([component])}).returncode, 0)
         automatic = {'SKIP_BUILD': 'true', 'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push'}
         self.assertEqual(self.run_step('deploy', name, automatic).returncode, 0)
         for changes in ({'GITHUB_EVENT_NAME': 'pull_request'}, {'AUTO_RELEASE': 'false'},
@@ -213,6 +215,29 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertEqual(unchanged.returncode, 0, unchanged.stderr)
         self.assertEqual(json.loads(unchanged.stdout)["status"], "unchanged")
         self.assertEqual(self.remote_revision(), second_revision)
+
+    def test_partial_release_preserves_unchanged_deployment_and_customer_tree(self):
+        self.assertEqual(self.deploy().returncode, 0)
+        first = self.remote_revision()
+        previous = json.loads(self.git("show", f"{first}:{WORKLOAD}").stdout)
+        api = next(x for x in previous['items'] if x['kind'] == 'Deployment' and x['metadata']['name'] == 'railshot-api')
+        self.git("switch", "--detach", self.source_sha)
+        (self.artifacts / 'api.json').unlink()
+        (self.artifacts / 'dashboard.json').write_text(json.dumps({'dashboard': 'ghcr.io/jasmin-softbank/railshot-dashboard@sha256:' + 'b' * 64}))
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = json.loads(self.git("show", f"{self.remote_revision()}:{WORKLOAD}").stdout)
+        self.assertEqual(next(x for x in after['items'] if x['kind'] == 'Deployment' and x['metadata']['name'] == 'railshot-api'), api)
+        self.assertEqual(self.git('diff', '--name-only', first, self.remote_revision()).stdout.strip(), WORKLOAD)
+        # Symmetric API-only updates retain the complete dashboard Deployment.
+        dashboard = next(x for x in after['items'] if x['kind'] == 'Deployment' and x['metadata']['name'] == 'railshot-dashboard')
+        self.git("switch", "--detach", self.source_sha)
+        (self.artifacts / 'dashboard.json').unlink()
+        (self.artifacts / 'api.json').write_text(json.dumps({'api': 'ghcr.io/jasmin-softbank/railshot-api@sha256:' + 'c' * 64}))
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = json.loads(self.git("show", f"{self.remote_revision()}:{WORKLOAD}").stdout)
+        self.assertEqual(next(x for x in after['items'] if x['kind'] == 'Deployment' and x['metadata']['name'] == 'railshot-dashboard'), dashboard)
 
     def test_untrusted_or_missing_digest_fails_before_branch_creation(self):
         image = self.artifacts / "api.json"
