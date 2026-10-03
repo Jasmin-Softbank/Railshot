@@ -3,6 +3,7 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { inspectArchive, validateFiles, archiveLimits } from './archive.js';
 import { APP_NAME, APP_NAME_MESSAGE, TENANT_NAME, TARGET_ID, SOURCE_COMMIT } from './contract.js';
 import { readPublished } from './published.js';
+import { readSourceArchive, readSourceResponse, sourceSnapshotLimit } from './source-snapshot.js';
 import { AgentEventError, agentEventCheckName, agentEventLimits, validateEventBinding, validateEventRun, readAgentEventCheck, emptyAgentEvents } from './agent-events.js';
 
 const API = 'https://api.github.com';
@@ -336,7 +337,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       signal: AbortSignal.timeout(30_000), headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' },
     });
     if (!response.ok) throw new ServiceError('게시 artifact를 다운로드하지 못했습니다.', 502);
-    const files = await inspectArchive(Buffer.from(await response.arrayBuffer()));
+    const files = await inspectArchive(await readSourceResponse(response, archiveLimits.maxBytes));
     const receipt = readPublished(files, { runId, attempt, headSha, targetId: expectedTargetId, tenant });
     const publication = { ...receipt, artifact_id: artifact.id, artifact_name: name };
     return includeFiles ? { publication, files } : publication;
@@ -371,7 +372,45 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     throw new ServiceError('CI 실행 종료를 확인하지 못했습니다.', 502);
   }
 
-  return { deploy, status, cancel, events, publishedFiles, allowTarget, targetId,
+  async function sourceFiles(publication) {
+    try {
+      const files = await publishedFiles(publication);
+      const sourceSha256 = JSON.parse(files.find((file) => file.path === 'verdict.json').content).source_sha256;
+      const { run_id: runId, producer_attempt: attempt, source_commit: sourceCommit } = publication;
+      const name = `source-${attempt}`;
+      const list = await request(`${repoPath}/actions/runs/${runId}/artifacts?name=${name}&per_page=100`,
+        { redirect: 'error' }, diagnosticLimit);
+      if (!Number.isSafeInteger(list.total_count) || list.total_count < 0 || list.total_count > 100
+          || !Array.isArray(list.artifacts) || list.artifacts.length !== list.total_count) throw new Error('Incomplete source artifacts');
+      if (!list.total_count) {
+        const error = new ServiceError('이 실행에는 보존된 최종 소스가 없습니다.', 404);
+        error.code = 'SOURCE_NOT_AVAILABLE'; throw error;
+      }
+      const matches = list.artifacts.filter((item) => item.name === name), artifact = matches[0];
+      if (matches.length !== 1 || artifact.expired !== false || !Number.isSafeInteger(artifact.id) || artifact.id < 1
+          || artifact.workflow_run?.id !== runId || artifact.workflow_run?.head_sha !== sourceCommit
+          || !Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes < 1 || artifact.size_in_bytes > sourceSnapshotLimit)
+        throw new Error('Invalid source artifact binding');
+      const signal = AbortSignal.timeout(60_000);
+      let response = await fetchImpl(`${API}${repoPath}/actions/artifacts/${artifact.id}/zip`, { redirect: 'manual', signal,
+        headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' } });
+      if (response.status === 302) {
+        const location = new URL(response.headers.get('location'));
+        if (location.protocol !== 'https:' || location.username || location.password || location.port
+            || !(location.hostname.endsWith('.blob.core.windows.net') || location.hostname.endsWith('.actions.githubusercontent.com')))
+          throw new Error('Invalid GitHub source artifact destination');
+        await response.body?.cancel();
+        response = await fetchImpl(location.href, { redirect: 'error', signal }); // Never forward the GitHub credential.
+      }
+      return await readSourceArchive(await readSourceResponse(response), publication, sourceSha256);
+    } catch (error) {
+      if (error?.code === 'SOURCE_NOT_AVAILABLE') throw error;
+      const safe = new ServiceError('최종 소스의 실행 식별자와 무결성을 확인하지 못했습니다.', 502);
+      safe.code = 'SOURCE_VERIFICATION_FAILED'; throw safe;
+    }
+  }
+
+  return { deploy, status, cancel, events, publishedFiles, sourceFiles, allowTarget, targetId,
     identity: Object.freeze({ tenant, sourceRepository: `${owner}/${repo}` }),
     get targetIds() { return Object.freeze([...targetIds]); } };
 }

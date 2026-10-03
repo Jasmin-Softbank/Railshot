@@ -154,6 +154,22 @@ test('unfinished durable intent is recovered as unknown; malformed or insecure s
   try { await assert.rejects(createProductStore(linked), /private owned/); } finally { await rm(linked); }
 });
 
+test('concurrent store close callers both wait for the owner lock release before restart', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-close-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = await createProductStore(directory);
+  const session = store.dashboard.session();
+  store.dashboard.preferences(session.id, { view: 'history' });
+  const closing = store.close();
+  try {
+    await store.close();
+    await assert.rejects(stat(join(directory, 'owner.json')), { code: 'ENOENT' });
+    const restarted = await createProductStore(directory);
+    try { assert.equal(restarted.dashboard.preferences(session.id).view, 'history'); }
+    finally { await restarted.close(); }
+  } finally { await closing; }
+});
+
 test('snapshot quota bounds admission before any dispatch', async (t) => {
   const f = await fixture(t, { maxSourceBytes: 1 });
   await assert.rejects(f.product.createDeployment(input, 'large'), { code: 'CAPACITY_EXCEEDED' });

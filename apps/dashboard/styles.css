@@ -186,6 +186,19 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .history-row > div { flex: 1; min-width: 180px; }
 .history-row strong { font-size: 14px; }
 .history-actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; }
+.application-panel, .update-context { margin-bottom: 24px; }
+.update-context { padding: 24px; }
+.update-context p, .application-detail, .update-changes { overflow-wrap: anywhere; line-height: 1.7; }
+.application-detail { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e5e9e7; }
+.application-version { padding: 14px 0; }
+.application-version h4 { margin: 0 0 6px; }
+.application-version p { margin: 6px 0; font-size: 13px; }
+.update-changes { display: grid; gap: 12px; margin: 16px 0; }
+#update-baseline, #update-origin { margin: 8px 0; overflow-wrap: anywhere; line-height: 1.7; }
+.update-changes summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.update-changes ul { max-height: 220px; overflow: auto; font-size: 12px; padding-left: 20px; }
+.rebuild-choice { display: flex; align-items: start; gap: 8px; margin: 20px 0; font-size: 13px; line-height: 1.7; }
+.source-download-message { flex-basis: 100%; margin: 0; }
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 24px; font-size: 13px; }
 button:disabled { cursor: default; opacity: .5; }
 #run-steps ul { margin: 8px 0 14px; padding-left: 22px; font-size: 12px; line-height: 1.8; }

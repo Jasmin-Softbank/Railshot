@@ -17,7 +17,7 @@ function parseRepositoryUrl(input) {
 }
 
 async function githubJson(fetchImpl, path) {
-  const response = await fetchImpl(`https://api.github.com${path}`, { headers, redirect: 'manual' });
+  const response = await fetchImpl(`https://api.github.com${path}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) });
   if (response.status === 404) throw new ServiceError('공개 저장소를 찾을 수 없습니다. 비공개 저장소는 지원하지 않습니다.', 404);
   if (response.status === 403 || response.status === 429) throw new ServiceError('GitHub의 공개 API 요청 한도에 도달했습니다. 잠시 후 다시 시도하세요.', 503);
   if (!response.ok) throw new ServiceError(`GitHub 공개 API 요청 실패 (${response.status}).`, 502);
@@ -49,13 +49,13 @@ export async function fetchPublicGithubSource(input, fetchImpl = fetch) {
   if (!metadata.default_branch) throw new ServiceError('저장소의 기본 브랜치를 확인할 수 없습니다.', 400);
   const commit = await githubJson(fetchImpl, `${path}/commits/${encodeURIComponent(metadata.default_branch)}`);
   if (!/^[0-9a-f]{40}$/i.test(commit.sha || '')) throw new ServiceError('저장소의 커밋 SHA를 확인할 수 없습니다.', 502);
-  const archive = await fetchImpl(`https://api.github.com${path}/zipball/${commit.sha}`, { headers, redirect: 'manual' });
+  const archive = await fetchImpl(`https://api.github.com${path}/zipball/${commit.sha}`, { headers, redirect: 'manual', signal: AbortSignal.timeout(30_000) });
   if (![301, 302, 303, 307, 308].includes(archive.status)) throw new ServiceError(`GitHub 소스 다운로드 요청 실패 (${archive.status}).`, 502);
   let downloadUrl;
   try { downloadUrl = new URL(archive.headers.get('location')); } catch { throw new ServiceError('GitHub 소스 다운로드 주소가 잘못되었습니다.', 502); }
   if (downloadUrl.protocol !== 'https:' || downloadUrl.hostname !== 'codeload.github.com' || downloadUrl.username || downloadUrl.password || downloadUrl.port) {
     throw new ServiceError('GitHub 소스 다운로드 주소가 허용되지 않습니다.', 502);
   }
-  const bytes = await limitedBytes(await fetchImpl(downloadUrl, { redirect: 'manual', headers: { 'user-agent': headers['user-agent'] } }));
+  const bytes = await limitedBytes(await fetchImpl(downloadUrl, { redirect: 'manual', headers: { 'user-agent': headers['user-agent'] }, signal: AbortSignal.timeout(30_000) }));
   return { files: await inspectArchive(bytes, { stripRoot: true }), source: { type: 'github', repository, sha: commit.sha } };
 }

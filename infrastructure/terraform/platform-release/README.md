@@ -72,6 +72,39 @@ These executor checks are required even when IAM allows an API call. The service
 account's historical read/update description is deliberately retained to avoid an
 unrelated identity update; its attached role documents define current authority.
 
+## Acknowledge a repaired observation failure
+
+After the operator repairs the observer/collector, an explicit command on the
+control host can clear the previous-attempt barrier without replaying a failed
+release. Use the reviewed source checkout and existing operator authentication:
+
+```sh
+python3 deployment/scripts/multicloud_release.py \
+  --config /etc/railshot/release.json \
+  --manifest /var/lib/railshot-release/<failed-source-sha>/manifest.json \
+  --reconcile
+```
+
+The command requires the existing release GitHub credential in its process
+environment (load the existing Kubernetes Secret in memory; never paste it into
+the command or a file). It accepts only node-only failures whose runtime apply
+already verified an unchanged policy. It reads the current verified CI/platform
+and credentials worker, then checks all three original node identities,
+registrations, management TLS, exporters and fresh canonical collector samples.
+It performs no runtime install, observer registration, edge operation, workflow
+promotion or application deployment. Coordinate it with other releases so the
+platform and canonical registrar remain stable during verification.
+
+Success is `reconciled`, not `verified`: the original failed receipts,
+`last-attempt.json` and `current.json` remain unchanged. Separate private
+`reconciliation.json` files bind the original receipt bytes and live evidence;
+target markers retain the original receipt path and reference that evidence.
+Only a later source can proceed through the automatic pipeline. The same failed
+source still cannot be replayed. If one target remains unhealthy, no aggregate
+acknowledgement is written; retain any partial target evidence and investigate
+before another explicit invocation. Changed runtime policies, application/edge
+failures and unknown runtime mutations need a separate recovery procedure.
+
 ## Keyless control-host authentication
 
 The AWS provider trusts account `721622471953` and requires this exact STS caller

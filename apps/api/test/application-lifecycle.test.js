@@ -270,7 +270,7 @@ test('registration-stage deletion saves owned scope then waits for registration 
   const registering = new Promise((resolve) => { enter = resolve; });
   const waiting = new Promise((resolve) => { finish = resolve; });
   const events = [];
-  const f = await fixture(t, { adapter: {
+  const f = await fixture(t, { application: { status: 'queued' }, adapter: {
     register: async (application) => { enter(); await waiting; events.push('registered'); return { ...application, status: 'ready', namespace: app.id }; },
     planPendingDeletion: async (application, { id, deploymentId }) => ({ public: { id, application_id: application.id, action: 'delete',
       plan_hash: 'e'.repeat(64), resources: [{ kind: 'ApplicationNamespace', name: app.id }, { kind: 'ApplicationRoutes', name: app.id }],
@@ -342,6 +342,43 @@ test('active CD deletion previews without taking its registration lock and waits
   } finally { finish(); }
 });
 
+test('deletion of an in-flight source update waits for its CD worker and prevents later updates', async (t) => {
+  let enter, finish, submissions = 0, deliveries = 0;
+  const entered = new Promise((resolve) => { enter = resolve; }), waiting = new Promise((resolve) => { finish = resolve; });
+  const events = [], allowed = new Set(['runtime-aws']);
+  const f = await fixture(t, { options: { service: { targetId: 'runtime-aws', get targetIds() { return [...allowed]; },
+    allowTarget: (id) => allowed.add(id), deploy: async () => ({ run_id: String(123 + submissions++), source_commit: 'd'.repeat(40) }),
+    status: async (id) => ({ state: 'published', status: 'completed', publication: { run_id: Number(id),
+      source_commit: 'd'.repeat(40), target_id: app.id, app: app.app } }),
+    sourceFiles: async () => source.files,
+    cancel: async (id) => { assert.equal(id, '124'); events.push('ci-quiescent'); return { status: 'completed' }; },
+  } }, adapter: {
+    deployPublished: async () => {
+      if (++deliveries === 2) { enter(); await waiting; events.push('cd-completed'); }
+      return { cd: { deployed: true, state: 'succeeded', revision: 'e'.repeat(40) },
+        public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://calculator.example.test' } };
+    },
+    applyLifecycle: async (application) => { assert.deepEqual(events, ['cd-completed', 'ci-quiescent']); events.push('cleanup');
+      return { status: 'succeeded', application_id: application.id, action: 'delete', steps: [], residuals: [] }; },
+  } });
+  const first = await f.product.createDeployment(source, 'baseline', undefined, f.owner.id);
+  assert.equal((await settledDeployment(f.product, first.id, f.owner.id)).status, 'succeeded');
+  const input = { source_type: 'folder', files: [{ path: 'app.js', content: Buffer.from('updated') }] };
+  const preview = await f.product.createUpdate(app.id, input, 'update-preview', undefined, f.owner.id);
+  await f.product.startUpdate(preview.id, {}, f.owner.id); await entered;
+  try {
+    const plan = await f.plan('delete');
+    const operation = await f.product.createApplicationOperation(app.id, f.input(plan), 'delete-update', f.owner.id);
+    await pause(10); assert.deepEqual(events, []);
+    assert.equal(f.product.getOperation(operation.id, f.owner.id).stage, 'quiescing');
+    finish(); assert.equal((await settled(f.product, operation.id, f.owner.id)).status, 'succeeded');
+    assert.deepEqual(events, ['cd-completed', 'ci-quiescent', 'cleanup']);
+    assert.equal((await f.product.getDeployment(preview.id, f.owner.id)).stage, 'cancelled');
+    await assert.rejects(f.product.createUpdate(app.id, input, 'after-delete', undefined, f.owner.id), { code: 'APPLICATION_RECONCILE_REQUIRED' });
+    assert.equal(submissions, 2);
+  } finally { finish(); }
+});
+
 test('deletion during resumed CD waits for the registered worker before fresh planning or cleanup', async (t) => {
   let finish, enter; const entered = new Promise((resolve) => { enter = resolve; });
   const waiting = new Promise((resolve) => { finish = resolve; });
@@ -378,7 +415,7 @@ test('deletion during resumed CD waits for the registered worker before fresh pl
     const cancelled = await f.product.getDeployment(deployment.id, f.owner.id);
     assert.equal(cancelled.status, 'blocked'); assert.equal(cancelled.stage, 'cancelled');
     assert.equal(f.product.getApplication(app.id, f.owner.id).status, 'deleted');
-    assert.deepEqual([registrations, submissions, deliveries], [1, 1, 2]);
+    assert.deepEqual([registrations, submissions, deliveries], [0, 1, 2]);
   } finally { finish(); }
 });
 
@@ -413,7 +450,7 @@ test('ready application with successful stop and start history can resume its or
   assert.equal(resumed.source_commit, original.source_commit);
   for (const key of ['run_id', 'publication_artifact_id', 'producer_attempt', 'images']) assert.deepEqual(resumed.ci[key], original.ci[key]);
   assert.equal(f.product.getApplication(app.id, f.owner.id).lifecycle_operation_id, last.id);
-  assert.deepEqual([registrations, submissions, deliveries, f.calls.apply], [1, 1, 2, 2]);
+  assert.deepEqual([registrations, submissions, deliveries, f.calls.apply], [0, 1, 2, 2]);
 });
 
 test('CD exceptions preserve verified progress and a resumed failure remains unknown', async (t) => {
