@@ -202,8 +202,12 @@ export async function createProductService({ service, directory, target, provide
     if (registeredEnvironment(restored, id)) service?.allowTarget?.(id);
   }
   function inputFingerprint(input) {
+    const connectionTokenHash = input.connection_token
+      ? createHash('sha256').update(input.connection_token).digest('hex')
+      : null;
     return digest({ app: input.app, target_id: input.target_id, type: input.source_type, ...(input.environment_target_id ? { environment_target_id: input.environment_target_id } : {}), ...(input.plan_id ? { plan_id: input.plan_id } : {}),
       ...(input.deployment_selection ? { selection: input.deployment_selection } : {}),
+      ...(connectionTokenHash ? { connection_token_hash: connectionTokenHash } : {}),
       ...(input.repository_url ? { repository_url: input.repository_url } : {
         files: input.files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort(([a], [b]) => a.localeCompare(b)),
       }) });

@@ -643,6 +643,9 @@ test('HTTP provider selection rejects other source apps before fetching or dispa
   };
   deployPublished.targets = { demo: { applicationName: 'demo-app' }, 'stack-gcp': { applicationName: 'gcp-app' }, 'stack-openstack': { applicationName: 'openstack-app' } };
   const { base } = await httpFixture(t, { target: { provider: 'aws' }, deployPublished,
+    openstackProjectId: 'project1', connectionService: { verify: async (token) => {
+      assert.equal(token, 'openstack-connection'); return { project_id: 'project1' };
+    } },
     sourceLoader: async (url) => { fetched.push(url); return { files }; },
     service: { targetId: 'demo', targetIds: ['demo', 'stack-gcp', 'stack-openstack'],
       deploy: async (value) => {
@@ -664,6 +667,7 @@ test('HTTP provider selection rejects other source apps before fetching or dispa
     for (const sourceType of ['folder', 'github']) {
       const body = form(); body.delete('app'); body.delete('target_id');
       body.set('provider', provider); body.set('environment', environment);
+      if (provider === 'openstack') body.set('connection_token', 'openstack-connection');
       if (sourceType === 'github') {
         body.delete('files'); body.delete('paths'); body.set('source_type', 'github');
         body.set('repository_url', 'https://github.com/example/different-source');
@@ -676,6 +680,7 @@ test('HTTP provider selection rejects other source apps before fetching or dispa
     const post = () => {
       const body = form(); body.delete('app'); body.delete('target_id');
       body.set('provider', provider); body.set('environment', environment); body.set('source_name', app.toUpperCase());
+      if (provider === 'openstack') body.set('connection_token', 'openstack-connection');
       return fetch(`${base}/api/v1/deployments`, { method: 'POST', body, headers: { 'Idempotency-Key': `multi-${provider}` } });
     };
     const accepted = await post(); assert.equal(accepted.status, 202, await accepted.text());

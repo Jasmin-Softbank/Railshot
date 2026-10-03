@@ -13,6 +13,7 @@ import { createProductService, ProductError, idempotencyKey } from './product.js
 import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
 import { createEnvironmentAdapter, EnvironmentError } from './environments.js';
 import { DashboardError, cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
+import { createConnectionService, ConnectionError } from './connections.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
 const assets = new Map([
@@ -52,7 +53,7 @@ async function uploadedSource(request, strict = false, allowSelection = false, s
   const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
   const allowed = new Set(['app', 'target_id', 'plan_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
   if (sourceOnly) for (const name of ['app', 'target_id', 'plan_id']) allowed.delete(name);
-  if (allowSelection) for (const name of ['environment', 'provider', 'source_name']) allowed.add(name);
+  if (allowSelection) for (const name of ['environment', 'provider', 'source_name', 'connection_token']) allowed.add(name);
   for (const key of form.keys()) {
     if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
     if (key !== 'files' && form.getAll(key).length !== 1) fail('단일 입력 필드를 중복해서 보낼 수 없습니다.');
@@ -72,8 +73,24 @@ async function uploadedSource(request, strict = false, allowSelection = false, s
     if (!(environment === 'cloud' && ['aws', 'gcp'].includes(provider) || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
     const source_name = form.has('source_name') ? form.get('source_name') : undefined;
     if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
-    selected = { deployment_selection: { environment, provider }, source_name };
-  } else if (form.has('source_name')) fail('소스 이름은 환경 선택과 함께 입력하세요.');
+    const connection_token = form.has('connection_token') ? form.get('connection_token') : undefined;
+    if (connection_token !== undefined) {
+      if (environment !== 'onprem' || provider !== 'openstack' || typeof connection_token !== 'string' || !connection_token) {
+        fail('OpenStack 연결 토큰을 확인하세요.');
+      }
+    }
+    selected = {
+      deployment_selection: { environment, provider },
+      source_name,
+      ...(connection_token ? { connection_token } : {}),
+    };
+  } else if (form.has('source_name')) {
+    fail('소스 이름은 환경 선택과 함께 입력하세요.');
+  } else if (form.has('connection_token')) {
+    const connection_token = form.get('connection_token');
+    if (typeof connection_token !== 'string' || !connection_token) fail('OpenStack 연결 토큰을 확인하세요.');
+    selected = { connection_token };
+  }
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
   if (supplied.length !== 1) fail('배포 소스 하나만 입력하세요.');
@@ -137,12 +154,15 @@ function page(items, parameters) {
   return { items: visible, next_marker: start + visible.length < items.length ? visible.at(-1).id : null };
 }
 function apiError(response, error, requestId, versioned) {
-  const status = error instanceof EnvironmentError && error.status === 400 ? 422 : Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+  const environmentInputError = error instanceof EnvironmentError && error.status === 400;
+  const status = environmentInputError ? 422
+    : Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
   const codes = { 400: 'INVALID_INPUT', 401: 'UNAUTHENTICATED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 405: 'METHOD_NOT_ALLOWED', 409: 'CONFLICT', 413: 'PAYLOAD_TOO_LARGE', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'INVALID_INPUT', 502: 'UPSTREAM_FAILURE', 503: 'UPSTREAM_UNAVAILABLE' };
-  const message = error instanceof ServiceError || error instanceof ProductError || error instanceof DashboardError ? error.message : '요청을 처리하지 못했습니다.';
+  const knownError = error instanceof ServiceError || error instanceof ProductError || error instanceof DashboardError || error instanceof ConnectionError;
+  const message = knownError ? error.message : '요청을 처리하지 못했습니다.';
   const headers = { 'X-Request-ID': requestId, ...(error.allow ? { Allow: error.allow } : {}), ...(error.retryable ? { 'Retry-After': '2' } : {}) };
-  const code = error instanceof EnvironmentError && error.status === 400 ? 'INVALID_INPUT'
-    : (error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError) && error.code || codes[status] || 'INTERNAL_ERROR';
+  const code = environmentInputError ? 'INVALID_INPUT'
+    : (error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError || error instanceof ConnectionError) && error.code || codes[status] || 'INTERNAL_ERROR';
   json(response, status, versioned ? { error: { code, message,
     request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown),
     ...(error instanceof ProductError && error.admission ? { admission: error.admission } : {}) } } : { error: message }, headers);
@@ -178,7 +198,45 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
   deployPublished, environmentAdapter, applicationAdapter, observeMetrics, observeLogs, product, pollInterval,
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
+  connectionService, openstackProjectId = process.env.RAILSHOT_OPENSTACK_PROJECT_ID,
 } = {}) {
+  const connectionsReady = Promise.resolve().then(() => connectionService === undefined
+    ? createConnectionService({ directory: join(stateDirectory, 'connections') }) : connectionService);
+  connectionsReady.catch(() => {});
+
+  async function configuredConnections() {
+    let connections;
+    try { connections = await connectionsReady; }
+    catch { throw new ServiceError('OpenStack 연결 설정을 확인할 수 없습니다.', 503); }
+    if (!connections) throw new ServiceError('OpenStack 인증 서버가 설정되지 않았습니다.', 503);
+    return connections;
+  }
+
+  async function verifyDeploymentConnection(input, products, sessionId) {
+    const selectedOpenStack = input.deployment_selection?.provider === 'openstack';
+    const directTarget = !input.deployment_selection && (products?.targets?.(sessionId) || [])
+      .find((row) => row.id === input.target_id);
+    const directApplication = !input.deployment_selection && (products?.applications?.(sessionId) || [])
+      .find((row) => row.id === input.target_id || row.target_id === input.target_id);
+    const directOpenStack = !input.deployment_selection && (directTarget?.provider === 'openstack'
+      || directApplication?.provider === 'openstack'
+      || target?.provider === 'openstack' && input.target_id === service?.targetId);
+    if (!selectedOpenStack && !directOpenStack) {
+      if (input.connection_token) {
+        throw new ConnectionError(422, 'INVALID_INPUT', '이 배포 대상에는 OpenStack 연결 토큰을 사용할 수 없습니다.');
+      }
+      return;
+    }
+
+    if (!openstackProjectId) {
+      throw new ConnectionError(409, 'CAPABILITY_UNAVAILABLE', 'OpenStack 배포 대상 프로젝트가 설정되지 않았습니다.');
+    }
+    const connection = await (await configuredConnections()).verify(input.connection_token);
+    if (connection.project_id !== openstackProjectId) {
+      throw new ConnectionError(403, 'FORBIDDEN', '연결 토큰의 프로젝트와 배포 대상이 일치하지 않습니다.');
+    }
+  }
+
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
     if (product) return product;
@@ -221,6 +279,15 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);
+        }
+        if (versioned && url.pathname === '/api/v1/identities') {
+          if (request.method !== 'POST') {
+            const error = new ServiceError('지원하지 않는 메서드입니다.', 405);
+            error.allow = 'POST'; throw error;
+          }
+          if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+          json(response, 201, await (await configuredConnections()).register(await jsonInput(request)));
+          return;
         }
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
@@ -266,7 +333,16 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           }
           if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
-            json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
+            const connected = await connectionsReady.catch(() => null);
+            const options = (products?.deploymentOptions?.() || []).map((option) => {
+              const openStackUnavailable = option.environment === 'onprem'
+                && option.provider === 'openstack'
+                && (!openstackProjectId || !connected);
+              return openStackUnavailable
+                ? { ...option, available: false, message: 'OpenStack 연결과 배포 대상 프로젝트가 운영자 설정에 등록되어야 합니다.' }
+                : option;
+            });
+            json(response, 200, page(options, url.searchParams)); return;
           }
           const updateRoute = /^\/api\/v1\/applications\/([A-Za-z0-9._-]+)\/updates$/.exec(url.pathname);
           if (updateRoute) {
@@ -370,7 +446,9 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           }
           if (kind === 'deployments') {
             const key = requestKey(request);
-            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true, true), key, sourceLoader, sessionId), requestId); return;
+            const input = await uploadedSource(request, true, true);
+            await verifyDeploymentConnection(input, products, sessionId);
+            accepted(response, kind, await products.createDeployment(input, key, sourceLoader, sessionId), requestId); return;
           }
           if (kind === 'plans') {
             const plan = await products.createPlan(await jsonInput(request), sessionId);
@@ -397,7 +475,10 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       response.writeHead(200, { 'content-type': asset[1], 'content-length': content.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }).end(content);
     } catch (error) { apiError(response, error, requestId, versioned); }
   });
-  server.on('close', () => { productReady.then((value) => value?.close?.()).catch(() => {}); });
+  server.on('close', () => {
+    productReady.then((value) => value?.close?.()).catch(() => {});
+    connectionsReady.then((value) => value?.close?.()).catch(() => {});
+  });
   server.productReady = productReady;
   return server;
 }

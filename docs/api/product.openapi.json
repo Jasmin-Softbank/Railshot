@@ -3,7 +3,7 @@
   "info": {
     "title": "RAILSHOT session-scoped product API",
     "version": "1.1.0",
-    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Every remote API request is session-scoped, including requests with the existing internal operator bearer. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. Optional OpenStack connection metadata is stored separately, with encrypted write-only passwords; it is not execution configuration. One API process and one persistent SQLite database on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
+    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Console connection metadata is session-scoped and not execution configuration. POST /api/v1/identities separately validates user-provided OpenStack credentials against the configured Keystone endpoint for deployment admission. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. One API process on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
   },
   "servers": [
     {
@@ -12,6 +12,171 @@
   ],
   "security": [],
   "paths": {
+    "/api/v1/identities": {
+      "post": {
+        "operationId": "registerOpenStackIdentity",
+        "summary": "Register a verified user-provided OpenStack identity",
+        "description": "Requires an operator-configured HTTPS Keystone v3 endpoint and encryption key. The user supplies a scoped token or Application Credential plus project and user IDs. The backend validates identity and roles and does not create a credential. The returned RailShot connection token is only displayed once.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "auth_type",
+                      "project_id",
+                      "user_id",
+                      "token"
+                    ],
+                    "properties": {
+                      "auth_type": {
+                        "const": "token"
+                      },
+                      "project_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "user_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "token": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 8192,
+                        "writeOnly": true
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "auth_type",
+                      "project_id",
+                      "user_id",
+                      "application_credential_id",
+                      "application_credential_secret"
+                    ],
+                    "properties": {
+                      "auth_type": {
+                        "const": "application_credential"
+                      },
+                      "project_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "user_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "application_credential_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "application_credential_secret": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 8192,
+                        "writeOnly": true
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Connection registered; connection_token is returned only in this response.",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "provider",
+                    "project_id",
+                    "project_name",
+                    "user_id",
+                    "auth_type",
+                    "connection_token"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "provider": {
+                      "const": "openstack"
+                    },
+                    "project_name": {
+                      "type": "string"
+                    },
+                    "connection_token": {
+                      "type": "string",
+                      "writeOnly": true
+                    },
+                    "project_id": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string"
+                    },
+                    "auth_type": {
+                      "enum": [
+                        "token",
+                        "application_credential"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "operationId": "listTargets",
@@ -4215,6 +4380,11 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -4247,6 +4417,11 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -4286,6 +4461,11 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -4712,6 +4892,11 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [
@@ -4780,6 +4965,11 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [
@@ -4855,6 +5045,11 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "connection_token": {
+                "type": "string",
+                "writeOnly": true,
+                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [

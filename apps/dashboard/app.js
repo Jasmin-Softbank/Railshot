@@ -42,6 +42,22 @@ const error = document.querySelector('#form-error');
 const provider = document.querySelector('#provider');
 const providerField = document.querySelector('#provider-field');
 const cloudProvider = document.querySelector('#cloud-provider');
+const connectionFields = {
+  root: document.querySelector('#openstack-connection-field'),
+  existing: document.querySelector('#existing-connection-field'),
+  new: document.querySelector('#new-connection-field'),
+  issued: document.querySelector('#issued-connection-field'),
+  issuedToken: document.querySelector('#issued-connection-token'),
+  status: document.querySelector('#connection-registration-status'),
+  registerButton: document.querySelector('#register-connection'),
+};
+const connectionToken = document.querySelector('#connection-token');
+const openstackProjectId = document.querySelector('#openstack-project-id');
+const openstackUserId = document.querySelector('#openstack-user-id');
+const openstackAuthType = document.querySelector('#openstack-auth-type');
+const openstackToken = document.querySelector('#openstack-token');
+const openstackCredentialId = document.querySelector('#openstack-credential-id');
+const openstackCredentialSecret = document.querySelector('#openstack-credential-secret');
 const deploymentDatabase = document.querySelector('#deployment-database');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
@@ -154,6 +170,16 @@ function deploymentSelection() {
   const environment = document.querySelector('[name="environment"]:checked').value;
   return { environment, provider: environment === 'cloud' ? cloudProvider.value : provider.value };
 }
+function isOpenStack(selection) {
+  return selection.environment === 'onprem' && selection.provider === 'openstack';
+}
+function connectionMode() {
+  return document.querySelector('[name="connection-mode"]:checked').value;
+}
+function showConnectionMode(mode) {
+  connectionFields.existing.hidden = mode === 'new';
+  connectionFields.new.hidden = mode !== 'new';
+}
 function selectedOption() {
   const selected = deploymentSelection();
   return deploymentOptions.find((item) => item.environment === selected.environment && item.provider === selected.provider);
@@ -184,6 +210,7 @@ function updateSelection() {
   const selected = deploymentSelection();
   providerField.hidden = selected.environment !== 'onprem';
   document.querySelector('#cloud-provider-field').hidden = selected.environment !== 'cloud';
+  connectionFields.root.hidden = !isOpenStack(selected);
   const profile = selectedProfile();
   document.querySelector('#deployment-database-field').hidden = !profile?.database;
   databaseChoice(deploymentDatabase, profile);
@@ -200,6 +227,21 @@ document.querySelectorAll('[name="environment"]').forEach((input) => input.addEv
 provider.addEventListener('change', updateSelection);
 cloudProvider.addEventListener('change', updateSelection);
 deploymentDatabase.addEventListener('change', updateSelection);
+document.querySelectorAll('[name="connection-mode"]').forEach((input) => input.addEventListener('change', () => {
+  showConnectionMode(connectionMode());
+  invalidateReview();
+}));
+connectionToken.addEventListener('input', invalidateReview);
+openstackAuthType.addEventListener('change', () => {
+  document.querySelector('#openstack-token-field').hidden = openstackAuthType.value !== 'token';
+  document.querySelector('#openstack-credential-field').hidden = openstackAuthType.value !== 'application_credential';
+  if (openstackAuthType.value === 'token') openstackCredentialSecret.value = '';
+  else openstackToken.value = '';
+  invalidateReview();
+});
+for (const field of [openstackProjectId, openstackUserId, openstackToken, openstackCredentialId, openstackCredentialSecret]) {
+  field.addEventListener('input', invalidateReview);
+}
 
 async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
@@ -216,6 +258,53 @@ async function request(path, options = {}, controller = new AbortController()) {
     return { data, location: response.headers.get('location'), status: response.status };
   } finally { clearTimeout(timeout); requests.delete(controller); }
 }
+
+async function registerConnection() {
+  const { status, registerButton } = connectionFields;
+  status.textContent = '';
+  connectionFields.issued.hidden = true;
+  connectionFields.issuedToken.value = '';
+  const project_id = openstackProjectId.value.trim();
+  const user_id = openstackUserId.value.trim();
+  const auth_type = openstackAuthType.value;
+  const credential = auth_type === 'token'
+    ? { token: openstackToken.value.trim() }
+    : { application_credential_id: openstackCredentialId.value.trim(),
+      application_credential_secret: openstackCredentialSecret.value };
+  if (!project_id || !user_id || Object.values(credential).some((value) => !value || /[\r\n]/.test(value))) {
+    status.textContent = '프로젝트·사용자 ID와 선택한 인증 정보를 입력하세요.';
+    return;
+  }
+
+  registerButton.disabled = true;
+  try {
+    const { data } = await request('/api/v1/identities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ auth_type, project_id, user_id, ...credential }),
+    });
+    if (typeof data.connection_token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.connection_token)) {
+      throw new Error('연결 토큰 발급 응답을 확인하지 못했습니다.');
+    }
+
+    connectionFields.issuedToken.value = data.connection_token;
+    connectionFields.issued.hidden = false;
+    connectionToken.value = data.connection_token;
+    openstackToken.value = '';
+    openstackCredentialSecret.value = '';
+    document.querySelector('[name="connection-mode"][value="existing"]').checked = true;
+    showConnectionMode('existing');
+    status.textContent = `${data.project_name} 프로젝트의 ${data.user_id} 사용자 연결을 확인했습니다. 발급된 토큰은 이번 화면에서만 확인할 수 있습니다.`;
+    invalidateReview();
+  } catch (cause) {
+    status.textContent = cause.name === 'AbortError'
+      ? '연결 등록 요청 시간이 초과되었습니다. 상태를 확인한 뒤 다시 시도하세요.'
+      : cause.message;
+  } finally {
+    registerButton.disabled = false;
+  }
+}
+connectionFields.registerButton.addEventListener('click', registerConnection);
 
 async function checkConnection() {
   try {
@@ -403,6 +492,8 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else if (selectedSource.kind === 'repository' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s?#]+\/?$/.test(selectedSource.label)) error.textContent = '공개 GitHub 저장소 URL을 입력하세요.';
   else if (selectedSource.kind === 'archive' && !archive.files[0].name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
   else if (selected.environment === 'onprem' && !selected.provider) error.textContent = '온프레미스 인프라 종류를 선택하세요.';
+  else if (isOpenStack(selected) && connectionMode() === 'new') error.textContent = '먼저 OpenStack 연결을 등록하고 토큰을 발급받으세요.';
+  else if (isOpenStack(selected) && !connectionToken.value.trim()) error.textContent = '기존 OpenStack 연결 토큰을 입력하세요.';
   else if (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available)) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
   else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
@@ -428,6 +519,7 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
       return;
     } finally { reviewing = false; reviewButton.disabled = false; }
     reviewed = { ...selected, source, kind: 'deployments', key: crypto.randomUUID(), plan,
+      ...(isOpenStack(selected) ? { connectionToken: connectionToken.value.trim() } : {}),
       targetId: plan?.runtime_target_id || profile?.target_id };
     document.querySelector('#review-source').textContent = source.label;
     document.querySelector('#review-app').textContent = app;
@@ -536,6 +628,8 @@ deployButton.addEventListener('click', async () => {
     if (draft.plan) {
       payload.set('app', draft.plan.name); payload.set('target_id', draft.targetId); payload.set('plan_id', draft.plan.id);
     } else { payload.set('environment', draft.environment); payload.set('provider', draft.provider); }
+    if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (draft.source.files[0].webkitRelativePath || draft.source.files[0].name).split('/')[0]);
+    if (draft.connectionToken) payload.set('connection_token', draft.connectionToken);
     if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (draft.source.files[0].webkitRelativePath || draft.source.files[0].name).split('/')[0]);
     appendSource(payload, draft.source);
     draft.attempted = true;
