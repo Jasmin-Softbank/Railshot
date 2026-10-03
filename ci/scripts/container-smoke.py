@@ -104,6 +104,11 @@ def verify_dashboard(endpoint, token, calls, marker):
     assert status == 200 and calls[-1]['authenticated'], 'Browser supplied authorization reached the private API'
     assert calls[-1]['path'] == '/api/v1/deployments' and calls[-1]['method'] == 'POST'
     assert calls[-1]['body'] == b'local-source-fixture' and calls[-1]['idempotency_key'] == 'proxy-smoke'
+    for path in ['/mcp', '/mcp/', '/.well-known/oauth-protected-resource']:
+        status, _, _ = http(endpoint + path, headers)
+        assert status == 401 and calls[-1]['path'] == path, 'MCP proxy did not reach fixture'
+        assert not calls[-1]['authenticated'], 'MCP proxy injected the internal API token'
+        assert calls[-1]['host'] == headers['Host'], 'MCP proxy lost Host'
     for path in ['/railshot-proxy.conf', '/start.sh', '/run/secrets/api-token', '/.env', '/.git/config']:
         status, _, content = http(endpoint + path)
         assert status == 404 and token.encode() not in content, 'Private configuration is reachable as a static asset'
@@ -158,7 +163,8 @@ def web_smoke(component, image, token_file, token, upstream=None):
                '-v', f'{token_file}:/run/secrets/api-token:ro']
     if component == 'dashboard':
         options += ['--add-host', 'host.docker.internal:host-gateway',
-                    '-e', f'RAILSHOT_API_UPSTREAM=host.docker.internal:{upstream[0]}']
+                    '-e', f'RAILSHOT_API_UPSTREAM=host.docker.internal:{upstream[0]}',
+                    '-e', f'RAILSHOT_MCP_UPSTREAM=host.docker.internal:{upstream[0]}']
     else:
         options += ['-e', 'RAILSHOT_BIND_HOST=0.0.0.0', '-e', 'RAILSHOT_ALLOWED_HOSTS=localhost,127.0.0.1',
                     '-e', 'RAILSHOT_STATE_DIR=/tmp/railshot-state', '-e', 'RAILSHOT_TARGET_ID=container-smoke',
@@ -213,6 +219,15 @@ def smoke(component, image):
                 assert selector.select(30), 'MCP initialize timed out'
                 response = json.loads(process.stdout.readline())
             assert response.get('id') == 1 and response.get('result', {}).get('serverInfo'), response
+            process.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
+            process.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}}) + '\n')
+            process.stdin.flush()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                assert selector.select(30), 'MCP tools/list timed out'
+                tools = json.loads(process.stdout.readline())
+            names = {item['name'] for item in tools.get('result', {}).get('tools', [])}
+            assert tools.get('id') == 2 and {'deploy_repository', 'get_deployment'} <= names, tools
         finally:
             remove_container(name)
             process.communicate(timeout=15)

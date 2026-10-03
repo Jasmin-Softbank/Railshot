@@ -56,7 +56,7 @@ flowchart TD
 | 자격 갱신·로그 | 등록 정책·ServiceAccount UID·namespace → TokenRequest/Pod owner 검사 → 갱신 worker·로그 reader | 공통 연결과 앱 private credential을 구분. 정책/Secret 전환 중 일부 쓰기 실패에도 갱신 가능 |
 | 관측 | 환경 ID → 노드 지표; 앱 target → Pod/로그 → UI | 공유 노드 지표를 특정 앱 전용 지표로 해석하지 않음. 다른 앱 Pod·로그 혼입 거절 |
 | 중지·재개·삭제 | 앱 소유 목록·실행 상태 → 제한된 실행 계획 → runtime/provider 정리 | #79의 세션 소유권·공통 실행 검사와 업데이트·CD 재개 경합 검사 유지. 공통 cluster Secret·갱신 정책·다른 앱·공유 LB 보존 |
-| CLI/MCP | origin별 cookie jar → 동일 API 권한 검사 → 기존 오류 형식 | remote client도 세션 소유권 적용. 사람의 로그인 계정이나 Argo SSO가 생긴 것으로 표현하지 않음 |
+| CLI/MCP | 각 클라이언트의 origin별 cookie jar → 동일 API 세션 검사 | 원격 클라이언트도 세션 소유권 적용. 서로 같은 쿠키 저장소를 공유하면 같은 세션으로 취급됨. 사람의 로그인 계정이나 Argo SSO가 생긴 것은 아님 |
 
 구현 위치: `apps/api/src/{sessions,applications,product,product-store}.js`, `apps/dashboard/app.js`, `deployment/scripts/{applications,environment}.py`, `gitops/{handoff,argo,credentials,logs}.py`. API 계약은 [product.md](../api/product.md), 세션 수명은 [dashboard-sessions.md](../api/dashboard-sessions.md)를 따른다.
 

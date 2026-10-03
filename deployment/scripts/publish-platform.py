@@ -41,14 +41,16 @@ def render(artifacts, target, port, provider_targets="{}", previous=None):
                 rf"ghcr\.io/jasmin-softbank/railshot-{item.stem}@sha256:[a-f0-9]{{64}}", image):
             raise ValueError("published component requires its immutable GHCR digest")
         images.update(value)
-    changed = set(images) & {"dashboard", "api"}
+    changed = set(images) & {"dashboard", "api", "mcp"}
     if not changed:
         raise ValueError("a platform publication artifact is required")
     preserved = {}
-    for component in {"dashboard", "api"} - changed:
+    for component in {"dashboard", "api", "mcp"} - changed:
         matches = [item for item in (previous or {}).get("items", [])
                    if item.get("kind") == "Deployment" and item.get("metadata", {}).get("name") == "railshot-" + component
                    and item["metadata"].get("namespace") == "railshot-system"]
+        if len(matches) != 1 and component == "mcp":
+            continue
         if len(matches) != 1:
             raise ValueError("initial deployment requires dashboard and api artifacts")
         preserved[component] = matches[0]

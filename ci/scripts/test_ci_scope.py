@@ -152,7 +152,11 @@ class ScopeTests(unittest.TestCase):
         cases = {
             'apps/dashboard/styles.css': {'dashboard'},
             'apps/dashboard/package.json': {'dashboard', 'api', 'mcp'},
-            'apps/api/src/server.js': {'api', 'mcp'},
+            'apps/api/src/server.js': {'api'},
+            'apps/api/Dockerfile': {'api', 'mcp'},
+            'apps/agent/src/mcp.js': {'mcp'},
+            'apps/agent/test/agent.test.js': {'mcp'},
+            'apps/agent/package.json': {'mcp'},
             'apps/agent/sender.py': {'api'},
             'apps/api/package.json': {'dashboard', 'api', 'mcp'},
             'package-lock.json': {'dashboard', 'api', 'mcp'},
@@ -199,6 +203,10 @@ class ScopeTests(unittest.TestCase):
                     if relative.startswith('apps/dashboard/') and relative != 'apps/dashboard/package.json':
                         continue
                     if ci_scope.documentation(relative):
+                        continue
+                    if relative.startswith('apps/agent/src/') or relative == 'apps/agent/package.json':
+                        with self.subTest(path=relative):
+                            self.assertIn('mcp', ci_scope.container_components([relative]))
                         continue
                     with self.subTest(path=relative):
                         self.assertIn('api', ci_scope.container_components([relative]))

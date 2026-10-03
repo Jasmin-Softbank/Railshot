@@ -12,7 +12,7 @@ The browser, HTTP API, and MCP agent are separate entry points. The API owns val
 | `api/src/http/` | Imported by `server.js` | Request parsing, source upload, and response formatting |
 | `api/src/openstack/` | Imported by API service | Registration tokens and installer package |
 | `api/src/product.js`, `product-store.js` | Imported by `server.js` | Deployment state machine and durable storage |
-| `agent/src/` | `npm start --prefix apps/agent` | Agent HTTP boundary, model, API client, and MCP tools |
+| `agent/src/` | `npm run mcp --workspace @railshot/agent` or `npm run mcp:remote --workspace @railshot/agent` | stdio or OAuth protected HTTP MCP tools and product API client; optional HTTP conversation agent |
 | `agent/*.py` | Called by customer install process | Restricted on-premises command channel; paths are part of `install.sh`'s package contract |
 
-The API can run as a host Node process or from the `api` stage of `api/Dockerfile`. The Dockerfile also has an `mcp` stage; the dashboard and CI runner have separate images. See [host deployment](../docs/architecture/host-api-deployment.md) or [container deployment](../docs/architecture/container-deployment.md).
+The API can run as a host Node process or from the `api` stage of `api/Dockerfile`. Its `mcp` stage packages both `agent/src/mcp.js` and `agent/src/remote-mcp.js`; the dashboard and CI runner have separate images. See [host deployment](../docs/architecture/host-api-deployment.md) or [container deployment](../docs/architecture/container-deployment.md).
