@@ -299,3 +299,23 @@ test('cancel during inventory refresh never sends a hidden plan request', { time
   finish(); await page.waitForFunction(() => document.querySelector('#applications-list li')?.textContent.includes('my-app'));
   assert.equal(state.plans.length, 0); assert.equal(state.writes.length, 0);
 });
+
+test('proxy HTML failure is readable and retryable without treating an uncertain delete as rejected', { timeout: 45000 }, async (t) => {
+  const { state, page } = await fixture(t); let unavailable = true;
+  await page.route('**/api/v1/applications/app-ready/plans', (route) => unavailable
+    ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }) : route.fallback());
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-retry').hidden);
+  assert.match(await page.locator('#lifecycle-error').innerText(), /서버 응답.*HTTP 502/);
+  assert.equal(await page.locator('#lifecycle-confirm').isDisabled(), true);
+  assert.equal(state.writes.length, 0); unavailable = false;
+  await page.getByRole('button', { name: '계획 다시 확인' }).click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  await page.route('**/api/v1/applications/app-ready/operations', (route) =>
+    route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }));
+  await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-dialog').open);
+  assert.match(await page.locator('#lifecycle-operation-message').innerText(), /HTTP 502/);
+  assert.equal(await appAction(page, 'my-app', '삭제').isDisabled(), true);
+  assert.equal(state.writes.length, 0);
+});
