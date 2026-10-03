@@ -3,6 +3,7 @@
 import argparse
 import base64
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 from http.client import HTTPConnection, HTTPSConnection
@@ -19,8 +20,14 @@ from urllib.parse import urlsplit
 from argo import LABEL, native, require
 
 LIFETIME = 21600
+MAX_POLICY_BYTES = 131072
+RENEWAL_WORKERS = 4
 LABELS = {'argocd.argoproj.io/secret-type': 'cluster', 'app.kubernetes.io/managed-by': 'railshot'}
 APPLICATION_ID = r'app-[a-f0-9]{24}'
+
+
+class PolicyCapacityError(ValueError):
+    code = 'APPLICATION_CREDENTIAL_POLICY_CAPACITY_EXCEEDED'
 
 
 def credential_labels_match(labels, target_id, project, namespaces):
@@ -46,8 +53,12 @@ def tls_name(value):
 
 def validate_policy(policy):
     require(set(policy) == {'version', 'targets'} and policy['version'] == 1, 'invalid renewal policy')
+    # This is credential storage, not a quota on successfully deployed apps.
+    # Use the worker's existing document bound instead of counting registrations.
+    if len(json.dumps(policy).encode()) >= MAX_POLICY_BYTES:
+        raise PolicyCapacityError('renewal policy exceeds the 128 KiB document limit')
     targets = policy['targets']
-    require(isinstance(targets, list) and 0 <= len(targets) <= 20, 'registered targets required')
+    require(isinstance(targets, list), 'registered targets required')
     for target in targets:
         required = {'secret', 'target_id', 'server', 'project', 'namespaces', 'service_account', 'ca_sha256', 'audiences'}
         require(required <= set(target) <= required | {'tls_server_name', 'previous_scope'}, 'invalid registration binding')
@@ -279,6 +290,22 @@ def render(policy, image):
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
 
 
+def renew_policy(policy):
+    """Renew independent Secrets with bounded concurrency; keep failures isolated."""
+    validate_policy(policy)
+
+    def attempt(target):
+        try:
+            return renew(target)
+        except Exception:
+            return {'secret': target['secret'], 'status': 'unchanged', 'code': 'RENEWAL_FAILED'}
+
+    # Policy validation rejects duplicate Secrets. Each worker retains the
+    # existing resourceVersion check and readback; it never retries a write.
+    with ThreadPoolExecutor(max_workers=RENEWAL_WORKERS) as executor:
+        return list(executor.map(attempt, policy['targets']))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('renew', 'render'))
@@ -286,17 +313,11 @@ def main():
     parser.add_argument('--image', help='published existing API image digest, for render only')
     args = parser.parse_args()
     try:
-        require(args.policy.stat().st_size < 131072, 'small operator policy required')
+        require(args.policy.stat().st_size < MAX_POLICY_BYTES, 'small operator policy required')
         policy = validate_policy(json.loads(args.policy.read_bytes()))
         if args.command == 'render':
             print(json.dumps(render(policy, args.image or ''), indent=2)); return 0
-        results = []
-        for target in policy['targets']:
-            try:
-                result = renew(target)
-            except Exception:
-                result = {'secret': target['secret'], 'status': 'unchanged', 'code': 'RENEWAL_FAILED'}
-            results.append(result)
+        results = renew_policy(policy)
         print(json.dumps({'results': results}))
         return 0 if all(r['status'] == 'renewed' for r in results) else 1
     except Exception:

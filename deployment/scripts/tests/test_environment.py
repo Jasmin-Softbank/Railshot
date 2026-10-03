@@ -136,18 +136,19 @@ class RegistrationTest(unittest.TestCase):
         cm['data']['policy.json'] = json.dumps({'version': 1, 'targets': targets})
         return targets
 
-    def test_legacy_registration_checks_renewal_capacity_before_external_writes(self):
+    def test_legacy_registration_checks_policy_size_before_external_writes(self):
         self.fill_renewal_policy(20)
-        with self.assertRaisesRegex(ValueError, 'renewal target capacity exhausted'):
+        with patch.object(env.credentials, 'MAX_POLICY_BYTES', 1), self.assertRaises(env.credentials.PolicyCapacityError):
             self.run_registration()
         self.assertEqual((self.runtime.applications, self.control.applications), (0, 0))
         self.assertIsNone(self.variable)
 
-    def test_install_renewal_rejects_full_or_invalid_candidate_before_role_write(self):
+    def test_install_renewal_rejects_oversized_or_invalid_candidate_before_role_write(self):
         targets = self.fill_renewal_policy(20)
         before = copy.deepcopy(self.control.objects)
         candidate = {**targets[0], 'target_id': 'new-target', 'secret': 'railshot-new-target'}
-        with self.assertRaisesRegex(ValueError, 'registered targets required'):
+        limit = len(json.dumps({'version': 1, 'targets': targets}).encode()) + 1
+        with patch.object(env.credentials, 'MAX_POLICY_BYTES', limit), self.assertRaises(env.credentials.PolicyCapacityError):
             env.install_renewal(self.config['cd'], candidate)
         self.assertEqual(self.control.applications, 0)
         self.assertEqual(self.control.objects, before)
