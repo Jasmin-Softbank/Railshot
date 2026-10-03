@@ -29,7 +29,7 @@ mock_provider "google" {
   }
 }
 
-run "exact_instance_and_read_update_authority" {
+run "exact_instance_and_application_lifecycle_authority" {
   command = apply
 
   assert {
@@ -56,15 +56,113 @@ run "exact_instance_and_read_update_authority" {
     condition = (
       google_project_iam_member.edge_release.project == "railshot-poc-20261001" &&
       google_project_iam_member.edge_release.member == "serviceAccount:railshot-gcp-edge-release@railshot-poc-20261001.iam.gserviceaccount.com" &&
-      alltrue([for permission in google_project_iam_custom_role.edge_release.permissions :
-        can(regex("^(compute|certificatemanager|resourcemanager|serviceusage)\\.[A-Za-z]+\\.(get|list|use|useReadOnly|update|setLabels|setTarget|setUrlMap|setCertificateMap)$", permission))
-      ]) &&
-      !contains(google_project_iam_custom_role.edge_release.permissions, "compute.instances.update") &&
-      !contains(google_project_iam_custom_role.edge_release.permissions, "compute.disks.update") &&
-      contains(google_project_iam_custom_role.edge_release.permissions, "compute.globalOperations.get") &&
-      contains(google_project_iam_custom_role.edge_release.permissions, "certificatemanager.operations.get")
+      google_project_iam_member.edge_release.role == google_project_iam_custom_role.edge_release.name &&
+      length(google_project_iam_member.edge_release.condition) == 0 &&
+      google_project_iam_custom_role.edge_release.role_id == "railshotExistingEdgeRelease" &&
+      toset(google_project_iam_custom_role.edge_release.permissions) == toset([
+        "resourcemanager.projects.get",
+        "serviceusage.services.list",
+        "serviceusage.services.use",
+        "compute.instances.get",
+        "compute.instances.list",
+        "compute.disks.get",
+        "compute.networkEndpointGroups.get",
+        "compute.networkEndpointGroups.use",
+        "compute.firewalls.get",
+        "compute.firewalls.update",
+        "compute.healthChecks.get",
+        "compute.healthChecks.update",
+        "compute.healthChecks.useReadOnly",
+        "compute.backendServices.get",
+        "compute.backendServices.update",
+        "compute.backendServices.use",
+        "compute.urlMaps.get",
+        "compute.urlMaps.update",
+        "compute.urlMaps.use",
+        "compute.targetHttpProxies.get",
+        "compute.targetHttpProxies.setUrlMap",
+        "compute.targetHttpProxies.use",
+        "compute.targetHttpsProxies.get",
+        "compute.targetHttpsProxies.setUrlMap",
+        "compute.targetHttpsProxies.setCertificateMap",
+        "compute.targetHttpsProxies.use",
+        "compute.globalAddresses.get",
+        "compute.globalAddresses.setLabels",
+        "compute.globalForwardingRules.get",
+        "compute.globalForwardingRules.setLabels",
+        "compute.globalForwardingRules.setTarget",
+        "compute.globalForwardingRules.update",
+        "compute.globalOperations.get",
+        "certificatemanager.dnsauthorizations.get",
+        "certificatemanager.dnsauthorizations.update",
+        "certificatemanager.certs.get",
+        "certificatemanager.certs.update",
+        "certificatemanager.certs.use",
+        "certificatemanager.certmaps.get",
+        "certificatemanager.certmaps.update",
+        "certificatemanager.certmaps.use",
+        "certificatemanager.certmapentries.get",
+        "certificatemanager.certmapentries.update",
+        "certificatemanager.operations.get",
+        "compute.networkEndpointGroups.create",
+        "compute.networkEndpointGroups.delete",
+        "compute.networkEndpointGroups.attachNetworkEndpoints",
+        "compute.networkEndpointGroups.detachNetworkEndpoints",
+        "compute.networkEndpointGroups.list",
+        "compute.networks.use",
+        "compute.subnetworks.use",
+        "compute.zoneOperations.get",
+        "compute.healthChecks.create",
+        "compute.healthChecks.delete",
+        "compute.healthChecks.list",
+        "compute.backendServices.create",
+        "compute.backendServices.list",
+        "certificatemanager.dnsauthorizations.create",
+        "certificatemanager.dnsauthorizations.delete",
+        "certificatemanager.dnsauthorizations.list",
+        "certificatemanager.dnsauthorizations.use",
+        "certificatemanager.certs.create",
+        "certificatemanager.certs.delete",
+        "certificatemanager.certs.list",
+        "certificatemanager.certmapentries.create",
+        "certificatemanager.certmapentries.delete",
+        "certificatemanager.certmapentries.list",
+      ])
     )
-    error_message = "The executor must not gain creation/deletion, IAM, VM modification, key publication, or API enable permissions."
+    error_message = "Preserve all 44 existing permissions and add exactly the 23 reviewed project/parent permissions, with no wildcard or extra grants."
+  }
+
+  assert {
+    condition = (
+      google_project_iam_custom_role.app_edge_bound.project == "railshot-poc-20261001" &&
+      google_project_iam_custom_role.app_edge_bound.role_id == "railshotAppBoundEdgeUse" &&
+      toset(google_project_iam_custom_role.app_edge_bound.permissions) == toset(["compute.backendServices.delete", "compute.instances.use"]) &&
+      google_project_iam_member.app_edge_bound.project == "railshot-poc-20261001" &&
+      google_project_iam_member.app_edge_bound.member == google_project_iam_member.edge_release.member &&
+      google_project_iam_member.app_edge_bound.role == google_project_iam_custom_role.app_edge_bound.name &&
+      length(google_project_iam_member.app_edge_bound.condition) == 1 &&
+      google_project_iam_member.app_edge_bound.condition[0].title == "registered-app-backend-and-runtime" &&
+      google_project_iam_member.app_edge_bound.condition[0].expression == "(resource.type == 'compute.googleapis.com/BackendService' && resource.name.startsWith('projects/railshot-poc-20261001/global/backendServices/railshot-gcp-edge-')) || (resource.type == 'compute.googleapis.com/Instance' && resource.name == 'projects/railshot-poc-20261001/zones/asia-northeast3-a/instances/railshot-gcp-poc')" &&
+      !contains(google_project_iam_custom_role.edge_release.permissions, "compute.backendServices.delete") &&
+      !contains(google_project_iam_custom_role.edge_release.permissions, "compute.instances.use")
+    )
+    error_message = "The two name-scoped grants must never enter the unconditional role; bind only the app backend prefix and exact registered runtime VM."
+  }
+
+  assert {
+    condition = toset([for permission in setunion(
+      toset(google_project_iam_custom_role.edge_release.permissions),
+      toset(google_project_iam_custom_role.app_edge_bound.permissions)
+      ) : permission if can(regex("\\.(create|delete|attachNetworkEndpoints|detachNetworkEndpoints)$", permission))]) == toset([
+      "compute.networkEndpointGroups.create", "compute.networkEndpointGroups.delete",
+      "compute.networkEndpointGroups.attachNetworkEndpoints", "compute.networkEndpointGroups.detachNetworkEndpoints",
+      "compute.healthChecks.create", "compute.healthChecks.delete",
+      "compute.backendServices.create", "compute.backendServices.delete",
+      "certificatemanager.dnsauthorizations.create", "certificatemanager.dnsauthorizations.delete",
+      "certificatemanager.certs.create", "certificatemanager.certs.delete",
+      "certificatemanager.certmapentries.create", "certificatemanager.certmapentries.delete",
+    ])
+    error_message = "Only the app resource API families may gain lifecycle verbs; shared frontend, VM, firewall, URL map and certificate map creation/deletion remain ungranted."
   }
 
   assert {
@@ -128,4 +226,43 @@ run "wrong_project_number_rejected" {
     values = { number = "359201781698" }
   }
   expect_failures = [data.google_project.release]
+}
+
+# Exercise the actual sibling module, so an app-name or default-name change cannot
+# silently put new backends outside the IAM prefix (or include the legacy app).
+run "app_backend_prefix_matches_native_module" {
+  command = plan
+  module { source = "../gcp-edge" }
+  variables {
+    project_id          = "railshot-poc-20261001"
+    zone                = "asia-northeast3-a"
+    instance_name       = "railshot-gcp-poc"
+    expected_private_ip = "10.66.0.2"
+    hostname            = "baseline.railshot.io"
+    routes = {
+      app-0123456789abcdef01234567 = { hostname = "app-012345abcdef.railshot.io", node_port = 31001, health_path = "/health" }
+    }
+  }
+  override_data {
+    target = data.google_compute_instance.backend
+    values = {
+      name = "railshot-gcp-poc"
+      network_interface = [{
+        network_ip = "10.66.0.2"
+        network    = "projects/railshot-poc-20261001/global/networks/railshot-runtime"
+        subnetwork = "projects/railshot-poc-20261001/regions/asia-northeast3/subnetworks/railshot-runtime"
+      }]
+      service_account = [{ email = "runtime@railshot-poc-20261001.iam.gserviceaccount.com" }]
+    }
+  }
+  assert {
+    condition = (
+      google_compute_backend_service.app.name == "railshot-gcp-edge" &&
+      google_compute_backend_service.routes["app-0123456789abcdef01234567"].name == "railshot-gcp-edge-${substr(sha256("app-0123456789abcdef01234567"), 0, 16)}" &&
+      startswith("projects/railshot-poc-20261001/global/backendServices/${google_compute_backend_service.routes["app-0123456789abcdef01234567"].name}", "projects/railshot-poc-20261001/global/backendServices/railshot-gcp-edge-") &&
+      !startswith("projects/railshot-poc-20261001/global/backendServices/${google_compute_backend_service.app.name}", "projects/railshot-poc-20261001/global/backendServices/railshot-gcp-edge-") &&
+      !startswith("projects/another-project/global/backendServices/${google_compute_backend_service.routes["app-0123456789abcdef01234567"].name}", "projects/railshot-poc-20261001/global/backendServices/railshot-gcp-edge-")
+    )
+    error_message = "The registered default module must hash app IDs under the allowed prefix while excluding the legacy baseline and every other project."
+  }
 }

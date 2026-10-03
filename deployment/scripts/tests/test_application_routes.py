@@ -119,6 +119,16 @@ class ApplicationRoutesTest(unittest.TestCase):
         finally:
             case.doCleanups()
 
+    def test_delete_fence_between_publication_and_route_prevents_external_write(self):
+        with self.fixture() as case:
+            prepared = routes.application_release.finalize(case.config_path, case.request)
+            home = Path(case.registration.config['state_dir']) / prepared['application_id']
+            runtime.save(home / 'lifecycle.json', {'status': 'deleting'})
+            with patch.object(routes.application_release, 'finalize', return_value=prepared):
+                with self.assertRaisesRegex(ValueError, 'APPLICATION_LIFECYCLE_BLOCKED'):
+                    routes.ensure(case.config_path, case.request)
+            case.native_ensure.assert_not_called(); case.dns.assert_not_called()
+
     def assert_configured_only(self, case, result):
         self.assertEqual(result['status'], 'succeeded')
         self.assertEqual(result['phase'], 'route_configured')

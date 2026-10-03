@@ -42,8 +42,8 @@ def render(*, namespace, name, tunnel_id, credentials_secret, hostnames, origin_
             raise ValueError()
     except (ValueError, TypeError):
         raise ValueError('origin-vip must be an RFC1918 IPv4 address; URLs, public, metadata and CGNAT addresses are forbidden') from None
-    if not isinstance(hostnames, list) or not 1 <= len(hostnames) <= 50:
-        raise ValueError('provide 1-50 distinct hostnames')
+    if not isinstance(hostnames, list) or not 0 <= len(hostnames) <= 50:
+        raise ValueError('provide 0-50 distinct hostnames')
     for host in hostnames:
         if (not isinstance(host, str) or len(host) > 253 or '.' not in host
                 or not all(LABEL.fullmatch(part) for part in host.split('.'))):

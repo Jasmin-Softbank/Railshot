@@ -27,6 +27,7 @@ COPY gitops/bridge.py gitops/argo.py gitops/handoff.py /app/gitops/
 COPY gitops/edge.py gitops/service_name.py /app/gitops/
 COPY gitops/dns.py gitops/gcp_routes.py /app/gitops/
 COPY gitops/openstack_routes.py /app/gitops/
+COPY gitops/application_cleanup.py /app/gitops/
 COPY gitops/credentials.py gitops/logs.py /app/gitops/
 COPY observability/register.py observability/bootstrap.py observability/render.py observability/compose.yaml observability/runtime_health.py /app/observability/
 COPY ci/scripts/execution.py ci/scripts/observability.py ci/scripts/process.py ci/scripts/publication.py ci/scripts/storage.py /app/ci/scripts/
@@ -49,6 +50,7 @@ COPY infrastructure/ansible/group_vars/all.yml /app/infrastructure/ansible/group
 COPY contracts/ansible-request.schema.json contracts/ansible-job.schema.json /app/contracts/
 COPY deployment/scripts/common.sh deployment/scripts/environment.py /app/deployment/scripts/
 COPY deployment/scripts/applications.py deployment/scripts/application_release.py deployment/scripts/application_routes.py /app/deployment/scripts/
+COPY deployment/scripts/application_lifecycle.py deployment/scripts/lifecycle_runtime.py /app/deployment/scripts/
 COPY deployment/scripts/openstack_route_worker.py /app/deployment/scripts/
 COPY deployment/cloudflared/register.py deployment/cloudflared/render.py /app/deployment/cloudflared/
 COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh deployment/bootstrap/runtime-healthz.py /app/deployment/bootstrap/

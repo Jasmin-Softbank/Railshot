@@ -6,9 +6,11 @@ import { APP_NAME, TARGET_ID, TENANT_NAME } from './contract.js';
 import { EnvironmentError, privateJson, privateDirectory, savePrivate, runEnvironmentCommand } from './environments.js';
 import { createCdAdapter } from './cd.js';
 import { createAppLogsObserver } from './logs.js';
+import { lifecycleActions, lifecycleId, lifecycleHash, lifecycleResources, lifecycleSteps } from './application-lifecycle.js';
 
 const REGISTER = fileURLToPath(new URL('../../../deployment/scripts/applications.py', import.meta.url));
 const FINALIZE = fileURLToPath(new URL('../../../deployment/scripts/application_routes.py', import.meta.url));
+const LIFECYCLE = fileURLToPath(new URL('../../../deployment/scripts/application_lifecycle.py', import.meta.url));
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = (code, status = 409, unknown = false) => new EnvironmentError(code, status, unknown);
 
@@ -47,8 +49,69 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
         || result.target_id !== application.target_id || result.app !== application.app) throw fail('APPLICATION_BINDING_MISMATCH', 502, true);
     return result;
   }
+  async function lifecycleRequest(application, payload, mutation) {
+    const home = await current(application);
+    if (!lifecycleId.test(payload.operation_id || '') || !lifecycleActions.includes(payload.action)) throw fail('APPLICATION_INPUT_INVALID', 422);
+    const run = join(home, 'lifecycle', payload.operation_id);
+    await privateDirectory(run);
+    const request = join(run, payload.phase + '-request.json');
+    // An uncertain executor invocation is never repeated, even with identical bytes.
+    try { await lstat(request); throw fail('APPLICATION_OPERATION_RECONCILE_REQUIRED', 409, mutation); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await savePrivate(request, { version: 1, application_id: application.id, environment_id: application.environment_target_id,
+      app: application.app, ...payload });
+    const result = await runner(python, [LIFECYCLE, '--config', configPath, '--request', request], { mutation, timeout: mutation ? 1_800_000 : 600_000 });
+    await savePrivate(join(run, payload.phase + '-receipt.json'), result);
+    return result;
+  }
+  async function verifyLifecyclePlan(application, plan) {
+    await current(application);
+    if (plan.private?.configuration_sha256 !== fingerprint || plan.public?.application_id !== application.id
+        || !lifecycleId.test(plan.public?.id || '') || !lifecycleHash.test(plan.public?.plan_hash || '')
+        || !lifecycleActions.includes(plan.public?.action) || Date.parse(plan.public.expires_at) <= Date.now()
+        || !Number.isFinite(Date.parse(plan.public.expires_at))) throw fail('APPLICATION_PLAN_STALE');
+    if (plan.private.deferred && (plan.public.action !== 'delete' || !lifecycleId.test(plan.private.deployment_id || '')
+        || plan.public.plan_hash !== hash({ application_id: application.id, environment_id: application.environment_target_id,
+          app: application.app, configuration_sha256: fingerprint, deployment_id: plan.private.deployment_id,
+          expires_at: plan.public.expires_at, scope: 'owned-application' }))) throw fail('APPLICATION_PLAN_STALE');
+  }
   return {
     targets: Object.freeze(targets), describe,
+    async planPendingDeletion(application, { id, deploymentId }) {
+      await current(application);
+      if (!lifecycleId.test(id || '') || !lifecycleId.test(deploymentId || '')) throw fail('APPLICATION_INPUT_INVALID', 422);
+      const expires_at = new Date(Date.now() + 600_000).toISOString();
+      const plan_hash = hash({ application_id: application.id, environment_id: application.environment_target_id,
+        app: application.app, configuration_sha256: fingerprint, deployment_id: deploymentId, expires_at, scope: 'owned-application' });
+      return { public: { id, application_id: application.id, action: 'delete', plan_hash, expires_at,
+        resources: [{ kind: 'ApplicationNamespace', name: application.id }, { kind: 'ApplicationRoutes', name: application.id }],
+        retained: [{ kind: 'SharedRuntime', name: application.environment_target_id },
+          { kind: 'AuditRecord', name: application.id }, { kind: 'BuildArtifacts', name: application.id }] },
+      private: { configuration_sha256: fingerprint, deferred: true, deployment_id: deploymentId } };
+    },
+    async planLifecycle(application, { id, action }) {
+      const result = await lifecycleRequest(application, { phase: 'plan', action, operation_id: id }, false);
+      const expires = Date.parse(result.expires_at);
+      if (result.status !== 'planned') throw fail('APPLICATION_PLAN_BLOCKED');
+      if (result.plan_id !== id || !lifecycleHash.test(result.plan_hash || '') || !Number.isFinite(expires)
+          || expires <= Date.now() || expires > Date.now() + 600_000) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
+      return { public: { id, application_id: application.id, action, plan_hash: result.plan_hash,
+        resources: lifecycleResources(result.resources), retained: lifecycleResources(result.retained), expires_at: result.expires_at },
+      private: { configuration_sha256: fingerprint } };
+    },
+    verifyLifecyclePlan,
+    async applyLifecycle(application, plan, { id, deleteData }) {
+      await verifyLifecyclePlan(application, plan);
+      if (plan.private.deferred) throw fail('APPLICATION_PLAN_STALE');
+      const { action, plan_hash: planHash, id: planId } = plan.public;
+      if (action === 'delete' && deleteData !== true || action !== 'delete' && deleteData !== false) throw fail('APPLICATION_INPUT_INVALID', 422);
+      const result = await lifecycleRequest(application, { phase: 'apply', action, operation_id: id,
+        plan_id: planId, plan_hash: planHash, delete_data: deleteData }, true);
+      if (result.application_id !== application.id || result.action !== action
+          || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502, true);
+      return { status: result.status, application_id: application.id, action,
+        steps: lifecycleSteps(result.steps), residuals: lifecycleResources(result.residuals) };
+    },
     async register(application) {
       const home = await current(application);
       await privateDirectory(home);

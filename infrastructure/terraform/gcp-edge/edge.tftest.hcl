@@ -50,6 +50,26 @@ run "wrong_vm_ip_rejected" {
   expect_failures = [google_compute_network_endpoint_group.app]
 }
 
+run "stopped_app_keeps_identity_and_certificate_without_unhealthy_backend" {
+  command = plan
+  variables {
+    routes = {
+      app-stopped = { hostname = "stopped.railshot.io", node_port = 31001, health_path = "/ready", enabled = false }
+      app-running = { hostname = "running.railshot.io", node_port = 31002, health_path = "/health" }
+    }
+  }
+  assert {
+    condition = (keys(google_compute_backend_service.routes) == ["app-running"] &&
+      keys(google_compute_network_endpoint_group.routes) == ["app-running"] &&
+      keys(google_compute_network_endpoint.routes) == ["app-running"] &&
+      keys(google_compute_health_check.routes) == ["app-running"] &&
+      keys(google_certificate_manager_certificate.routes) == ["app-running", "app-stopped"] &&
+      one(google_compute_firewall.gfe.allow).ports == tolist(["30080", "31002"]) &&
+    alltrue([for rule in google_compute_url_map.app.host_rule : !contains(rule.hosts, "stopped.railshot.io")]))
+    error_message = "A stopped app must retain certificate ownership while removing only its backend, health check, host route and firewall port."
+  }
+}
+
 run "two_apps_share_existing_frontend" {
   command = apply
   variables {

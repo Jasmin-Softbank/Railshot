@@ -153,7 +153,7 @@ function requestKey(request) {
 }
 function accepted(response, kind, record, requestId, action = 'create') {
   const terminal = !['queued', 'running'].includes(record.status);
-  json(response, terminal ? 200 : 202, terminal ? record : { resource_id: record.id, action, status: 'accepted', request_id: requestId },
+  json(response, terminal ? 200 : 202, terminal || kind === 'operations' ? record : { resource_id: record.id, action, status: 'accepted', request_id: requestId },
     { Location: `/api/v1/${kind}/${record.id}`, 'X-Request-ID': requestId, ...(!terminal ? { 'Retry-After': '2' } : {}) });
 }
 
@@ -315,6 +315,20 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
             if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
             json(response, 200, await products.getDeploymentLogs(logRoute[1], sessionId)); return;
+          }
+          const lifecycle = /^\/api\/v1\/applications\/([A-Za-z0-9._-]+)\/(plans|operations)$/.exec(url.pathname);
+          const operation = /^\/api\/v1\/operations\/([A-Za-z0-9._-]+)$/.exec(url.pathname);
+          if (lifecycle || operation) {
+            const allowed = lifecycle ? 'POST' : 'GET';
+            if (request.method !== allowed) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = allowed; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+            if (operation) { json(response, 200, products.getOperation(operation[1], sessionId)); return; }
+            if (lifecycle[2] === 'plans') {
+              json(response, 201, await products.createApplicationPlan(lifecycle[1], await jsonInput(request), sessionId)); return;
+            }
+            const key = requestKey(request);
+            accepted(response, 'operations', await products.createApplicationOperation(lifecycle[1], await jsonInput(request), key, sessionId), requestId); return;
           }
           const actionRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/actions$/.exec(url.pathname);
           if (actionRoute) {

@@ -48,6 +48,7 @@ def _registration(config, request):
     profile, _, descriptor, endpoint, _, authority, _, fingerprint = applications._inputs(config, registration_request)
     app_id = request['application_id']
     home = Path(config['state_dir']) / app_id
+    applications.assert_deployable(home)
     record = runtime.read_private(home / 'registration.json')
     require(record.get('status') == 'succeeded', 'APPLICATION_NOT_REGISTERED')
     require(all(record.get(key) == value for key, value in registration_request.items())

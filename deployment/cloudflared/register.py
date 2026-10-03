@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Add one owned ingress to an existing, operator-bound Named Tunnel deployment."""
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import importlib.util
@@ -100,7 +101,7 @@ def bound_object(value, expected, uid):
 
 def inspect(config, cm, deployment):
     owners = json.loads(cm['metadata']['annotations'][OWNERS], object_pairs_hook=runtime.ansible.unique_pairs)
-    require(isinstance(owners, dict) and owners and all(isinstance(owner, str) and re.fullmatch(r'app-[a-f0-9]{24}', owner)
+    require(isinstance(owners, dict) and all(isinstance(owner, str) and re.fullmatch(r'app-[a-f0-9]{24}', owner)
                                                       for owner in owners.values()), 'TUNNEL_OWNERS_INVALID')
     expected_cm, expected_deployment = rendered(config, list(owners))
     bound_object(cm, expected_cm, config['configmap_uid'])
@@ -168,6 +169,8 @@ def ensure(private_config_path, request):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RegistrationError('TUNNEL_BUSY') from None
+            for path in root.glob('application-lifecycle-*/intent.json'):
+                require(runtime.read_private(path).get('phase') in ('planned', 'succeeded'), 'TUNNEL_LIFECYCLE_RECONCILE_REQUIRED')
             with runtime.runtime_kubectl(native) as kube:
                 namespace, name = config['namespace'], config['name']
                 cm = kube(namespace, 'get', 'configmap', name + '-config', '-o', 'json')
@@ -197,6 +200,71 @@ def ensure(private_config_path, request):
             return result
     except Exception as error:
         return failure(error, changed)
+
+
+@contextmanager
+def lifecycle_session(config_path, request):
+    config, native = inputs(config_path, request)
+    root = runtime.bridge.private_directory(config['state_dir'])
+    with os.fdopen(os.open(root / 'ingress.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'a') as lock:
+        info = os.fstat(lock.fileno())
+        require(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.geteuid(), 'TUNNEL_LOCK_INVALID')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RegistrationError('TUNNEL_BUSY') from None
+        with runtime.runtime_kubectl(native) as kube:
+            yield config, kube
+
+
+def lifecycle_snapshot(config, kube, request):
+    cm = kube(config['namespace'], 'get', 'configmap', config['name'] + '-config', '-o', 'json')
+    deployment = kube(config['namespace'], 'get', 'deployment', config['name'], '-o', 'json')
+    owners = inspect(config, cm, deployment)
+    require(owners.get(request['hostname'], request['application_id']) == request['application_id'], 'TUNNEL_HOSTNAME_OWNED')
+    expected_hash = rendered(config, list(owners))[1]['spec']['template']['metadata']['annotations'][HASH]
+    require(deployment['spec']['template']['metadata']['annotations'][HASH] == expected_hash, 'TUNNEL_ROLLOUT_UNVERIFIED')
+    # UID/resourceVersion are CAS preconditions; runtime status is not ownership.
+    cm.pop('status', None); deployment.pop('status', None)
+    return {'config': config, 'configmap': cm, 'deployment': deployment, 'owners': owners}
+
+
+def lifecycle_plan(config_path, request, action):
+    require(action in ('start', 'stop', 'delete'), 'TUNNEL_ACTION_INVALID')
+    with lifecycle_session(config_path, request) as (config, kube):
+        return lifecycle_snapshot(config, kube, request)
+
+
+def lifecycle_validate(config_path, request, action, expected):
+    require(action in ('start', 'stop', 'delete'), 'TUNNEL_ACTION_INVALID')
+    with lifecycle_session(config_path, request) as (config, kube):
+        require(lifecycle_snapshot(config, kube, request) == expected, 'TUNNEL_LIFECYCLE_PLAN_STALE')
+
+
+def lifecycle_execute(config_path, request, action, expected):
+    """The caller's durable lifecycle intent must precede this exact CAS update."""
+    require(action in ('start', 'stop', 'delete'), 'TUNNEL_ACTION_INVALID')
+    with lifecycle_session(config_path, request) as (config, kube):
+        require(lifecycle_snapshot(config, kube, request) == expected, 'TUNNEL_LIFECYCLE_PLAN_STALE')
+        owners = dict(expected['owners'])
+        if action == 'start':
+            owners[request['hostname']] = request['application_id']
+        else:
+            owners.pop(request['hostname'], None)
+        cm, deployment = expected['configmap'], expected['deployment']
+        desired_cm, desired_deployment = rendered(config, list(owners))
+        desired_hash = desired_deployment['spec']['template']['metadata']['annotations'][HASH]
+        if owners != expected['owners']:
+            patch(kube, config['namespace'], cm, [('/data/config.json', desired_cm['data']['config.json']),
+                  ('/metadata/annotations/railshot.io~1application-owners', runtime.bridge.encoded(owners).decode())])
+            patch(kube, config['namespace'], deployment, [('/spec/template/metadata/annotations/railshot.io~1config-sha256', desired_hash)])
+        cm = kube(config['namespace'], 'get', 'configmap', config['name'] + '-config', '-o', 'json')
+        require(cm['data'] == desired_cm['data'] and json.loads(cm['metadata']['annotations'][OWNERS]) == owners,
+                'TUNNEL_LIFECYCLE_READBACK_MISMATCH')
+        rollout(kube, config, cm, desired_hash)
+        return {'status': 'succeeded', 'https_verified': False, 'hostname': request['hostname'],
+                'configmap_uid': cm['metadata']['uid'], 'tunnel_id': config['tunnel_id'],
+                'route_present': request['hostname'] in owners}
 
 
 def main():

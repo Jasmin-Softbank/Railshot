@@ -32,9 +32,10 @@ variable "routes" {
     priority                 = number
     target_security_group_id = optional(string)
     manage_dns               = optional(bool, true)
+    enabled                  = optional(bool, true)
   }))
   validation {
-    condition = length(var.routes) > 0 && length(var.routes) <= 50 && alltrue([for key, route in var.routes :
+    condition = length(var.routes) <= 50 && alltrue([for key, route in var.routes :
       can(regex("^[a-z][a-z0-9-]{1,39}$", key)) && route.provider_kind == "aws" &&
       can(cidrnetmask("${route.target_private_ip}/32")) &&
       can(regex("^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)", route.target_private_ip)) &&
@@ -44,7 +45,7 @@ variable "routes" {
       length(route.host) <= 253 && can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$", route.host)) &&
       can(regex("^sg-[0-9a-f]{8,17}$", route.target_security_group_id))
     ])
-    error_message = "Use 1-50 named AWS routes with an RFC1918 IPv4, NodePort, health path, DNS host, priority and dedicated target SG. GCP uses its native L7 entrypoint; WireGuard routes are retired."
+    error_message = "Use 0-50 named AWS routes with an RFC1918 IPv4, NodePort, health path, DNS host, priority and dedicated target SG. GCP uses its native L7 entrypoint; WireGuard routes are retired."
   }
   validation {
     condition     = length(distinct([for r in values(var.routes) : r.host])) == length(var.routes) && length(distinct([for r in values(var.routes) : r.priority])) == length(var.routes)

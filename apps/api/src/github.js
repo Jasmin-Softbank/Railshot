@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { setTimeout as pause } from 'node:timers/promises';
 import { inspectArchive, validateFiles, archiveLimits } from './archive.js';
 import { APP_NAME, APP_NAME_MESSAGE, TENANT_NAME, TARGET_ID, SOURCE_COMMIT } from './contract.js';
 import { readPublished } from './published.js';
@@ -94,6 +95,10 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       throw new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502);
     }
     if (response.status === 204) return {};
+    if (maxBytes === 0) {
+      if (response.status !== 202) throw new ServiceError('취소 접수를 확인하지 못했습니다.', 502);
+      return {};
+    }
     if (maxBytes === null) return response.json();
     if (Number(response.headers.get('content-length')) > maxBytes) {
       await response.body?.cancel(); throw new AgentEventError('too_large');
@@ -345,6 +350,28 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return verified.files;
   }
 
+  async function cancel(runId, binding, { signal } = {}) {
+    permittedTarget(binding.target_id);
+    if (!/^\d+$/.test(String(runId)) || !SOURCE_COMMIT.test(binding.source_commit || '')) throw new ServiceError('취소할 실행 식별자가 잘못되었습니다.', 400);
+    const path = `${repoPath}/actions/runs/${runId}`;
+    const identity = { runId: String(runId), source_commit: binding.source_commit, owner, repo, ref, workflow };
+    const before = await request(path, { redirect: 'error' });
+    const attempt = validateEventRun(before, identity);
+    // Product dispatch creates a new run at attempt 1, including older bindings.
+    if (attempt !== (binding.run_attempt ?? 1)) throw new ServiceError('접수한 실행 attempt가 달라 취소할 수 없습니다.', 409);
+    if (before.status === 'completed') return { status: 'completed', run_id: String(runId), attempt };
+    // Exactly one mutation; a lost response is never retried or force-cancelled.
+    await request(path + '/cancel', { method: 'POST', redirect: 'error' }, 0);
+    const deadline = Date.now() + 120000;
+    while (!signal?.aborted && Date.now() < deadline) {
+      const observed = await request(path, { redirect: 'error' });
+      if (validateEventRun(observed, identity) !== attempt) throw new ServiceError('실행 attempt가 바뀌어 취소 결과를 확정할 수 없습니다.', 502);
+      if (observed.status === 'completed') return { status: 'completed', run_id: String(runId), attempt };
+      await pause(1000, undefined, { signal });
+    }
+    throw new ServiceError('CI 실행 종료를 확인하지 못했습니다.', 502);
+  }
+
   async function sourceFiles(publication) {
     try {
       const files = await publishedFiles(publication);
@@ -383,7 +410,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     }
   }
 
-  return { deploy, status, events, publishedFiles, sourceFiles, allowTarget, targetId,
+  return { deploy, status, cancel, events, publishedFiles, sourceFiles, allowTarget, targetId,
     identity: Object.freeze({ tenant, sourceRepository: `${owner}/${repo}` }),
     get targetIds() { return Object.freeze([...targetIds]); } };
 }

@@ -47,7 +47,7 @@ const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
 let selectedSource = null;
 let updateApplication = null, updatePreviewRequest = null, applicationDetail = null;
-let applications = [], applicationMarker = null, applicationsController, applicationController;
+let applications = [], applicationPageEnds = [], applicationPage = 0, applicationsController, applicationController;
 let reviewed = null;
 let deploymentOptions = [];
 let profiles = [];
@@ -208,7 +208,7 @@ async function request(path, options = {}, controller = new AbortController()) {
       const failure = new Error(data.error?.message || (typeof data.error === 'string' ? data.error : `요청 실패 (HTTP ${response.status})`));
       failure.status = response.status; failure.code = data.error?.code; throw failure;
     }
-    return { data, location: response.headers.get('location') };
+    return { data, location: response.headers.get('location'), status: response.status };
   } finally { clearTimeout(timeout); requests.delete(controller); }
 }
 
@@ -275,10 +275,13 @@ function setUpdateMode(application) {
 }
 document.querySelector('#cancel-update').addEventListener('click', () => { if (!submitting) { setUpdateMode(null); showView('deploy'); } });
 function beginUpdate(application) {
-  if (submitting || !resourceId(application?.id)) return;
+  if (!resourceId(application?.id)) return false;
+  application = { ...application, ...applications.find((row) => row.id === application.id) };
+  if (updateBlocked(application)) return false;
   setUpdateMode(application); showView('deploy');
   document.querySelector('#update-context').scrollIntoView({ block: 'start' });
   document.querySelector('#choose-file').focus({ preventScroll: true });
+  return true;
 }
 
 function validatePreview(data, application) {
@@ -321,7 +324,8 @@ document.querySelector('#update-rebuild').addEventListener('change', (event) => 
   if (reviewed?.update && !reviewed.attempted) deployButton.textContent = event.target.checked ? '다시 빌드·배포' : '변경 없음으로 완료';
 });
 async function reviewUpdate() {
-  if (!selectedSource) error.textContent = '업데이트할 소스를 선택하세요.';
+  if (applicationBusy(updateApplication?.id)) error.textContent = '진행 중인 앱 관리 작업을 먼저 확인하세요.';
+  else if (!selectedSource) error.textContent = '업데이트할 소스를 선택하세요.';
   else if (selectedSource.kind === 'repository' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s?#]+\/?$/.test(selectedSource.label)) error.textContent = '공개 GitHub 저장소 URL을 입력하세요.';
   else if (selectedSource.kind === 'archive' && !selectedSource.files[0]?.name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
   else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
@@ -354,6 +358,7 @@ async function reviewUpdate() {
   error.hidden = false;
 }
 async function startUpdate(draft) {
+  if (applicationBusy(draft.application.id, true)) throw new Error('진행 중인 앱 관리 작업을 먼저 확인하세요.');
   if (!draft.attempted && Date.parse(draft.preview.expires_at) <= Date.now()) {
     reviewed = null; updatePreviewRequest = null; throw new Error('변경 검토가 만료됐습니다. 소스 선택에서 다시 확인하세요.');
   }
@@ -457,11 +462,12 @@ function taskList(tasks = []) {
   return list;
 }
 function renderRun() {
+  renderApplicationActions();
   document.querySelector('#run-panel').hidden = false;
   const resume = document.querySelector('#resume-run');
   resume.hidden = !(current.kind === 'deployments' && current.application_id && current.status === 'unknown'
     && ['cd', 'http'].includes(current.stage) && current.ci?.state === 'published');
-  resume.disabled = Boolean(resuming) || observationError;
+  resume.disabled = Boolean(resuming) || observationError || applicationBusy(current.application_id);
   const label = executionLabel(current);
   document.querySelector('#run-freshness').textContent = lastReadAt ? `마지막 상태 조회: ${new Date(lastReadAt).toLocaleString()}${observationError ? ' · 조회 실패, 마지막 기록입니다.' : ''}` : '서버 상태 조회 전';
   document.querySelector('#run-meta').textContent = `${current.app || '앱'} · ${current.id} · ${current.target_id || ''}`;
@@ -552,6 +558,7 @@ deployButton.addEventListener('click', async () => {
     controls.forEach((control) => { control.disabled = false; });
     document.querySelector('#update-rebuild').disabled = Boolean(draft.update && draft.attempted);
     if (!reviewed) deployButton.disabled = true;
+    renderApplications();
   }
 });
 function stopPolling() {
@@ -768,38 +775,51 @@ function applicationVersion(label, deployment, uncertain = false) {
   group.append(button, sourceDownloads(deployment)); return group;
 }
 function renderApplications() {
-  document.querySelector('#applications-list').replaceChildren(...applications.map((application) => {
+  document.querySelector('#applications-list').replaceChildren(...applications.slice(0, applicationPageEnds[applicationPage] || 0).map((application) => {
     const item = document.createElement('li'), header = element('div', '', 'history-row'), content = document.createElement('div');
-    content.append(element('strong', application.app), element('small', `환경 ${application.target_id}`, 'history-meta'),
+    content.append(element('strong', application.app), element('span', applicationStates[application.status] || '상태 확인 필요', 'state-badge'),
+      element('small', `환경 ${application.environment_target_id || application.target_id || '미지정'} · 앱 ID ${application.id}`, 'history-meta'),
       element('small', `${application.current_deployment_state === 'unverified' ? '마지막 검증 성공 (현재 상태 확인 필요)' : '현재 서비스'}: ${application.current_deployment ? application.current_deployment.id : '검증된 배포 없음'}`, 'history-meta'),
       element('small', `최근 시도: ${application.latest_deployment ? `${executionLabel(application.latest_deployment)} · ${application.latest_deployment.id}` : '없음'}`, 'history-meta'));
     const detail = element('button', '앱 상세·업데이트', 'secondary-button'); detail.type = 'button';
     detail.setAttribute('aria-label', `${application.app} 앱 상세·업데이트`);
     detail.addEventListener('click', () => loadApplication(application.id));
-    header.append(content, detail); item.append(header); return item;
+    header.append(content, detail); item.append(header, applicationButtons(application)); return item;
   }));
-  document.querySelector('#applications-more').hidden = !applicationMarker;
+  document.querySelector('#applications-more').hidden = applicationPage >= applicationPageEnds.length - 1;
   document.querySelector('#applications-more').disabled = Boolean(applicationsController);
+  renderApplicationActions(); renderHistory();
 }
 async function loadApplications(more = false) {
-  if (more && !applicationMarker) return;
+  if (more) {
+    if (applicationsController || applicationPage >= applicationPageEnds.length - 1) return false;
+    applicationPage += 1; renderApplications(); return true;
+  }
   applicationsController?.abort();
   const controller = new AbortController(); applicationsController = controller;
-  const message = document.querySelector('#applications-message'); message.textContent = '이 세션의 앱을 조회하고 있습니다.';
-  const query = new URLSearchParams({ limit: '20' });
-  if (more) query.set('marker', applicationMarker);
-  document.querySelector('#applications-list').setAttribute('aria-busy', 'true'); renderApplications();
+  applications = []; applicationPageEnds = []; applicationPage = 0; renderApplications();
+  document.querySelector('#applications-list').setAttribute('aria-busy', 'true');
+  const message = document.querySelector('#applications-message'); message.textContent = '이 세션의 최신 앱 목록을 확인하고 있습니다.';
   try {
-    const { data } = await request(`/api/v1/applications?${query}`, {}, controller);
-    if (applicationsController !== controller) return;
-    if (!Array.isArray(data.items) || data.items.some((item) => !resourceId(item.id) || typeof item.app !== 'string' || typeof item.target_id !== 'string')
-        || data.next_marker != null && typeof data.next_marker !== 'string') throw new Error('앱 목록을 확인하지 못했습니다.');
-    const next = more ? [...applications, ...data.items] : data.items;
-    applications = [...new Map(next.map((item) => [item.id, item])).values()]; applicationMarker = data.next_marker || null;
-    message.textContent = applications.length ? '현재 서비스와 최근 배포 시도를 구분해 표시합니다.' : '아직 이 세션에 등록된 앱이 없습니다.';
+    // Fetch the full owned inventory for history/detail actions; reveal its API pages progressively.
+    let marker = null; const rows = [], markers = new Set(), pageEnds = [];
+    do {
+      const query = new URLSearchParams({ limit: '20' }); if (marker) query.set('marker', marker);
+      const { data } = await request(`/api/v1/applications?${query}`, {}, controller);
+      if (!Array.isArray(data.items) || data.items.some((item) => !resourceId(item.id) || typeof item.app !== 'string')
+          || data.next_marker != null && typeof data.next_marker !== 'string') throw new Error('앱 목록을 확인하지 못했습니다.');
+      rows.push(...data.items); pageEnds.push(rows.length); marker = data.next_marker;
+      if (rows.length > 1000 || marker && markers.has(marker)) throw new Error('앱 목록 범위를 확인하지 못했습니다.');
+      markers.add(marker);
+    } while (marker);
+    if (applicationsController !== controller) return false;
+    if (new Set(rows.map((row) => row.id)).size !== rows.length) throw new Error('앱 ID가 중복된 응답입니다.');
+    applications = rows; applicationPageEnds = pageEnds;
+    message.textContent = applications.length ? `${rows.length}개 앱 · 이 세션의 현재 서비스와 최근 배포 시도를 구분해 표시합니다.` : '아직 이 세션에 등록된 앱이 없습니다.';
+    return true;
   } catch (cause) {
-    if (applicationsController !== controller) return;
-    message.textContent = `앱 목록 조회 실패: ${cause.message} 앱 새로고침을 눌러 다시 확인하세요.`;
+    if (applicationsController === controller) message.textContent = `앱 목록 조회 실패: ${cause.message} 앱 새로고침을 눌러 다시 확인하세요.`;
+    return false;
   } finally {
     if (applicationsController === controller) {
       applicationsController = null; renderApplications(); document.querySelector('#applications-list').setAttribute('aria-busy', 'false');
@@ -819,9 +839,7 @@ async function loadApplication(id) {
     if (data.id !== id || typeof data.app !== 'string' || typeof data.target_id !== 'string') throw new Error('앱 상세가 요청한 앱과 일치하지 않습니다.');
     applicationDetail = data;
     document.querySelector('#application-detail-title').textContent = data.app;
-    const blocked = data.current_deployment_state === 'unverified' ? '현재 적용 결과가 불확실하여 운영자 확인 후 업데이트할 수 있습니다.'
-      : data.status !== 'ready' ? '앱이 실행 가능한 준비 상태일 때 업데이트할 수 있습니다.'
-      : !data.current_deployment ? '업데이트 기준으로 사용할 성공한 배포가 없습니다.' : '';
+    const blocked = updateBlocked(data);
     message.textContent = `기존 환경 ${data.target_id} · 앱 ID ${data.id}${blocked ? ` · ${blocked}` : ''}`;
     document.querySelector('#application-versions').replaceChildren(
       applicationVersion(data.current_deployment_state === 'unverified' ? '마지막 검증 성공 · 현재 상태 확인 필요' : '현재 서비스 버전', data.current_deployment, data.current_deployment_state === 'unverified'),
@@ -830,7 +848,7 @@ async function loadApplication(id) {
     document.querySelector('#application-detail-title').focus({ preventScroll: true }); panel.scrollIntoView({ block: 'nearest' });
   } catch (cause) {
     if (applicationController === controller) message.textContent = `앱 상세 조회 실패: ${cause.message}`;
-  } finally { if (applicationController === controller) applicationController = null; }
+  } finally { if (applicationController === controller) { applicationController = null; renderApplicationActions(); } }
 }
 async function openUpdatePreview(record) {
   if (submitting) return;
@@ -841,7 +859,8 @@ async function openUpdatePreview(record) {
     if (!resourceId(data.application_id)) throw new Error('이 변경 검토의 앱 연결을 확인하지 못했습니다.');
     const { data: application } = await request(`/api/v1/applications/${encodeURIComponent(data.application_id)}`);
     if (generation !== reviewGeneration) return;
-    validatePreview(data, application); beginUpdate(application);
+    validatePreview(data, application);
+    if (!beginUpdate(application)) throw new Error('현재 앱 상태에서는 변경 검토를 열 수 없습니다. 앱 관리 작업과 배포 상태를 확인하세요.');
     reviewed = { update: true, kind: 'deployments', preview: data, application };
     renderUpdatePreview(data, application);
   } catch (cause) {
@@ -878,6 +897,11 @@ function renderHistory() {
       const button = element('button', label, 'text-button'); button.type = 'button';
       button.setAttribute('aria-label', `${row.app || '앱'} ${label}`);
       button.addEventListener('click', () => openExecution(row, tab)); actions.append(button);
+    }
+    if (row.kind === 'deployments') {
+      const app = applications.find((item) => item.id === row.application_id);
+      if (app) actions.append(applicationButtons(app));
+      else actions.append(element('span', '앱 관리 ID를 확인할 수 없어 자동 삭제를 지원하지 않습니다.', 'field-note'));
     }
     item.append(header, element('small', `실행 ${row.id}`, 'history-meta'), actions);
     if (row.kind === 'deployments') item.append(sourceDownloads(row));
@@ -1087,6 +1111,182 @@ document.querySelector('#connection-form').addEventListener('submit', async (eve
   } catch (cause) { document.querySelector('#connection-message').textContent = cause.message; }
   finally { password.value = ''; delete body.password; button.disabled = false; }
 });
+// Lifecycle actions bind only to the latest session-owned application inventory.
+const lifecycleDialog = document.querySelector('#lifecycle-dialog');
+const lifecycleNames = { stop: '중지', start: '재개', delete: '삭제' };
+const applicationStates = { ready: '실행 중', stopped: '중지됨', deleted: '삭제됨', unknown: '확인 필요',
+  stopping: '중지 중', starting: '재개 중', deleting: '삭제 중', queued: '배포 대기', registering: '배포 준비 중' };
+let lifecycleDraft, lifecycleBusy = false, lifecycleTimer, lifecycleReadBusy = false;
+let lifecycleOperation = null;
+try { lifecycleOperation = JSON.parse(sessionStorage.getItem('railshot.application-operation') || 'null'); } catch { /* No writes are replayed on reload. */ }
+function storeLifecycleOperation() {
+  try { sessionStorage.setItem('railshot.application-operation', JSON.stringify(lifecycleOperation)); } catch { /* The server remains the authority. */ }
+}
+function applicationBusy(id, ownSubmission = false) {
+  return (!ownSubmission && submitting) || Boolean(resuming) || lifecycleBusy || lifecycleReadBusy
+    || ['queued', 'running'].includes(lifecycleOperation?.status)
+    || Boolean(lifecycleOperation && lifecycleOperation.application_id === id && lifecycleOperation.status !== 'succeeded');
+}
+function updateBlocked(app) {
+  return applicationBusy(app?.id) ? '진행 중이거나 결과를 확인해야 하는 앱 관리 작업이 있습니다.'
+    : app?.current_deployment_state === 'unverified' ? '현재 적용 결과가 불확실하여 운영자 확인 후 업데이트할 수 있습니다.'
+    : app?.status !== 'ready' ? '앱이 실행 가능한 준비 상태일 때 업데이트할 수 있습니다.'
+    : !app.current_deployment ? '업데이트 기준으로 사용할 성공한 배포가 없습니다.' : '';
+}
+function applicationAllowed(app, action) {
+  return !applicationBusy(app.id)
+    && (action === 'start' ? app.status === 'stopped' : action === 'stop' ? app.status === 'ready' : ['ready', 'stopped', 'queued', 'running', 'registering'].includes(app.status));
+}
+function applicationButtons(app) {
+  const actions = element('div', '', 'history-actions');
+  for (const action of ['stop', 'start', 'delete']) {
+    const button = element('button', action === 'delete' ? '🗑 삭제' : lifecycleNames[action], action === 'delete' ? 'text-button danger-button' : 'text-button');
+    button.type = 'button'; button.disabled = !applicationAllowed(app, action);
+    button.setAttribute('aria-label', `${app.app} ${lifecycleNames[action]}${action === 'delete' ? ' · 데이터도 영구 삭제' : ''}`);
+    button.addEventListener('click', () => reviewApplication(app.id, action)); actions.append(button);
+  }
+  return actions;
+}
+function renderApplicationActions() {
+  const app = applications.find((row) => row.id === current?.application_id);
+  for (const id of ['run-application-actions', 'monitor-application-actions']) {
+    const holder = document.getElementById(id); holder.replaceChildren();
+    if (app) holder.append(element('strong', `${app.app} · ${applicationStates[app.status] || '상태 확인 필요'}`), applicationButtons(app));
+    else if (current?.kind === 'deployments') holder.append(element('span', '이 배포의 앱 관리 ID를 최신 목록에서 확인하지 못했습니다. 자동 삭제를 지원하지 않습니다.', 'field-note'));
+  }
+  const detail = applications.find((row) => row.id === applicationDetail?.id);
+  document.querySelector('#detail-application-actions').replaceChildren(...(detail ? [applicationButtons(detail)] : []));
+  document.querySelector('#application-update').disabled = !detail || Boolean(updateBlocked({ ...applicationDetail, ...detail }));
+  if (current) document.querySelector('#resume-run').disabled = observationError || applicationBusy(current.application_id);
+}
+function lifecycleResources(selector, rows, empty) {
+  document.querySelector(selector).replaceChildren(...(rows?.length ? rows.map((row) => element('li', `${row.kind} · ${row.namespace ? row.namespace + '/' : ''}${row.name}`)) : [element('li', empty)]));
+}
+function resourceList(rows) { return Array.isArray(rows) && rows.every((row) => row && typeof row.kind === 'string' && typeof row.name === 'string' && (row.namespace == null || typeof row.namespace === 'string')); }
+function lifecycleError(message) { const error = document.querySelector('#lifecycle-error'); error.textContent = message; error.hidden = !message; }
+function lifecycleConfirmState() {
+  const draft = lifecycleDraft;
+  const valid = draft?.plan && Date.parse(draft.plan.expires_at) > Date.now();
+  document.querySelector('#lifecycle-confirm').disabled = lifecycleBusy || !valid;
+  if (draft?.plan && !valid) lifecycleError('계획이 만료됐습니다. 취소한 뒤 새 계획을 확인하세요.');
+}
+async function reviewApplication(id, action) {
+  if (lifecycleBusy || lifecycleDialog.open) return;
+  const opener = document.activeElement;
+  lifecycleDraft = { id, action, opener, openerLabel: opener?.getAttribute('aria-label') }; lifecycleError('');
+  document.querySelector('#lifecycle-title').textContent = `앱 ${lifecycleNames[action]} 계획`;
+  document.querySelector('#lifecycle-description').textContent = '최신 앱 상태와 실행 계획을 확인하고 있습니다.';
+  document.querySelector('#lifecycle-expiry').textContent = '';
+  document.querySelector('#lifecycle-resources').replaceChildren(); document.querySelector('#lifecycle-retained').replaceChildren();
+  document.querySelector('#lifecycle-confirm').textContent = action === 'delete' ? '영구 삭제' : `앱 ${lifecycleNames[action]}`;
+  document.querySelector('#lifecycle-confirm').classList.toggle('danger-button', action === 'delete');
+  lifecycleConfirmState(); lifecycleDialog.showModal();
+  const draft = lifecycleDraft; lifecycleDialog.setAttribute('aria-busy', 'true');
+  try {
+    if (!await loadApplications()) throw new Error('최신 앱 목록을 확인한 뒤 다시 시도하세요.');
+    const app = applications.find((row) => row.id === id);
+    if (!app || !applicationAllowed(app, action)) throw new Error('현재 앱 상태에서는 이 작업을 실행할 수 없습니다. 진행 중인 작업이나 배포 상태를 확인하세요.');
+    const { data: plan } = await request(`/api/v1/applications/${encodeURIComponent(id)}/plans`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+    if (lifecycleDraft !== draft || !lifecycleDialog.open) return;
+    if (plan.application_id !== id || plan.action !== action || !/^[a-f0-9-]{36}$/.test(plan.id || '')
+        || !/^[a-f0-9]{64}$/.test(plan.plan_hash || '') || !Number.isFinite(Date.parse(plan.expires_at))
+        || !resourceList(plan.resources) || !resourceList(plan.retained)) throw new Error('앱과 일치하는 실행 계획을 확인하지 못했습니다.');
+    Object.assign(draft, { app, plan });
+    document.querySelector('#lifecycle-title').textContent = `${app.app} ${lifecycleNames[action]}`;
+    document.querySelector('#lifecycle-description').textContent = action === 'delete'
+      ? '데이터도 영구 삭제됩니다. 진행 중인 배포는 중단을 확인한 뒤 정리합니다. 앱 전용 Pod·네트워크·스토리지와 데이터를 영구 삭제합니다. 삭제한 데이터는 복구할 수 없습니다. 공용 노드와 공용 로드밸런서는 보존합니다.'
+      : action === 'stop' ? '앱 실행을 중지합니다. 데이터와 스토리지는 보존하며, 다시 사용하려면 재개를 선택하세요.' : '보존된 앱 설정과 데이터로 실행을 재개합니다.';
+    document.querySelector('#lifecycle-expiry').textContent = `계획 유효 기한: ${formatTime(plan.expires_at)}`;
+    lifecycleResources('#lifecycle-resources', plan.resources, '변경할 리소스 없음');
+    lifecycleResources('#lifecycle-retained', plan.retained, '서버가 별도로 표시한 보존 리소스 없음');
+  } catch (cause) { if (lifecycleDraft === draft) lifecycleError(cause.message); }
+  finally { if (lifecycleDraft === draft) { lifecycleDialog.setAttribute('aria-busy', 'false'); lifecycleConfirmState(); } }
+}
+function renderLifecycleOperation() {
+  const operation = lifecycleOperation;
+  document.querySelector('#lifecycle-operation').hidden = !operation;
+  if (!operation) return;
+  const title = `${operation.app || '앱'} ${lifecycleNames[operation.action] || '관리'}`;
+  document.querySelector('#lifecycle-operation-title').textContent = title;
+  document.querySelector('#lifecycle-operation-state').textContent = `${({ queued: '접수됨', running: '실행 중', succeeded: '완료', blocked: '실행 차단', failed: '실행 실패', unknown: '결과 확인 필요' })[operation.status] || '결과 확인 필요'}${operation.stage ? ' · ' + operation.stage : ''}`;
+  document.querySelector('#lifecycle-operation-message').textContent = operation.readError || operation.error?.message ||
+    (operation.status === 'succeeded' ? '서버가 실행 완료를 확인했습니다.' : ['queued', 'running'].includes(operation.status)
+      ? '15초마다 상태를 확인합니다. 페이지를 닫아도 서버 작업은 계속됩니다.' : '완료로 확인되지 않았습니다. 자동으로 다시 실행하지 않습니다. 남은 자원과 서버의 실행 상태를 확인하세요.');
+  document.querySelector('#lifecycle-operation-steps').replaceChildren(...(Array.isArray(operation.steps) ? operation.steps : []).map((step) => element('li', `${step.name}: ${step.status}`)));
+  document.querySelector('#lifecycle-residuals').hidden = !operation.residuals?.length;
+  lifecycleResources('#lifecycle-residual-list', operation.residuals, '');
+  document.querySelector('#lifecycle-operation-refresh').disabled = lifecycleReadBusy || !operation.id;
+  document.querySelector('#lifecycle-operation').setAttribute('aria-busy', String(lifecycleReadBusy || ['queued', 'running'].includes(operation.status)));
+  renderApplications();
+}
+async function refreshLifecycleOperation() {
+  clearTimeout(lifecycleTimer);
+  const previous = lifecycleOperation;
+  if (!previous?.id || lifecycleReadBusy) return;
+  lifecycleReadBusy = true; renderLifecycleOperation();
+  try {
+    const { data } = await request(`/api/v1/operations/${encodeURIComponent(previous.id)}`);
+    if (lifecycleOperation !== previous) return;
+    if (data.id !== previous.id || data.application_id !== previous.application_id || data.action !== previous.action
+        || !['queued', 'running', 'succeeded', 'blocked', 'failed', 'unknown'].includes(data.status)
+        || !resourceList(data.residuals || [])) throw new Error('실행 결과의 앱 정보가 일치하지 않습니다.');
+    lifecycleOperation = { ...previous, ...data, readError: null }; storeLifecycleOperation();
+    if (['queued', 'running'].includes(data.status)) lifecycleTimer = setTimeout(refreshLifecycleOperation, 15000);
+    else await loadApplications();
+  } catch (cause) {
+    if (lifecycleOperation === previous) { lifecycleOperation = { ...previous, status: 'unknown', readError: `상태 조회 실패: ${cause.message} 실행을 다시 보내지 않습니다. 상태 다시 조회를 눌러 확인하세요.` }; storeLifecycleOperation(); }
+  } finally { lifecycleReadBusy = false; renderLifecycleOperation(); }
+}
+document.querySelector('#lifecycle-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); lifecycleConfirmState();
+  const draft = lifecycleDraft;
+  if (document.querySelector('#lifecycle-confirm').disabled || !draft?.plan) return;
+  lifecycleBusy = true; lifecycleConfirmState(); renderApplications(); lifecycleDialog.setAttribute('aria-busy', 'true');
+  document.querySelector('#lifecycle-cancel').disabled = true;
+  let submitted = false;
+  try {
+    if (!await loadApplications()) throw new Error('최신 앱 상태를 확인하지 못했습니다. 요청을 보내지 않았습니다.');
+    const app = applications.find((row) => row.id === draft.id);
+    if (!app || app.app !== draft.app.app || app.status !== draft.app.status || Date.parse(draft.plan.expires_at) <= Date.now()) throw new Error('앱 상태가 바뀌었거나 계획이 만료됐습니다. 취소 후 새 계획을 확인하세요.');
+    lifecycleOperation = { application_id: app.id, app: app.app, action: draft.action, status: 'unknown', id: null };
+    storeLifecycleOperation(); submitted = true;
+    const { data, location, status } = await request(`/api/v1/applications/${encodeURIComponent(app.id)}/operations`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify({ action: draft.action, plan_id: draft.plan.id, plan_hash: draft.plan.plan_hash,
+        confirmation: app.app, ...(draft.action === 'delete' ? { delete_data: true } : {}) }) });
+    if (status !== 202 || !/^[A-Za-z0-9._-]+$/.test(data.id || '') || location !== `/api/v1/operations/${data.id}`
+        || data.application_id !== app.id || data.action !== draft.action || !['queued', 'running', 'succeeded', 'blocked', 'failed', 'unknown'].includes(data.status)) throw new Error('접수 결과를 확인하지 못했습니다.');
+    lifecycleOperation = { ...lifecycleOperation, ...data, application_id: app.id, app: app.app, action: draft.action };
+    storeLifecycleOperation(); lifecycleDialog.close(); refreshLifecycleOperation();
+  } catch (cause) {
+    if (submitted) {
+      lifecycleOperation.readError = `요청 결과를 확인하지 못했습니다: ${cause.message} 중복 실행을 막기 위해 다시 보내지 않습니다. 운영자에게 실행 확인을 요청하세요.`;
+      storeLifecycleOperation(); lifecycleDialog.close();
+    } else lifecycleError(cause.message);
+  } finally {
+    lifecycleBusy = false; document.querySelector('#lifecycle-cancel').disabled = false;
+    lifecycleDialog.setAttribute('aria-busy', 'false'); lifecycleConfirmState(); renderLifecycleOperation();
+  }
+});
+document.querySelector('#lifecycle-cancel').addEventListener('click', () => lifecycleDialog.close());
+lifecycleDialog.addEventListener('cancel', (event) => { if (lifecycleBusy) event.preventDefault(); });
+lifecycleDialog.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const controls = [...lifecycleDialog.querySelectorAll('button:not(:disabled)')];
+  const first = controls[0], last = controls.at(-1);
+  if (!first) { event.preventDefault(); return; }
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+lifecycleDialog.addEventListener('close', () => {
+  const draft = lifecycleDraft; lifecycleDraft = null;
+  const opener = draft?.opener?.isConnected ? draft.opener : [...document.querySelectorAll('button[aria-label]')].find((button) => button.getAttribute('aria-label') === draft?.openerLabel && !button.disabled && button.getClientRects().length);
+  (opener || (!views.history.hidden ? document.querySelector('#applications-refresh') : document.querySelector('#lifecycle-operation-refresh'))).focus();
+});
+document.querySelector('#lifecycle-operation-refresh').addEventListener('click', refreshLifecycleOperation);
+window.addEventListener('pagehide', () => clearTimeout(lifecycleTimer));
+
 async function initializeDashboard() {
   try {
     const { data: session } = await request('/api/v1/sessions', { method: 'POST' });
@@ -1102,6 +1302,8 @@ async function initializeDashboard() {
     await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError), loadConnections().catch((cause) => {
       document.querySelector('#connection-message').textContent = cause.message;
     })]);
+    renderLifecycleOperation();
+    if (lifecycleOperation?.id) refreshLifecycleOperation();
     if (history.length) { current = history[0]; renderRun(); refreshRun(); }
     if (!views.monitor.hidden || !views.deploy.hidden) loadEnvironments();
   } catch (cause) {

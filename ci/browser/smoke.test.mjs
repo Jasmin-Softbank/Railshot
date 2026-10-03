@@ -63,6 +63,64 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   assert.deepEqual(errors, []);
 });
 
+test('application detail keeps update and lifecycle controls while active deployments beyond the first app page remain manageable', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors } = await start(t, { service: null });
+  const baseline = { id: 'stable-deployment', app: 'stable-app', target_id: 'shared-target', status: 'succeeded' };
+  const stable = { id: 'stable-application', app: 'stable-app', target_id: 'shared-target', status: 'ready',
+    current_deployment_state: 'verified', current_deployment: baseline, latest_deployment: baseline };
+  const building = { id: 'building-application', app: 'building-app', target_id: 'shared-target', status: 'queued' };
+  const deployment = { id: 'active-deployment', application_id: building.id, app: building.app,
+    target_id: building.target_id, status: 'running', stage: 'ci', steps: [] };
+  const writes = [];
+  const operation = { id: 'manage-stable', application_id: stable.id, action: 'stop', status: 'running', steps: [], residuals: [] };
+  const json = (route, data, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(data) });
+  await page.route('**/api/v1/applications?*', (route) => json(route, new URL(route.request().url()).searchParams.has('marker')
+    ? { items: [building], next_marker: null } : { items: [stable], next_marker: 'next-page' }));
+  await page.route('**/api/v1/applications/stable-application', (route) => json(route, stable));
+  await page.route('**/api/v1/deployments?*', (route) => json(route, { items: [deployment], next_marker: null }));
+  await page.route('**/api/v1/deployments/active-deployment', (route) => json(route, deployment));
+  await page.route('**/api/v1/applications/*/plans', (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-2);
+    return json(route, { id: '11111111-1111-4111-8111-111111111111', application_id: id,
+      action: route.request().postDataJSON().action, plan_hash: 'a'.repeat(64), expires_at: '2099-01-01T00:00:00Z',
+      resources: [{ kind: 'Namespace', name: id }], retained: [{ kind: 'Node', name: 'shared-node' }] });
+  });
+  await page.route('**/api/v1/applications/stable-application/operations', (route) => {
+    writes.push(route.request().postDataJSON()); stable.status = 'stopping';
+    return json(route, operation, 202, { location: '/api/v1/operations/manage-stable' });
+  });
+  await page.route('**/api/v1/operations/manage-stable', (route) => json(route, operation));
+  await page.goto(origin); await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  await page.locator('[data-view="history"]').click();
+  await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
+  assert.equal(await page.locator('#applications-list > li').count(), 1);
+  const trash = page.locator('#history-list').getByRole('button', { name: /^building-app 삭제/ });
+  await trash.click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  assert.match(await page.locator('#lifecycle-description').innerText(), /데이터도 영구 삭제.*진행 중인 배포/);
+  assert.match(await page.locator('#lifecycle-retained').innerText(), /shared-node/);
+  await page.getByRole('button', { name: '취소', exact: true }).click();
+  assert.equal(writes.length, 0, 'opening or cancelling delete never executes');
+  await page.locator('#applications-more').click();
+  assert.equal(await page.locator('#applications-list > li').count(), 2);
+  await page.getByRole('button', { name: 'stable-app 앱 상세·업데이트' }).click();
+  await page.waitForFunction(() => !document.querySelector('#application-update').disabled);
+  assert.equal(await page.locator('#detail-application-actions').getByRole('button').count(), 3);
+  assert.ok(await page.locator('#application-versions').getByRole('button', { name: /최종 소스 다운로드/ }).count());
+  await page.locator('#application-update').click();
+  assert.equal(await page.locator('#update-context').isVisible(), true);
+  assert.equal(await page.locator('#target-section').isVisible(), false);
+  await page.locator('[data-view="history"]').click();
+  await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
+  await page.locator('#detail-application-actions').getByRole('button', { name: 'stable-app 중지', exact: true }).click();
+  await page.getByRole('button', { name: '앱 중지', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('실행 중'));
+  assert.equal(writes.length, 1); assert.equal(writes[0].action, 'stop');
+  assert.equal(await page.locator('#application-update').isDisabled(), true);
+  assert.equal(await page.locator('#history-list').getByRole('button', { name: /^building-app 삭제/ }).isDisabled(), true);
+  assert.deepEqual(errors, []);
+});
+
 test('application updates keep app and environment fixed across all source formats, review diffs, and start the frozen preview', { timeout: 90000 }, async (t) => {
   const { page, origin, errors, stateDirectory } = await start(t, { service: null });
   const baseline = { id: 'deployed-v1', app: 'stable-app', target_id: 'same-target', status: 'succeeded', source_commit: 'a'.repeat(40) };
@@ -102,6 +160,7 @@ test('application updates keep app and environment fixed across all source forma
     assert.equal(await page.locator('#target-section').isVisible(), false);
   };
   await page.locator('[data-view="history"]').click();
+  await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
   assert.match(await page.locator('#applications-list').innerText(), /현재 서비스: deployed-v1/);
   assert.match(await page.locator('#applications-list').innerText(), /최근 시도: 실행 실패 · failed-v2/);
   await page.getByRole('button', { name: 'stable-app 앱 상세·업데이트' }).click();

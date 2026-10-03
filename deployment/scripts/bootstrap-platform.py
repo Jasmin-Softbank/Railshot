@@ -274,14 +274,19 @@ def ensure_object(document, uids, preserve_existing=False, claim=None):
         for rule in rules:
             require(isinstance(rule, dict) and set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'} and
                     isinstance(rule['apiGroups'], list) and isinstance(rule['resources'], list) and
-                    len(rule['apiGroups']) == len(rule['resources']) == 1 and rule['verbs'] == ['get', 'patch'] and
+                    len(rule['apiGroups']) == len(rule['resources']) == 1 and rule['verbs'] in (['get', 'patch'], ['delete']) and
                     isinstance(rule['resourceNames'], list) and rule['resourceNames'] and all(
                         isinstance(value, str) and re.fullmatch(r'[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?', value)
                         for value in rule['resourceNames']), 'REGISTRATION_ROLE_DIFFERS')
             kind = (rule['apiGroups'][0], rule['resources'][0])
+            grant = (*kind, tuple(rule['verbs']))
             require(kind in {('argoproj.io', 'appprojects'), ('argoproj.io', 'applications'), ('', 'secrets')}
-                    and kind not in seen, 'REGISTRATION_ROLE_DIFFERS')
-            seen.add(kind)
+                    and grant not in seen, 'REGISTRATION_ROLE_DIFFERS')
+            seen.add(grant)
+            if rule['verbs'] == ['delete']:
+                pattern = {'applications': r'app-[a-f0-9]{24}-[a-z0-9-]+', 'appprojects': r'app-[a-f0-9]{24}',
+                           'secrets': r'railshot-app-[a-f0-9]{24}'}[kind[1]]
+                require(all(re.fullmatch(pattern, value) for value in rule['resourceNames']), 'REGISTRATION_ROLE_DIFFERS')
         current = kube_get(document['kind'], meta['name'], ns)
         require(current and current['metadata']['uid'] == old['metadata']['uid'] and not current['metadata'].get('deletionTimestamp')
                 and (current.get('rules') or []) == rules, 'REGISTRATION_ROLE_READBACK_DIFFERS')

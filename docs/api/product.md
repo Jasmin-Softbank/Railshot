@@ -15,6 +15,8 @@
 | profile | `GET /api/v1/profiles` | 운영자가 등록한 환경 사양, 고정 대상 또는 생성 템플릿, 선택적 앱 이름·DB 역할 수와 지원 범위. 자격·로컬 경로는 포함하지 않는다. |
 | 계획 | `POST /api/v1/plans`, `GET /api/v1/plans/{id}` | 검증·저장한 계획을 201로 반환한다. 계획은 VM 생성 결과가 아니다. |
 | 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | 저장된 계획을 한 번 실행한다. 자원·guest·runtime, 선택적 Patroni DB와 배포 대상 등록을 각각 기록한다. 앱 소스의 CI·배포·공개 HTTP 검증은 이 요청에 포함하지 않는다. |
+| 앱 작업 계획 | `POST /api/v1/applications/{id}/plans` | 현재 세션이 소유한 앱의 중지·시작·삭제 범위와 보존 자원을 읽어 10분간 유효한 계획을 반환한다. |
+| 앱 작업 | `POST /api/v1/applications/{id}/operations`, `GET /api/v1/operations/{id}` | 확인한 계획을 한 번 실행하고 단계·결과·남거나 확인하지 못한 자원을 기록한다. |
 
 실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`만 받는다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
 
@@ -105,6 +107,22 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 `RAILSHOT_APPLICATIONS_FILE`은 기존 Ansible registry의 환경 ID와 CD 기반 설정을 연결하는 비공개 운영자 JSON이다. API는 업로드에서 실제 앱 이름을 얻고 `(environment_id, tenant, app)`으로 앱 binding ID를 결정한다. 환경에는 앱 이름을 넣지 않는다. `GET /api/v1/targets`는 `deployment_scope=environment`, `GET /api/v1/applications[/{id}]`는 현재 세션의 앱 등록을 반환한다. 처음에는 앱 목록이 비어 있다.
 
 같은 앱 재배포는 namespace·NodePort·Argo project·GitOps 경로를 재사용한다. 다른 앱은 별도 등록을 만든다. `deployment.target_id`는 앱 binding이고 `environment_target_id`는 기존 노드다. CI 게시물·CD·로그는 앱 binding을 사용하며 노드 관측만 환경 ID를 사용한다. 다른 세션의 같은 이름은 409이며 다른 세션의 등록 상세는 404다.
+
+### 앱 중지·시작·삭제
+
+`POST /api/v1/applications/{id}/plans`는 `{action:"stop"|"start"|"delete"}`를 받아 현재 세션의 앱 계획을 201로 반환한다. 응답은 `{id, application_id, action, plan_hash, resources, retained, expires_at}`이며 `resources`와 `retained`는 `{kind,name,namespace?}` 목록이다. 삭제할 앱의 고정 등록·소유권·경로를 읽고, 계획 ID·SHA-256·운영자 설정·앱 상태를 저장한다. 계획은 10분간 유효하며 환경 생성용 `/api/v1/plans` 목록에는 포함하지 않는다. 공개 입력에는 앱 ID와 허용된 작업만 받으며 자격·파일 경로·임의 명령을 받지 않는다.
+
+확인한 계획은 `POST /api/v1/applications/{id}/operations`에 `{action,plan_id,plan_hash,confirmation,delete_data?}`와 `Idempotency-Key`를 보내 실행한다. `confirmation`은 현재 앱 이름과 정확히 같아야 한다. 삭제에는 `delete_data:true`가 필수이며 중지·시작은 이 필드를 생략하거나 false로 보낸다. 대시보드의 삭제 경고에서 한 번 더 삭제를 누르면 앱 이름과 데이터 삭제 동의를 전달한다. 별도의 이름 입력이나 체크박스는 요구하지 않는다.
+
+앱 작업은 초기 202와 완료된 동일 요청의 200 모두 **작업 객체를 직접 반환**한다. 기존 배포·환경 생성의 accepted envelope는 유지한다. 앱 작업 응답의 `id`, `application_id`, `action`, `status`, `stage`, `steps`, `residuals`, `retained`, `error`로 화면을 갱신하고 `Location: /api/v1/operations/{id}`에서 조회한다. 202에는 `Retry-After: 2`, 모든 응답에는 새 `X-Request-ID`와 `Cache-Control: no-store`가 있다. `steps`는 `{name,status}` 목록이며 `residuals`는 남아 있거나 부재를 검증하지 못한 자원의 식별자다. 비공개 계획·경로·자격·하위 명령 출력은 반환하지 않는다.
+
+중지는 앱 실행을 멈추고 데이터를 보존하며 `ready → stopping → stopped`, 시작은 명시적으로 재개해 `stopped → starting → ready`, 삭제는 확인한 앱 소유 자원과 데이터를 제거해 `ready|stopped → deleting → deleted`로 전환한다. 삭제 기록은 tombstone으로 남긴다. stopped·deleted 앱으로 새 소스 배포를 보내면 409이며 중지한 앱은 먼저 시작해야 한다. 앱 삭제는 공용 노드·K3s·Cilium·공용 ingress를 제거하는 환경 삭제가 아니다. 실행 실패나 결과 유실은 앱을 unknown으로 남기며 운영자가 실제 기록을 확인하기 전에는 새 작업을 허용하지 않는다.
+
+배포 중에도 같은 앱에는 삭제를 접수할 수 있다. 서버는 `deletion_requested`를 먼저 영속 저장해 새 CI/CD 진행을 막고 기존 worker의 종료를 기다린다. CI가 시작됐다면 저장한 저장소·workflow·source SHA·run attempt에 묶인 실행에 취소를 한 번 요청하고 완료를 다시 확인한다. CD가 진행 중이면 그 실행 결과와 이후 실제 Argo 상태가 확인돼야 정리할 수 있다. 작업을 멈춘 후 새 비공개 계획을 만들며, 처음 구체적으로 확인한 삭제 범위가 늘었으면 `APPLICATION_PLAN_CHANGED`로 차단한다. 취소 응답 유실·타임아웃·원격 상태 불확실은 정리 실행 전에 unknown으로 남긴다.
+
+같은 앱의 배포가 진행 중이면 등록·CI·CD 단계 모두 정확한 앱 ID의 `ApplicationNamespace`·`ApplicationRoutes`를 삭제 범위로 확인한다. 이는 생성 완료 목록이 아니라 해당 앱에 한정된 삭제 승인 범위다. 운영자 설정 digest와 그 배포 ID에 고정하며, 진행 중인 등록·CD writer의 lock을 선점하지 않는다. 최대 30분 동안 worker 종료를 기다리고 배포가 멈춘 뒤 실제 Python 계획이 등록 binding·소유권을 검증해야 실행할 수 있다. 등록 의도 자체가 없다는 증명은 공용 등록 lock 안에서 검사하고, 일부만 등록된 불확실 기록은 자동 정리하지 않는다. 다른 앱의 진행 중 작업과 unknown은 계속 전역 실행 한도를 점유한다.
+
+멱등 키는 세션·앱 작업 종류별로 관리한다. 같은 키·같은 본문은 원래 작업을 반환하고 입력이 달라지면 409다. 계획 만료·이미 소비한 계획·변경된 앱 상태와 다른 세션 접근은 실행 전에 거부한다. SQLite에 계획 소비·작업·앱 전이를 저장한 뒤 고정 Python 실행기를 한 번 호출한다. 재시작 시 queued/running 작업과 전이 중 앱은 unknown으로 복구하며 자동 재실행하지 않는다. 중지·시작·삭제 계획과 작업도 기존 보관 상한을 공유한다.
 
 최초 `stage=registration`에서 실제 노드의 Service와 영속 예약을 읽어 NodePort를 할당하고 namespace·pull Secret·Argo 권한·CI binding을 연결한다. VM 생성이나 runtime 재설치는 하지 않는다. 등록 `ready`는 배포 완료가 아니다. `running/unknown` 등록은 재실행하지 않고 운영자 조정이 필요하다. CI의 정확한 source commit·앱·target·image digest를 검증한 뒤 실제 spec의 포트·health·route로 CD와 공개 경로를 준비한다. 앱 URL은 해당 revision/digest가 실행되고 실제 health와 서비스 경로가 HTTPS 200을 반환할 때만 제공한다.
 

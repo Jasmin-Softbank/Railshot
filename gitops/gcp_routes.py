@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import tempfile
 
-from edge import encoded, digest, read_private, locked, durable_write, native, require, http_path
+from edge import encoded, digest, read_private, locked, durable_write, native, require, http_path, lifecycle_ready
 
 SOURCE = Path(__file__).resolve().parents[1] / 'infrastructure/terraform/gcp-edge'
 KINDS = ('google_compute_network_endpoint_group', 'google_compute_network_endpoint',
@@ -98,8 +98,13 @@ def validate_plan(plan, request, values):
     require(not plan.get('errored') and all(actions.get(item['address']) == ['no-op']
             for item in plan.get('resource_drift', [])), 'reconcile writable refresh drift before route writes')
     key = request['application_id']
-    expected = {**values, 'routes': {**values.get('routes', {}), key: checked_request(request)}}
-    require(all(plan.get('variables', {}).get(k, {}).get('value') == v for k, v in expected.items()),
+    expected = copy.deepcopy({**values, 'routes': {**values.get('routes', {}), key: checked_request(request)}})
+    actual = copy.deepcopy({k: plan.get('variables', {}).get(k, {}).get('value') for k in expected})
+    for collection in (actual, expected):
+        for route in (collection.get('routes') or {}).values():
+            if route.get('enabled') is True:
+                route.pop('enabled')
+    require(actual == expected,
             'saved plan variables differ from bound candidate')
     provider = plan.get('configuration', {}).get('provider_config', {}).get('google', {})
     require(provider.get('full_name') == 'registry.terraform.io/hashicorp/google' and
@@ -203,6 +208,7 @@ def output_route(state, request, values):
 def ensure(config_path, request):
     route, config = checked_request(request), config_at(config_path)
     with locked(config) as root:
+        lifecycle_ready(root)
         require(config_at(config_path) == config, 'authority changed before locking')
         for existing in root.glob('gcp-route-*.json'):
             require(read_private(existing).get('phase') == 'applied', 'unfinished edge operation requires manual reconciliation')
@@ -211,7 +217,9 @@ def ensure(config_path, request):
         require(isinstance(routes, dict), 'route map required')
         key = request['application_id']
         if key in routes:
-            require(routes[key] == route, 'existing application route changes require separate approval')
+            require(routes[key].get('enabled', True) and
+                    {k: v for k, v in routes[key].items() if k != 'enabled'} == route,
+                    'existing application route changes require separate approval')
             return output_route(state, request, values)
         require(all(route['hostname'] != r['hostname'] and route['node_port'] != r['node_port'] for r in
                     [{**values, 'node_port': values.get('node_port', 30080)}, *routes.values()]),
