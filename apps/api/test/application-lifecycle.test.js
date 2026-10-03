@@ -570,7 +570,7 @@ test('known registration preflight failure deletes a queued app only through a v
     assert.equal(submissions, 0);
     if (mode !== 'unstarted') {
       await assert.rejects(product.createApplicationPlan(deployment.application_id, { action: 'delete' }, owner),
-        { code: mode === 'unknown_registration' ? 'EXECUTOR_BUSY' : 'APPLICATION_PLAN_BLOCKED' });
+        { code: mode === 'unknown_registration' ? 'EXECUTOR_BUSY' : 'APPLICATION_REGISTRATION_INCOMPLETE' });
       assert.deepEqual(phases, mode === 'unknown_registration' ? ['registration'] : ['registration', 'plan']);
       assert.notEqual(product.getApplication(deployment.application_id, owner).status, 'deleted');
       return;
@@ -631,4 +631,94 @@ test('failed initial deployment cannot stop or start but remains deletable', asy
     assert.equal((await settled(product, operation.id, f.owner.id)).status, 'succeeded');
     assert.deepEqual(product.applications(f.owner.id), []);
   } finally { await product.close(); }
+});
+
+test('async lifecycle preview returns before cloud inspection, deduplicates and leaves the writer queue free', async (t) => {
+  let release, calls = 0;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const f = await fixture(t, { adapter: { planLifecycle: async (application, { id, action }) => {
+    calls++; await gate;
+    return { public: { id, application_id: application.id, action, plan_hash: 'b'.repeat(64), resources, retained,
+      expires_at: new Date(Date.now() + 600000).toISOString() }, private: { path: '/private/never-exposed' } };
+  } } });
+  try {
+    const pending = await f.product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id, { asynchronous: true });
+    assert.equal(pending.status, 'planning');
+    assert.equal(disk(f.directory, 'plans', pending.id).public.status, 'planning');
+    const replay = await f.product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id, { asynchronous: true });
+    assert.equal(replay.id, pending.id); assert.equal(calls, 1);
+    const rejected = f.product.createApplicationOperation(app.id, { ...f.input(pending), plan_hash: 'b'.repeat(64) }, 'not-ready', f.owner.id);
+    await assert.rejects(Promise.race([rejected, pause(300).then(() => { throw new Error('writer queue blocked by cloud inspection'); })]), { code: 'APPLICATION_PLAN_STALE' });
+    assert.throws(() => f.product.getApplicationPlan(app.id, pending.id, f.stranger.id), { status: 404 });
+    assert.throws(() => f.product.getApplicationPlan(app.id, pending.id), { status: 404 });
+    assert.equal(f.calls.apply, 0);
+    release();
+    for (let i = 0; i < 100 && f.product.getApplicationPlan(app.id, pending.id, f.owner.id).status === 'planning'; i++) await pause(5);
+    const ready = f.product.getApplicationPlan(app.id, pending.id, f.owner.id);
+    assert.equal(ready.status, 'ready'); assert.equal(ready.private, undefined);
+    const op = await f.product.createApplicationOperation(app.id, f.input(ready), 'confirmed-delete', f.owner.id);
+    assert.equal((await settled(f.product, op.id, f.owner.id)).status, 'succeeded'); assert.equal(f.calls.apply, 1);
+  } finally { release(); }
+});
+
+test('async plan failures are inspectable and private executor errors stay private', async (t) => {
+  const f = await fixture(t, { adapter: { planLifecycle: async () => { throw new Error('/private/credentials SECRET'); } } });
+  const pending = await f.product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id, { asynchronous: true });
+  for (let i = 0; i < 100 && f.product.getApplicationPlan(app.id, pending.id, f.owner.id).status === 'planning'; i++) await pause(5);
+  const failed = f.product.getApplicationPlan(app.id, pending.id, f.owner.id);
+  assert.equal(failed.status, 'failed'); assert.equal(failed.error.code, 'APPLICATION_PLAN_UNAVAILABLE');
+  assert.equal(failed.error.outcome_unknown, false); assert.doesNotMatch(JSON.stringify(failed), /SECRET|credentials/);
+  assert.equal(f.calls.apply, 0);
+});
+
+test('restart makes unfinished read-only plans retryable without replaying cloud work', async (t) => {
+  const f = await fixture(t); const plan = await f.plan(); await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction((state) => { state.plans[plan.id].public.status = 'planning'; }); await store.close();
+  const restarted = await createProductService(f.options);
+  try {
+    const value = restarted.getApplicationPlan(app.id, plan.id, f.owner.id);
+    assert.equal(value.status, 'failed'); assert.equal(value.error.code, 'APPLICATION_PLAN_INTERRUPTED');
+    assert.equal(f.calls.plan, 1); assert.equal(f.calls.apply, 0);
+    await assert.rejects(restarted.createApplicationOperation(app.id, f.input(value), 'interrupted-plan', f.owner.id), { code: 'APPLICATION_PLAN_STALE' });
+  } finally { await restarted.close(); }
+});
+
+test('async plan becomes stale if the application changes during inspection', async (t) => {
+  const f = await fixture(t); const approved = await f.plan('stop');
+  const original = f.adapter.planLifecycle; let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  f.adapter.planLifecycle = async (...args) => { await gate; return original(...args); };
+  try {
+    const pending = await f.product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id, { asynchronous: true });
+    const stop = await f.product.createApplicationOperation(app.id, f.input(approved), 'stop-during-inspection', f.owner.id);
+    await settled(f.product, stop.id, f.owner.id); release();
+    for (let i = 0; i < 100 && f.product.getApplicationPlan(app.id, pending.id, f.owner.id).status === 'planning'; i++) await pause(5);
+    const stale = f.product.getApplicationPlan(app.id, pending.id, f.owner.id);
+    assert.equal(stale.status, 'failed'); assert.equal(stale.error.code, 'APPLICATION_PLAN_STALE');
+    assert.equal(f.calls.apply, 1);
+  } finally { release(); }
+});
+
+test('HTTP async plan exposes a session-bound status URL and polling never applies deletion', async (t) => {
+  let release; const gate = new Promise((resolve) => { release = resolve; });
+  const f = await fixture(t); const original = f.adapter.planLifecycle;
+  f.adapter.planLifecycle = async (...args) => { await gate; return original(...args); };
+  const server = createAppServer({ product: f.product });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = { cookie: 'railshot_session=' + f.owner.token, 'content-type': 'application/json', Prefer: 'respond-async' };
+  try {
+    const response = await fetch(base + `/api/v1/applications/${app.id}/plans`, { method: 'POST', headers, body: JSON.stringify({ action: 'delete' }) });
+    assert.equal(response.status, 202); assert.equal(response.headers.get('preference-applied'), 'respond-async');
+    const body = await response.json(); assert.equal(body.status, 'planning');
+    const location = response.headers.get('location'); assert.equal(location, `/api/v1/applications/${app.id}/plans/${body.id}`);
+    const status = await fetch(base + location, { headers }); assert.equal(status.status, 200);
+    assert.equal(status.headers.get('retry-after'), '2'); assert.equal((await status.json()).status, 'planning');
+    assert.equal((await fetch(base + location, { headers: { ...headers, cookie: 'railshot_session=' + f.stranger.token } })).status, 404);
+    assert.equal((await fetch(base + location + '?extra=1', { headers })).status, 422);
+    assert.equal((await fetch(base + location, { method: 'POST', headers })).status, 405);
+    assert.equal(f.calls.apply, 0);
+  } finally { release(); }
 });

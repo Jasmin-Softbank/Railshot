@@ -73,40 +73,112 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
     const draft = lifecycleDraft;
     const valid = draft?.plan && Date.parse(draft.plan.expires_at) > Date.now();
     document.querySelector('#lifecycle-confirm').disabled = lifecycleBusy || !valid;
-    if (draft?.plan && !valid) lifecycleError('계획이 만료됐습니다. 취소한 뒤 새 계획을 확인하세요.');
+    if (draft?.plan && !valid) { lifecycleError('계획이 만료됐습니다. 계획 다시 확인으로 새 계획을 확인하세요.'); document.querySelector('#lifecycle-retry').hidden = false; }
+  }
+  function rememberPlan(draft, id) {
+    draft.pending = id;
+    try { sessionStorage.setItem('railshot.application-plan', JSON.stringify({ application_id: draft.id, action: draft.action, id })); } catch { /* The server retains the plan. */ }
+  }
+  function clearPlan(draft) {
+    draft.pending = null;
+    try { sessionStorage.removeItem('railshot.application-plan'); } catch { /* A stale cached plan remains subject to server checks. */ }
+  }
+  function showPlan(draft, plan) {
+    if (plan.application_id !== draft.id || plan.action !== draft.action || !/^[a-f0-9-]{36}$/.test(plan.id || ''))
+      throw new Error('앱과 일치하는 실행 계획을 확인하지 못했습니다.');
+    rememberPlan(draft, plan.id);
+    if (plan.status === 'failed') {
+      clearPlan(draft);
+      throw new Error(`${plan.error?.message || '실행 계획을 확인하지 못했습니다.'}${plan.error?.code ? ' (' + plan.error.code + ')' : ''}`);
+    }
+    if (plan.status === 'planning') {
+      draft.startedAt = Date.parse(plan.created_at) || draft.startedAt;
+      document.querySelector('#lifecycle-description').textContent = '서버에서 앱 전용 자원과 공용 자원을 확인하고 있습니다. 아직 앱 변경은 실행되지 않았습니다.';
+      draft.pollTimer = setTimeout(() => readPlan(draft), 2000);
+      return;
+    }
+    if ((plan.status && plan.status !== 'ready') || !/^[a-f0-9]{64}$/.test(plan.plan_hash || '')
+        || !Number.isFinite(Date.parse(plan.expires_at)) || !resourceList(plan.resources) || !resourceList(plan.retained))
+      throw new Error('앱과 일치하는 실행 계획을 확인하지 못했습니다.');
+    clearPlan(draft); draft.plan = plan; draft.loading = false;
+    document.querySelector('#lifecycle-progress').hidden = true;
+    document.querySelector('#lifecycle-title').textContent = `${draft.app.app} ${lifecycleNames[draft.action]}`;
+    document.querySelector('#lifecycle-description').textContent = draft.action === 'delete'
+      ? '데이터도 영구 삭제됩니다. 진행 중인 배포는 중단을 확인한 뒤 정리합니다. 앱 전용 Pod·네트워크·스토리지와 데이터를 영구 삭제합니다. 삭제한 데이터는 복구할 수 없습니다. 공용 노드와 공용 로드밸런서는 보존합니다.'
+      : draft.action === 'stop' ? '앱 실행을 중지합니다. 데이터와 스토리지는 보존하며, 다시 사용하려면 재개를 선택하세요.' : '보존된 앱 설정과 데이터로 실행을 재개합니다.';
+    document.querySelector('#lifecycle-expiry').textContent = `계획 유효 기한: ${formatTime(plan.expires_at)}`;
+    lifecycleResources('#lifecycle-resources', plan.resources, '변경할 리소스 없음');
+    lifecycleResources('#lifecycle-retained', plan.retained, '서버가 별도로 표시한 보존 리소스 없음');
+    lifecycleDialog.setAttribute('aria-busy', 'false'); lifecycleConfirmState();
+  }
+  function planFailure(draft, cause) {
+    if (lifecycleDraft !== draft || !lifecycleDialog.open) return;
+    draft.loading = false; clearTimeout(draft.pollTimer);
+    document.querySelector('#lifecycle-progress').hidden = true;
+    document.querySelector('#lifecycle-description').textContent = '계획 확인을 완료하지 못했습니다. 앱 변경은 실행되지 않았습니다.';
+    lifecycleError(cause.name === 'AbortError' ? '서버 응답을 기다리는 시간이 초과됐습니다. 계획 다시 확인을 눌러 상태를 조회하세요.' : cause.message);
+    document.querySelector('#lifecycle-retry').hidden = false;
+    lifecycleDialog.setAttribute('aria-busy', 'false'); lifecycleConfirmState();
+  }
+  async function readPlan(draft) {
+    if (lifecycleDraft !== draft || !lifecycleDialog.open) return;
+    try {
+      if (Date.now() - draft.startedAt > 660000) throw new Error('계획 확인이 예상보다 오래 걸립니다. 계획 다시 확인으로 서버 상태를 조회하세요.');
+      const { data } = await request(`/api/v1/applications/${encodeURIComponent(draft.id)}/plans/${encodeURIComponent(draft.pending)}`, {}, draft.controller);
+      if (lifecycleDraft !== draft || !lifecycleDialog.open) return;
+      if (data.id !== draft.pending) throw new Error('계획 조회 결과가 일치하지 않습니다.');
+      showPlan(draft, data);
+    } catch (cause) {
+      if (lifecycleDraft !== draft || !lifecycleDialog.open) return;
+      if (cause.status === 404) clearPlan(draft);
+      planFailure(draft, cause);
+    }
+  }
+  async function preparePlan(draft) {
+    draft.controller?.abort(); clearTimeout(draft.pollTimer);
+    draft.controller = new AbortController(); draft.loading = true; draft.startedAt = Date.now();
+    draft.plan = null; lifecycleError(''); lifecycleConfirmState();
+    document.querySelector('#lifecycle-retry').hidden = true;
+    document.querySelector('#lifecycle-description').textContent = '최신 앱 상태를 확인하고 있습니다. 아직 앱 변경은 실행되지 않았습니다.';
+    document.querySelector('#lifecycle-expiry').textContent = '';
+    lifecycleResources('#lifecycle-resources', [], '계획 확인 후 표시됩니다.');
+    lifecycleResources('#lifecycle-retained', [], '계획 확인 후 표시됩니다.');
+    lifecycleDialog.setAttribute('aria-busy', 'true');
+    try {
+      if (!await loadApplications()) throw new Error('최신 앱 목록을 확인한 뒤 다시 시도하세요.');
+      if (lifecycleDraft !== draft || !lifecycleDialog.open) return;
+      const app = getApplications().find((row) => row.id === draft.id);
+      if (!app || !applicationAllowed(app, draft.action)) throw new Error('현재 앱 상태에서는 이 작업을 실행할 수 없습니다. 진행 중인 작업이나 배포 상태를 확인하세요.');
+      draft.app = app;
+      if (draft.pending) { await readPlan(draft); return; }
+      const { data, status, location } = await request(`/api/v1/applications/${encodeURIComponent(draft.id)}/plans`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Prefer: 'respond-async' }, body: JSON.stringify({ action: draft.action }) }, draft.controller);
+      if (lifecycleDraft !== draft || !lifecycleDialog.open) return;
+      if (status === 202 && location !== `/api/v1/applications/${draft.id}/plans/${data.id}`) throw new Error('계획 접수 결과를 확인하지 못했습니다.');
+      showPlan(draft, data);
+    } catch (cause) { planFailure(draft, cause); }
   }
   async function reviewApplication(id, action) {
     if (lifecycleBusy || lifecycleDialog.open) return;
     const opener = document.activeElement;
-    lifecycleDraft = { id, action, opener, openerLabel: opener?.getAttribute('aria-label') }; lifecycleError('');
+    const draft = { id, action, opener, openerLabel: opener?.getAttribute('aria-label') };
+    try {
+      const saved = JSON.parse(sessionStorage.getItem('railshot.application-plan') || 'null');
+      if (saved?.application_id === id && saved.action === action && /^[a-f0-9-]{36}$/.test(saved.id || '')) draft.pending = saved.id;
+    } catch { /* Start a fresh read-only plan when no saved reference exists. */ }
+    lifecycleDraft = draft;
     document.querySelector('#lifecycle-title').textContent = `앱 ${lifecycleNames[action]} 계획`;
-    document.querySelector('#lifecycle-description').textContent = '최신 앱 상태와 실행 계획을 확인하고 있습니다.';
-    document.querySelector('#lifecycle-expiry').textContent = '';
-    document.querySelector('#lifecycle-resources').replaceChildren(); document.querySelector('#lifecycle-retained').replaceChildren();
     document.querySelector('#lifecycle-confirm').textContent = action === 'delete' ? '영구 삭제' : `앱 ${lifecycleNames[action]}`;
     document.querySelector('#lifecycle-confirm').classList.toggle('danger-button', action === 'delete');
-    lifecycleConfirmState(); lifecycleDialog.showModal();
-    const draft = lifecycleDraft; lifecycleDialog.setAttribute('aria-busy', 'true');
-    try {
-      if (!await loadApplications()) throw new Error('최신 앱 목록을 확인한 뒤 다시 시도하세요.');
-      const app = getApplications().find((row) => row.id === id);
-      if (!app || !applicationAllowed(app, action)) throw new Error('현재 앱 상태에서는 이 작업을 실행할 수 없습니다. 진행 중인 작업이나 배포 상태를 확인하세요.');
-      const { data: plan } = await request(`/api/v1/applications/${encodeURIComponent(id)}/plans`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
-      if (lifecycleDraft !== draft || !lifecycleDialog.open) return;
-      if (plan.application_id !== id || plan.action !== action || !/^[a-f0-9-]{36}$/.test(plan.id || '')
-          || !/^[a-f0-9]{64}$/.test(plan.plan_hash || '') || !Number.isFinite(Date.parse(plan.expires_at))
-          || !resourceList(plan.resources) || !resourceList(plan.retained)) throw new Error('앱과 일치하는 실행 계획을 확인하지 못했습니다.');
-      Object.assign(draft, { app, plan });
-      document.querySelector('#lifecycle-title').textContent = `${app.app} ${lifecycleNames[action]}`;
-      document.querySelector('#lifecycle-description').textContent = action === 'delete'
-        ? '데이터도 영구 삭제됩니다. 진행 중인 배포는 중단을 확인한 뒤 정리합니다. 앱 전용 Pod·네트워크·스토리지와 데이터를 영구 삭제합니다. 삭제한 데이터는 복구할 수 없습니다. 공용 노드와 공용 로드밸런서는 보존합니다.'
-        : action === 'stop' ? '앱 실행을 중지합니다. 데이터와 스토리지는 보존하며, 다시 사용하려면 재개를 선택하세요.' : '보존된 앱 설정과 데이터로 실행을 재개합니다.';
-      document.querySelector('#lifecycle-expiry').textContent = `계획 유효 기한: ${formatTime(plan.expires_at)}`;
-      lifecycleResources('#lifecycle-resources', plan.resources, '변경할 리소스 없음');
-      lifecycleResources('#lifecycle-retained', plan.retained, '서버가 별도로 표시한 보존 리소스 없음');
-    } catch (cause) { if (lifecycleDraft === draft) lifecycleError(cause.message); }
-    finally { if (lifecycleDraft === draft) { lifecycleDialog.setAttribute('aria-busy', 'false'); lifecycleConfirmState(); } }
+    lifecycleDialog.showModal();
+    draft.clock = setInterval(() => {
+      if (lifecycleDraft !== draft) return;
+      const progress = document.querySelector('#lifecycle-progress');
+      progress.hidden = !draft.loading;
+      if (draft.loading) progress.textContent = `계획 확인 중 · ${Math.floor((Date.now() - draft.startedAt) / 1000)}초 경과. 최대 10분 걸릴 수 있습니다. 창을 닫아도 삭제는 실행되지 않습니다.`;
+      lifecycleConfirmState();
+    }, 1000);
+    await preparePlan(draft);
   }
   function renderLifecycleOperation() {
     const operation = lifecycleOperation;
@@ -164,7 +236,7 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
       if (status !== 202 || !/^[A-Za-z0-9._-]+$/.test(data.id || '') || location !== `/api/v1/operations/${data.id}`
           || data.application_id !== app.id || data.action !== draft.action || !['queued', 'running', 'succeeded', 'blocked', 'failed', 'unknown'].includes(data.status)) throw new Error('접수 결과를 확인하지 못했습니다.');
       lifecycleOperation = { ...lifecycleOperation, ...data, application_id: app.id, app: app.app, action: draft.action };
-      storeLifecycleOperation(); lifecycleDialog.close(); refreshLifecycleOperation();
+      storeLifecycleOperation(); clearPlan(draft); lifecycleDialog.close(); refreshLifecycleOperation();
     } catch (cause) {
       if (submitted && cause.status >= 400 && cause.status < 500 && cause.outcomeUnknown === false) {
         lifecycleOperation = previousOperation; storeLifecycleOperation();
@@ -178,11 +250,16 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
       lifecycleDialog.setAttribute('aria-busy', 'false'); lifecycleConfirmState(); renderLifecycleOperation();
     }
   });
+  document.querySelector('#lifecycle-retry').addEventListener('click', () => {
+    const draft = lifecycleDraft; if (!draft || draft.loading || lifecycleBusy) return;
+    if (draft.plan && Date.parse(draft.plan.expires_at) <= Date.now()) clearPlan(draft);
+    preparePlan(draft);
+  });
   document.querySelector('#lifecycle-cancel').addEventListener('click', () => lifecycleDialog.close());
   lifecycleDialog.addEventListener('cancel', (event) => { if (lifecycleBusy) event.preventDefault(); });
   lifecycleDialog.addEventListener('keydown', (event) => {
     if (event.key !== 'Tab') return;
-    const controls = [...lifecycleDialog.querySelectorAll('button:not(:disabled)')];
+    const controls = [...lifecycleDialog.querySelectorAll('button:not(:disabled)')].filter((button) => !button.hidden);
     const first = controls[0], last = controls.at(-1);
     if (!first) { event.preventDefault(); return; }
     if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
@@ -190,11 +267,13 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
   });
   lifecycleDialog.addEventListener('close', () => {
     const draft = lifecycleDraft; lifecycleDraft = null;
+    draft?.controller?.abort(); clearTimeout(draft?.pollTimer); clearInterval(draft?.clock);
+    document.querySelector('#lifecycle-progress').hidden = true;
     const opener = draft?.opener?.isConnected ? draft.opener : [...document.querySelectorAll('button[aria-label]')].find((button) => button.getAttribute('aria-label') === draft?.openerLabel && !button.disabled && button.getClientRects().length);
     (opener || (!isHistoryHidden() ? document.querySelector('#applications-refresh') : document.querySelector('#lifecycle-operation-refresh'))).focus();
   });
   document.querySelector('#lifecycle-operation-refresh').addEventListener('click', refreshLifecycleOperation);
-  window.addEventListener('pagehide', () => clearTimeout(lifecycleTimer));
+  window.addEventListener('pagehide', () => { clearTimeout(lifecycleTimer); lifecycleDraft?.controller?.abort(); clearTimeout(lifecycleDraft?.pollTimer); clearInterval(lifecycleDraft?.clock); });
 
   return { applicationBusy, updateBlocked, applicationButtons, renderApplicationActions,
     renderLifecycleOperation, refreshLifecycleOperation, get operation() { return lifecycleOperation; } };

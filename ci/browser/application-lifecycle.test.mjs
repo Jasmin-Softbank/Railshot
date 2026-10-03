@@ -33,10 +33,22 @@ async function fixture(t) {
     const plan = /^\/api\/v1\/applications\/([^/]+)\/plans$/.exec(path);
     if (plan) {
       state.plans.push({ id: plan[1], input });
-      return send(response, 200, { id: '11111111-1111-4111-8111-111111111111', application_id: state.planMode === 'foreign' ? 'foreign-app' : plan[1],
+      const result = { id: '11111111-1111-4111-8111-111111111111', application_id: state.planMode === 'foreign' ? 'foreign-app' : plan[1],
         action: input.action, plan_hash: 'a'.repeat(64), expires_at: new Date(Date.now() + (state.planMode === 'expired' ? -1000 : 600000)).toISOString(),
         resources: [{ kind: 'Deployment', namespace: 'app-private', name: 'workload' }, { kind: 'PersistentVolumeClaim', namespace: 'app-private', name: 'database' }],
-        retained: [{ kind: 'Node', name: 'shared-node' }, { kind: 'LoadBalancer', name: 'shared-lb' }] });
+        retained: [{ kind: 'Node', name: 'shared-node' }, { kind: 'LoadBalancer', name: 'shared-lb' }] };
+      if (state.planMode === 'async') {
+        state.planDocument = result;
+        return send(response, 202, { id: result.id, application_id: result.application_id, action: result.action, status: 'planning', created_at: new Date().toISOString() }, `/api/v1/applications/${plan[1]}/plans/${result.id}`);
+      }
+      return send(response, 200, result);
+    }
+    if (/^\/api\/v1\/applications\/[^/]+\/plans\/[^/]+$/.test(path)) {
+      state.planReads = (state.planReads || 0) + 1;
+      if (state.planReadError) return send(response, 503, { error: { message: '계획 조회 연결 실패' } });
+      const doc = state.planDocument;
+      return send(response, 200, { ...doc, status: state.planStatus || 'planning', created_at: new Date().toISOString(),
+        ...(state.planStatus === 'failed' ? { error: { code: 'APPLICATION_PLAN_INTERRUPTED', message: '서버 재시작으로 계획 확인이 중단됐습니다.' } } : {}) });
     }
     const mutation = /^\/api\/v1\/applications\/([^/]+)\/operations$/.exec(path);
     if (mutation) {
@@ -94,7 +106,8 @@ test('session app controls stop and resume through fresh plans; native dialog ca
   await appAction(page, 'my-app', '중지').click();
   await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
   const timeouts = await page.evaluate(() => window.planTimeouts);
-  assert.ok(timeouts.includes(600000), 'application planning shares the executor ten-minute deadline');
+  assert.ok(timeouts.includes(15000), 'async application planning only waits for admission and short status reads');
+  assert.ok(!timeouts.includes(600000), 'the browser no longer holds one ten-minute plan response');
   assert.ok(!timeouts.includes(120000), 'a plan must not abort at the normal POST deadline');
   assert.match(await page.locator('#lifecycle-description').innerText(), /데이터와 스토리지는 보존/);
   await page.keyboard.press('Escape');
@@ -127,7 +140,7 @@ test('running deployment trash requires a second permanent-delete click and show
   assert.match(await page.locator('#lifecycle-retained').innerText(), /shared-node/);
   assert.match(await page.locator('#lifecycle-retained').innerText(), /shared-lb/);
   assert.equal(await page.locator('#lifecycle-dialog input').count(), 0);
-  assert.equal(await page.locator('#lifecycle-dialog button').count(), 2);
+  assert.equal(await page.locator('#lifecycle-dialog button:visible').count(), 2);
   assert.equal(state.writes.length, 0, 'trash click only prepares a plan');
   await page.keyboard.press('Tab');
   assert.equal(await page.evaluate(() => document.activeElement.id), 'lifecycle-confirm');
@@ -231,4 +244,58 @@ test('definitive admission rejection allows a fresh plan without a permanent unk
   await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('완료'));
   assert.equal(await appAction(page, 'my-app', '삭제').count(), 0);
+});
+
+test('slow delete plan shows progress and survives closing and reloading without another POST', { timeout: 45000 }, async (t) => {
+  const { state, page, origin } = await fixture(t); state.planMode = 'async';
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-description').textContent.includes('서버에서'));
+  assert.equal(await page.locator('#lifecycle-confirm').isDisabled(), true);
+  assert.match(await page.locator('#lifecycle-resources').innerText(), /확인 후 표시/);
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-progress').hidden);
+  assert.match(await page.locator('#lifecycle-progress').innerText(), /초 경과/);
+  if (process.env.RAILSHOT_SCREENSHOT_DIR) {
+    await mkdir(process.env.RAILSHOT_SCREENSHOT_DIR, { recursive: true });
+    await page.screenshot({ path: join(process.env.RAILSHOT_SCREENSHOT_DIR, 'delete-plan-pending.png'), fullPage: true });
+  }
+  await page.getByRole('button', { name: '취소', exact: true }).click();
+  await page.goto(origin); await page.waitForFunction(() => document.querySelector('#applications-list li')?.textContent.includes('my-app'));
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-description').textContent.includes('서버에서'));
+  assert.equal(state.plans.length, 1); assert.equal(state.writes.length, 0);
+  state.planStatus = 'ready';
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  assert.match(await page.locator('#lifecycle-retained').innerText(), /shared-lb/);
+  await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('완료'));
+  assert.equal(state.writes.length, 1);
+});
+
+test('failed plan shows a reason and allows a fresh preview while read failure retries the same plan', { timeout: 45000 }, async (t) => {
+  const { state, page } = await fixture(t); state.planMode = 'async'; state.planReadError = true;
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-retry').hidden);
+  assert.match(await page.locator('#lifecycle-error').innerText(), /연결 실패/);
+  assert.equal(await page.locator('#lifecycle-confirm').isDisabled(), true);
+  state.planReadError = false; state.planStatus = 'failed';
+  await page.getByRole('button', { name: '계획 다시 확인' }).click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-error').textContent.includes('APPLICATION_PLAN_INTERRUPTED'));
+  assert.equal(state.plans.length, 1); assert.equal(state.writes.length, 0);
+  if (process.env.RAILSHOT_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.RAILSHOT_SCREENSHOT_DIR, 'delete-plan-retry.png'), fullPage: true });
+  state.planStatus = 'ready';
+  await page.getByRole('button', { name: '계획 다시 확인' }).click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  assert.equal(state.plans.length, 2); assert.equal(state.writes.length, 0);
+});
+
+test('cancel during inventory refresh never sends a hidden plan request', { timeout: 45000 }, async (t) => {
+  const { state, page } = await fixture(t); let finish;
+  await page.route('**/api/v1/applications?*', async (route) => {
+    await new Promise((resolve) => { finish = resolve; }); await route.continue();
+  });
+  await appAction(page, 'my-app', '삭제').click();
+  await page.getByRole('button', { name: '취소', exact: true }).click();
+  while (!finish) await new Promise((resolve) => setTimeout(resolve, 5));
+  finish(); await page.waitForFunction(() => document.querySelector('#applications-list li')?.textContent.includes('my-app'));
+  assert.equal(state.plans.length, 0); assert.equal(state.writes.length, 0);
 });
