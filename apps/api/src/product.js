@@ -111,7 +111,7 @@ export async function createProductService({ service, directory, target, provide
     return application;
   }
   function lifecycleAvailable(state, application, action, cancelling = null) {
-    checkUncertainResource(state, application, cancelling);
+    checkUncertainResource(state, application, cancelling, action === 'delete');
     if (!['planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle'].every((name) => typeof applicationAdapter?.[name] === 'function')) throw unavailable();
     const versions = applicationVersions(state, application);
     if (action !== 'delete' && versions.latest && !versions.current)
@@ -212,14 +212,23 @@ export async function createProductService({ service, directory, target, provide
     if (deploymentId) deploymentWorkers.set(deploymentId, worker);
     return worker;
   }
-  function checkUncertainResource(state, candidate, except = null) {
+  function checkUncertainResource(state, candidate, except = null, deleting = false) {
     const target = candidate.environment_target_id || candidate.target_id;
     // CI writes a shared app source path. Once publication is bound, CD affects
     // the registered environment only; another environment has a distinct app ID.
     const separateDelivery = (row) => row.application_id && row.ci?.state === 'published'
       && ['cd', 'http'].includes(row.stage) && row.environment_target_id && candidate.environment_target_id
       && row.environment_target_id !== candidate.environment_target_id;
+    // A stopped observation is not a live writer. Deletion can inventory the exact
+    // registered app without a successful CD journal; the native plan/apply still
+    // checks ownership, active syncs, provider state and resource identities.
+    const inspectForDeletion = (row) => deleting && row.kind === 'deployments' && row.status === 'blocked'
+      && row.ci?.state === 'published' && ['cd', 'http'].includes(row.stage)
+      && row.application_id === candidate.id && row.target_id === candidate.target_id
+      && row.environment_target_id === candidate.environment_target_id && row.session_id === candidate.session_id
+      && !deploymentWorkers.has(row.id);
     const blocker = Object.values(state.operations).find((row) => row.id !== except && (row.status === 'unknown' || row.status === 'blocked' && row.error?.outcome_unknown)
+      && !inspectForDeletion(row)
       && (row.app && row.app === candidate.app && !separateDelivery(row)
         || (row.kind === 'environments' || row.stage === 'environment')
           && (!target || (row.environment_target_id || row.target_id || state.plans[row.plan_id]?.private?.profile?.target?.target_id) === target)));
@@ -644,7 +653,7 @@ export async function createProductService({ service, directory, target, provide
     const current = rows.find(successfulDeployment) || null;
     const newer = current ? rows.slice(0, rows.indexOf(current)) : rows;
     const uncertain = newer.some((row) => row.cd?.state === 'running' || row.cd?.state === 'unknown'
-      || row.cd?.deployed === true || row.status === 'unknown' && ['cd', 'http'].includes(row.stage));
+      || row.cd?.deployed === true || (row.status === 'unknown' || row.error?.outcome_unknown) && ['cd', 'http'].includes(row.stage));
     return { current, latest: rows[0] || null, state: uncertain ? 'unverified' : current ? 'verified' : 'not_deployed' };
   }
   function publicApplication(state, application) {
