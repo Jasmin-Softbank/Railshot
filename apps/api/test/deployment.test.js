@@ -816,3 +816,49 @@ test('snapshot digest interoperates with Python gate hashing for Unicode names, 
   const read = readSourceSnapshot(Buffer.from(JSON.stringify(value)), value, value.source_sha256);
   assert.deepEqual(read.map((file) => file.path), ['a/한글😀.txt', 'a.txt']);
 });
+
+test('large source trees are bounded, complete, and never dispatch after a tree failure', async () => {
+  const files = Array.from({ length: 231 }, (_, i) => ({ path: `src/group-${i % 7}/file-${i}.txt`, content: Buffer.from(`file ${i}`) }));
+  for (const failure of [null, 'tree', 'dispatch']) {
+    const trees = new Map(); let sourceWrites = 0, commits = 0, dispatches = 0, publishedTree;
+    const service = createDeploymentService({ token: 'secret', targetId: 'aws-demo' }, async (url, options = {}) => {
+      const path = new URL(url).pathname, body = options.body && JSON.parse(options.body);
+      if (path.endsWith('/git/ref/heads/main')) return Response.json({ object: { sha: 'a'.repeat(40) } });
+      if (path.endsWith('/git/commits/' + 'a'.repeat(40))) return Response.json({ tree: { sha: 'base' } });
+      if (path.endsWith('/git/trees/base')) return Response.json({ tree: [] });
+      if (path.endsWith('/git/blobs')) return Response.json({ sha: createHash('sha1').update(body.content).digest('hex') });
+      if (path.endsWith('/git/trees')) {
+        if (body.tree[0].type === 'tree') { publishedTree = trees.get(body.tree[0].sha); return Response.json({ sha: 'root' }); }
+        sourceWrites++;
+        if (body.tree.length > 100 || failure === 'tree' && sourceWrites === 2) return Response.json({ message: 'private upstream detail' }, { status: 504 });
+        const entries = new Map(body.base_tree ? trees.get(body.base_tree) : []);
+        for (const entry of body.tree) entries.set(entry.path, entry.sha);
+        const sha = `tree-${sourceWrites}`; trees.set(sha, entries); return Response.json({ sha });
+      }
+      if (path.endsWith('/git/commits')) { commits++; return Response.json({ sha: 'b'.repeat(40) }); }
+      if (path.endsWith('/git/refs/heads/main')) return Response.json({});
+      if (path.endsWith('/dispatches')) {
+        dispatches++;
+        if (failure === 'dispatch') throw new DOMException('private upstream detail', 'TimeoutError');
+        return Response.json({ workflow_run_id: 987 });
+      }
+      assert.fail(path);
+    });
+    if (failure) {
+      await assert.rejects(service.deploy({ app: 'large-app', files }), (error) => {
+        assert.equal(error.phase, failure === 'tree' ? 'source_tree' : 'ci_dispatch');
+        assert.equal(error.upstream_status, failure === 'tree' ? 504 : null);
+        assert.equal(error.outcomeUnknown, failure === 'dispatch');
+        assert.ok(!error.message.includes('private upstream detail'));
+        return true;
+      });
+      assert.equal(dispatches, failure === 'tree' ? 0 : 1);
+      assert.equal(commits, failure === 'tree' ? 0 : 1);
+    } else {
+      assert.equal((await service.deploy({ app: 'large-app', files })).run_id, 987);
+      assert.deepEqual([...publishedTree.keys()].sort(), files.map((f) => f.path).sort());
+      assert.equal(dispatches, 1);
+      assert.equal(commits, 1);
+    }
+  }
+});
