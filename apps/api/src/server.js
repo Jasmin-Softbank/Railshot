@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import yazl from 'yazl';
 import { createDeploymentService, ServiceError } from './github.js';
 import { archiveLimits, inspectArchive, validateFiles } from './archive.js';
 import { fetchPublicGithubSource } from './public-github.js';
@@ -41,7 +42,7 @@ function normalizedRepository(value) {
   return `https://github.com/${match[1].toLowerCase()}/${match[2].toLowerCase()}`;
 }
 // Parse without fetching GitHub: an idempotency replay must retain its first source snapshot.
-async function uploadedSource(request, strict = false, allowSelection = false) {
+async function uploadedSource(request, strict = false, allowSelection = false, sourceOnly = false) {
   const contentType = request.headers['content-type'] || '';
   if (!/^multipart\/form-data\s*;/i.test(contentType)) throw new ServiceError('multipart/form-data 요청이 필요합니다.', 415);
   const body = await readLimited(request, archiveLimits.maxBytes + 1024 * 1024);
@@ -50,6 +51,7 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
   catch { throw new ServiceError('multipart 요청 형식이 잘못되었습니다.', 400); }
   const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
   const allowed = new Set(['app', 'target_id', 'plan_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
+  if (sourceOnly) for (const name of ['app', 'target_id', 'plan_id']) allowed.delete(name);
   if (allowSelection) for (const name of ['environment', 'provider', 'source_name']) allowed.add(name);
   for (const key of form.keys()) {
     if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
@@ -57,10 +59,10 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
   }
   const selecting = allowSelection && (form.has('environment') || form.has('provider'));
   const app = form.has('app') ? form.get('app') : undefined;
-  if (!selecting && (typeof app !== 'string' || !APP_NAME.test(app))) fail(APP_NAME_MESSAGE);
+  if (!selecting && !sourceOnly && (typeof app !== 'string' || !APP_NAME.test(app))) fail(APP_NAME_MESSAGE);
   const target_id = form.has('target_id') ? form.get('target_id') : undefined;
   if (target_id !== undefined && (typeof target_id !== 'string' || !target_id)) fail('대상 ID가 잘못되었습니다.');
-  if (strict && !selecting && !target_id) fail('대상 ID가 필요합니다.');
+  if (strict && !selecting && !sourceOnly && !target_id) fail('대상 ID가 필요합니다.');
   const plan_id = form.has('plan_id') ? form.get('plan_id') : undefined;
   if (plan_id !== undefined && (!allowSelection || typeof plan_id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(plan_id))) fail('환경 계획 ID가 잘못되었습니다.');
   let selected = {};
@@ -82,7 +84,7 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
     if (typeof form.get('repository_url') !== 'string') fail('공개 GitHub 저장소 URL이 필요합니다.');
     let repository_url;
     try { repository_url = normalizedRepository(form.get('repository_url')); } catch { fail('공개 GitHub 저장소 기본 URL이 필요합니다.'); }
-    return { app, target_id, ...(plan_id ? { plan_id } : {}), ...selected, source_type, repository_url };
+    return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, source_type, repository_url };
   }
   try {
     if (source_type === 'folder') {
@@ -92,11 +94,11 @@ async function uploadedSource(request, strict = false, allowSelection = false) {
         if (!file || typeof file.arrayBuffer !== 'function') fail('폴더 파일이 잘못되었습니다.');
         return { path: paths[index], content: Buffer.from(await file.arrayBuffer()) };
       }));
-      return { app, target_id, ...(plan_id ? { plan_id } : {}), ...selected, source_type, files: validateFiles(files) };
+      return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, source_type, files: validateFiles(files) };
     }
     const file = form.get('archive');
     if (!file || typeof file.arrayBuffer !== 'function' || !file.name?.toLowerCase().endsWith('.zip')) fail('ZIP 파일이 필요합니다.');
-    return { app, target_id, ...(plan_id ? { plan_id } : {}), ...selected, ...(selecting && !selected.source_name ? { source_name: file.name } : {}), source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
+    return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, ...(selecting && !selected.source_name ? { source_name: file.name } : {}), source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
   } catch { fail('소스 파일 목록·경로·크기를 확인하세요. 비밀 파일은 보낼 수 없습니다.'); }
 }
 async function jsonInput(request) {
@@ -153,6 +155,19 @@ function accepted(response, kind, record, requestId, action = 'create') {
   const terminal = !['queued', 'running'].includes(record.status);
   json(response, terminal ? 200 : 202, terminal ? record : { resource_id: record.id, action, status: 'accepted', request_id: requestId },
     { Location: `/api/v1/${kind}/${record.id}`, 'X-Request-ID': requestId, ...(!terminal ? { 'Retry-After': '2' } : {}) });
+}
+
+async function sourceArchive(files) {
+  const zip = new yazl.ZipFile();
+  for (const file of validateFiles(files)) zip.addBuffer(file.content, file.path);
+  zip.end();
+  const chunks = []; let size = 0;
+  for await (const chunk of zip.outputStream) {
+    size += chunk.length;
+    if (size > archiveLimits.maxBytes + 1024 * 1024) throw new ServiceError('소스 다운로드 크기가 허용 범위를 초과했습니다.', 413);
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
@@ -251,6 +266,35 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             json(response, 200, page(products?.deploymentOptions?.() || [], url.searchParams)); return;
+          }
+          const updateRoute = /^\/api\/v1\/applications\/([A-Za-z0-9._-]+)\/updates$/.exec(url.pathname);
+          if (updateRoute) {
+            if (request.method !== 'POST') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'POST'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            // Authorize before reading an upload or resolving a remote repository.
+            products.getApplication(updateRoute[1], sessionId);
+            const key = requestKey(request);
+            const record = await products.createUpdate(updateRoute[1], await uploadedSource(request, true, false, true), key, sourceLoader, sessionId);
+            accepted(response, 'deployments', record, requestId); return;
+          }
+          const startRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/start$/.exec(url.pathname);
+          if (startRoute) {
+            if (request.method !== 'POST') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'POST'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            const input = await jsonInput(request);
+            if (Object.keys(input).some((key) => key !== 'rebuild') || input.rebuild !== undefined && typeof input.rebuild !== 'boolean') throw new ServiceError('rebuild는 true 또는 false로 입력하세요.', 422);
+            accepted(response, 'deployments', await products.startUpdate(startRoute[1], input, sessionId), requestId); return;
+          }
+          const sourceRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/source$/.exec(url.pathname);
+          if (sourceRoute) {
+            if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+            if ([...url.searchParams.keys()].some((key) => key !== 'variant') || url.searchParams.getAll('variant').length > 1) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            const variant = url.searchParams.get('variant') || 'submitted';
+            if (!['submitted', 'deployed'].includes(variant)) throw new ServiceError('소스 종류를 확인하세요.', 422);
+            const bytes = await sourceArchive(await products.sourceFiles(sourceRoute[1], variant, sessionId));
+            response.writeHead(200, { 'content-type': 'application/zip', 'content-length': bytes.length,
+              'content-disposition': `attachment; filename="railshot-${sourceRoute[1]}-${variant}.zip"`,
+              'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(bytes); return;
           }
           const eventRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/events$/.exec(url.pathname);
           if (eventRoute) {
