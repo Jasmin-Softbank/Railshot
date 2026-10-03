@@ -7,6 +7,7 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { createDeploymentService } from '../src/github.js';
 import { createAppServer } from '../src/server.js';
 import { apiAccessConfig } from '../src/access.js';
+import { summarizeAgentEvents } from '../src/agent-events.js';
 
 const sourceCommit = 'a'.repeat(40);
 const binding = { source_commit: sourceCommit, app: 'demo-app', target_id: 'demo' };
@@ -166,6 +167,13 @@ test('real events HTTP route binds ownership before GitHub reads, rejects contro
   assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal(body.deployment_id, id); assert.equal(body.state, 'live'); assert.equal(body.run_id, '123');
   assert.equal(body.items[0].progress.sdk_event_count, 4);
+  assert.equal(body.progress.poll_after_ms, 15000);
+  assert.equal(body.progress.latest.attempt_id, 'native:123:1');
+  assert.equal(body.progress.sdk_invocations, null, 'heartbeat is not an SDK call receipt');
+  assert.equal(body.progress.agent_budget, null, 'older producers do not declare a budget');
+  const stored = body.timeline.items.find((event) => event.event_name === 'agent.heartbeat');
+  assert.equal(stored.attributes.process_running, true);
+  assert.deepEqual(stored.attributes.progress.token_usage, { input_tokens: 100, output_tokens: 2 });
   const count = f.calls.length;
   assert.equal((await fetch(origin + path, { headers: { Cookie: foreign } })).status, 404);
   assert.equal(f.calls.length, count, 'another session cannot reach a warmed event cache');
@@ -174,6 +182,42 @@ test('real events HTTP route binds ownership before GitHub reads, rejects contro
   const rejected = await (await fetch(origin + path, { headers: { Cookie: owner } })).json();
   assert.equal(rejected.state, 'unavailable'); assert.deepEqual(rejected.items, []);
   assert.equal(JSON.stringify(rejected).includes('raw-secret-canary'), false);
+});
+
+test('declared optional agent budget is bounded and preserved without fabricating SDK usage', async () => {
+  const f = fixture();
+  const started = { sequence: 1, occurred_at: f.envelope.updated_at, event_name: 'loop.started', native_run_id: 'native:123',
+    phase: 'loop', outcome: 'RUNNING', sdk_invocations: 0, agent_budget: { enabled: true, max_invocations: 2 } };
+  f.envelope.items = [started]; f.save();
+  const observed = await f.read();
+  assert.equal(observed.state, 'live');
+  const summary = summarizeAgentEvents(observed);
+  assert.deepEqual(summary.agent_budget, started.agent_budget);
+  assert.equal(summary.sdk_invocations, 0);
+  for (const budget of [{ enabled: true, max_invocations: 3 }, { enabled: false, max_invocations: 2 },
+    { enabled: true, max_invocations: '2' }, { enabled: true, max_invocations: 2, command: 'raw-secret-canary' }]) {
+    const bad = fixture(); bad.envelope.items = [{ ...started, agent_budget: budget }]; bad.save();
+    assert.equal((await bad.read()).reason, 'invalid_payload');
+  }
+  const disabled = fixture(); disabled.envelope.items = [{ ...started, agent_budget: { enabled: false, max_invocations: 0 } }]; disabled.save();
+  assert.equal((await disabled.read()).state, 'live');
+});
+
+test('summary retains only the current attempt budget and distinguishes heartbeat from final usage', () => {
+  const f = fixture(), timeline = { items: [{ correlation: { github_run_id: '123', github_run_attempt: 1 },
+    attributes: { agent_budget: { enabled: true, max_invocations: 2 } } }] };
+  const summary = summarizeAgentEvents(f.envelope, timeline);
+  assert.equal(summary.agent_budget.max_invocations, 2);
+  assert.equal(summary.sdk_invocations, null);
+  assert.equal(summary.latest.progress.sdk_event_count, 4);
+  assert.equal(summarizeAgentEvents({ ...f.envelope, run_attempt: 2 }, timeline).agent_budget, null);
+  assert.equal(summarizeAgentEvents({ ...f.envelope, run_id: '456' }, timeline).agent_budget, null);
+  const final = { ...f.envelope.items[0], event_name: 'loop.completed', sdk_invocations: 2 };
+  assert.equal(summarizeAgentEvents({ ...f.envelope, items: [...f.envelope.items, final] }, timeline).sdk_invocations, 2);
+  const unavailable = summarizeAgentEvents({ items: [], run_id: '123', run_attempt: null }, timeline);
+  assert.equal(unavailable.latest, null);
+  assert.equal(unavailable.agent_budget, null);
+  assert.equal(unavailable.sdk_invocations, null);
 });
 
 test('deterministic gate progress is admitted with no agent call and rejects forged counters', async () => {

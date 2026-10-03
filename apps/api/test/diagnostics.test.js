@@ -123,6 +123,18 @@ test('central timeline deduplicates out-of-order CI rows without deciding deploy
   assert.equal(publicTelemetry(record).items[0].producer_key, undefined);
 });
 
+test('a stopped SDK observation preserves its metadata without inventing success or ongoing work', () => {
+  const record = { id: 'dep', app: 'demo-app', target_id: 'demo', status: 'running', ci: { run_id: 123 } };
+  ingestCiEvents(record, { run_id: '123', run_attempt: 1, checked_at: new Date().toISOString(), state: 'live', items: [
+    { sequence: 1, native_run_id: 'run', event_name: 'agent.observation', occurred_at: new Date().toISOString(),
+      process_running: false, snapshot_state: 'unavailable', last_sdk_event_age_ms: null }] });
+  const event = publicTelemetry(record).items[0];
+  assert.equal(event.outcome, 'UNKNOWN');
+  assert.equal(event.attributes.process_running, false);
+  assert.equal(event.attributes.last_sdk_event_age_ms, null);
+  assert.equal(record.status, 'running');
+});
+
 test('classification is durable and single-call; GET and another session cannot spend a call', async (t) => {
   const { createProductStore } = await import('../src/product-store.js');
   const { createProductService } = await import('../src/product.js');
