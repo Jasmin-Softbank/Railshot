@@ -462,6 +462,40 @@ async function queuedBrowser(t, { unknownFirst = false } = {}) {
   return { ...fixture, submissions, deliveries, release, submit, read, until, maximumActive: () => maximumActive };
 }
 
+test('a second session resolves an app name collision through the optional name without changing the source or owner', { timeout: 45000 }, async (t) => {
+  const f = await queuedBrowser(t);
+  await f.page.locator('#repository-url').fill('https://github.com/example/beta-queue');
+  const original = await f.submit();
+  await f.until(original, (row) => row.status === 'succeeded');
+  const context = await f.page.context().browser().newContext();
+  const page = await context.newPage(); page.setDefaultTimeout(10000);
+  await page.goto(f.origin);
+  await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('URL 확인'));
+  await page.locator('#repository-url').fill('https://github.com/example/beta-queue');
+  await page.locator('#deploy-form button[type="submit"]').click();
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => !document.querySelector('#request-error').hidden);
+  assert.match(await page.locator('#request-error').innerText(), /다른 세션.*다른 이름/);
+  assert.equal(f.submissions.length, 1, 'name collision cannot dispatch or overwrite the original app');
+  await page.getByLabel('앱 이름 (선택)').fill('second-calculator');
+  assert.equal(await page.locator('#review-panel').isVisible(), false, 'renaming requires a fresh review and request key');
+  await page.locator('#deploy-form button[type="submit"]').click();
+  assert.equal(await page.locator('#review-app').innerText(), 'second-calculator');
+  const response = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/v1/deployments' && r.request().method() === 'POST');
+  await page.locator('#deploy-button').click();
+  assert.equal((await response).status(), 202);
+  await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('second-calculator'));
+  const deadline = Date.now() + 10000;
+  while (f.submissions.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(f.submissions[1].app, 'second-calculator');
+  assert.equal(f.submissions[1].files[0].content.toString(), 'https://github.com/example/beta-queue');
+  const inventory = await (await page.request.get(f.origin + '/api/v1/applications')).json();
+  assert.deepEqual(inventory.items.map((app) => app.app), ['second-calculator']);
+  assert.equal((await f.read(original)).app, 'beta-queue');
+  assert.deepEqual(f.errors, []);
+  await context.close();
+});
+
 test('browser accepts overlapping GitHub ZIP and folder uploads and the real HTTP queue dispatches FIFO once', { timeout: 45000 }, async (t) => {
   const f = await queuedBrowser(t), { page, stateDirectory } = f;
   await page.locator('#repository-url').fill('https://github.com/example/alpha-queue');
