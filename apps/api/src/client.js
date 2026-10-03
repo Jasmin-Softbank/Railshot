@@ -1,4 +1,4 @@
-import { readFile, readdir, lstat, realpath, mkdir, writeFile, rename } from 'node:fs/promises';
+import { readFile, readdir, lstat, mkdir, writeFile, rename } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, join, relative, resolve, sep } from 'node:path';
@@ -129,11 +129,4 @@ export async function getRun(runId, baseUrl = defaultUrl) {
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || `API ${response.status}`);
   return result;
-}
-
-export async function insideRoot(path, root) {
-  const resolved = await realpath(resolve(path));
-  const rel = relative(await realpath(resolve(root)), resolved);
-  if (rel === '..' || rel.startsWith(`..${sep}`)) throw new Error(`허용된 소스 경로 밖입니다: ${root}`);
-  return resolved;
 }
