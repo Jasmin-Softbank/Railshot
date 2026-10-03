@@ -40,6 +40,7 @@ async function fixture(t) {
     }
     const mutation = /^\/api\/v1\/applications\/([^/]+)\/operations$/.exec(path);
     if (mutation) {
+      if (state.outcome === 'rejected') return send(response, 409, { error: { code: 'APPLICATION_PLAN_STALE', message: '계획 만료', outcome_unknown: false } });
       state.writes.push({ application_id: mutation[1], input, key: request.headers['idempotency-key'] });
       const id = `operation-${state.writes.length}`;
       const operation = { id, application_id: mutation[1], action: input.action, status: 'queued', stage: 'accepted', steps: [], residuals: [] };
@@ -141,8 +142,8 @@ test('running deployment trash requires a second permanent-delete click and show
   assert.equal(state.writes[0].application_id, 'app-building');
   assert.equal(state.writes[0].input.confirmation, 'building-app');
   assert.equal(state.writes[0].input.delete_data, true);
-  assert.equal(await appAction(page, 'building-app', '삭제').isDisabled(), true);
-  await page.reload(); await page.waitForFunction(() => document.querySelector('#applications-message').textContent.includes('3개'));
+  assert.equal(await appAction(page, 'building-app', '삭제').count(), 0);
+  await page.reload(); await page.waitForFunction(() => document.querySelector('#applications-message').textContent.includes('2개'));
   assert.equal(state.writes.length, 1, 'reload only observes the accepted operation');
   assert.deepEqual(state.errors, []);
 });
@@ -200,4 +201,32 @@ test('a changed app blocks submission and an in-progress management operation di
   assert.equal(await appAction(page, 'my-app', '삭제').isDisabled(), true);
   assert.equal(state.writes.length, 1);
   assert.deepEqual(state.errors, []);
+});
+
+test('failed first deployment is not running and only deletion is enabled', { timeout: 45000 }, async (t) => {
+  const { state, page } = await fixture(t);
+  Object.assign(state.applications[0], { current_deployment_state: 'not_deployed', current_deployment: null,
+    latest_deployment: { id: 'failed-first', status: 'failed' } });
+  await page.getByRole('button', { name: '앱 목록 새로고침' }).click();
+  await page.waitForFunction(() => document.querySelector('#applications-list').textContent.includes('배포 실패'));
+  assert.equal(await appAction(page, 'my-app', '중지').isDisabled(), true);
+  assert.equal(await appAction(page, 'my-app', '재개').isDisabled(), true);
+  assert.equal(await appAction(page, 'my-app', '삭제').isEnabled(), true);
+  assert.equal(state.writes.length, 0);
+});
+
+test('definitive admission rejection allows a fresh plan without a permanent unknown lock', { timeout: 45000 }, async (t) => {
+  const { state, page } = await fixture(t);
+  state.outcome = 'rejected';
+  await appAction(page, 'my-app', '삭제').click();
+  await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-error').textContent.includes('접수되지 않았습니다'));
+  await page.getByRole('button', { name: '취소', exact: true }).click();
+  assert.equal(await appAction(page, 'my-app', '삭제').isEnabled(), true);
+  assert.equal(state.writes.length, 0);
+  state.outcome = 'succeeded';
+  await appAction(page, 'my-app', '삭제').click();
+  await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('완료'));
+  assert.equal(await appAction(page, 'my-app', '삭제').count(), 0);
 });
