@@ -120,7 +120,8 @@ from pathlib import Path
 payload=json.load(sys.stdin); target=payload['target']; release=payload['release']; source=Path(payload['source_root'])
 sys.path.insert(0,str(source/'ci/scripts'))
 from storage import durable_write
-verify_only=payload.get('verify_only',False)
+verify_only=payload.get('verify_only',False); reconcile=payload.get('reconcile',False)
+assert not (verify_only and reconcile), 'one operation required'
 root=Path('/home/railshot-operator/.local/share/railshot/multicloud-releases')/release['source_sha']/target['target_id']
 def read(path):
  p=Path(path); s=p.lstat()
@@ -132,14 +133,15 @@ def hash(value): return hashlib.sha256(json.dumps(value,sort_keys=True,separator
 runtime_config=read(target['config_file']); node_only=target.get('scope')=='node-only'
 assert (runtime_config.get('version')==2 and runtime_config.get('scope')=='node-only')==node_only, 'runtime scope differs'
 assert target.get('scope') in (None,'node-only'), 'target scope differs'
+assert not reconcile or node_only, 'reconciliation requires node-only scope'
 if node_only:
  assert 'edge_config_file' not in target and 'binding_file' not in target and release['edge_kinds'][target['provider']]=='none' and release['edge_modules'][target['provider']] is None, 'node-only edge binding differs'
-if not verify_only: root.mkdir(parents=True,exist_ok=True,mode=0o700)
+if not (verify_only or reconcile): root.mkdir(parents=True,exist_ok=True,mode=0o700)
 before=read(target['from_policy_file']); after=release['runtime_policy']
 plan={'version':1,'source_sha':release['source_sha'],'from_policy':before,'to_policy':after,'from_policy_sha256':hash(before),'to_policy_sha256':hash(after)}
 if 'upgrade' in target: plan['upgrade']=target['upgrade']
 plan_path=root/'release.json'
-if verify_only:
+if verify_only or reconcile:
  plan=read(plan_path)
  assert plan['source_sha']==release['source_sha'] and plan['to_policy']==after and before==after
 elif plan_path.exists(): assert read(plan_path)==plan, 'release binding changed'
@@ -147,6 +149,7 @@ else: write(plan_path,plan)
 command=[sys.executable,str(source/'deployment/scripts/runtime-update.py'),'--registry',target['registry_file'],'--target-id',target['target_id'],'--config',target['config_file'],'--registration-dir',target['registration_state'],'--state-dir',str(root/'runtime'),'--release',str(plan_path)]
 if 'binding_file' in target: command+=['--binding',target['binding_file']]
 if verify_only: command+=['--verify-only']
+if reconcile: command+=['--reconcile']
 if node_only: edge_proof={'status':'not_applicable','reason':'node-only'}
 else:
  edge_config=read(target['edge_config_file'])
@@ -158,22 +161,26 @@ else:
  except (ValueError,TypeError): edge_proof={'phase':'unknown'}
  if edge_run.returncode!=0 or edge_proof.get('phase')!='succeeded' or edge_proof.get('provider')!=target['provider'] or edge_proof.get('release_sha')!=release['source_sha']:
   print(json.dumps({'status':'failed','code':'EDGE_UPDATE_NOT_VERIFIED','provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha']})); sys.exit(1)
-run=subprocess.run(command,capture_output=True,text=True,timeout=1800,env={**os.environ,'RAILSHOT_RELEASE_API_IMAGE':release['images']['api']})
+run=subprocess.run(command,capture_output=True,text=True,timeout=1800,env={**os.environ,'RAILSHOT_RELEASE_API_IMAGE':payload.get('api_image',release['images']['api'])})
 try: proof=json.loads(run.stdout)
 except (ValueError,TypeError): proof={'status':'failed','code':'RUNTIME_RECEIPT_UNAVAILABLE'}
 if not isinstance(proof,dict) or any(proof.get(key)!=value for key,value in {'provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha'],'scope':target.get('scope')}.items()):
  proof={'status':'failed','code':'RUNTIME_RECEIPT_BINDING_MISMATCH','provider':target['provider'],'target_id':target['target_id'],'source_sha':release['source_sha']}
 proof.update(release_sha=release['source_sha'],edge=edge_proof)
-if run.returncode!=0 or proof.get('status')!='verified': proof['status']='failed'
+expected_status='reconciled' if reconcile else 'verified'
+if run.returncode!=0 or proof.get('status')!=expected_status: proof['status']='failed'
 if proof['status']=='verified' and not verify_only:
  current=read(target['from_policy_file'])
  assert current==before, 'runtime baseline changed during release'
  write(target['from_policy_file'],after)
-print(json.dumps(proof)); sys.exit(0 if proof['status']=='verified' else 1)
+print(json.dumps(proof)); sys.exit(0 if proof['status']==expected_status else 1)
 '''
 
 
-def update_target(target, manifest, config, verify_only=False):
+def update_target(target, manifest, config, verify_only=False, *, reconcile=False, api_image=None):
+    require(not reconcile or (not verify_only and target.get('scope') == 'node-only' and isinstance(api_image, str)
+            and re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-api@sha256:[a-f0-9]{64}', api_image)),
+            'RECONCILIATION_API_BINDING_REQUIRED')
     # Operator-owned SSH, kubeconfig and WIF bindings stay on the existing control host.
     command = ['sudo', '-n', '-u', 'railshot-operator', '--', 'env', '-i',
         'HOME=' + OPERATOR_HOME, 'USER=railshot-operator', 'LOGNAME=railshot-operator',
@@ -185,7 +192,8 @@ def update_target(target, manifest, config, verify_only=False):
         'AWS_PAGER=', 'PYTHONDONTWRITEBYTECODE=1', 'CHECKPOINT_DISABLE=1',
         'python3', '-c', TARGET_PROGRAM]
     result = subprocess.run(command, input=encoded({'target': target, 'release': manifest,
-        'verify_only': verify_only, 'source_root': str(ROOT)}), capture_output=True, timeout=3700)
+        'verify_only': verify_only, 'source_root': str(ROOT),
+        **({'reconcile': True, 'api_image': api_image} if reconcile else {})}), capture_output=True, timeout=3700)
 
     try:
         proof = json.loads(result.stdout)
@@ -195,9 +203,102 @@ def update_target(target, manifest, config, verify_only=False):
             and proof.get('target_id') == target['target_id']
             and proof.get('scope') == target.get('scope')
             and proof.get('source_sha') == manifest['source_sha'], 'TARGET_RECEIPT_BINDING_MISMATCH')
-    if result.returncode and proof.get('status') == 'verified':
+    if result.returncode and proof.get('status') in {'verified', 'reconciled'}:
         proof['status'] = 'unknown'
     return {**proof, 'provider': target['provider'], 'target_id': target['target_id'], 'source_sha': manifest['source_sha']}
+
+
+def reconciled_targets(checked, previous):
+    original = {(row.get('provider'), row.get('target_id')): row for row in previous.get('targets', [])}
+    return (len(checked) == len(original) == 3 and {row.get('provider') for row in checked} == PROVIDERS
+            and {(row.get('provider'), row.get('target_id')) for row in checked} == set(original)
+            and all(row.get('status') == 'reconciled' and row.get('scope') == 'node-only'
+                    and row.get('source_sha') == previous['source_sha']
+                    and row.get('input_sha256') == original[row['provider'], row['target_id']]['input_sha256']
+                    and row.get('to_policy_sha256') == original[row['provider'], row['target_id']]['to_policy_sha256']
+                    and row.get('after', {}).get('node_uid') == original[row['provider'], row['target_id']]['runtime']['after']['node_uid']
+                    for row in checked))
+
+
+def reconciled_failure(state, previous):
+    """Accept only the explicit acknowledgement bound to the unchanged failed receipt."""
+    path = state / 'reconciliation.json'
+    if not path.exists():
+        return False
+    proof = private(path)
+    return (proof.get('status') == 'reconciled' and previous.get('status') == 'incomplete'
+            and proof.get('source_sha') == previous.get('source_sha')
+            and proof.get('input_sha256') == previous.get('input_sha256')
+            and proof.get('failed_receipt_sha256') == hashlib.sha256((state / 'receipt.json').read_bytes()).hexdigest()
+            and reconciled_targets(proof.get('targets', []), previous))
+
+
+def reconcile(config, manifest, *, workers=None, target_reconciler=None, platform_verify=None):
+    """Operator-only recovery acknowledgement; never retry or relabel a failed release."""
+    targets = validate(manifest, config)
+    # ponytail: only verified no-op node releases; changed runtime/edge recovery needs its own reviewed procedure.
+    require(all(target.get('scope') == 'node-only' for target in targets), 'NODE_ONLY_RECONCILIATION_REQUIRED')
+    home = Path(config['state_dir'])
+    require(home.is_absolute() and home.resolve() == home and home.stat().st_uid == os.geteuid()
+            and not home.stat().st_mode & 0o077, 'PRIVATE_RELEASE_STATE_REQUIRED')
+    with os.fdopen(os.open(home / 'release.lock', os.O_RDONLY | os.O_NOFOLLOW), 'r') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        state = home / manifest['source_sha']; previous = private(state / 'receipt.json')
+        identity = digest({'manifest': manifest, 'config': config})
+        require(previous.get('status') == 'incomplete' and previous.get('stage') == 'targets'
+                and previous.get('source_sha') == manifest['source_sha'] and previous.get('input_sha256') == identity
+                and private(state / 'manifest.json') == manifest
+                and private(home / 'last-attempt.json') == {'source_sha': manifest['source_sha'], 'input_sha256': identity},
+                'FAILED_RELEASE_BINDING_DIFFERS')
+        failed_hash = hashlib.sha256((state / 'receipt.json').read_bytes()).hexdigest()
+        original = {row['target_id']: row for row in previous['targets']}
+        require(len(original) == 3 and set(original) == {row['target_id'] for row in targets}
+                and all(row.get('scope') == 'node-only' and row.get('runtime', {}).get('status') == 'verified'
+                        and row['runtime'].get('changed') is False
+                        and row.get('from_policy_sha256') == row.get('to_policy_sha256') == digest(manifest['runtime_policy'])
+                        for row in original.values()), 'VERIFIED_NOOP_RUNTIME_REQUIRED')
+        worker_module = workers or module('platform_workers')
+        verification = platform_verify or module('verify-platform').local
+        current = private(home / 'ci-runtime' / 'current.json')
+        require(current.get('status') == 'verified' and re.fullmatch('[a-f0-9]{40}', current.get('source_sha', '')),
+                'CURRENT_CI_RELEASE_REQUIRED')
+        ci_state = home / 'ci-runtime' / current['source_sha']; ci_manifest = private(ci_state / 'manifest.json')
+        validate(ci_manifest, config, 'ci-runtime')
+        ci_config = {key: config[key] for key in ('version', 'state_dir', 'workers', 'apps')}
+        ci_config['workers'] = worker_module.scoped_config(ci_config['workers'], 'ci')
+        require(ci_manifest['source_sha'] == current['source_sha'] and private(ci_state / 'receipt.json') == current
+                and current['input_sha256'] == digest({'manifest': ci_manifest, 'config': ci_config}), 'CURRENT_CI_RELEASE_DIFFERS')
+        platform = verification(ci_manifest['platform_revision'], {k: ci_manifest['images'][k] for k in ('dashboard', 'api')})
+        # The failed full release owns credential renewal; the current CI receipt owns build replenishment.
+        require(private(ci_state / 'workers.json')['config'] == ci_config['workers'], 'CI_WORKER_BINDING_DIFFERS')
+        require(private(state / 'workers.json')['config'] == worker_module.scoped_config(config['workers'], 'credentials'),
+                'CREDENTIAL_WORKER_BINDING_DIFFERS')
+        checked_workers = [worker_module.verify_workers(path) for path in (ci_state / 'workers.json', state / 'workers.json')]
+        require(all(row.get('status') == 'verified' and row.get('executable_verification') is True
+                    and row.get('source_sha') == expected['source_sha'] and row.get('images') == expected['images']
+                    for row, expected in zip(checked_workers, (ci_manifest, manifest))),
+                'WORKER_EXECUTION_NOT_VERIFIED')
+        apps = worker_module.verify_apps(ci_state / 'apps.json')
+        require(apps.get('status') == 'verified' and apps.get('source_sha') == apps.get('platform_ref') == current['source_sha'],
+                'CURRENT_APPS_RELEASE_DIFFERS')
+        if target_reconciler is None:
+            target_reconciler = lambda target, release: update_target(target, release, config,
+                reconcile=True, api_image=ci_manifest['images']['api'])
+        checked = [target_reconciler(target, manifest) for target in targets]
+        require(reconciled_targets(checked, previous), 'THREE_NODE_RECONCILIATION_NOT_VERIFIED')
+        verification(ci_manifest['platform_revision'], {k: ci_manifest['images'][k] for k in ('dashboard', 'api')})
+        require(private(home / 'ci-runtime' / 'current.json') == current
+                and hashlib.sha256((state / 'receipt.json').read_bytes()).hexdigest() == failed_hash,
+                'RECONCILIATION_CONCURRENT_CHANGE')
+        proof = {'version': 1, 'status': 'reconciled', 'source_sha': manifest['source_sha'], 'input_sha256': identity,
+                 'failed_receipt_sha256': failed_hash, 'current_ci_source_sha': current['source_sha'],
+                 'platform': platform, 'workers': checked_workers, 'apps': apps, 'targets': checked,
+                 'checked_at': datetime.now(timezone.utc).isoformat()}
+        if (state / 'reconciliation.json').exists():
+            require(reconciled_failure(state, previous), 'RECONCILIATION_RECORD_DIFFERS')
+            return proof  # Rechecking is read-only; retain the original acknowledgement.
+        save(state / 'reconciliation.json', proof)
+        return proof
 
 
 def execute(config, manifest, *, scope='multicloud', workers=None, target_runner=None, target_verifier=None, platform_verify=None, promote=None):
@@ -259,8 +360,9 @@ def execute(config, manifest, *, scope='multicloud', workers=None, target_runner
             require(isinstance(last.get('source_sha'), str) and re.fullmatch('[a-f0-9]{40}', last['source_sha']),
                     'PRIOR_RELEASE_RECONCILIATION_REQUIRED')
             prior = private(home / last['source_sha'] / 'receipt.json')
-            require(prior.get('status') == 'verified' and prior.get('input_sha256') == last.get('input_sha256')
-                    and private(home / 'current.json').get('input_sha256') == last.get('input_sha256'),
+            require(prior.get('input_sha256') == last.get('input_sha256') and
+                    ((prior.get('status') == 'verified' and private(home / 'current.json').get('input_sha256') == last.get('input_sha256'))
+                     or (scope == 'multicloud' and reconciled_failure(home / last['source_sha'], prior))),
                     'PRIOR_RELEASE_RECONCILIATION_REQUIRED')
         receipt = {'version': 1, 'scope': scope, 'source_sha': manifest['source_sha'], 'input_sha256': identity,
                    'status': 'running', 'stage': 'preflight', 'targets': [], 'started_at': datetime.now(timezone.utc).isoformat()}
@@ -316,13 +418,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--manifest', type=Path, required=True)
+    parser.add_argument('--reconcile', action='store_true', help='verify repaired no-op nodes and acknowledge the failed release without replaying it')
     args = parser.parse_args()
     try:
-        result = execute(private(args.config), private(args.manifest))
-    except Exception:
-        result = {'status': 'blocked', 'code': 'RELEASE_PREFLIGHT_FAILED'}
+        result = (reconcile if args.reconcile else execute)(private(args.config), private(args.manifest))
+    except Exception as error:
+        result = {'status': 'blocked', 'code': str(error) if isinstance(error, ValueError) and re.fullmatch('[A-Z_]+', str(error)) else 'RELEASE_PREFLIGHT_FAILED'}
     print(json.dumps(result))
-    return 0 if result['status'] == 'verified' else 1
+    return 0 if result['status'] == ('reconciled' if args.reconcile else 'verified') else 1
 
 
 if __name__ == '__main__':
