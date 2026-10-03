@@ -144,7 +144,8 @@ function apiError(response, error, requestId, versioned) {
   const code = error instanceof EnvironmentError && error.status === 400 ? 'INVALID_INPUT'
     : (error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError) && error.code || codes[status] || 'INTERNAL_ERROR';
   json(response, status, versioned ? { error: { code, message,
-    request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown) } } : { error: message }, headers);
+    request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown),
+    ...(error instanceof ProductError && error.admission ? { admission: error.admission } : {}) } } : { error: message }, headers);
 }
 function requestKey(request) {
   const count = request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'idempotency-key').length;

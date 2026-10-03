@@ -183,11 +183,16 @@ test('failed latest deployment preserves last verified success; unknown dispatch
   assert.equal((await f.product.startUpdate(uncertain.id, {}, f.owner)).status, 'unknown');
   await assert.rejects(f.product.startUpdate(waiting.id, {}, f.owner), (error) => {
     assert.equal(error.code, 'EXECUTOR_BUSY'); assert.equal(error.retryable, false);
+    assert.equal(error.admission.scope, 'workspace'); assert.equal(error.admission.accepted, false);
+    assert.equal(error.admission.reason, 'reconciliation_required');
+    assert.equal(error.admission.blocking_operation.id, uncertain.id);
+    assert.equal(Object.hasOwn(error.admission.blocking_operation, 'session_id'), false);
     assert.match(error.message, /demo-app.*ci.*마지막 갱신/); return true;
   });
   await assert.rejects(f.product.createDeployment({ ...upload(original), source_name: 'different-app',
     deployment_selection: { environment: 'cloud', provider: 'aws' } }, 'other-owner', undefined, f.other), (error) => {
-    assert.equal(error.code, 'EXECUTOR_BUSY'); assert.doesNotMatch(error.message, /demo-app|마지막 갱신/); return true;
+    assert.equal(error.code, 'EXECUTOR_BUSY'); assert.doesNotMatch(error.message, /demo-app|마지막 갱신/);
+    assert.deepEqual(error.admission, { scope: 'workspace', accepted: false, reason: 'reconciliation_required' }); return true;
   });
   assert.equal(f.submissions.length, 3);
 });

@@ -146,6 +146,9 @@ const labels = { queued: '실행 대기 중', running: '실행 중', succeeded: 
   failed: '실행 실패', blocked: '실행 조건 확인 필요', unknown: '실행 결과 확인 필요', publication_unverified: '게시 결과 확인 필요',
   preview: '변경 검토 대기', unchanged: '변경 없음 · 실행 생략', expired: '변경 검토 만료' };
 function executionLabel(row) { return row.kind === 'builds' && row.status === 'succeeded' ? '이미지 게시 완료' : labels[row.status] || row.status || '실행 상태 확인 중'; }
+function environmentLabel(row) {
+  return row.environment_target_id ? `환경 ${row.environment_target_id}` : `배포 대상 ${row.target_id || '미지정'}`;
+}
 function activeRun() { return current && (current.status === 'unknown' || !terminal.has(current.status)); }
 function deploymentSelection() {
   const environment = document.querySelector('[name="environment"]:checked').value;
@@ -206,7 +209,9 @@ async function request(path, options = {}, controller = new AbortController()) {
     const data = response.status === 204 ? null : await response.json();
     if (!response.ok) {
       const failure = new Error(data.error?.message || (typeof data.error === 'string' ? data.error : `요청 실패 (HTTP ${response.status})`));
-      failure.status = response.status; failure.code = data.error?.code; throw failure;
+      Object.assign(failure, { status: response.status, code: data.error?.code,
+        outcomeUnknown: data.error?.outcome_unknown, admission: data.error?.admission });
+      throw failure;
     }
     return { data, location: response.headers.get('location'), status: response.status };
   } finally { clearTimeout(timeout); requests.delete(controller); }
@@ -269,7 +274,7 @@ function setUpdateMode(application) {
   document.querySelector('#deploy-title').textContent = application ? '앱 업데이트하기' : '앱 배포하기';
   document.querySelector('#deploy-view .page-header .eyebrow').textContent = application ? 'APPLICATION UPDATE' : 'NEW DEPLOYMENT';
   document.querySelector('#review-title').textContent = application ? '변경 내용' : '선택 내용';
-  document.querySelector('#update-identity').textContent = application ? `앱 ${application.app} · 기존 환경 ${application.target_id}` : '';
+  document.querySelector('#update-identity').textContent = application ? `앱 ${application.app} · ${environmentLabel(application)}` : '';
   document.querySelector('#deploy-form button[type="submit"]').textContent = application ? '변경 내용 확인 →' : '선택 내용 확인 →';
   requestError.hidden = true;
 }
@@ -298,7 +303,7 @@ function validatePreview(data, application) {
 function renderUpdatePreview(data, application, sourceLabel) {
   document.querySelector('#review-source').textContent = sourceLabel || '서버에 보관된 소스';
   document.querySelector('#review-app').textContent = application.app;
-  document.querySelector('#review-target').textContent = `기존 환경 · ${application.target_id}`;
+  document.querySelector('#review-target').textContent = environmentLabel(application);
   document.querySelector('#review-note').textContent = `소스가 서버에 고정되었습니다. 아래 변경을 확인한 뒤 업데이트를 시작하세요. 유효 시각: ${formatTime(data.expires_at)}`;
   document.querySelector('#update-baseline').textContent = `비교 기준 배포: ${data.base_deployment_id} · ${data.baseline_kind === 'deployed'
     ? '검증된 최종 소스와 비교합니다.' : '제출 원본과 비교합니다. 이 배포의 AI 수정 후 최종 소스는 보관되어 있지 않습니다. 실제 배포 소스와 동일한지는 확인할 수 없어 검사·빌드를 생략하지 않습니다.'}`;
@@ -547,9 +552,15 @@ deployButton.addEventListener('click', async () => {
     document.querySelector('#run-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     refreshRun();
   } catch (cause) {
-    requestError.textContent = `${cause.name === 'AbortError' ? '요청 시간이 초과되었습니다.' : cause.message} ${draft.update
-      ? reviewed ? '다시 누르면 서버에 보관한 같은 변경 검토의 실행 상태를 확인합니다.' : '소스 선택에서 변경 내용을 다시 확인하세요.'
-      : '서버에서 이미 처리했을 수 있습니다. 배포 재요청은 같은 요청 키를 사용합니다.'}`;
+    const uncertain = draft.attempted && (cause.outcomeUnknown === true || !cause.status);
+    const next = cause.code === 'EXECUTOR_BUSY'
+      ? cause.admission?.reason === 'reconciliation_required'
+        ? '운영자가 기존 작업의 결과를 확인한 뒤 다시 요청하세요. 자동으로 시작되지 않습니다.'
+        : '기존 작업이 끝난 뒤 다시 요청하세요. 자동으로 시작되지 않습니다.'
+      : draft.update ? reviewed ? '다시 누르면 서버에 보관한 같은 변경 검토의 실행 상태를 확인합니다.' : '소스 선택에서 변경 내용을 다시 확인하세요.'
+      : uncertain ? '서버에서 이미 처리했을 수 있습니다. 배포 재요청은 같은 요청 키를 사용합니다.'
+      : '요청 조건을 확인한 뒤 다시 시도하세요.';
+    requestError.textContent = `${cause.name === 'AbortError' ? '요청 시간이 초과되었습니다.' : cause.message} ${next}`;
     requestError.hidden = false;
     // Only deployments promise a safe retry with the same key and unchanged source.
     deployButton.disabled = draft.kind !== 'deployments';
@@ -778,7 +789,7 @@ function renderApplications() {
   document.querySelector('#applications-list').replaceChildren(...applications.slice(0, applicationPageEnds[applicationPage] || 0).map((application) => {
     const item = document.createElement('li'), header = element('div', '', 'history-row'), content = document.createElement('div');
     content.append(element('strong', application.app), element('span', applicationStates[application.status] || '상태 확인 필요', 'state-badge'),
-      element('small', `환경 ${application.environment_target_id || application.target_id || '미지정'} · 앱 ID ${application.id}`, 'history-meta'),
+      element('small', `${environmentLabel(application)} · 앱 ID ${application.id}`, 'history-meta'),
       element('small', `${application.current_deployment_state === 'unverified' ? '마지막 검증 성공 (현재 상태 확인 필요)' : '현재 서비스'}: ${application.current_deployment ? application.current_deployment.id : '검증된 배포 없음'}`, 'history-meta'),
       element('small', `최근 시도: ${application.latest_deployment ? `${executionLabel(application.latest_deployment)} · ${application.latest_deployment.id}` : '없음'}`, 'history-meta'));
     const detail = element('button', '앱 상세·업데이트', 'secondary-button'); detail.type = 'button';
@@ -840,7 +851,7 @@ async function loadApplication(id) {
     applicationDetail = data;
     document.querySelector('#application-detail-title').textContent = data.app;
     const blocked = updateBlocked(data);
-    message.textContent = `기존 환경 ${data.target_id} · 앱 ID ${data.id}${blocked ? ` · ${blocked}` : ''}`;
+    message.textContent = `${environmentLabel(data)} · 앱 ID ${data.id}${blocked ? ` · ${blocked}` : ''}`;
     document.querySelector('#application-versions').replaceChildren(
       applicationVersion(data.current_deployment_state === 'unverified' ? '마지막 검증 성공 · 현재 상태 확인 필요' : '현재 서비스 버전', data.current_deployment, data.current_deployment_state === 'unverified'),
       applicationVersion('최근 배포 시도', data.latest_deployment));
@@ -890,7 +901,7 @@ function renderHistory() {
     const item = document.createElement('li'), header = element('div', '', 'history-row'), content = document.createElement('div');
     const badge = element('span', executionLabel(row), 'state-badge');
     badge.dataset.state = ['failed', 'blocked'].includes(row.status) ? 'failed' : row.status === 'succeeded' ? 'ready' : 'unknown';
-    content.append(element('strong', row.app || '앱 이름 미제공'), element('small', `환경 ${row.target_id || '미지정'} · ${formatTime(row.created_at)}`, 'history-meta'));
+    content.append(element('strong', row.app || '앱 이름 미제공'), element('small', `${environmentLabel(row)} · ${formatTime(row.created_at)}`, 'history-meta'));
     header.append(content, badge);
     const actions = element('div', '', 'history-actions');
     for (const [label, tab] of [['실행 상세·작업 로그', 'work'], ...(row.kind === 'deployments' ? [['앱 로그', 'app']] : [])]) {

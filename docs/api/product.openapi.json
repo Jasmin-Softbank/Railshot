@@ -2924,6 +2924,9 @@
           },
           "outcome_unknown": {
             "type": "boolean"
+          },
+          "admission": {
+            "$ref": "#/components/schemas/ExecutionAdmission"
           }
         },
         "required": [
@@ -5106,6 +5109,14 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "application_id": {
+            "type": "string",
+            "description": "Registered application identity, when present. Distinct from this operation id."
+          },
+          "environment_target_id": {
+            "type": "string",
+            "description": "Parent runtime environment identity. Do not substitute the application target_id when absent on legacy records."
           }
         },
         "required": [
@@ -6437,6 +6448,71 @@
           }
         ],
         "description": "One complete source snapshot. Identity comes only from the owning application route. App, target, environment and plan fields are rejected; missing old paths are deleted. ZIP/folder input limits stay 2,000 files and 100 MiB. Public GitHub default branch is resolved once at preview creation."
+      },
+      "ExecutionAdmission": {
+        "type": "object",
+        "description": "Present on EXECUTOR_BUSY. The current action was not admitted; the scope is the shared writer, not the browser session. Blocker details are included only for its exact session owner.",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "workspace"
+            ]
+          },
+          "accepted": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "execution_in_progress",
+              "reconciliation_required"
+            ]
+          },
+          "blocking_operation": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "app": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string"
+              },
+              "updated_at": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "queued",
+                  "running",
+                  "unknown"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "scope",
+          "accepted",
+          "reason"
+        ],
+        "additionalProperties": false
       }
     },
     "responses": {

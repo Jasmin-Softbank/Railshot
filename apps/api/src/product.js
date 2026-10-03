@@ -9,8 +9,8 @@ import { EnvironmentError } from './environments.js';
 import { exact, lifecycleActions, lifecycleId, lifecycleHash, lifecycleResources, lifecycleSteps } from './application-lifecycle.js';
 
 export class ProductError extends Error {
-  constructor(status, code, message, { outcomeUnknown = false, retryable = false } = {}) {
-    super(message); Object.assign(this, { status, code, outcomeUnknown, retryable });
+  constructor(status, code, message, { outcomeUnknown = false, retryable = false, admission } = {}) {
+    super(message); Object.assign(this, { status, code, outcomeUnknown, retryable, admission });
   }
 }
 const invalid = (message) => new ProductError(422, 'INVALID_INPUT', message);
@@ -40,12 +40,18 @@ function publicRecord(record) {
   return structuredClone(visible);
 }
 function checkFree(state, sessionId = null, except = null) {
-  const blocker = Object.values(state.operations).find((row) => active(row) && row.id !== except);
+  const blocker = Object.values(state.operations).find((record) => record.id !== except && active(record));
   if (!blocker) return;
   // ponytail: one shared Git branch and runtime writer; per-app admission needs isolated writers first.
-  const detail = blocker.session_id === sessionId
+  const owned = Boolean(sessionId && blocker.session_id === sessionId);
+  const detail = owned
     ? ` ${blocker.app || '환경'} · ${blocker.stage || '접수'} · 마지막 갱신 ${blocker.updated_at || blocker.created_at || '확인 불가'}.` : '';
-  throw new ProductError(409, 'EXECUTOR_BUSY', `다른 실행 또는 결과 확인이 끝나지 않았습니다.${detail} 이번 요청은 실행 대기열에 추가되지 않았습니다.`, { retryable: blocker.status !== 'unknown' });
+  const admission = { scope: 'workspace', accepted: false,
+    reason: blocker.status === 'unknown' ? 'reconciliation_required' : 'execution_in_progress',
+    ...(owned ? { blocking_operation: { id: blocker.id, kind: blocker.kind, app: blocker.app,
+      status: blocker.status, stage: blocker.stage, updated_at: blocker.updated_at || blocker.created_at } } : {}) };
+  throw new ProductError(409, 'EXECUTOR_BUSY', `공유 배포 작업의 실행 또는 결과 확인이 끝나지 않았습니다.${detail} 이번 요청은 실행 대기열에 추가되지 않았습니다.`,
+    { retryable: blocker.status !== 'unknown', admission });
 }
 
 export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
@@ -616,7 +622,7 @@ export async function createProductService({ service, directory, target, provide
       if (kind === 'plans') return Object.values(store.read().plans).filter((row) => owns(row, sessionId) && row.kind !== 'application-lifecycle').reverse().map((row) => structuredClone(row.public));
       const { records, hasMore, total } = store.operationPage(kind, sessionId, pagination);
       const items = records.map((row) => ({ id: kind === 'builds' ? String(row.ci.run_id) : row.id, kind, status: row.status,
-        ...Object.fromEntries(['app', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
+        ...Object.fromEntries(['app', 'application_id', 'environment_target_id', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
       return { items, next_marker: hasMore ? items.at(-1).id : null, total };
     },
     deploymentOptions,
@@ -743,9 +749,7 @@ export async function createProductService({ service, directory, target, provide
             || expected.provider !== application.provider) {
           throw new ProductError(409, 'RESUME_BINDING_MISMATCH', '원래 앱·환경·CI 실행과 연결이 일치하지 않습니다.');
         }
-        if (Object.values(state.operations).some((other) => other.id !== id && active(other))) {
-          throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
-        }
+        checkFree(state, sessionId, id);
         Object.assign(operation, { status: 'running', error: null, resumed_at: new Date().toISOString(),
           resume_count: (operation.resume_count || 0) + 1, updated_at: new Date().toISOString() });
         return operation;

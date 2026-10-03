@@ -77,7 +77,11 @@ test('concurrent identical keys dispatch once; another intent is refused while a
   const f = await fixture(t, { service: { deploy: async () => { calls++; await wait; return { run_id: 123, source_commit: publication.source_commit }; } } });
   const [first, second] = await Promise.all([f.product.createDeployment(input, 'same'), f.product.createDeployment(input, 'same')]);
   assert.equal(first.id, second.id);
-  await assert.rejects(f.product.createDeployment(input, 'other'), { code: 'EXECUTOR_BUSY' });
+  await assert.rejects(f.product.createDeployment(input, 'other'), (error) => {
+    assert.equal(error.code, 'EXECUTOR_BUSY'); assert.equal(error.retryable, true);
+    assert.deepEqual(error.admission, { scope: 'workspace', accepted: false, reason: 'execution_in_progress' });
+    return true;
+  });
   release();
   await settle(() => f.product.getDeployment(first.id));
   assert.equal(calls, 1);
@@ -1224,7 +1228,13 @@ test('resume rejects altered registration or run bindings, lifecycle actions and
     const product = await createProductService(f.options);
     f.service.status = async () => assert.fail('Invalid resume must not read CI');
     try {
-      await assert.rejects(product.resumeDeployment(f.created.id, f.owner), (error) => [404, 409].includes(error.status));
+      await assert.rejects(product.resumeDeployment(f.created.id, f.owner), (error) => {
+        if (name === 'busy') {
+          assert.equal(error.retryable, false);
+          assert.deepEqual(error.admission, { scope: 'workspace', accepted: false, reason: 'reconciliation_required' });
+        }
+        return [404, 409].includes(error.status);
+      });
       assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1); assert.equal(f.deliveries.length, 1);
     } finally { await product.close(); }
   });
@@ -1243,7 +1253,26 @@ test('HTTP deployment actions accepts exact resume input and returns the same re
   const created = await fetch(`${base}/api/v1/deployments`, { method: 'POST', headers: { cookie, 'Idempotency-Key': 'resume-http' }, body: source });
   assert.equal(created.status, 202);
   const id = (await created.json()).resource_id;
-  await settle(async () => (await fetch(`${base}/api/v1/deployments/${id}`, { headers: { cookie } })).json());
+  const original = await settle(async () => (await fetch(`${base}/api/v1/deployments/${id}`, { headers: { cookie } })).json());
+  const history = await (await fetch(`${base}/api/v1/deployments`, { headers: { cookie } })).json();
+  assert.equal(history.items[0].application_id, original.application_id);
+  assert.equal(history.items[0].environment_target_id, original.environment_target_id);
+  assert.notEqual(original.environment_target_id, original.target_id);
+  source.set('source_name', 'todomvc');
+  for (const sameOwner of [true, false]) {
+    const blocked = await fetch(`${base}/api/v1/deployments`, { method: 'POST',
+      headers: { ...(sameOwner ? { cookie } : {}), 'Idempotency-Key': 'blocked-new-app' }, body: source });
+    assert.equal(blocked.status, 409); assert.equal(blocked.headers.get('retry-after'), null);
+    const { error } = await blocked.json();
+    assert.equal(error.code, 'EXECUTOR_BUSY'); assert.equal(error.outcome_unknown, false);
+    assert.equal(error.admission.accepted, false); assert.equal(error.admission.reason, 'reconciliation_required');
+    if (sameOwner) assert.equal(error.admission.blocking_operation.id, id);
+    else {
+      assert.equal(Object.hasOwn(error.admission, 'blocking_operation'), false);
+      assert.doesNotMatch(JSON.stringify(error), new RegExp(`${id}|calculator|session_id`));
+    }
+  }
+  assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1);
   const url = `${base}/api/v1/deployments/${id}/actions`;
   const headers = { cookie, 'content-type': 'application/json' };
   for (const method of ['GET', 'PUT', 'DELETE']) {
