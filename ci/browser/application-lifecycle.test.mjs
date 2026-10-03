@@ -91,6 +91,32 @@ async function fixture(t) {
 }
 const appAction = (page, name, action) => page.locator('#applications-list').getByRole('button', { name: new RegExp(`^${name} ${action}`) });
 
+test('a failed lifecycle read retains execution state and retries reads without another mutation', { timeout: 45000 }, async t => {
+  const { state, page } = await fixture(t);
+  state.outcome = 'running';
+  await page.evaluate(() => {
+    const original = window.setTimeout.bind(window);
+    window.setTimeout = (fn, delay, ...args) => original(fn, delay === 15000 ? 200 : delay, ...args);
+  });
+  await appAction(page, 'my-app', '중지').click();
+  await page.getByRole('button', { name: '앱 중지', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('실행 중'));
+  let failed = false;
+  await page.route('**/api/v1/operations/*', route => {
+    if (failed) return route.fallback();
+    failed = true;
+    return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { message: 'temporary read failure' } }) });
+  });
+  await page.locator('#lifecycle-operation-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-message').textContent.includes('마지막 확인 상태'));
+  assert.match(await page.locator('#lifecycle-operation-state').innerText(), /^실행 중/);
+  const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('railshot.application-operation')));
+  assert.equal(saved.status, 'running');
+  state.outcome = 'succeeded';
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('완료'));
+  assert.equal(state.writes.length, 1); assert.deepEqual(state.errors, []);
+});
+
 test('session app controls stop and resume through fresh plans; native dialog cancels and restores focus', { timeout: 45000 }, async (t) => {
   const { state, page } = await fixture(t);
   assert.equal(await appAction(page, 'my-app', '재개').isDisabled(), true);

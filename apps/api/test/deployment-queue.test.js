@@ -91,6 +91,25 @@ test('concurrent different apps persist FIFO while identical keys produce only o
   assert.equal(f.submissions.length, 3);
 });
 
+test('unavailable CI observation yields the writer to another app and later finishes the original run', async t => {
+  const f = await fixture(t), status = f.options.service.status;
+  let unavailable = true;
+  f.options.service.status = async (...args) => {
+    if (String(args[0]) === '1001' && unavailable) throw new TypeError('temporary GitHub read failure');
+    return status(...args);
+  };
+  const alpha = await f.create('alpha');
+  await until(() => f.read(alpha.id), row => row.ci.observation?.error);
+  const beta = await f.create('beta');
+  assert.equal((await until(() => f.read(beta.id))).status, 'succeeded');
+  const waiting = await f.read(alpha.id);
+  assert.equal(waiting.status, 'running'); assert.equal(waiting.ci.run_id, '1001');
+  unavailable = false;
+  assert.equal((await until(() => f.read(alpha.id))).status, 'succeeded');
+  assert.deepEqual(f.submissions.map(row => row.app), ['alpha', 'beta']);
+  assert.equal(f.deliveries.length, 2);
+});
+
 test('expired published delivery frees the global slot but preserves the affected environment fence', async (t) => {
   const grace = 100, f = await fixture(t, { unknownGraceMs: grace });
   const deliver = f.adapter.deployPublished;

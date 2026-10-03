@@ -104,6 +104,11 @@ export async function createProductStore(directory) {
         && Number.isSafeInteger(operation.queue?.sequence) && operation.queue.sequence > 0
         && operation.queue.enqueued_at && !operation.queue.started_at;
       if (['queued', 'running'].includes(operation.status) && !unclaimed) {
+        if (operation.stage === 'ci' && operation.dispatch?.state === 'preparing' && !operation.ci?.run_id) {
+          operation.status = 'failed';
+          operation.error = { code: 'CI_DISPATCH_NOT_SENT', request_id: randomUUID(), message: '소스 준비 중 서버가 재시작되었습니다. GitHub 실행 요청은 보내지 않았습니다.', retryable: false, outcome_unknown: false };
+          continue;
+        }
         operation.status = 'unknown';
         operation.unknown_since = new Date().toISOString();
         operation.error = { code: 'INTERRUPTED', request_id: randomUUID(), message: '실행이 중단되어 결과를 다시 확인해야 합니다.', retryable: false, outcome_unknown: true };
