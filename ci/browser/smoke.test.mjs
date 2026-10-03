@@ -43,7 +43,7 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   await page.goto(origin);
   await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
   assert.equal(await page.locator('#api-token').count(), 0);
-  assert.equal(await page.locator('#deploy-view input[type="password"]').count(), 0);
+  assert.equal(await page.locator('#deploy-view input[type="password"]:not(#openstack-enrollment-key)').count(), 0);
   await page.locator('#deploy-form button[type="submit"]').click();
   assert.match(await page.locator('#form-error').innerText(), /소스를 선택/);
   await page.locator('#repository-url').fill('https://example.invalid/app');
