@@ -216,5 +216,6 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const { server } = createRemoteMcpServer();
-  server.listen(Number(process.env.RAILSHOT_MCP_PORT || 4185), process.env.RAILSHOT_MCP_HOST || '0.0.0.0');
+  // Kubernetes injects RAILSHOT_MCP_PORT as a Service URL, not a numeric listen port.
+  server.listen(Number(process.env.RAILSHOT_MCP_LISTEN_PORT || 4185), process.env.RAILSHOT_MCP_HOST || '0.0.0.0');
 }
