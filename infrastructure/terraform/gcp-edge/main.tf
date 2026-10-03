@@ -16,9 +16,10 @@ data "google_compute_instance" "backend" {
 }
 
 locals {
-  nic         = data.google_compute_instance.backend.network_interface[0]
-  gfe_sources = ["35.191.0.0/16", "130.211.0.0/22"]
-  route_names = { for id in keys(var.routes) : id => "${var.name}-${substr(sha256(id), 0, 16)}" }
+  nic           = data.google_compute_instance.backend.network_interface[0]
+  gfe_sources   = ["35.191.0.0/16", "130.211.0.0/22"]
+  route_names   = { for id in keys(var.routes) : id => "${var.name}-${substr(sha256(id), 0, 16)}" }
+  active_routes = { for id, route in var.routes : id => route if route.enabled }
 }
 
 resource "google_project_service" "certificates" {
@@ -34,7 +35,7 @@ resource "google_compute_firewall" "gfe" {
   target_service_accounts = [one(data.google_compute_instance.backend.service_account).email]
   allow {
     protocol = "tcp"
-    ports    = concat([tostring(var.node_port)], [for id in sort(keys(var.routes)) : tostring(var.routes[id].node_port)])
+    ports    = concat([tostring(var.node_port)], [for id in sort(keys(local.active_routes)) : tostring(local.active_routes[id].node_port)])
   }
 }
 
@@ -84,7 +85,7 @@ resource "google_compute_backend_service" "app" {
 }
 
 resource "google_compute_network_endpoint_group" "routes" {
-  for_each              = var.routes
+  for_each              = local.active_routes
   name                  = local.route_names[each.key]
   zone                  = var.zone
   network               = local.nic.network
@@ -94,7 +95,7 @@ resource "google_compute_network_endpoint_group" "routes" {
 }
 
 resource "google_compute_network_endpoint" "routes" {
-  for_each               = var.routes
+  for_each               = local.active_routes
   network_endpoint_group = google_compute_network_endpoint_group.routes[each.key].name
   zone                   = var.zone
   instance               = data.google_compute_instance.backend.name
@@ -103,7 +104,7 @@ resource "google_compute_network_endpoint" "routes" {
 }
 
 resource "google_compute_health_check" "routes" {
-  for_each = var.routes
+  for_each = local.active_routes
   name     = local.route_names[each.key]
   http_health_check {
     port         = each.value.node_port
@@ -113,7 +114,7 @@ resource "google_compute_health_check" "routes" {
 }
 
 resource "google_compute_backend_service" "routes" {
-  for_each              = var.routes
+  for_each              = local.active_routes
   name                  = local.route_names[each.key]
   load_balancing_scheme = "EXTERNAL_MANAGED"
   protocol              = "HTTP"
@@ -140,14 +141,14 @@ resource "google_compute_url_map" "app" {
     default_service = google_compute_backend_service.app.id
   }
   dynamic "host_rule" {
-    for_each = var.routes
+    for_each = local.active_routes
     content {
       hosts        = [host_rule.value.hostname]
       path_matcher = local.route_names[host_rule.key]
     }
   }
   dynamic "path_matcher" {
-    for_each = var.routes
+    for_each = local.active_routes
     content {
       name            = local.route_names[path_matcher.key]
       default_service = google_compute_backend_service.routes[path_matcher.key].id
@@ -244,14 +245,14 @@ resource "google_compute_url_map" "redirect" {
     strip_query            = false
   }
   dynamic "host_rule" {
-    for_each = var.routes
+    for_each = local.active_routes
     content {
       hosts        = [host_rule.value.hostname]
       path_matcher = local.route_names[host_rule.key]
     }
   }
   dynamic "path_matcher" {
-    for_each = var.routes
+    for_each = local.active_routes
     content {
       name = local.route_names[path_matcher.key]
       default_url_redirect {
@@ -287,7 +288,7 @@ output "application_routes" {
   value = { for id, route in var.routes : id => {
     frontend_ip              = google_compute_global_address.app.address
     hostname                 = route.hostname
-    backend_service          = google_compute_backend_service.routes[id].name
+    backend_service          = local.route_names[id]
     dns_authorization_record = google_certificate_manager_dns_authorization.routes[id].dns_resource_record[0]
   } }
 }

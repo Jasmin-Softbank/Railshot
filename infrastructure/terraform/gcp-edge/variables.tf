@@ -52,6 +52,7 @@ variable "routes" {
     hostname    = string
     node_port   = number
     health_path = string
+    enabled     = optional(bool, true)
   }))
   default  = {}
   nullable = false

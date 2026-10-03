@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Connect a verified app publication to its registered native edge and authoritative DNS."""
 import argparse
+import fcntl
+import stat
 import hashlib
 import importlib.util
 import json
@@ -22,6 +24,20 @@ _tunnel_spec.loader.exec_module(tunnel)
 def ensure(config_path, publication_request):
     prepared = application_release.finalize(config_path, publication_request)
     config = applications.load_config(config_path)
+    root = applications.private_directory(config['state_dir'])
+    with os.fdopen(os.open(root / 'registration.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'a') as lock:
+        info = os.fstat(lock.fileno())
+        applications.require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077,
+                             'APPLICATION_STORAGE_INVALID')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise applications.RegistrationError('REGISTRATION_BUSY') from None
+        applications.assert_deployable(root / prepared['application_id'])
+        return _ensure(config, publication_request, prepared)
+
+
+def _ensure(config, publication_request, prepared):
     directory = Path(config['state_dir']) / prepared['application_id'] / 'deployments' / publication_request['deployment_id']
     # finalize has checked both hashes against release.json and the current registration.
     request = runtime.read_private(directory / 'route-request.json')

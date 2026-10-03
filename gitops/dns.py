@@ -168,14 +168,18 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def transport(config, method, *, query=None, body=None):
+def transport(config, method, *, query=None, body=None, record_id=None):
     """Fixed-origin, bounded HTTPS only. No redirects, proxies, logging or retries."""
-    require(method in ('GET', 'POST'), 'DNS_METHOD_INVALID')
+    require(method in ('GET', 'POST', 'DELETE'), 'DNS_METHOD_INVALID')
+    require((method == 'DELETE' and isinstance(record_id, str) and re.fullmatch(r'[0-9a-f]{32}', record_id)
+             and query is None and body is None) or (method != 'DELETE' and record_id is None), 'DNS_RECORD_ID_INVALID')
     token = private_bytes(config['token_file'], 4096)
     try:
         token = token.decode('ascii').rstrip('\n')
         require(token and all(33 <= ord(char) <= 126 for char in token), 'DNS_TOKEN_INVALID')
         url = API + config['zone_id'] + '/dns_records'
+        if record_id is not None:
+            url += '/' + record_id
         if query:
             url += '?' + urlencode(query)
         headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json',
@@ -240,6 +244,47 @@ def save(path, value):
         durable_write(path, encoded(value))
     except (OSError, ValueError):
         raise DNSError('DNS_STATE_IO_FAILED', 'UNKNOWN') from None
+
+
+def application_snapshot(config, application_id, hostname):
+    """Caller holds dns.lock. Bind all app/certificate records to durable ownership."""
+    result = []
+    for path in sorted(Path(config['state_dir']).glob('*.json')):
+        if not re.fullmatch(r'[a-f0-9]{64}\.json', path.name):
+            continue
+        row = private_json(path)
+        request = row.get('request', {})
+        if request.get('application_id') != application_id:
+            continue
+        request_at(config, request)
+        require(row.get('config_sha256') == config['_sha256'] and
+                request.get('application_hostname', request['hostname']) == hostname and
+                path.stem == digest({'zone_id': config['zone_id'], 'hostname': request['hostname']}),
+                'DNS_APPLICATION_BINDING_CHANGED')
+        require(row.get('phase') in ('verified', 'deleted'), 'DNS_APPLICATION_RECONCILE_REQUIRED')
+        found = owned_record(records_at(config, request['hostname']), request)
+        if row['phase'] == 'deleted':
+            require(found is None, 'DNS_DELETED_RECORD_REAPPEARED')
+            continue
+        require(found is not None and found['id'] == row.get('receipt', {}).get('record_id'),
+                'DNS_APPLICATION_RECORD_CHANGED')
+        result.append({'path': str(path), 'row': row, 'record': found})
+    if not any(item['row']['request']['hostname'] == hostname for item in result):
+        require(not records_at(config, hostname), 'DNS_APPLICATION_UNRECORDED')
+    return result
+
+
+def remove_application(config, application_id, hostname, expected):
+    """Delete exact record IDs once, under the existing DNS lock; verify absence."""
+    require(application_snapshot(config, application_id, hostname) == expected, 'DNS_APPLICATION_PLAN_STALE')
+    for item in expected:
+        path, row = item['path'], item['row']
+        # A transport/storage failure leaves deleting, which no writer can replay.
+        save(path, {**row, 'phase': 'deleting'})
+        transport(config, 'DELETE', record_id=item['record']['id'])
+        require(not records_at(config, row['request']['hostname']), 'DNS_DELETE_UNVERIFIED')
+        save(path, {**row, 'phase': 'deleted'})
+    require(not application_snapshot(config, application_id, hostname), 'DNS_DELETE_UNVERIFIED')
 
 
 def ensure(config_path, request):

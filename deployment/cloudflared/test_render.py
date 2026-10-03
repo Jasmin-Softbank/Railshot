@@ -93,7 +93,7 @@ class RenderTest(unittest.TestCase):
         mutations += [('hostnames', [value]) for value in
                       ('*.example.com', 'https://app.example.com', 'app.example.com:443',
                        'APP.example.com', 'app.example.com.', 'app.example.com\nHost:x', '10.20.0.50')]
-        mutations += [('hostnames', []), ('hostnames', ['app.example.com'] * 2),
+        mutations += [('hostnames', ['app.example.com'] * 2),
                       ('hostnames', [f'app{i}.example.com' for i in range(51)]),
                       ('credentials_secret', '../secret'), ('ca_configmap', '/ca.pem'),
                       ('tunnel_id', 'not-a-uuid'), ('namespace', 'bad/ns'), ('name', 'x' * 57)]

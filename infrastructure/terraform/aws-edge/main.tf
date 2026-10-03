@@ -10,12 +10,13 @@ provider "aws" {
 }
 
 locals {
-  dns_routes = { for key, route in var.routes : key => route if route.manage_dns }
+  active_routes = { for key, route in var.routes : key => route if route.enabled }
+  dns_routes    = { for key, route in var.routes : key => route if route.manage_dns }
   route_hosts_valid = alltrue([for r in values(var.routes) :
     (r.host == var.base_domain && var.apex_certificate_arn != null) ||
     (endswith(r.host, ".${var.base_domain}") && length(split(".", r.host)) == length(split(".", var.base_domain)) + 1)
   ])
-  aws_target_rules = { for pair in toset([for r in values(var.routes) : "${r.target_security_group_id}:${r.node_port}" if r.provider_kind == "aws"]) :
+  aws_target_rules = { for pair in toset([for r in values(local.active_routes) : "${r.target_security_group_id}:${r.node_port}" if r.provider_kind == "aws"]) :
     pair => { security_group_id = split(":", pair)[0], port = tonumber(split(":", pair)[1]) }
   }
 }
@@ -52,7 +53,7 @@ resource "aws_security_group" "alb" {
     }
   }
   dynamic "egress" {
-    for_each = var.routes
+    for_each = local.active_routes
     content {
       description = ""
       protocol    = "tcp"
@@ -116,7 +117,7 @@ resource "aws_lb" "app" {
   }
 }
 resource "aws_lb_target_group" "app" {
-  for_each    = var.routes
+  for_each    = local.active_routes
   name_prefix = "rsapp-"
   vpc_id      = var.vpc_id
   protocol    = "HTTP"
@@ -129,7 +130,7 @@ resource "aws_lb_target_group" "app" {
   lifecycle { create_before_destroy = true }
 }
 resource "aws_lb_target_group_attachment" "app" {
-  for_each         = var.routes
+  for_each         = local.active_routes
   target_group_arn = aws_lb_target_group.app[each.key].arn
   target_id        = each.value.target_private_ip
   port             = each.value.node_port
@@ -195,7 +196,7 @@ resource "aws_lb_listener_certificate" "apex" {
   }
 }
 resource "aws_lb_listener_rule" "app" {
-  for_each     = var.routes
+  for_each     = local.active_routes
   listener_arn = aws_lb_listener.https.arn
   priority     = each.value.priority
   condition {

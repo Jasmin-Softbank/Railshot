@@ -113,6 +113,34 @@ class RegisterTest(unittest.TestCase):
     def ensure(self):
         return registration.ensure(self.config_path, self.request)
 
+    def test_lifecycle_last_route_removal_preserves_tunnel_then_explicit_restore(self):
+        self.seed({self.request['hostname']: self.request['application_id']})
+        original = copy.deepcopy(self.kube.objects)
+        snapshot = registration.lifecycle_plan(self.config_path, self.request, 'stop')
+        registration.lifecycle_validate(self.config_path, self.request, 'stop', snapshot)
+        self.assertFalse(self.kube.patches)
+        receipt = registration.lifecycle_execute(self.config_path, self.request, 'stop', snapshot)
+        self.assertFalse(receipt['route_present'])
+        cm = self.kube.objects['configmap']
+        self.assertEqual(json.loads(cm['data']['config.json'])['ingress'], [{'service': 'http_status:404'}])
+        self.assertEqual(cm['metadata']['uid'], original['configmap']['metadata']['uid'])
+        self.assertEqual(self.kube.objects['deployment']['spec']['template']['spec'], original['deployment']['spec']['template']['spec'])
+        snapshot = registration.lifecycle_plan(self.config_path, self.request, 'start')
+        receipt = registration.lifecycle_execute(self.config_path, self.request, 'start', snapshot)
+        self.assertTrue(receipt['route_present'])
+
+    def test_lifecycle_rejects_foreign_owner_or_stale_uid_before_patch(self):
+        self.seed({self.request['hostname']: self.request['application_id']})
+        snapshot = registration.lifecycle_plan(self.config_path, self.request, 'delete')
+        self.kube.objects['configmap']['metadata']['uid'] = 'changed-uid'
+        with self.assertRaises(registration.RegistrationError):
+            registration.lifecycle_execute(self.config_path, self.request, 'delete', snapshot)
+        self.assertFalse(self.kube.patches)
+        self.seed({self.request['hostname']: self.old['application_id']})
+        with self.assertRaises(registration.RegistrationError):
+            registration.lifecycle_plan(self.config_path, self.request, 'delete')
+        self.assertFalse(self.kube.patches)
+
     def test_add_preserves_existing_host_tls_and_uses_bound_runtime(self):
         before = copy.deepcopy(self.kube.objects)
         result = self.ensure()
