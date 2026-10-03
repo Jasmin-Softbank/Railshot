@@ -3,7 +3,7 @@
   "info": {
     "title": "RAILSHOT session-scoped product API",
     "version": "1.1.0",
-    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Every remote API request is session-scoped, including requests with the existing internal operator bearer. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. Optional OpenStack connection metadata is stored separately, with encrypted write-only passwords; it is not execution configuration. One API process and one persistent SQLite database on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
+    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Every remote API request is session-scoped, including requests with the existing internal operator bearer. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. Optional OpenStack connection metadata is stored separately, with encrypted write-only passwords; it is not execution configuration. One API process and one persistent SQLite database on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence. OpenStack registration requires the configured operator Bearer, stores only a salted hash of the user-supplied enrollment key, and returns a 10-minute one-time linkage token. The existing install.sh is served unchanged."
   },
   "servers": [
     {
@@ -301,7 +301,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/builds/{id}": {
@@ -541,7 +541,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/deployments/{id}": {
@@ -1011,7 +1011,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/environments/{id}": {
@@ -2862,6 +2862,376 @@
                 }
               }
             },
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registrations": {
+      "post": {
+        "operationId": "createOpenStackRegistration",
+        "summary": "Store an OpenStack registration and issue a one-time linkage token",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "provider",
+                  "project_id",
+                  "user_id",
+                  "auth_type",
+                  "enrollment_key"
+                ],
+                "properties": {
+                  "provider": {
+                    "const": "openstack"
+                  },
+                  "project_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
+                  },
+                  "user_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
+                  },
+                  "auth_type": {
+                    "enum": [
+                      "token",
+                      "application_credential"
+                    ]
+                  },
+                  "enrollment_key": {
+                    "type": "string",
+                    "minLength": 16,
+                    "maxLength": 256
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registration and one-time token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "provider",
+                    "project_id",
+                    "user_id",
+                    "auth_type",
+                    "status",
+                    "created_at",
+                    "claimed_at",
+                    "linkage_token",
+                    "token_expires_at"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "provider": {
+                      "const": "openstack"
+                    },
+                    "project_id": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string"
+                    },
+                    "auth_type": {
+                      "enum": [
+                        "token",
+                        "application_credential"
+                      ]
+                    },
+                    "status": {
+                      "enum": [
+                        "pending",
+                        "claimed"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "claimed_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "linkage_token": {
+                      "type": "string",
+                      "pattern": "^rsl_[A-Za-z0-9_-]{43}$"
+                    },
+                    "token_expires_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Operator Bearer required"
+          },
+          "422": {
+            "description": "Invalid input"
+          },
+          "503": {
+            "description": "Operator token or store unavailable"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listOpenStackRegistrations",
+        "summary": "List session-owned registrations",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registration list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/OpenStackRegistration"
+                      }
+                    },
+                    "next_marker": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registrations/{id}": {
+      "get": {
+        "operationId": "getOpenStackRegistration",
+        "summary": "Read a session-owned registration",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registration metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenStackRegistration"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not owned by this session"
+          }
+        }
+      }
+    },
+    "/api/v1/registrations/{id}/tokens": {
+      "post": {
+        "operationId": "renewOpenStackLinkageToken",
+        "summary": "Issue a new token after expiry with the original enrollment key",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "enrollment_key"
+                ],
+                "properties": {
+                  "enrollment_key": {
+                    "type": "string",
+                    "minLength": 16,
+                    "maxLength": 256
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New one-time token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "registration_id",
+                    "token",
+                    "expires_at"
+                  ],
+                  "properties": {
+                    "registration_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "token": {
+                      "type": "string",
+                      "pattern": "^rsl_[A-Za-z0-9_-]{43}$"
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong enrollment key"
+          },
+          "409": {
+            "description": "Current token remains valid"
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack": {
+      "get": {
+        "operationId": "getOpenStackInstaller",
+        "summary": "Get the existing install.sh content and download URLs",
+        "responses": {
+          "200": {
+            "description": "Installer metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "install_sh",
+                    "bundle_sha256",
+                    "script_url",
+                    "bundle_url"
+                  ],
+                  "properties": {
+                    "install_sh": {
+                      "type": "string"
+                    },
+                    "bundle_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "script_url": {
+                      "const": "/api/v1/installers/openstack/scripts"
+                    },
+                    "bundle_url": {
+                      "const": "/api/v1/installers/openstack/bundles"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/scripts": {
+      "get": {
+        "operationId": "downloadOpenStackInstallScript",
+        "summary": "Download the existing install.sh file",
+        "responses": {
+          "200": {
+            "description": "Shell script",
+            "content": {
+              "text/x-shellscript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/bundles": {
+      "get": {
+        "operationId": "downloadOpenStackInstallerBundle",
+        "summary": "Download install.sh with its companion files",
+        "responses": {
+          "200": {
+            "description": "ZIP package",
             "content": {
               "application/zip": {
                 "schema": {
@@ -6563,6 +6933,58 @@
           }
         },
         "additionalProperties": false
+      },
+      "OpenStackRegistration": {
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "project_id",
+          "user_id",
+          "auth_type",
+          "status",
+          "created_at",
+          "claimed_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider": {
+            "const": "openstack"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "auth_type": {
+            "enum": [
+              "token",
+              "application_credential"
+            ]
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "claimed"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
       }
     },
     "responses": {
@@ -6927,6 +7349,12 @@
           "pattern": "^[A-Za-z0-9._-]{1,128}$"
         },
         "description": "Anonymous session and resource-kind scope. Same semantic input returns the same operation; a different input conflicts. Unknown operations never replay. Trusted cookieless localhost maintenance keeps legacy workspace scope."
+      }
+    },
+    "securitySchemes": {
+      "operatorBearer": {
+        "type": "http",
+        "scheme": "bearer"
       }
     }
   }
