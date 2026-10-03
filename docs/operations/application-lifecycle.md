@@ -85,7 +85,7 @@ to make a retry possible.
 | --- | --- | --- |
 | AWS | ALB listener rule, target group/attachment, app-specific NodePort SG rule; owned DNS on delete | ALB/listener, shared certificates, VM, VPC/subnets, cluster |
 | GCP | URL-map app host/path entry, backend service, NEG/endpoint, health check, NodePort firewall contribution; app certificate/map entry and DNS on delete | Shared HTTPS frontend/IP/proxy/map, VM/network/cluster, legacy baseline |
-| OpenStack | Exact route policy/rule, pool/member/health monitor, tunnel ingress entry and owned DNS | Octavia listener/LB, tunnel/Deployment/Secret, VM/network/cluster |
+| OpenStack | Exact route policy/rule, pool/member/health monitor, app NodePort SG rule, tunnel ingress entry and owned DNS | Octavia listener/LB, tunnel/Deployment/Secret, VM/network/cluster |
 
 Stop removes active app backends instead of leaving an unhealthy target pointing at
 an absent workload. Start restores the recorded app route. The last application may
@@ -121,8 +121,12 @@ OpenStack additionally runs a fixed controller-host executable at
 `/opt/railshot/octavia/openstack_route_worker.py`. Install the reviewed worker revision
 through the existing operator deployment path before enabling its lifecycle RPCs; an
 API image update alone does not update that host file. Unsupported/old worker responses
-fail closed. No live host upgrade or production deletion was performed as part of the
-source implementation.
+fail closed. The on-prem integration on 2026-10-03 installed the worker whose SHA-256 is
+`5ccb8f6e1bf4e0d65c681c9a9f62045e66661f8bc3f3a01da1b5d1d9a8efb230`;
+the source includes that version. Its isolated acceptance verified health-path
+replacement, strict TLS/HTTP 200, native route/SG deletion and identical-request replay.
+Do not replace it with the earlier worker during the API release. A health-path change
+recreates only that app's verified route and briefly interrupts its traffic.
 
 ## Storage and verification limits
 
@@ -151,3 +155,11 @@ They do not delete a production app or establish live three-provider teardown su
 A live acceptance run must use a disposable registered app on each provider, record its
 namespace and edge IDs, test stop/start/delete, then verify the app resources are absent
 and another app plus shared infrastructure remain healthy.
+
+OpenStack storage component acceptance on 2026-10-03 separately verified Cinder PVC
+creation, data preservation across Pod recreation, 1Gi-to-2Gi expansion, and deletion
+through PVC/PV/VolumeAttachment absence to the original Cinder volume's HTTP 404.
+The native storage inventory accepted that real volume with the source helper hash
+`a0dc1e04bdc0377727d910e05094aeb40f7d65672b632f97574a327fb2221b73`.
+This component evidence does not establish dashboard/API application deletion on all
+three providers. The Cinder installation contract is in [deployment/cinder/README.md](../../deployment/cinder/README.md).

@@ -344,7 +344,9 @@ export async function createProductService({ service, directory, target, provide
     } catch (error) {
       const known = error instanceof EnvironmentError;
       const unknown = resume || !known || error.outcomeUnknown;
-      if (!abort.signal.aborted) await update(record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(known ? error.code : 'CD_OUTCOME_UNKNOWN', unknown) });
+      const status = unknown ? 'unknown' : 'blocked', cd = store.read().operations[record.id]?.cd;
+      if (!abort.signal.aborted) await update(record.id, { status, ...(cd?.state === 'running' ? { cd: { ...cd, state: status } } : {}),
+        error: operationError(known ? error.code : 'CD_OUTCOME_UNKNOWN', unknown) });
     }
   }
   return {

@@ -12,6 +12,7 @@ import { createApplicationAdapter } from '../src/applications.js';
 import { createAppServer } from '../src/server.js';
 import { createDeploymentService } from '../src/github.js';
 import { lifecycleResources } from '../src/application-lifecycle.js';
+import { EnvironmentError } from '../src/environments.js';
 
 const app = { id: 'app-' + 'a'.repeat(24), app: 'calculator', target_id: 'app-' + 'a'.repeat(24), environment_target_id: 'runtime-aws', provider: 'aws', status: 'ready' };
 const resources = [{ kind: 'Deployment', name: 'calculator', namespace: 'tenant-app' }];
@@ -404,7 +405,7 @@ test('ready application with successful stop and start history can resume its or
   assert.equal(f.product.getApplication(app.id, f.owner.id).status, 'ready');
   const deployment = await f.product.createDeployment(source, 'after-start', undefined, f.owner.id);
   const original = await settledDeployment(f.product, deployment.id, f.owner.id);
-  assert.equal(original.status, 'unknown');
+  assert.equal(original.status, 'unknown'); assert.equal(original.cd.state, 'unknown');
   assert.equal(f.product.getApplication(app.id, f.owner.id).lifecycle_operation_id, last.id);
   await f.product.resumeDeployment(deployment.id, f.owner.id);
   const resumed = await settledDeployment(f.product, deployment.id, f.owner.id);
@@ -413,6 +414,33 @@ test('ready application with successful stop and start history can resume its or
   for (const key of ['run_id', 'publication_artifact_id', 'producer_attempt', 'images']) assert.deepEqual(resumed.ci[key], original.ci[key]);
   assert.equal(f.product.getApplication(app.id, f.owner.id).lifecycle_operation_id, last.id);
   assert.deepEqual([registrations, submissions, deliveries, f.calls.apply], [1, 1, 2, 2]);
+});
+
+test('CD exceptions preserve verified progress and a resumed failure remains unknown', async (t) => {
+  const allowed = new Set(['runtime-aws']); let deliveries = 0;
+  const publication = { run_id: 123, source_commit: 'd'.repeat(40), target_id: app.id, app: app.app,
+    artifact_id: 456, producer_attempt: 1, images: { web: `ghcr.io/example/apps@sha256:${'e'.repeat(64)}` } };
+  const progress = { cd: { state: 'succeeded', deployed: true, revision: 'f'.repeat(40) },
+    public_http: { state: 'unverified', url: null, verified_at: null } };
+  const f = await fixture(t, { options: { service: { targetId: 'runtime-aws', get targetIds() { return [...allowed]; },
+    allowTarget: (id) => allowed.add(id), deploy: async () => ({ run_id: '123', source_commit: publication.source_commit }),
+    status: async () => ({ state: 'published', status: 'completed', source_commit: publication.source_commit, publication }),
+  } }, adapter: {
+    register: async (application) => ({ ...application, status: 'ready' }),
+    deployPublished: async (_application, args) => {
+      await args.onProgress(progress);
+      if (++deliveries === 1) throw new Error('HTTP observation interrupted');
+      throw new EnvironmentError('HTTP_PREFLIGHT_BLOCKED', 409, false);
+    },
+  } });
+  const deployment = await f.product.createDeployment(source, 'verified-cd', undefined, f.owner.id);
+  for (const attempt of [1, 2]) {
+    if (attempt === 2) await f.product.resumeDeployment(deployment.id, f.owner.id);
+    const result = await settledDeployment(f.product, deployment.id, f.owner.id);
+    assert.equal(result.status, 'unknown'); assert.equal(result.stage, 'http');
+    assert.deepEqual(result.cd, progress.cd); assert.deepEqual(result.public_http, progress.public_http);
+    assert.equal(result.error.outcome_unknown, true); assert.equal(deliveries, attempt);
+  }
 });
 
 test('known registration preflight failure deletes a queued app only through a verified native no-registration plan', async (t) => {
