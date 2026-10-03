@@ -75,6 +75,9 @@ class OctaviaCLI:
             else:
                 positionals.append(token)
         objects = self.objects[kind]
+        if action == 'delete':
+            del objects[positionals[-1]]
+            return {}
         if action == "list":
             rows = [value for value in objects.values()
                     if ("--tags" not in options or options["--tags"] in value["tags"].splitlines()) and
@@ -133,7 +136,7 @@ class OctaviaCLI:
         return copy.deepcopy(value)
 
     def mutations(self):
-        return [args for args in self.calls if len(args) > 1 and args[1] in ("create", "set")]
+        return [args for args in self.calls if len(args) > 1 and args[1] in ("create", "set", "delete")]
 
     def network(self, arguments):
         self.network_calls.append(list(arguments))
@@ -143,6 +146,9 @@ class OctaviaCLI:
             return copy.deepcopy(self.group)
         assert arguments[:3] == ["security", "group", "rule"]
         action = arguments[3]
+        if action == 'delete':
+            del self.network_rules[arguments[4]]
+            return {}
         if action == "list":
             return [{"ID": key} for key in self.network_rules]
         if action == "show":
@@ -191,6 +197,157 @@ class RouteWorkerTests(unittest.TestCase):
 
     def configure(self, request=None):
         return worker.configure(self.config, request or self.request, self.cli)
+
+    def lifecycle(self, action, operation='lifecycle-plan', expected=None):
+        envelope = {'operation': operation, 'action': action, 'request': {
+            k: self.request[k] for k in ('application_id', 'hostname', 'node_port')}}
+        if expected is not None:
+            envelope['expected'] = expected
+        return worker.lifecycle(self.config, envelope, self.cli)
+
+    def test_lifecycle_stop_start_delete_preserves_other_app_and_shared_listener(self):
+        first = self.configure()
+        other_request = {**self.request, 'application_id': 'app-' + 'b' * 24,
+                         'hostname': 'other.railshot.io', 'node_port': 31002}
+        other = self.configure(other_request)
+        shared = copy.deepcopy((self.cli.lb, self.cli.listener, self.cli.ports, self.cli.group))
+        app_path = Path(self.config['state_dir']) / (self.request['application_id'] + '.json')
+        raw = app_path.read_bytes(); mutations = len(self.cli.mutations())
+        plan = self.lifecycle('stop')
+        self.lifecycle('stop', 'lifecycle-validate', plan['expected'])
+        self.assertEqual(app_path.read_bytes(), raw)
+        self.assertEqual(len(self.cli.mutations()), mutations)
+        receipt = self.lifecycle('stop', 'lifecycle-execute', plan['expected'])
+        self.assertEqual(receipt['resources'], {})
+        for kind, resource_id in other['resources'].items():
+            self.assertEqual(set(self.cli.objects[kind]), {resource_id})
+        self.assertEqual(set(self.cli.network_rules), {other['network_rule_id']})
+        plan = self.lifecycle('start')
+        restored = self.lifecycle('start', 'lifecycle-execute', plan['expected'])
+        self.assertEqual(set(restored['resources']), set(worker.KINDS))
+        self.assertTrue(all(restored['resources'][kind] != first['resources'][kind] for kind in worker.KINDS))
+        plan = self.lifecycle('delete')
+        self.lifecycle('delete', 'lifecycle-execute', plan['expected'])
+        self.assertEqual((self.cli.lb, self.cli.listener, self.cli.ports, self.cli.group), shared)
+        with self.assertRaises(worker.RouteError):
+            self.lifecycle('start')
+
+    def test_lifecycle_foreign_tag_and_partial_delete_fail_closed_without_replay(self):
+        result = self.configure()
+        plan = self.lifecycle('delete')
+        monitor = self.cli.objects['monitor'][result['resources']['monitor']]
+        original = monitor['tags']; monitor['tags'] = 'foreign-owner'
+        mutations = len(self.cli.mutations())
+        with self.assertRaises(worker.RouteError):
+            self.lifecycle('delete', 'lifecycle-execute', plan['expected'])
+        self.assertEqual(len(self.cli.mutations()), mutations)
+        monitor['tags'] = original
+        raw_call = self.cli
+        def fail(arguments, service=('loadbalancer',)):
+            if arguments[:2] == ['l7policy', 'delete']:
+                raise worker.RouteError('uncertain delete', 'unknown')
+            return raw_call(arguments, service=service)
+        envelope = {'operation': 'lifecycle-execute', 'action': 'delete', 'expected': plan['expected'],
+                    'request': {k: self.request[k] for k in ('application_id', 'hostname', 'node_port')}}
+        with self.assertRaises(worker.RouteError) as caught:
+            worker.lifecycle(self.config, envelope, fail)
+        self.assertEqual(caught.exception.status, 'unknown')
+        mutations = len(self.cli.mutations())
+        with self.assertRaises(worker.RouteError):
+            self.lifecycle('delete')
+        with self.assertRaises(worker.RouteError):
+            self.configure()
+        self.assertEqual(len(self.cli.mutations()), mutations)
+
+    def test_lifecycle_before_first_deployment_is_readonly_noop(self):
+        plan = self.lifecycle('delete')
+        self.assertEqual(plan['resources'], {})
+        self.lifecycle('delete', 'lifecycle-execute', plan['expected'])
+        self.assertFalse(self.cli.mutations())
+        self.assertFalse(self.cli.network_mutations())
+
+    def test_verified_deleted_app_releases_hostname_and_nodeport_to_another_app(self):
+        first = self.configure()
+        plan = self.lifecycle('delete')
+        self.lifecycle('delete', 'lifecycle-execute', plan['expected'])
+        old = Path(self.config['state_dir']) / (self.request['application_id'] + '.json')
+        tombstone = old.read_bytes()
+        second = self.configure({**self.request, 'application_id': 'app-' + 'b' * 24})
+        self.assertEqual(second['status'], 'configured')
+        self.assertEqual(second['hostname'], first['hostname'])
+        self.assertEqual(second['node_port'], first['node_port'])
+        self.assertEqual(old.read_bytes(), tombstone)
+        self.assertTrue(all(first['resources'][kind] != second['resources'][kind] for kind in worker.KINDS))
+
+    def test_stopped_unknown_and_unanchored_deleted_records_retain_reservations(self):
+        self.configure()
+        path = Path(self.config['state_dir']) / (self.request['application_id'] + '.json')
+        original = worker.read_private(path)
+        for status in ('stopped', 'unknown', 'deleted'):
+            with self.subTest(status=status):
+                worker.save(path, {**original, 'status': status})
+                before = copy.deepcopy((self.cli.calls, self.cli.network_calls))
+                with self.assertRaisesRegex(worker.RouteError, '^application_route_conflict$'):
+                    self.configure({**self.request, 'application_id': 'app-' + 'b' * 24})
+                self.assertEqual((self.cli.calls, self.cli.network_calls), before)
+                self.assertFalse((path.parent / ('app-' + 'b' * 24 + '.json')).exists())
+
+    def test_deleted_reservation_requires_exact_successful_plan_and_receipt_anchor(self):
+        self.configure()
+        plan = self.lifecycle('delete')
+        self.lifecycle('delete', 'lifecycle-execute', plan['expected'])
+        path = Path(self.config['state_dir']) / ('lifecycle-' + plan['expected']['plan_id'] + '.json')
+        original = worker.read_private(path)
+        for change in ('receipt', 'hash', 'snapshot', 'config'):
+            with self.subTest(change=change):
+                value = copy.deepcopy(original)
+                if change == 'receipt':
+                    value['receipt']['application_id'] = 'app-' + 'c' * 24
+                elif change == 'hash':
+                    value['plan_sha256'] = '0' * 64
+                elif change == 'snapshot':
+                    value['plan']['snapshot']['record']['fingerprint'] = '0' * 64
+                    value['plan_sha256'] = worker.lifecycle_hash(value['plan'])
+                else:
+                    value['plan']['snapshot']['config_sha256'] = '0' * 64
+                    value['plan_sha256'] = worker.lifecycle_hash(value['plan'])
+                worker.save(path, value)
+                before = copy.deepcopy((self.cli.calls, self.cli.network_calls))
+                with self.assertRaisesRegex(worker.RouteError, '^application_route_conflict$'):
+                    self.configure({**self.request, 'application_id': 'app-' + 'b' * 24})
+                self.assertEqual((self.cli.calls, self.cli.network_calls), before)
+        worker.save(path, original)
+
+    def test_successful_lifecycle_replay_returns_exact_receipt_without_provider_or_state_writes(self):
+        self.configure()
+        directory = Path(self.config['state_dir'])
+        previous = []
+        def no_provider(*_args, **_kwargs):
+            self.fail('A successful replay must not make another provider call')
+        for action in ('stop', 'start', 'delete'):
+            plan = self.lifecycle(action)
+            result = self.lifecycle(action, 'lifecycle-execute', plan['expected'])
+            envelope = {'operation': 'lifecycle-execute', 'action': action, 'expected': plan['expected'],
+                        'request': {key: self.request[key] for key in ('application_id', 'hostname', 'node_port')}}
+            previous.append((envelope, result))
+            before = {p.name: p.read_bytes() for p in directory.glob('*.json')}
+            for saved, receipt in previous:
+                self.assertEqual(worker.lifecycle(self.config, saved, no_provider), receipt)
+            self.assertEqual({p.name: p.read_bytes() for p in directory.glob('*.json')}, before)
+        for change in ('action', 'hostname', 'node_port', 'hash', 'config'):
+            with self.subTest(change=change):
+                altered, config = copy.deepcopy(envelope), copy.deepcopy(self.config)
+                if change == 'action':
+                    altered['action'] = 'stop'
+                elif change == 'hash':
+                    altered['expected']['plan_sha256'] = '0' * 64
+                elif change == 'config':
+                    config['listener_id'] = str(uuid.UUID(int=44))
+                else:
+                    altered['request'][change] = 'other.railshot.io' if change == 'hostname' else 31001
+                with self.assertRaisesRegex(worker.RouteError, '^lifecycle_plan_stale$'):
+                    worker.lifecycle(config, altered, no_provider)
+                self.assertEqual({p.name: p.read_bytes() for p in directory.glob('*.json')}, before)
 
     def test_input_validation_before_provider_calls(self):
         for key, value in (("application_id", "../app"), ("hostname", "first.evil.test"),

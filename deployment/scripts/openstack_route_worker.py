@@ -189,7 +189,7 @@ def verify_certificate(reference, hostname):
         raise RouteError("hostname_certificate_not_ready") from None
 
 
-def ensure_network_rule(config, request, record, path, call):
+def ensure_network_rule(config, request, record, path, call, observe_only=False):
     """One fixed amphora /32 -> one runtime TCP NodePort; no SG/port changes."""
     network = config["network"]
     group = network["runtime_security_group_id"]
@@ -244,6 +244,7 @@ def ensure_network_rule(config, request, record, path, call):
     step = record.get("network")
     rule_id = step.get("id") if step else None
     if not rule_id:
+        require(not observe_only, "network_ownership_unrecorded")
         rule_id = find()
         if not rule_id:
             if step is not None:
@@ -269,7 +270,8 @@ def ensure_network_rule(config, request, record, path, call):
     require(rule.get("id") == rule_id and exact(rule) and rule.get("description") == description,
             "network_rule_readback_mismatch")
     record["network"] = {"intent": True, "id": rule_id}
-    save(path, record)
+    if not observe_only:
+        save(path, record)
     return rule_id
 
 
@@ -285,12 +287,13 @@ def configure(config, request, call=run_cli):
         private_stat(os.fstat(lock))
         require(stat.S_ISREG(os.fstat(lock).st_mode), "invalid_lock_file")
         fcntl.flock(lock, fcntl.LOCK_EX)
+        lifecycle_ready(directory)
         return configure_locked(config, request, directory, call)
     finally:
         os.close(lock)
 
 
-def configure_locked(config, request, directory, call):
+def configure_locked(config, request, directory, call, observe_only=False):
     app, lb, listener = request["application_id"], config["loadbalancer_id"], config["listener_id"]
     fingerprint = hashlib.sha256(json.dumps({"config": config, "request": request},
                                            sort_keys=True).encode()).hexdigest()
@@ -298,12 +301,17 @@ def configure_locked(config, request, directory, call):
     path = directory / (app + ".json")
     if path.exists():
         record = read_private(path)
+        require(record.get("status") not in ("stopped", "deleted"), "application_lifecycle_action_required")
         require(record.get("fingerprint") == fingerprint and record.get("request") == request,
                 "application_intent_conflict")
     else:
+        require(not observe_only, "application_ownership_unrecorded")
         record = {"fingerprint": fingerprint, "request": request, "steps": {}}
         for other in directory.glob("app-*.json"):
-            previous = read_private(other)["request"]
+            previous_record = read_private(other)
+            if verified_deleted(config, previous_record, directory):
+                continue
+            previous = previous_record["request"]
             require(previous["hostname"] != request["hostname"] and
                     previous["node_port"] != request["node_port"], "application_route_conflict")
         save(path, record)
@@ -396,7 +404,7 @@ def configure_locked(config, request, directory, call):
                  rule.get("compare_type") == "EQUAL_TO" and rule.get("invert") is False]
         require(hosts and all(rule.get("value") != request["hostname"] for rule in hosts),
                 "existing_listener_route_conflict")
-    network_rule_id = ensure_network_rule(config, request, record, path, call)
+    network_rule_id = ensure_network_rule(config, request, record, path, call, observe_only)
     for kind in KINDS:
         step = record["steps"].get(kind)
         if step is not None:
@@ -404,6 +412,7 @@ def configure_locked(config, request, directory, call):
             if not resource_id:
                 raise RouteError("creation_unresolved_" + kind, "unknown")
         else:
+            require(not observe_only, "application_ownership_incomplete")
             require(not discover(kind), "unrecorded_resource_" + kind)
             preflight()
             pool = record["steps"].get("pool", {}).get("id", "")
@@ -436,7 +445,8 @@ def configure_locked(config, request, directory, call):
                     raise RouteError("creation_unresolved_" + kind, "unknown")
         require(is_uuid(resource_id), "invalid_resource_id")
         record["steps"][kind]["id"] = resource_id
-        save(path, record)
+        if not observe_only:
+            save(path, record)
         verified(kind, resource_id)
 
     ids = {kind: record["steps"][kind]["id"] for kind in KINDS}
@@ -445,6 +455,7 @@ def configure_locked(config, request, directory, call):
             pool.get("healthmonitor_id") == ids["monitor"], "unexpected_pool_resources")
     require(relation_ids(policy.get("rules")) == {ids["rule"]}, "unexpected_policy_rules")
     if not policy["admin_state_up"]:
+        require(not observe_only, "application_policy_disabled")
         if record.get("activation_intent"):
             raise RouteError("activation_unresolved", "unknown")
         preflight()
@@ -458,9 +469,170 @@ def configure_locked(config, request, directory, call):
             raise RouteError("activation_unresolved", "unknown")
     preflight()
     record["status"] = "configured"
-    save(path, record)
+    if not observe_only:
+        save(path, record)
     return {**request, "status": "configured", "https_verified": False, "resources": ids,
             "network_rule_id": network_rule_id}
+
+
+def lifecycle_ready(directory):
+    for path in directory.glob("lifecycle-*.json"):
+        require(read_private(path).get("phase") in ("planned", "succeeded"), "lifecycle_reconciliation_required")
+
+
+def lifecycle_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def verified_deleted(config, record, directory):
+    """Release a reservation only with the successful absence-verification journal."""
+    if record.get("status") != "deleted":
+        return False
+    request = {key: record["request"][key] for key in ("application_id", "hostname", "node_port")}
+    for path in directory.glob("lifecycle-*.json"):
+        journal = read_private(path)
+        plan = journal.get("plan", {})
+        snapshot = plan.get("snapshot", {})
+        original = snapshot.get("record")
+        if (journal.get("phase") == "succeeded" and is_uuid(journal.get("plan_id"))
+                and path.name == "lifecycle-" + journal["plan_id"] + ".json"
+                and journal.get("plan_sha256") == lifecycle_hash(plan)
+                and plan.get("action") == "delete" and plan.get("request") == request
+                and snapshot.get("config_sha256") == lifecycle_hash(config)
+                and isinstance(original, dict) and record == {**original, "status": "deleted"}
+                and journal.get("receipt") == {"status": "succeeded", "https_verified": False,
+                    "action": "delete", "application_id": request["application_id"], "resources": {}}):
+            return True
+    return False
+
+
+def lifecycle_observe(config, request, directory, call):
+    """Reuse every existing project/tag/network/relationship check without saving."""
+    app = request["application_id"]
+    path = directory / (app + ".json")
+    record = read_private(path) if path.exists() else None
+    if record:
+        require(all(record["request"].get(k) == v for k, v in request.items()), "lifecycle_binding_changed")
+        checked_request(config, record["request"])
+        require(record.get("status") in ("configured", "stopped", "deleted"), "application_creation_unresolved")
+    if not record or record["status"] in ("stopped", "deleted"):
+        for command, scope in (("pool", ["--loadbalancer", config["loadbalancer_id"]]),
+                               ("l7policy", ["--listener", config["listener_id"]]), ("healthmonitor", [])):
+            rows = call([command, "list", *scope, "-f", "json"])
+            require(isinstance(rows, list) and not any(r.get("name") == app for r in rows), "unrecorded_application_resources")
+        rules = call(["security", "group", "rule", "list", config["network"]["runtime_security_group_id"],
+                      "-c", "ID", "-f", "json"], service=())
+        require(isinstance(rules, list), "invalid_network_rule_list")
+        for row in rules:
+            require(is_uuid(row.get("ID")), "invalid_network_rule_id")
+            rule = call(["security", "group", "rule", "show", row["ID"], "-f", "json"], service=())
+            require(rule.get("description") != "railshot:" + app, "unrecorded_application_network_rule")
+        return {"config_sha256": lifecycle_hash(config), "record": record, "resources": {}}
+    observations = []
+    def stable(value):
+        if isinstance(value, dict):
+            return {k: stable(v) for k, v in value.items() if k not in ("operating_status", "updated_at", "created_at")}
+        if isinstance(value, list):
+            return [stable(v) for v in value]
+        return value
+    def observe(arguments, service=("loadbalancer",)):
+        result = call(arguments, service=service)
+        observations.append({"arguments": arguments, "service": list(service), "value": stable(result)})
+        return result
+    result = configure_locked(config, record["request"], directory, observe, observe_only=True)
+    return {"config_sha256": lifecycle_hash(config), "record": record, "resources": result["resources"],
+            "network_rule_id": result["network_rule_id"], "observations": observations}
+
+
+def lifecycle(config, envelope, call=run_cli):
+    config = checked_config(config)
+    require(isinstance(envelope, dict) and set(envelope) <= {"operation", "action", "request", "expected"}
+            and envelope.get("operation") in ("lifecycle-plan", "lifecycle-validate", "lifecycle-execute")
+            and envelope.get("action") in ("start", "stop", "delete"), "invalid_lifecycle_request")
+    request, action = envelope["request"], envelope["action"]
+    require(isinstance(request, dict) and set(request) == {"application_id", "hostname", "node_port"}, "invalid_lifecycle_binding")
+    checked_request(config, {**request, "private_address": config["runtime_private_address"], "health_path": "/"})
+    directory = Path(config["state_dir"]); directory.mkdir(mode=0o700, exist_ok=True)
+    private_stat(directory.stat())
+    fd = os.open(directory / (config["loadbalancer_id"] + ".lock"), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        private_stat(os.fstat(fd)); require(stat.S_ISREG(os.fstat(fd).st_mode), "invalid_lock_file")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if envelope["operation"] != "lifecycle-plan":
+            expected = envelope.get("expected", {})
+            require(isinstance(expected, dict) and set(expected) == {"plan_id", "plan_sha256"}
+                    and is_uuid(expected["plan_id"]), "reviewed_lifecycle_plan_required")
+            path = directory / ("lifecycle-" + expected["plan_id"] + ".json")
+            journal = read_private(path)
+            plan = journal.get("plan", {})
+            require(all(journal.get(k) == v for k, v in expected.items())
+                    and plan.get("action") == action and plan.get("request") == request
+                    and plan.get("snapshot", {}).get("config_sha256") == lifecycle_hash(config)
+                    and lifecycle_hash(plan) == expected["plan_sha256"], "lifecycle_plan_stale")
+            if journal.get("phase") == "succeeded":
+                receipt = journal.get("receipt", {})
+                require(receipt.get("status") == "succeeded" and receipt.get("https_verified") is False
+                        and receipt.get("action") == action and receipt.get("application_id") == request["application_id"]
+                        and isinstance(receipt.get("resources"), dict), "lifecycle_receipt_invalid")
+                # A historical result is not a new live observation or another mutation.
+                return receipt
+        lifecycle_ready(directory)
+        snapshot = lifecycle_observe(config, request, directory, call)
+        if action == "start":
+            require(snapshot["record"] and snapshot["record"].get("status") == "stopped", "only_stopped_application_can_start")
+        if envelope["operation"] == "lifecycle-plan":
+            plan_id = str(uuid.uuid4())
+            plan = {"action": action, "request": request, "snapshot": snapshot}
+            expected = {"plan_id": plan_id, "plan_sha256": lifecycle_hash(plan)}
+            save(directory / ("lifecycle-" + plan_id + ".json"), {"phase": "planned", "plan": plan, **expected})
+            return {"status": "succeeded", "https_verified": False, "expected": expected,
+                    "resources": snapshot["resources"], "network_rule_id": snapshot.get("network_rule_id"),
+                    "health_path": snapshot["record"]["request"]["health_path"] if snapshot["record"] else None}
+        require(journal["phase"] == "planned" and
+                journal["plan"] == {"action": action, "request": request, "snapshot": snapshot}, "lifecycle_plan_stale")
+        if envelope["operation"] == "lifecycle-validate":
+            return {"status": "succeeded", "https_verified": False}
+        save(path, {**journal, "phase": "applying"})
+        try:
+            record = snapshot["record"]
+            app_path = directory / (request["application_id"] + ".json")
+            if action == "start":
+                # Reset creation intents only after an explicitly reviewed stopped
+                # snapshot verified absence; never reset an uncertain creation.
+                save(app_path, {k: v for k, v in record.items() if k in ("fingerprint", "request")} | {"steps": {}})
+                configure_locked(config, record["request"], directory, call)
+                result = lifecycle_observe(config, request, directory, call)
+                require(len(result["resources"]) == 5 and is_uuid(result.get("network_rule_id")), "application_restore_unverified")
+            elif snapshot["resources"]:
+                ids = snapshot["resources"]
+                for kind in ("rule", "policy", "monitor", "member", "pool"):
+                    command = {"monitor": "healthmonitor", "policy": "l7policy", "rule": "l7rule"}.get(kind, kind)
+                    parent = [ids["policy"]] if kind == "rule" else [ids["pool"]] if kind == "member" else []
+                    call([command, "delete", *parent, ids[kind], "--wait"])
+                    scope = parent or (["--listener", config["listener_id"]] if kind == "policy" else
+                                       ["--loadbalancer", config["loadbalancer_id"]] if kind == "pool" else [])
+                    rows = call([command, "list", *scope, "-f", "json"])
+                    require(isinstance(rows, list) and not any(row.get("id") == ids[kind] for row in rows), "application_delete_unverified")
+                rule_id = snapshot["network_rule_id"]
+                call(["security", "group", "rule", "delete", rule_id], service=())
+                rows = call(["security", "group", "rule", "list", config["network"]["runtime_security_group_id"],
+                             "-c", "ID", "-f", "json"], service=())
+                require(isinstance(rows, list) and not any(row.get("ID") == rule_id for row in rows), "network_delete_unverified")
+                save(app_path, {**record, "status": "stopped" if action == "stop" else "deleted"})
+                result = lifecycle_observe(config, request, directory, call)
+            else:
+                if record and action == "delete":
+                    save(app_path, {**record, "status": "deleted"})
+                result = lifecycle_observe(config, request, directory, call)
+            receipt = {"status": "succeeded", "https_verified": False, "action": action,
+                       "application_id": request["application_id"], "resources": result["resources"]}
+            save(path, {**journal, "phase": "succeeded", "receipt": receipt})
+            return receipt
+        except BaseException:
+            save(path, {**journal, "phase": "unknown"})
+            raise RouteError("lifecycle_outcome_unknown", "unknown") from None
+    finally:
+        os.close(fd)
 
 
 def main():
@@ -470,14 +642,15 @@ def main():
         config = read_private(CONFIG)
         raw = sys.stdin.read(16385)
         require(len(raw) <= 16384, "request_too_large")
-        result = configure(config, json.loads(raw))
+        request = json.loads(raw)
+        result = lifecycle(config, request) if isinstance(request, dict) and 'operation' in request else configure(config, request)
     except RouteError as error:
         result = {"status": error.status, "reason": str(error), "https_verified": False}
     except Exception:
         # Includes corrupt private state and native errors; no traceback/CLI data.
         result = {"status": "blocked", "reason": "invalid_local_state", "https_verified": False}
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] == "configured" else 1
+    return 0 if result["status"] in ("configured", "succeeded") else 1
 
 
 if __name__ == "__main__":

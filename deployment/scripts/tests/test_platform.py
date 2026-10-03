@@ -99,16 +99,18 @@ class PlatformTests(unittest.TestCase):
                                  ({namespace: 'railshot-build'}, False), ({namespace: 'tenant-demo'}, False)]:
             with self.subTest(labels=labels):
                 self.assertEqual(denied(labels), expected)
-        # These exact documents passed AWS ValidatePolicy on 2026-10-03 (KST).
+        # The executor document passed AWS ValidatePolicy on 2026-10-03 (KST).
         # SSM context/target/document and edge-read simulations were refreshed;
         # the earlier 57-check receipt applies to the prior policy bytes only.
-        # Changing privileges requires a new policy review, not an unbound fixture.
+        # The exact edge hash below separately passed AWS ValidatePolicy with
+        # zero findings on 2026-10-03. This is not an IAM rollout or proof that a
+        # live principal can execute lifecycle deletes; scope tests are separate.
         policy = (ROOT / 'infrastructure/terraform/control/product-executor-policy.json').read_bytes()
         self.assertEqual(hashlib.sha256(policy).hexdigest(),
                          '0ab96416ae2537a339b5f2fbe7a3d1331b9f7063ca56596c53dedcf66602f814')
         edge_policy = (ROOT / 'infrastructure/terraform/control/product-edge-policy.json').read_bytes()
         self.assertEqual(hashlib.sha256(edge_policy).hexdigest(),
-                         '2b7a9b9a1586a86553648e74f0e22fb3f1430f54b2a2f0b2e007fb2821b84606')
+                         'fb401be9f21ee946592cd56f1e2991359df0d60785bca03ddf36decb7a118dfb')
         self.assertLessEqual(len(json.dumps(json.loads(edge_policy), separators=(',', ':'))), 6144)
 
     @unittest.skipUnless(os.environ.get("RAILSHOT_ARGO_SCHEMA_MANIFEST"),

@@ -33,7 +33,7 @@ def tls_name(value):
 def validate_policy(policy):
     require(set(policy) == {'version', 'targets'} and policy['version'] == 1, 'invalid renewal policy')
     targets = policy['targets']
-    require(isinstance(targets, list) and 1 <= len(targets) <= 20, 'registered targets required')
+    require(isinstance(targets, list) and 0 <= len(targets) <= 20, 'registered targets required')
     for target in targets:
         required = {'secret', 'target_id', 'server', 'project', 'namespaces', 'service_account', 'ca_sha256', 'audiences'}
         require(required <= set(target) <= required | {'tls_server_name'}, 'invalid registration binding')
@@ -208,7 +208,7 @@ def render(policy, image):
         {'apiVersion': 'v1', 'kind': 'ServiceAccount', 'metadata': meta, 'automountServiceAccountToken': False},
         {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role', 'metadata': meta, 'rules': [
             {'apiGroups': [''], 'resources': ['secrets'], 'resourceNames': [t['secret'] for t in policy['targets']],
-             'verbs': ['get', 'patch']}]},
+             'verbs': ['get', 'patch']}] if policy['targets'] else []},
         {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding', 'metadata': meta,
          'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': name},
          'subjects': [{'kind': 'ServiceAccount', 'name': name, 'namespace': 'argocd'}]},

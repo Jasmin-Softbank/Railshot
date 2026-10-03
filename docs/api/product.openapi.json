@@ -2217,6 +2217,308 @@
           }
         }
       }
+    },
+    "/api/v1/applications/{id}/plans": {
+      "post": {
+        "operationId": "createApplicationLifecyclePlan",
+        "summary": "Preview stopping, starting or deleting an owned application",
+        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted. Registered active deployments can be deleted after cancellation/quiescence. Active deployment deletion uses a private, configuration-bound application scope and requires fresh ownership validation before cleanup. Other unfinished/unknown work blocks admission.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplicationLifecyclePlanInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Saved preview; no lifecycle mutation has run.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationLifecyclePlan"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/applications/{id}/operations": {
+      "post": {
+        "operationId": "createApplicationLifecycleOperation",
+        "summary": "Execute one confirmed application lifecycle plan",
+        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted. Idempotency-Key binds the application and complete normalized request. Same input returns the same operation; changed input returns 409. Plans expire or are consumed once. For this operation resource, both 202 and terminal replay 200 return the operation record directly. A same-application active deployment is durably guarded, quiesced and its exact CI run cancelled before fresh inventory and cleanup. Uncertain cancellation or increased concrete resource scope does not start cleanup.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplicationLifecycleInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Persisted queued/running operation. Poll Location.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^/api/v1/operations/[a-f0-9-]+$"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "2"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationLifecycleOperation"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Terminal replay of the same operation; no execution is repeated.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "pattern": "^/api/v1/operations/[a-f0-9-]+$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationLifecycleOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/operations/{id}": {
+      "get": {
+        "operationId": "getApplicationLifecycleOperation",
+        "summary": "Read an owned application lifecycle operation",
+        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current lifecycle result, steps and residual resource identifiers.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationLifecycleOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2622,7 +2924,8 @@
               "ci",
               "cd",
               "complete",
-              "http"
+              "http",
+              "cancelled"
             ]
           },
           "ci": {
@@ -2912,6 +3215,10 @@
           "environment_target_id": {
             "type": "string",
             "description": "Existing runtime environment ID; node observations use this ID."
+          },
+          "deletion_requested": {
+            "type": "string",
+            "format": "uuid"
           }
         },
         "required": [
@@ -5179,7 +5486,7 @@
       },
       "Application": {
         "type": "object",
-        "description": "Session-owned application slot on an existing runtime. ready means namespace, permissions and CI binding registered; it does not mean deployed or publicly reachable.",
+        "description": "Session-owned application slot on an existing runtime. ready means namespace, permissions and CI binding registered; it does not mean deployed or publicly reachable. stop/start/delete are explicit lifecycle operations. Deleted records remain as tombstones; stopped/deleted records reject source redeployment.",
         "properties": {
           "id": {
             "type": "string"
@@ -5219,8 +5526,21 @@
               "registering",
               "ready",
               "blocked",
-              "unknown"
+              "unknown",
+              "stopping",
+              "stopped",
+              "starting",
+              "deleting",
+              "deleted"
             ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lifecycle_operation_id": {
+            "type": "string",
+            "format": "uuid"
           }
         },
         "required": [
@@ -5255,6 +5575,298 @@
           "next_marker"
         ],
         "additionalProperties": false
+      },
+      "LifecycleAction": {
+        "type": "string",
+        "enum": [
+          "stop",
+          "start",
+          "delete"
+        ]
+      },
+      "LifecycleResource": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9._:-]{0,252}$"
+          },
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9._:-]{0,252}$"
+          },
+          "namespace": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9._:-]{0,252}$"
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "LifecycleStep": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9._:-]{0,252}$"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "blocked",
+              "unknown",
+              "skipped"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "ApplicationLifecyclePlanInput": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/LifecycleAction"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false
+      },
+      "ApplicationLifecyclePlan": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/components/schemas/LifecycleAction"
+          },
+          "plan_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "resources": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleResource"
+            }
+          },
+          "retained": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleResource"
+            }
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "application_id",
+          "action",
+          "plan_hash",
+          "resources",
+          "retained",
+          "expires_at"
+        ],
+        "additionalProperties": false,
+        "description": "Read-only preview, valid for ten minutes. An active-deployment deletion preview names the exact owned application namespace/routes as an authorization scope; it is not evidence that those resources already exist. A fresh private executor plan is required after quiescence."
+      },
+      "ApplicationLifecycleInput": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/LifecycleAction"
+          },
+          "plan_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "plan_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "confirmation": {
+            "type": "string",
+            "description": "Exact current application name. The UI fills this after the user confirms the warning."
+          },
+          "delete_data": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "action",
+          "plan_id",
+          "plan_hash",
+          "confirmation"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "action": {
+                  "const": "delete"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "delete_data"
+              ],
+              "properties": {
+                "delete_data": {
+                  "const": true
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "delete_data": {
+                  "const": false
+                }
+              }
+            }
+          }
+        ]
+      },
+      "ApplicationLifecycleOperation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "const": "application-lifecycle"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "app": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/components/schemas/LifecycleAction"
+          },
+          "plan_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "plan_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "delete_data": {
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "blocked",
+              "unknown"
+            ]
+          },
+          "stage": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9._:-]{0,252}$"
+          },
+          "steps": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleStep"
+            }
+          },
+          "residuals": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleResource"
+            }
+          },
+          "retained": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleResource"
+            }
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cancelling_deployment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "effective_plan_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "effective_plan_hash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "application_id",
+          "app",
+          "target_id",
+          "action",
+          "plan_id",
+          "plan_hash",
+          "delete_data",
+          "status",
+          "stage",
+          "steps",
+          "residuals",
+          "retained",
+          "error",
+          "created_at",
+          "updated_at"
+        ],
+        "additionalProperties": false,
+        "description": "Persisted session-owned operation. residuals are resources remaining or not verified absent. A queued/running operation is never replayed after restart; its state becomes unknown. Private plans, credentials and paths are not exposed."
       }
     },
     "responses": {

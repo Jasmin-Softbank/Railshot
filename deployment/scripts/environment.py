@@ -333,6 +333,10 @@ def install_renewal(cd, renewal):
         policy['targets'].append(renewal)
     credentials.validate_policy(policy)
     role = control('get', 'role', 'railshot-credentials', '-o', 'json')
+    empty_role = not (role.get('rules') or [])
+    if empty_role:
+        argo.require(not policy['targets'] or policy['targets'] == [renewal], 'renewal role differs')
+        role['rules'] = [{'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get', 'patch'], 'resourceNames': []}]
     argo.require(len(role['rules']) == 1 and role['rules'][0]['apiGroups'] == ['']
                  and role['rules'][0]['resources'] == ['secrets'] and role['rules'][0]['verbs'] == ['get', 'patch'], 'renewal role differs')
     names = role['rules'][0]['resourceNames']
@@ -359,7 +363,7 @@ def grant_control_objects(cd, registered, target_id):
     for rule in rules:
         argo.require(set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
                      and len(rule['apiGroups']) == len(rule['resources']) == 1
-                     and rule['verbs'] == ['get', 'patch'] and rule['resourceNames']
+                     and rule['verbs'] in (['get', 'patch'], ['get', 'patch', 'delete']) and rule['resourceNames']
                      and all(label(value) for value in rule['resourceNames']), 'registration Role must contain exact names only')
         key = (rule['apiGroups'][0], rule['resources'][0])
         argo.require(key in expected and key not in seen, 'registration Role kind differs')
@@ -368,8 +372,9 @@ def grant_control_objects(cd, registered, target_id):
     for (group, resource), resource_name in expected.items():
         rule = next((r for r in rules if r['apiGroups'] == [group] and r['resources'] == [resource]), None)
         if rule is None:
-            rule = {'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch'], 'resourceNames': []}
+            rule = {'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch', 'delete'], 'resourceNames': []}
             rules.append(rule)
+        rule['verbs'] = ['get', 'patch', 'delete']
         if resource_name not in rule['resourceNames']:
             rule['resourceNames'].append(resource_name)
     if rules != original:

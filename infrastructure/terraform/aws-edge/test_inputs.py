@@ -40,6 +40,16 @@ def evaluate(values, expression='local.aws_target_rules'):
 
 
 class EdgeInputsTest(unittest.TestCase):
+    def test_stopped_apps_keep_dns_but_no_backend_networking_and_last_app_can_delete(self):
+        values = fixture()
+        values['routes']['aws-demo-a1b2']['enabled'] = False
+        self.assertEqual(evaluate(values, 'keys(local.active_routes)'), ['aws-other-c3d4'])
+        self.assertEqual(evaluate(values, 'keys(local.dns_routes)'), ['aws-demo-a1b2', 'aws-other-c3d4'])
+        self.assertEqual(evaluate(values), {'sg-0123456789abcdef2:30081': {'security_group_id': 'sg-0123456789abcdef2', 'port': 30081}})
+        values['routes'] = {}
+        self.assertEqual(evaluate(values, '{routes=local.active_routes,dns=local.dns_routes,rules=local.aws_target_rules}'),
+                         {'routes': {}, 'dns': {}, 'rules': {}})
+
     def test_idle_timeout_preserves_default_and_bounds_long_api_waits(self):
         values = fixture()
         self.assertEqual(evaluate(values, 'var.idle_timeout'), 60)
@@ -85,7 +95,7 @@ class EdgeInputsTest(unittest.TestCase):
         source = (MODULE / 'main.tf').read_text()
         for resource in ('aws_lb_target_group', 'aws_lb_target_group_attachment', 'aws_lb_listener_rule'):
             block = source.split('resource "' + resource + '" "app" {', 1)[1].split('\n}', 1)[0]
-            self.assertRegex(block, r'for_each\s*= var.routes')
+            self.assertRegex(block, r'for_each\s*= local.active_routes')
         dns = source.split('resource "aws_route53_record" "app" {', 1)[1].split('\n}', 1)[0]
         self.assertIn('for_each = local.dns_routes', dns)
 

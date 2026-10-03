@@ -59,8 +59,8 @@ def locked(config):
 
 def base_values(config, *, writable=False):
     values = read_private(config['variables_file'])
-    require(values.get('base_domain') == 'railshot.io' and isinstance(values.get('routes'), dict) and
-            values['routes'], 'existing railshot.io routes required')
+    require(values.get('base_domain') == 'railshot.io' and isinstance(values.get('routes'), dict),
+            'existing railshot.io route map required')
     if writable:
         require(all(route.get('provider_kind') == 'aws' for route in values['routes'].values()) and
                 not any(key.startswith('wireguard_') for key in values),
@@ -115,6 +115,7 @@ def prepare(config_path, request):
     identity = {key: request[key] for key in ('tenant', 'app', 'environment_id')}
     key = 'app-' + digest(identity)[:24]
     with locked(config) as root:
+        lifecycle_ready(root)
         values = base_values(config, writable=True)
         ledger_path = root / 'allocations.json'
         ledger = read_private(ledger_path) if ledger_path.exists() else {}
@@ -183,8 +184,58 @@ def native(args):
     return result.stdout
 
 
+def lifecycle_ready(root):
+    for path in Path(root).glob('application-lifecycle-*/intent.json'):
+        require(read_private(path).get('phase') in ('planned', 'succeeded'),
+                'application lifecycle requires manual reconciliation')
+
+
+def local_state_file(config):
+    """Bind explicit or implicit local state without ever inventing a new backend."""
+    directory = Path(config['terraform_dir'])
+    metadata = directory / '.terraform/terraform.tfstate'
+    backend = {}
+    if metadata.exists():
+        require(metadata.is_file() and not metadata.is_symlink(), 'regular initialized backend metadata required')
+        backend = json.loads(metadata.read_bytes()).get('backend') or {}
+        require(not backend or backend.get('type') == 'local', 'local edge backend required')
+    for path in directory.glob('*.tf'):
+        kinds = re.findall(r'backend\s+"([^"]+)"\s*\{', path.read_text())
+        require(all(kind == 'local' for kind in kinds) and (not kinds or backend),
+                'uninitialized or remote edge backend forbidden')
+    for path in directory.glob('*.tf.json'):
+        declared = json.loads(path.read_bytes()).get('terraform', {}).get('backend', {})
+        require(not declared or (set(declared) == {'local'} and backend), 'uninitialized or remote edge backend forbidden')
+    state_path = backend.get('config', {}).get('path') or str(directory / 'terraform.tfstate')
+    require(Path(state_path).is_absolute(), 'absolute existing local state required')
+    state = read_private(state_path)
+    require(isinstance(state.get('lineage'), str) and state['lineage'] and type(state.get('serial')) is int,
+            'existing state lineage and serial required')
+    return str(state_path)
+
+
 def terraform(config, *args):
-    return native(['terraform', '-chdir=' + config['terraform_dir'], *args])
+    # Every app writer uses the bundled module, including after lifecycle changes.
+    # The operator directory remains the state authority, never a second source
+    # that can silently ignore enabled=false on the next app publication.
+    source = Path(__file__).resolve().parents[1] / 'infrastructure/terraform/aws-edge'
+    files = {path.name: path.read_bytes() for path in sorted(source.iterdir())
+             if path.is_file() and (path.suffix == '.tf' or path.name == '.terraform.lock.hcl')}
+    state_file = local_state_file(config)
+    files['backend.tf.json'] = encoded({'terraform': {'backend': {'local': {'path': state_file}}}})
+    fingerprint = digest({name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()})
+    work = Path(config['state_dir']) / ('aws-source-' + fingerprint)
+    require(not work.is_symlink(), 'private source directory required')
+    work.mkdir(mode=0o700, exist_ok=True)
+    require(work.stat().st_uid == os.geteuid() and not work.stat().st_mode & 0o077, 'private source directory required')
+    for name, raw in files.items():
+        path = work / name
+        if path.exists():
+            require(not path.is_symlink() and path.read_bytes() == raw, 'bundled source cache changed')
+        else:
+            durable_write(path, raw)
+    native(['terraform', '-chdir=' + str(work), 'init', '-input=false', '-lockfile=readonly'])
+    return native(['terraform', '-chdir=' + str(work), *args])
 
 
 def save(config, row):
@@ -228,6 +279,7 @@ def validate_plan(plan, row):
 def plan_route(reference):
     config, _ = load(reference)
     with locked(config):
+        lifecycle_ready(config['state_dir'])
         config, row = load(reference)
         require(row['phase'] in ('reserved', 'planned'), 'observe interrupted or already applied routes; never replan automatically')
         values = base_values(config, writable=True)
@@ -256,6 +308,7 @@ def plan_route(reference):
 def apply_route(reference, plan_sha256):
     config, _ = load(reference)
     with locked(config):
+        lifecycle_ready(config['state_dir'])
         config, row = load(reference)
         require(row['phase'] == 'planned' and row['plan_sha256'] == plan_sha256, 'reviewed saved plan required')
         base_values(config, writable=True)

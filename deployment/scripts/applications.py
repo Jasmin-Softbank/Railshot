@@ -139,6 +139,13 @@ def _claim(path, value):
         runtime.save(path, value)
 
 
+def assert_deployable(home):
+    """Shared guard for registration and publication, including direct CLI callers."""
+    path = Path(home) / 'lifecycle.json'
+    if path.exists():
+        require(runtime.read_private(path).get('status') == 'ready', 'APPLICATION_LIFECYCLE_BLOCKED')
+
+
 def register(config_path, request):
     config = load_config(config_path)
     profile, native, descriptor, endpoint, physical, authority, pull, fingerprint = _inputs(config, request)
@@ -160,6 +167,7 @@ def register(config_path, request):
         for path in claims:
             _claim(path, environment_claim)
         home = private_directory(root / app_id)
+        assert_deployable(home)
         receipt = home / 'registration.json'
         if receipt.exists():
             record = runtime.read_private(receipt)
@@ -179,6 +187,9 @@ def register(config_path, request):
                 used = {port['nodePort'] for svc in services['items'] for port in svc.get('spec', {}).get('ports', []) if 'nodePort' in port}
                 for prior_path in root.glob('app-*/registration.json'):
                     prior = runtime.read_private(prior_path)
+                    lifecycle = prior_path.parent / 'lifecycle.json'
+                    if lifecycle.exists() and runtime.read_private(lifecycle).get('status') == 'deleted':
+                        continue  # Allocation is released only after verified complete cleanup.
                     if prior.get('environment_id') == env_id:
                         require(type(prior.get('node_port')) is int, 'APPLICATION_STORAGE_INVALID')
                         used.add(prior['node_port'])

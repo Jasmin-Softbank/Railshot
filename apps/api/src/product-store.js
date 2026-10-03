@@ -91,11 +91,15 @@ export async function createProductStore(directory) {
     }
     if (state.version !== 1 || !state.operations || !state.keys || !state.bindings || !state.plans) throw new Error('Invalid workspace state');
     state.applications ||= {};
-    for (const app of Object.values(state.applications)) if (app.status === 'registering') app.status = 'unknown';
+    for (const app of Object.values(state.applications)) if (['registering', 'stopping', 'starting', 'deleting'].includes(app.status)) app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
       if (['queued', 'running'].includes(operation.status)) {
         operation.status = 'unknown';
         operation.error = { code: 'INTERRUPTED', request_id: randomUUID(), message: '실행이 중단되어 결과를 다시 확인해야 합니다.', retryable: false, outcome_unknown: true };
+        if (operation.kind === 'application-lifecycle') {
+          operation.residuals = state.plans[operation.plan_id]?.public?.resources || [];
+          if (state.applications[operation.application_id]) state.applications[operation.application_id].status = 'unknown';
+        }
       }
     }
     persist(state);

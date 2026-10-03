@@ -255,7 +255,7 @@ def ensure_object(document, uids, preserve_existing=False, claim=None):
         for rule in rules:
             require(isinstance(rule, dict) and set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'} and
                     isinstance(rule['apiGroups'], list) and isinstance(rule['resources'], list) and
-                    len(rule['apiGroups']) == len(rule['resources']) == 1 and rule['verbs'] == ['get', 'patch'] and
+                    len(rule['apiGroups']) == len(rule['resources']) == 1 and rule['verbs'] in (['get', 'patch'], ['get', 'patch', 'delete']) and
                     isinstance(rule['resourceNames'], list) and rule['resourceNames'] and all(
                         isinstance(value, str) and re.fullmatch(r'[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?', value)
                         for value in rule['resourceNames']), 'REGISTRATION_ROLE_DIFFERS')
