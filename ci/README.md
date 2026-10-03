@@ -73,3 +73,11 @@ source_commit/target_id를 workflow 입력으로 받아 checkout 및 운영자 t
 토큰은 environment secret → 0600 임시 JSON → AWS CLI 파일 입력으로만 전달하고, 성공·실패·시간 초과 모두 파일을 삭제한다. 토큰을 CLI 인수·로그·artifact에 넣지 않는다. 운영 노드는 별도 IAM으로 이 parameter 하나의 `GetParameter`만 허용받아 대상 namespace의 pull Secret을 설치한다. 이 workflow의 성공은 SSM 저장 접수이며 실제 노드의 private image pull은 별도로 검증한다.
 
 현재 관리 중인 GHCR 자격은 classic PAT의 `read:packages` 권한만 가지며 기록된 만료일은 **2026-10-09**다. 만료 전에 보호된 GitHub secret을 교체하고 이 workflow를 다시 실행한 뒤 대상 Secret과 실제 pull을 확인한다. SSM parameter의 설명은 만료 메타데이터이며 토큰을 자동 갱신하지 않는다.
+
+## 고객 앱 CI의 기본 실행량
+
+기본 경로는 L0(변경·비밀 경계) → L1(배포 명세) → L2(이미지 빌드) → L4(보안 검사) → L3(실제 기동·HTTP)다. 별도 lint/type/unit Q는 기본 배포에서 실행하지 않는다. `--layers L0,L1,Q,L2,L4,L3`로 명시하면 기존 진단을 실행하며, 이전 6단계 bundle도 계속 검증한다.
+
+표준 단일 Vite 앱은 lockfile과 기존 build 명령을 보존하는 템플릿으로 패키징한다. 계산기처럼 이 조건에 맞으면 AI 호출 없이 baseline을 실행한다. 사용자 Dockerfile·명세, Go 서버, SSR·사용자 출력 디렉터리는 자동으로 덮어쓰지 않는다. 나머지는 실패할 때만 기본 1회, Codex medium 추론으로 packaging 수정을 시도한다. 운영 변수 `REPAIR_SCOPE=source`나 `RAILSHOT_MAX_REPAIR_ATTEMPTS`를 설정한 저장소는 명시한 값이 우선한다.
+
+Memos의 Go 서버와 영구 `/var/opt/memos` 저장소는 정적 Vite 앱 조건에 해당하지 않는다. CI 축소는 영구 볼륨 지원을 추가하지 않으며, 임시 디스크로 대체하여 배포 성공으로 처리해서는 안 된다.
