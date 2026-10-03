@@ -506,6 +506,7 @@ export async function createProductService({ service, directory, target, provide
   }
   return {
     dashboard: store.dashboard,
+    registrations: store.registrations,
     createUpdate, startUpdate,
     async sourceFiles(id, variant, sessionId = null) {
       const record = find('deployments', id, sessionId);

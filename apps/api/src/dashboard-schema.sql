@@ -51,3 +51,22 @@ CREATE TABLE IF NOT EXISTS connections (
   updated_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS connections_session ON connections(session_id);
+CREATE TABLE IF NOT EXISTS registrations (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  provider TEXT NOT NULL CHECK(provider = 'openstack'),
+  project_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  auth_type TEXT NOT NULL CHECK(auth_type IN ('token', 'application_credential')),
+  status TEXT NOT NULL CHECK(status IN ('pending', 'claimed')),
+  created_at TEXT NOT NULL,
+  claimed_at TEXT
+) STRICT;
+CREATE INDEX IF NOT EXISTS registrations_session_created ON registrations(session_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS registration_tokens (
+  registration_id TEXT PRIMARY KEY REFERENCES registrations(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER,
+  created_at INTEGER NOT NULL
+) STRICT;

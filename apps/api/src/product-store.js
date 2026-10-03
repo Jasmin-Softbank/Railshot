@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { DashboardError, createDashboardData } from './sessions.js';
+import { createRegistrations } from './registrations.js';
 import { validateFiles } from './archive.js';
 
 const run = promisify(execFile);
@@ -61,7 +62,7 @@ export async function createProductStore(directory) {
     const directoryHandle = await open(root, 'r');
     try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
   }
-  let state, db, dashboard;
+  let state, db, dashboard, registrations;
   try {
     const path = join(root, 'dashboard.sqlite3');
     try { const file = await open(path, 'wx', 0o600); await file.close(); }
@@ -75,7 +76,7 @@ export async function createProductStore(directory) {
     db = new DatabaseSync(path);
     db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1].includes(version)) throw new Error('Unsupported database schema');
+    if (![0, 1, 2].includes(version)) throw new Error('Unsupported database schema');
     db.exec(await readFile(new URL('./dashboard-schema.sql', import.meta.url), 'utf8'));
     if (version === 0) {
       try { state = await readPrivate(join(root, 'state.json')); }
@@ -105,6 +106,7 @@ export async function createProductStore(directory) {
     }
     persist(state);
     dashboard = await createDashboardData(db, root);
+    registrations = createRegistrations(db);
   } catch (error) { db?.close(); await unlink(lockPath); throw error; }
   function persist(next) {
     // ponytail: rewrite the existing bounded 100-operation snapshot in one transaction;
@@ -122,12 +124,13 @@ export async function createProductStore(directory) {
       for (const [id, value] of Object.entries(next.bindings)) binding.run(id, value.operation_id, JSON.stringify(value));
       const key = db.prepare('INSERT INTO idempotency VALUES (?, ?)');
       for (const [id, value] of Object.entries(next.keys)) key.run(id, value);
-      db.exec('PRAGMA user_version=1; COMMIT');
+      db.exec('PRAGMA user_version=2; COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
   let tail = Promise.resolve();
   return {
     dashboard,
+    registrations,
     read: () => structuredClone(state),
     operationPage(kind, sessionId, { limit, marker }) {
       if (!['builds', 'deployments', 'environments'].includes(kind)) throw new Error('Invalid operation kind');

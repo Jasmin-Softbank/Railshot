@@ -94,7 +94,7 @@ def test_downloaded_complete_payload_runs_real_help(launcher):
     assert 'verify-vm' in result.stdout
     downloaded = {record['url'][len(BASE_URL) + 1:] for record in records}
     for relative in ('deployment/bootstrap/client_setup/main.py', 'deployment/bootstrap/install_payload.py',
-                     'deployment/bootstrap/requirements.lock', 'infrastructure/providers/openstack/identity.py',
+                     'deployment/bootstrap/requirements.lock', 'infrastructure/providers/openstack/cli.py',
                      'apps/agent/runner.py'):
         assert relative in downloaded
     # Independently traverse local imports, including preflight -> state -> report.
@@ -162,7 +162,7 @@ def test_untrusted_url_rejected_before_download(launcher, url):
                                      'deployment/bootstrap/client_setup/preflight.py',
                                      'deployment/bootstrap/client_setup/state.py',
                                      'deployment/bootstrap/client_setup/report.py',
-                                     'infrastructure/providers/openstack/identity.py',
+                                     'infrastructure/providers/openstack/access.py',
                                      'apps/agent/runner.py'])
 def test_missing_required_file_never_executes_partial_payload(launcher, missing):
     result, records, commands, stages = launcher('--download-base-url', BASE_URL, '--help', overrides={'FAIL_RELATIVE': missing})

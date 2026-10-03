@@ -232,6 +232,13 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);
         }
+        if (/^\/api\/v1\/registrations(?:\/|$)/.test(url.pathname)) {
+          if (!access.token) throw new ServiceError('등록 요청에는 운영자 API 토큰 설정이 필요합니다.', 503);
+          if (!allowsToken(request.headers.authorization, access.token)) {
+            response.setHeader('www-authenticate', 'Bearer');
+            throw new ServiceError('API authentication required', 401);
+          }
+        }
         if (versioned && ['/api/v1/installers/openstack', '/api/v1/installers/openstack/bundle'].includes(url.pathname)) {
           if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
           if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
@@ -250,12 +257,35 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         // Public visitors are anonymous cookie sessions. Existing localhost maintenance clients
         // without a cookie retain their private maintenance channel and legacy contracts.
         const dashboardRoute = /^\/api\/v1\/(sessions|preferences|connections)(?:\/|$)/.test(url.pathname);
-        const scoped = access.remote || access.publicDemo || dashboardRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
+        const registrationRoute = /^\/api\/v1\/registrations(?:\/|$)/.test(url.pathname);
+        const scoped = access.remote || access.publicDemo || dashboardRoute || registrationRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
         const session = scoped ? products.dashboard.session(cookieToken(request.headers.cookie)) : null;
         const sessionId = session?.id ?? null;
         if (session?.token) response.setHeader('Set-Cookie', sessionCookie(session.token, access.remote));
         response.setHeader('Vary', 'Cookie');
         if (versioned) {
+          if (registrationRoute) {
+            if (!products.registrations) throw new ServiceError('등록 저장소를 사용할 수 없습니다.', 503);
+            if ([...url.searchParams].length && !(url.pathname === '/api/v1/registrations' && request.method === 'GET')) {
+              throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            }
+            const route = /^\/api\/v1\/registrations(?:\/([a-f0-9-]{36})(?:\/(tokens))?)?$/.exec(url.pathname);
+            if (!route) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+            const [, id, child] = route;
+            const methods = child ? ['POST'] : id ? ['GET'] : ['GET', 'POST'];
+            if (!methods.includes(request.method)) {
+              const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = methods.join(', '); throw error;
+            }
+            if (child) {
+              const input = await jsonInput(request);
+              if (Object.keys(input).length) throw new ServiceError('토큰 발급 요청 본문은 빈 객체여야 합니다.', 422);
+              json(response, 201, products.registrations.issue(sessionId, id)); return;
+            }
+            if (id) { json(response, 200, products.registrations.get(sessionId, id)); return; }
+            if (request.method === 'GET') { json(response, 200, page(products.registrations.list(sessionId), url.searchParams)); return; }
+            const record = products.registrations.create(sessionId, await jsonInput(request));
+            json(response, 201, record, { Location: `/api/v1/registrations/${record.id}` }); return;
+          }
           if (dashboardRoute) {
             const route = /^\/api\/v1\/(sessions|preferences|connections)(?:\/([a-f0-9-]{36}))?$/.exec(url.pathname);
             if (!route) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);

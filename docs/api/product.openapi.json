@@ -3,7 +3,7 @@
   "info": {
     "title": "RAILSHOT session-scoped product API",
     "version": "1.1.0",
-    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Console connection metadata is session-scoped and not execution configuration. The API serves an OpenStack installer package; Keystone credentials are entered on the customer node and never sent to this endpoint. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. One API process on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
+    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Console connection metadata is session-scoped and not execution configuration. The API serves an OpenStack installer package; Keystone credentials are entered on the customer node and never sent to this endpoint. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. One API process on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence. OpenStack registrations require an operator Bearer token and remain scoped to an anonymous cookie session. Linkage tokens are issued once, stored only as hashes, and are not yet consumed by a customer-side WireGuard client."
   },
   "servers": [
     {
@@ -2927,6 +2927,279 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/registrations": {
+      "get": {
+        "operationId": "listRegistrations",
+        "summary": "List OpenStack registration requests owned by this session",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session registrations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "items",
+                    "next_marker"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Registration"
+                      }
+                    },
+                    "next_marker": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Operator Bearer required"
+          },
+          "404": {
+            "description": "Registration not owned by this session"
+          },
+          "409": {
+            "description": "Session expired, capacity reached, token active, or already claimed"
+          },
+          "422": {
+            "description": "Invalid input"
+          },
+          "503": {
+            "description": "Operator token or registration store unavailable"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createRegistration",
+        "summary": "Persist an OpenStack registration request",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "provider",
+                  "project_id",
+                  "user_id",
+                  "auth_type"
+                ],
+                "properties": {
+                  "provider": {
+                    "const": "openstack"
+                  },
+                  "project_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
+                  },
+                  "user_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
+                  },
+                  "auth_type": {
+                    "enum": [
+                      "token",
+                      "application_credential"
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored registration",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Registration"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Operator Bearer required"
+          },
+          "404": {
+            "description": "Registration not owned by this session"
+          },
+          "409": {
+            "description": "Session expired, capacity reached, token active, or already claimed"
+          },
+          "422": {
+            "description": "Invalid input"
+          },
+          "503": {
+            "description": "Operator token or registration store unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/registrations/{id}": {
+      "get": {
+        "operationId": "getRegistration",
+        "summary": "Read a session-owned registration",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registration metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Registration"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Operator Bearer required"
+          },
+          "404": {
+            "description": "Registration not owned by this session"
+          },
+          "409": {
+            "description": "Session expired, capacity reached, token active, or already claimed"
+          },
+          "422": {
+            "description": "Invalid input"
+          },
+          "503": {
+            "description": "Operator token or registration store unavailable"
+          }
+        }
+      }
+    },
+    "/api/v1/registrations/{id}/tokens": {
+      "post": {
+        "operationId": "issueRegistrationToken",
+        "summary": "Issue a one-time 10-minute linkage token",
+        "description": "The plaintext token is returned only once; only its SHA-256 hash is stored. Customer-side WireGuard exchange is not implemented yet.",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "maxProperties": 0
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Token issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "registration_id",
+                    "token",
+                    "expires_at"
+                  ],
+                  "properties": {
+                    "registration_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "token": {
+                      "type": "string",
+                      "pattern": "^rsl_[A-Za-z0-9_-]{43}$"
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Operator Bearer required"
+          },
+          "404": {
+            "description": "Registration not owned by this session"
+          },
+          "409": {
+            "description": "Session expired, capacity reached, token active, or already claimed"
+          },
+          "422": {
+            "description": "Invalid input"
+          },
+          "503": {
+            "description": "Operator token or registration store unavailable"
           }
         }
       }
@@ -6570,6 +6843,58 @@
           "reason"
         ],
         "additionalProperties": false
+      },
+      "Registration": {
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "project_id",
+          "user_id",
+          "auth_type",
+          "status",
+          "created_at",
+          "claimed_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider": {
+            "const": "openstack"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "auth_type": {
+            "enum": [
+              "token",
+              "application_credential"
+            ]
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "claimed"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
       }
     },
     "responses": {
@@ -6934,6 +7259,13 @@
           "pattern": "^[A-Za-z0-9._-]{1,128}$"
         },
         "description": "Anonymous session and resource-kind scope. Same semantic input returns the same operation; a different input conflicts. Unknown operations never replay. Trusted cookieless localhost maintenance keeps legacy workspace scope."
+      }
+    },
+    "securitySchemes": {
+      "operatorBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "RAILSHOT_API_TOKEN or RAILSHOT_API_TOKEN_FILE; session cookie scopes ownership."
       }
     }
   }

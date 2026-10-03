@@ -42,7 +42,6 @@ required_files=(
     deployment/bootstrap/templates/agent-authorized-keys.README
     infrastructure/providers/openstack/__init__.py
     infrastructure/providers/openstack/cli.py
-    infrastructure/providers/openstack/identity.py
     infrastructure/providers/openstack/discovery.py
     infrastructure/providers/openstack/access.py
     infrastructure/providers/openstack/templates/cloud-init.yaml.tmpl

@@ -8,6 +8,8 @@
 | --- | --- | --- |
 | 화면 선택 | `GET /api/v1/options` | 기존 환경의 클라우드(AWS/GCP)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. provider에 배정된 대상이 CI 허용 목록과 CD 등록에 모두 있을 때만 available이다. |
 | OpenStack 설치 묶음 | `GET /api/v1/installers/openstack`, `GET /api/v1/installers/openstack/bundle` | 설치 스크립트 내용·묶음 해시와 ZIP을 제공한다. 사용자 인증정보는 요청하지 않는다. |
+| 인프라 등록 요청 | `POST /api/v1/registrations`, `GET /api/v1/registrations`, `GET /api/v1/registrations/{id}` | 운영자 Bearer 토큰을 확인한 뒤 세션별 OpenStack 프로젝트·사용자 ID와 인증 형식만 SQLite에 저장한다. Keystone 비밀값은 거부한다. |
+| 일회성 연계 토큰 | `POST /api/v1/registrations/{id}/tokens` | 등록 소유 세션에서 10분짜리 토큰을 한 번만 반환한다. DB에는 SHA-256 해시만 남고 유효한 토큰의 중복 발급은 409다. |
 | 환경 관측 | `GET /api/v1/targets/{id}/observations` | 접근 가능한 등록 대상의 실제 노드·앱 지표와 수집 시각. 배포 이력 없이 조회하며 결측·실패는 null과 상태로 표시한다. |
 | 대상 | `GET /api/v1/targets` | CI 서비스에 등록한 대상 목록. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
 | 빌드 | `POST /api/v1/builds`, `GET /api/v1/builds/{id}` | ZIP·폴더·공개 GitHub를 기존 CI로 제출한다. ID는 GitHub run ID 문자열이며 등록한 run만 조회한다. `published`는 검증한 이미지 게시다. |
@@ -18,6 +20,14 @@
 | 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | 저장된 계획을 한 번 실행한다. 자원·guest·runtime, 선택적 Patroni DB와 배포 대상 등록을 각각 기록한다. 앱 소스의 CI·배포·공개 HTTP 검증은 이 요청에 포함하지 않는다. |
 | 앱 작업 계획 | `POST /api/v1/applications/{id}/plans` | 현재 세션이 소유한 앱의 중지·시작·삭제 범위와 보존 자원을 읽어 10분간 유효한 계획을 반환한다. |
 | 앱 작업 | `POST /api/v1/applications/{id}/operations`, `GET /api/v1/operations/{id}` | 확인한 계획을 한 번 실행하고 단계·결과·남거나 확인하지 못한 자원을 기록한다. |
+
+### OpenStack 인프라 등록과 연계 토큰
+
+운영자는 `RAILSHOT_API_TOKEN` 또는 `RAILSHOT_API_TOKEN_FILE`을 설정하고, 등록 관련 모든 요청에 `Authorization: Bearer <운영자 토큰>`을 보낸다. 공개 데모 모드에서도 이 경계가 적용된다. 현재는 사용자 계정이 없으므로 이 Bearer가 서비스 인증을 맡고, HttpOnly 세션 쿠키가 등록 요청의 소유 범위를 구분한다. 동일한 Bearer를 가진 다른 세션에서도 등록 상세·토큰을 조회하거나 발급할 수 없다. Bearer가 설정되지 않은 서버는 등록 요청을 503으로 거절한다.
+
+`POST /api/v1/registrations` 본문은 `{"provider":"openstack","project_id":"project-1","user_id":"user-1","auth_type":"token"}` 형식이다. `auth_type`은 `token` 또는 `application_credential`이다. Keystone 토큰, Application Credential ID·secret, 인증 URL, WireGuard 키는 이 API로 보내지 않는다. 생성 응답은 201, `Location`은 등록 상세 경로다. 세션당 등록은 최대 20개다.
+
+`POST /api/v1/registrations/{id}/tokens`는 빈 JSON 객체 `{}`를 받아 201로 `registration_id`, `token`, `expires_at`을 반환한다. 응답의 원문 토큰은 다시 조회할 수 없다. 만료 전 재발급은 409이고 만료 후 재발급은 기존 해시를 교체한다. 백엔드의 원자적 사용 처리 함수는 같은 토큰을 두 번 사용할 수 없도록 구현돼 있다. 현 단계는 **발급까지**이며 고객 노드의 토큰 제출, WireGuard 키 교환·터널 구성, 연결 완료 상태 검증은 아직 구현되지 않았다. 따라서 토큰 발급만으로 터널이 연결됐다고 판단하면 안 된다.
 
 실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`만 받는다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
 
