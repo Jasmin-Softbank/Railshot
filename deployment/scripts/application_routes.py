@@ -74,10 +74,13 @@ def _ensure(config, publication_request, prepared):
         edge_receipt = {'provider': 'aws', 'plan_sha256': applied['plan_sha256'], 'route_key': applied['route_key']}
     elif request['provider'] == 'gcp':
         import gcp_routes
-        native = gcp_routes.ensure(ingress['edge_config_file'], {
-            'application_id': app_id, 'hostname': request['hostname'], 'node_port': request['node_port'],
-            'health_path': request['health_path'],
-        })
+        try:
+            native = gcp_routes.ensure(ingress['edge_config_file'], {
+                'application_id': app_id, 'hostname': request['hostname'], 'node_port': request['node_port'],
+                'health_path': request['health_path'],
+            })
+        except gcp_routes.RouteError as error:
+            raise applications.RegistrationError(error.code, unknown=error.unknown) from error
         applications.require(native['hostname'] == request['hostname'], 'APPLICATION_ROUTE_BINDING_MISMATCH')
         auth = native['dns_authorization_record']
         applications.require(auth['type'] == 'CNAME' and auth['data'].rstrip('.').endswith('.authorize.certificatemanager.goog'),

@@ -92,12 +92,15 @@ class GcpRoutesTest(unittest.TestCase):
         self.write(self.config['variables_file'], self.values)
         self.calls = []
         self.interrupt = False
+        self.interrupt_after = False
+        self.drift = False
+        self.plans = {}
         self.corrupt_output = False
 
     def write(self, path, data):
         routes.durable_write(path, routes.encoded(data))
 
-    def native(self, argv):
+    def native(self, argv, **kwargs):
         self.calls.append(argv)
         work = Path(argv[1].split('=', 1)[1]); command = argv[2]
         if command == 'init':
@@ -106,16 +109,23 @@ class GcpRoutesTest(unittest.TestCase):
             return ''
         candidate = routes.read_private(work / 'candidate.json')
         current = routes.read_private(self.config['variables_file'])
+        before = routes.read_private(work / 'before.json')
+        current = before['values']
         key = next(k for k in candidate['routes'] if k not in current.get('routes', {}))
         request = {'application_id': key, **candidate['routes'][key]}
         if command == 'plan':
             self.assertEqual({k: v for k, v in candidate.items() if k != 'routes'}, {k: v for k, v in current.items() if k != 'routes'})
             self.assertEqual({k: candidate['routes'][k] for k in current.get('routes', {})}, current.get('routes', {}))
-            routes.durable_write(work / 'plan', b'synthetic saved plan')
+            target = Path(next(a[5:] for a in argv if a.startswith('-out=')))
+            routes.durable_write(target, b'synthetic saved plan')
+            self.plans[str(target)] = plan_for(request, current) if target.name == 'plan' else {
+                'resource_changes': [{'address': 'google_compute_firewall.gfe', 'change': {'actions': ['update']}}] if self.drift else [],
+                'output_changes': {}}
             return ''
         if command == 'show':
-            return json.dumps(plan_for(request, current))
+            return json.dumps(self.plans[argv[-1]])
         self.assertEqual(command, 'apply')
+        self.assertEqual(kwargs.get('timeout'), 900)
         self.assertEqual(routes.read_private(Path(self.config['state_dir']) / ('gcp-route-' + key + '.json'))['phase'], 'applying')
         if self.interrupt:
             raise RuntimeError('synthetic uncertain apply')
@@ -134,6 +144,8 @@ class GcpRoutesTest(unittest.TestCase):
         if self.corrupt_output:
             state['outputs']['application_routes']['value'][key]['hostname'] = 'foreign.railshot.io'
         self.write(self.config['state_file'], state)
+        if self.interrupt_after:
+            raise RuntimeError('synthetic lost apply reply')
         return ''
 
     def test_two_apps_preserve_existing_ids_routes_defaults_and_replay_reads_only(self):
@@ -157,23 +169,23 @@ class GcpRoutesTest(unittest.TestCase):
     def test_uncertain_apply_never_retries_same_or_different_app(self):
         self.interrupt = True
         with patch('gcp_routes.native', side_effect=self.native):
-            with self.assertRaisesRegex(RuntimeError, 'uncertain'):
+            with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_APPLY_INCOMPLETE'):
                 routes.ensure(self.config_path, app())
             count = len(self.calls)
             for request in (app(), app(2)):
-                with self.assertRaisesRegex(ValueError, 'manual reconciliation'):
+                with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_RECONCILE_REQUIRED'):
                     routes.ensure(self.config_path, request)
-            self.assertEqual(len(self.calls), count)
+            self.assertFalse(any(c[2] == 'apply' for c in self.calls[count:]))
         self.assertEqual(routes.read_private(self.config['variables_file']), self.values)
 
     def test_post_apply_output_mismatch_is_unknown_and_does_not_commit_authority(self):
         self.corrupt_output = True
-        with patch('gcp_routes.native', side_effect=self.native), self.assertRaisesRegex(ValueError, 'output'):
+        with patch('gcp_routes.native', side_effect=self.native), self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_APPLY_INCOMPLETE'):
             routes.ensure(self.config_path, app())
         self.assertEqual(routes.read_private(self.config_path), self.config)
-        with patch('gcp_routes.native') as native, self.assertRaisesRegex(ValueError, 'manual reconciliation'):
+        with patch('gcp_routes.native', side_effect=self.native), self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_RECONCILE_REQUIRED'):
             routes.ensure(self.config_path, app())
-        native.assert_not_called()
+        self.assertEqual(sum(c[2] == 'apply' for c in self.calls), 1)
 
     def test_storage_failure_after_apply_keeps_unknown_without_second_apply(self):
         write = routes.durable_write
@@ -182,11 +194,28 @@ class GcpRoutesTest(unittest.TestCase):
                 raise OSError('synthetic authority commit interruption')
             return write(path, data, *args, **kwargs)
         with patch('gcp_routes.native', side_effect=self.native), patch('gcp_routes.durable_write', side_effect=failing_write):
-            with self.assertRaises(OSError): routes.ensure(self.config_path, app())
+            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app())
         self.assertEqual(sum(command[2] == 'apply' for command in self.calls), 1)
-        with patch('gcp_routes.native') as native, self.assertRaisesRegex(ValueError, 'manual reconciliation'):
-            routes.ensure(self.config_path, app())
-        native.assert_not_called()
+        with patch('gcp_routes.native', side_effect=self.native):
+            self.assertEqual(routes.ensure(self.config_path, app())['phase'], 'applied')
+        self.assertEqual(sum(c[2] == 'apply' for c in self.calls), 1)
+
+    def test_completed_apply_recovers_by_observation_without_second_apply(self):
+        self.interrupt_after = True
+        with patch('gcp_routes.native', side_effect=self.native):
+            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app())
+            self.assertEqual(routes.ensure(self.config_path, app())['phase'], 'applied')
+        self.assertEqual(sum(c[2] == 'apply' for c in self.calls), 1)
+
+    def test_partial_cloud_apply_is_not_adopted_or_replayed(self):
+        self.interrupt_after = True
+        self.drift = True
+        with patch('gcp_routes.native', side_effect=self.native):
+            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app())
+            with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_RECONCILE_REQUIRED'):
+                routes.ensure(self.config_path, app(2))
+        self.assertEqual(sum(c[2] == 'apply' for c in self.calls), 1)
+        self.assertEqual(routes.read_private(self.config_path), self.config)
 
     def test_saved_plan_tamper_after_intent_never_applies(self):
         write = routes.durable_write
@@ -197,7 +226,7 @@ class GcpRoutesTest(unittest.TestCase):
                     plan.write_bytes(b'tampered plan')
             return result
         with patch('gcp_routes.native', side_effect=self.native), patch('gcp_routes.durable_write', side_effect=tamper):
-            with self.assertRaisesRegex(ValueError, 'changed before apply'): routes.ensure(self.config_path, app())
+            with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_APPLY_INCOMPLETE'): routes.ensure(self.config_path, app())
         self.assertFalse(any(command[2] == 'apply' for command in self.calls))
 
     def test_plan_rejection_never_applies_or_changes_authority(self):
@@ -214,7 +243,7 @@ class GcpRoutesTest(unittest.TestCase):
         self.assertEqual(routes.read_private(self.config['variables_file']), self.values)
 
     def test_failed_preflight_can_retry_with_new_workspace_without_replaying_apply(self):
-        with patch('gcp_routes.native', side_effect=RuntimeError('synthetic init failure')), self.assertRaises(RuntimeError):
+        with patch('gcp_routes.native', side_effect=RuntimeError('synthetic init failure')), self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_PREPARATION_FAILED'):
             routes.ensure(self.config_path, app())
         with patch('gcp_routes.native', side_effect=self.native):
             self.assertEqual(routes.ensure(self.config_path, app())['phase'], 'applied')
@@ -227,7 +256,7 @@ class GcpRoutesTest(unittest.TestCase):
             if field == 'lineage': changed['lineage'] = 'foreign'
             else: changed['resources'][0]['instances'][0]['attributes']['id'] = 'foreign'
             self.write(self.config['state_file'], changed)
-            with patch('gcp_routes.native') as native, self.assertRaisesRegex(ValueError, 'ownership'):
+            with patch('gcp_routes.native') as native, self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_PREPARATION_FAILED'):
                 routes.ensure(self.config_path, app())
             native.assert_not_called()
 

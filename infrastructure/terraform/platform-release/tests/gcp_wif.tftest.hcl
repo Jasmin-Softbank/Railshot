@@ -70,6 +70,7 @@ run "exact_instance_and_application_lifecycle_authority" {
         "compute.networkEndpointGroups.use",
         "compute.firewalls.get",
         "compute.firewalls.update",
+        "compute.networks.updatePolicy",
         "compute.healthChecks.get",
         "compute.healthChecks.update",
         "compute.healthChecks.useReadOnly",
@@ -129,7 +130,7 @@ run "exact_instance_and_application_lifecycle_authority" {
         "certificatemanager.certmapentries.list",
       ])
     )
-    error_message = "Preserve all 44 existing permissions and add exactly the 23 reviewed project/parent permissions, with no wildcard or extra grants."
+    error_message = "Preserve existing permissions, including the VPC updatePolicy dependency required by firewall PATCH, with no wildcard or extra grants."
   }
 
   assert {

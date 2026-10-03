@@ -635,7 +635,7 @@ function renderRun() {
   renderApplicationActions();
   document.querySelector('#run-panel').hidden = Boolean(updateApplication && (updateStage !== 'run' || current.id !== updateRunId));
   const resume = document.querySelector('#resume-run');
-  resume.hidden = !(current.kind === 'deployments' && current.application_id && current.status === 'unknown'
+  resume.hidden = !(current.kind === 'deployments' && current.application_id && ['unknown', 'blocked'].includes(current.status)
     && ['cd', 'http'].includes(current.stage) && current.ci?.state === 'published');
   resume.disabled = Boolean(resuming) || observationError || applicationBusy(current.application_id);
   const label = executionLabel(current);

@@ -21,7 +21,13 @@ const active = (record) => ['queued', 'running', 'unknown'].includes(record.stat
 const occupiesSlot = (record) => active(record) && !(record.status === 'unknown' && record.queue?.released_at)
   && !(record.status === 'running' && (record.ci?.observation?.next_retry_at || record.cd?.observation?.next_retry_at));
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const operationError = (code = 'UPSTREAM_FAILURE', unknown = true) => ({ code, request_id: randomUUID(), message: unknown ? '외부 실행 결과를 확인할 수 없습니다. 자동으로 재실행하지 않습니다.' : '실행이 완료되지 않았습니다.', retryable: false, outcome_unknown: unknown });
+const deliveryMessages = {
+  GCP_ROUTE_PREPARATION_FAILED: 'GCP 로드밸런서 경로 준비에 실패했습니다. 앱 적용 전에 환경 설정과 실행 권한을 확인해야 합니다.',
+  GCP_ROUTE_APPLY_TIMEOUT: 'GCP 로드밸런서 구성 시간이 초과됐습니다. 일부 자원이 생성됐을 수 있으며 현재 상태 확인 후 게시된 이미지로 이어갈 수 있습니다.',
+  GCP_ROUTE_APPLY_INCOMPLETE: 'GCP 로드밸런서 구성이 끝나지 않았습니다. 방화벽·경로·인증서 적용 결과를 확인해야 합니다.',
+  GCP_ROUTE_RECONCILE_REQUIRED: '이전 GCP 로드밸런서 구성이 일부만 완료돼 배포가 멈췄습니다. 남은 자원을 복구한 뒤 게시된 이미지로 이어갈 수 있습니다.',
+};
+const operationError = (code = 'UPSTREAM_FAILURE', unknown = true) => ({ code, request_id: randomUUID(), message: deliveryMessages[code] || (unknown ? '외부 실행 결과를 확인할 수 없습니다. 자동으로 재실행하지 않습니다.' : '실행이 완료되지 않았습니다.'), retryable: false, outcome_unknown: unknown });
 function ciObservation(build, previous = {}) {
   const now = new Date().toISOString();
   return { ...previous, run_id: build.id, state: build.status, steps: build.steps ?? [],
@@ -296,7 +302,7 @@ export async function createProductService({ service, directory, target, provide
               && !(row.status === 'queued' && row.queue?.enqueued_at))) return null;
           if (recovery) {
             const recoveringDelivery = ['cd', 'http'].includes(recovery.stage);
-            Object.assign(recovery, { status: 'running', error: null, updated_at: iso });
+            Object.assign(recovery, { status: 'running', ...(recoveringDelivery ? {} : { error: null }), updated_at: iso });
             // Hold the writer while a read may advance into CD; yield only after
             // persisting the next read time. HTTP lifecycle writes use this same slot.
             const phase = recoveringDelivery ? recovery.cd : recovery.ci;
@@ -550,14 +556,18 @@ export async function createProductService({ service, directory, target, provide
       const stopped = ['blocked', 'failed'].includes(result.cd?.state);
       const unknown = result.cd?.state === 'unknown';
       const cd = unknown ? store.read().operations[record.id].cd : result.cd;
-      const error = unknown ? { code: result.error?.code || 'CD_OBSERVATION_UNAVAILABLE', message: '클러스터 결과 조회를 재시도하고 있습니다.', retryable: true } : null;
+      const missing = result.error?.code === 'DEPLOYMENT_NOT_FOUND';
+      const originalError = missing && store.read().operations[record.id].error;
+      const error = unknown ? { code: result.error?.code || 'CD_OBSERVATION_UNAVAILABLE', message: '클러스터 결과 조회를 재시도하고 있습니다.', retryable: true }
+        : missing ? { code: 'DEPLOYMENT_NOT_FOUND', message: '클러스터 적용 기록이 아직 없습니다. 앞선 경로 구성 오류를 확인하세요.', retryable: false } : null;
       const observation = { checked_at: now, last_success_at: unknown ? cd.observation?.last_success_at || null : now,
         error, next_retry_at: succeeded || stopped ? null : new Date(Date.now() + Math.max(pollInterval, 5000)).toISOString() };
       await update(record.id, { status: succeeded ? 'succeeded' : stopped ? 'blocked' : 'running',
         stage: succeeded ? 'complete' : cd.deployed ? 'http' : 'cd', cd: { ...cd, observation },
         ...(unknown ? {} : { public_http: result.public_http }),
         url: succeeded ? result.public_http.site_url || result.public_http.url : null,
-        error: stopped ? { ...operationError(result.error?.code || 'CD_OBSERVATION_REJECTED', true), message: '기존 배포 기록으로 클러스터 결과를 확인하지 못했습니다. 이 앱의 배포 기록을 확인해야 합니다.' } : null });
+        error: stopped ? originalError || { ...operationError(result.error?.code || 'CD_OBSERVATION_REJECTED', true), message: '기존 배포 기록으로 클러스터 결과를 확인하지 못했습니다. 이 앱의 배포 기록을 확인해야 합니다.' }
+          : unknown ? store.read().operations[record.id].error : null });
       if (succeeded || stopped) cdRecoveries.delete(record.id);
     } catch (error) {
       if (abort.signal.aborted) return;
@@ -1111,7 +1121,7 @@ export async function createProductService({ service, directory, target, provide
           && lifecycle.kind === 'application-lifecycle' && lifecycle.application_id === application.id
           && lifecycle.session_id === sessionId && lifecycle.target_id === operation.target_id
           && lifecycle.app === application.app && lifecycle.status === 'succeeded' && ['stop', 'start'].includes(lifecycle.action);
-        if (operation.status !== 'unknown' || !['cd', 'http'].includes(operation.stage)
+        if (!['unknown', 'blocked'].includes(operation.status) || !['cd', 'http'].includes(operation.stage)
             || application.status !== 'ready' || application.deletion_requested || operation.deletion_requested || !completedLifecycle
             || ci?.state !== 'published'
             || typeof applicationAdapter?.deployPublished !== 'function'
@@ -1120,7 +1130,7 @@ export async function createProductService({ service, directory, target, provide
             || !Number.isSafeInteger(ci.producer_attempt) || ci.producer_attempt < 1
             || !ci.images || typeof ci.images !== 'object' || Array.isArray(ci.images) || !Object.keys(ci.images).length
             || Object.values(ci.images).some((image) => typeof image !== 'string' || !/^ghcr\.io\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/.test(image))) {
-          throw new ProductError(409, 'DEPLOYMENT_NOT_RESUMABLE', '게시 완료 후 결과가 불확실한 앱 배포만 재개할 수 있습니다.');
+          throw new ProductError(409, 'DEPLOYMENT_NOT_RESUMABLE', '이미지 게시 후 적용 또는 확인 단계에서 멈춘 앱 배포만 재개할 수 있습니다.');
         }
         const binding = state.bindings[ci.run_id];
         const expected = applicationAdapter.describe(operation.environment_target_id, operation.app);
