@@ -41,7 +41,7 @@
 
 쿠키가 없거나 만료·변조됐으면 새 빈 세션을 만든다. 같은 브라우저의 탭은 세션을 공유하고 다른 브라우저·시크릿 창은 별도 세션이다. 쿠키 삭제 시 기존 세션 복구 기능은 없다. 계정 인증이나 사람의 신원 확인을 제공하지 않으며 쿠키를 소유한 클라이언트가 같은 세션이다.
 
-모든 원격 API 요청은 세션 범위를 적용한다. reverse proxy가 기존 내부 Bearer를 삽입해도 소유 범위를 우회하지 못한다. 기존 비공개 localhost의 쿠키 없는 CLI 유지보수 경로만 기존 공유 상태 접근을 유지한다. 원격 CLI/MCP는 API origin별 쿠키를 `~/.local/state/railshot-client`의 0600 파일에 저장한다. `RAILSHOT_CLIENT_SESSION_DIR`로 위치를 바꿀 수 있다. 원격 curl 등 별도 클라이언트도 cookie jar를 유지해야 한다.
+모든 원격 API 요청은 세션 범위를 적용한다. reverse proxy가 기존 내부 Bearer를 삽입해도 소유 범위를 우회하지 못한다. 기존 비공개 localhost의 쿠키 없는 CLI 유지보수 경로만 기존 공유 상태 접근을 유지한다. 원격 CLI는 API origin별 쿠키를 `~/.local/state/railshot-client`에, `apps/agent` MCP는 `~/.local/state/railshot-agent`에 0600 파일로 저장한다. 각각 `RAILSHOT_CLIENT_SESSION_DIR`, `RAILSHOT_AGENT_SESSION_DIR`로 위치를 바꿀 수 있다. 원격 curl 등 별도 클라이언트도 cookie jar를 유지해야 한다.
 
 배포·빌드·계획·환경의 조회와 목록, 멱등 키, 신규 런타임 대상은 세션별이다. 다른 세션의 상세 ID는 404이고 외부 서비스 조회 전에 거부한다. 다른 세션의 계획으로 배포를 요청하면 실행 가능한 계획이 없다는 422, 환경 생성은 404다. 운영자가 지정한 공용 대상은 계속 공유하므로 같은 공용 앱에 배포하면 기존 앱을 갱신할 수 있다. 세션은 VM·네트워크 격리를 제공하지 않는다. 하나의 미완료 작업만 허용하는 기존 실행 제한도 전체 서버에 적용한다.
 
