@@ -20,14 +20,14 @@ agent task and L1 check use that exact identity. A spec mismatch fails before
 quality/build work and remains repairable as F5; publication checks it again.
 
 An early failure starts a bounded proposal, not a pass. Every proposal contains
-an ordered `gate_plan` for **L0 → L1 → Q → L2 → L4 → L3**, the failure evidence,
+an ordered `gate_plan` for the supplied deployment gates (currently **L0 → L1 → L2 → L3**, optionally L4 before L3), the failure evidence,
 and file-level reasons. The runner durably records `<role>-plan.json` before
 applying any bytes. The loop stores it as `<role>-<attempt>-plan.json`, checkpoints
 it, and includes its hash, gate list and subsequent written files/verdict in
 `evidence.json`. Workflow artifacts expose that safe linkage; source text and
 raw model planning text remain in the private run directory. Every changed
-attempt reruns the deterministic gates from L0. There are at most three model
-attempts; an unchanged failure signature stops the run sooner.
+attempt reruns the deterministic gates from L0. The default is at most two SDK
+attempts, with three available through `RAILSHOT_MAX_REPAIR_ATTEMPTS`; an unchanged failure signature stops the run sooner.
 
 A completed model response rejected by schema or patch validation can consume a
 remaining attempt for a fresh fixer plan only when the runner proves zero source
@@ -39,7 +39,7 @@ repeat the completed model call. A corrected proposal still reruns every gate.
 
 | First failure | Authorized remediation | Required evidence afterward |
 | --- | --- | --- |
-| L0 prohibited patch | Revise proposal within unchanged platform limits | Full patch policy; no deleted files, escaped paths, secret files or bypasses |
+| L0 prohibited patch | Revise proposal within unchanged platform limits | Full patch policy; scoped regular-text deletion only, no protected/escaped paths, secret files or bypasses |
 | L1 missing/invalid Dockerfile or service spec | Generate the smallest packaging proposal | Schema, port, image and service contract |
 | Q missing tests/checkers or completed lint/type/unit failure | Record the original result as advisory and continue; no model repair | Required build, scan and runtime checks still pass |
 | Missing JS dependency lock / additive dependencies | Native npm/pnpm/Yarn resolution in existing filtered-network Docker sandbox | External hash-bound native lock receipt, then frozen install and full gates |
@@ -49,7 +49,7 @@ repeat the completed model call. A corrected proposal still reruns every gate.
 | Runner, Docker, network/auth/secret absence, uncertain execution | Stop with the actual operator action | Infrastructure recovery evidence before a new execution |
 
 The model retains read-only, network-disabled tools. It proposes at most eight
-files and 20 KB per patch. Existing tests, scripts (except the exact npm empty-test
+files and 20 KB per patch, including original bytes of deleted files. Creation/update uses the full content; deletion uses `action: delete` with empty content. File actions are recorded before applying them. Existing tests, scripts (except the exact npm empty-test
 placeholder), dependency versions, checker configuration, migrations and schemas
 are immutable. The underlying source validator accepts additive manifest test setup and exact
 public package versions; it never accepts model-authored locks. Native locks have

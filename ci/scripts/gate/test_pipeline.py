@@ -70,6 +70,26 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(invalid["status"], "BLOCKED")
             self.assertEqual(invalid["layers"][0]["blocked"], "INVALID_APP_ID")
 
+    def test_l0_deletions_share_runner_scope_and_protect_existing_tests(self):
+        paths = gate.yaml.safe_load((gate.PLATFORM / 'contract/paths.yaml').read_text())
+        for path, scope, allowed in [('old.Dockerfile', 'packaging', True),
+                                     ('src/old.java', 'source', True),
+                                     ('src/old.java', 'packaging', False),
+                                     ('tests/test_app.py', 'source', False),
+                                     ('package.json', 'source', False),
+                                     ('schema/model.py', 'source', False)]:
+            with self.subTest(path=path, scope=scope), tempfile.TemporaryDirectory() as tmp:
+                ws = imported_workspace(tmp, {path: '{}'})
+                (ws / path).unlink()
+                errors, changed = gate.l0(ws, paths, repair_scope=scope)
+                self.assertEqual(not errors, allowed, errors)
+                self.assertIn(path, changed)
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = imported_workspace(tmp, {'old.Dockerfile': 'x' * 20001})
+            (ws / 'old.Dockerfile').unlink()
+            errors, _ = gate.l0(ws, paths)
+            self.assertTrue(any('patch too large' in error for error in errors), errors)
+
     def test_imported_ignored_source_is_tracked_and_policy_checked(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = imported_workspace(tmp, {".gitignore": "app.py\n", "app.py": "print('before')\n"})
@@ -112,7 +132,8 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(lines.count("print('rename')"), 1)
             paths = gate.yaml.safe_load((gate.PLATFORM / "contract/paths.yaml").read_text())
             errors, _ = gate.l0(ws, paths, repair_scope="source")
-            self.assertTrue(any("deleted file: app.py" in error for error in errors), errors)
+            self.assertTrue(any("forbidden pattern" in error for error in errors), errors)
+            self.assertFalse(any("app.py" in error for error in errors), errors)
             self.assertTrue(any("forbidden pattern" in error for error in errors), errors)
 
     def test_default_gate_runs_the_built_image_id_without_optional_scan(self):

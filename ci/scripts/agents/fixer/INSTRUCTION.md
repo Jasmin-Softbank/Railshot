@@ -2,7 +2,7 @@
 
 ## Goal
 
-One gate step failed. Change the writable files so that this failure's root cause goes away without breaking the contract. Make the smallest change that fixes the cause, not the symptom.
+One gate step failed after intake or an earlier proposal. Use the shared prepare-deployment skill to understand the system flow and the current working copy. Change the writable files so that this failure's root cause goes away without breaking the contract. Make the smallest change that fixes the cause, not the symptom.
 
 ## Inputs (paths given in the task message)
 
@@ -18,9 +18,9 @@ One gate step failed. Change the writable files so that this failure's root caus
    - class F7 needs source scope; F8 (transient), infrastructure/authentication failures or a destroy/replace in a plan require operator repair, so return `give_up`;
    - the cause lies outside writable paths: return `give_up` with the exact user action.
 3. If `lessons.md` shows this signature after a change like the one you plan, do something different that the evidence supports, or `give_up`. Never repeat a failed change.
-4. Edit only writable files. Fix the cause (wrong path, missing build step, wrong bind host, missing system package, wrong port, wrong health path) rather than working around it.
+4. Trace the affected entrypoint and dependencies before proposing a create, update or justified deletion within writable files. Preserve unrelated behavior. Fix the cause (wrong path, missing build step, wrong bind host, missing system package, wrong port, wrong health path) rather than working around it.
 5. Re-check C1–C11 and the forbidden patterns.
-6. Return the report with `root_cause`, `addresses_failure` and `gate_plan` set. Plan L0, L1, L2, L4, L3 even when the observed failure is early. Do not add or run separate lint/type/unit gates; preserve existing build commands and tests. Limit source changes to the observed build/start/health failure; never label an unexecuted check as passed.
+6. Return the report with `root_cause`, `addresses_failure` and `gate_plan` set. Plan the gate order supplied in the task even when the observed failure is early. Do not add or run separate lint/type/unit gates; preserve existing build commands and tests. Limit source changes to the observed build/start/health failure; never label an unexecuted check as passed.
 
 ## Per-class guidance
 
@@ -29,7 +29,7 @@ One gate step failed. Change the writable files so that this failure's root caus
 | F1 dependencies | missing system library, wrong install command, lockfile not used | add OS packages in the build stage or use the lockfile install command. Source scope also permits additive exact-version dependencies; the harness regenerates native locks. Never change existing dependency versions or author locks. |
 | F2 build context | wrong `COPY` path, `.dockerignore` hides a needed file, wrong context | fix paths, context or ignore rules |
 | F3 architecture/base | incompatible runtime architecture or base | use a compatible allowlisted explicit-version base; never waive platform/architecture checks |
-| F4 start, port, health | binds 127.0.0.1, wrong port, health path 404/5xx, slow start, missing runtime file | fix `CMD` flags or env, the spec port, a health path that exists in code, copy the missing file from the build stage |
+| F4 start, port, health | binds 127.0.0.1, wrong port, health path 404/5xx, slow start, missing runtime file | fix supported `CMD` flags or env, the spec port, an existing health path, or a missing runtime asset; source scope may repair a hard-coded listener or startup defect shown by the gate |
 | F5 spec or policy | schema error, gate L1 rule | follow the rule message; change the spec or Dockerfile, never the rule |
 | F6 vulnerability | CRITICAL with a fixed version | newer patch-level base image or package in the build; never ignore |
 | F9 infrastructure plan | the spec asks for something the catalog or policy rejects | adjust the spec within the catalog; if the user explicitly asked for it, `give_up` and explain |
