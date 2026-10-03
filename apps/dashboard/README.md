@@ -54,3 +54,5 @@ The new-deployment form resolves the source-derived or explicit app name through
 Another session's matching name remains an ownership conflict. Different names/environments are separate apps; repository URL alone does not select an app because one repository may have multiple deployments. Stopped/deleted/pending apps are not silently recreated. A ready registration with no successful baseline can retry normal deployment. The explicit app-detail update flow still supports source files whose archive/repository name changes.
 
 An uncertain published CD/HTTP result fences its registered environment, so a GCP route reconciliation does not block a same-named AWS application. Uncertain CI/registration or missing environment bindings keep the conservative name-level fence because CI source paths are shared. The affected environment still requires reconciliation; this does not retry it or alter its resources.
+
+짧은 API 교체 중에는 읽기/비동기 계획 요청과 동일 Idempotency-Key를 가진 앱 작업 요청의 전송을 제한된 횟수로 재시도한다. 서버가 접수 전에 반환한 `PLATFORM_UPDATING`도 같은 요청으로 이어간다. 키 없는 변경 요청이나 앱 상태 충돌은 자동 재전송하지 않는다. 중단 버튼/창 닫기는 재시도 대기도 취소한다.

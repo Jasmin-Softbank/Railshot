@@ -218,7 +218,7 @@ export async function createProductService({ service, directory, target, provide
   }
   let pumping;
   function pump() {
-    if (pumping || abort.signal.aborted || workers.size) return pumping;
+    if (pumping || releasePaused || abort.signal.aborted || workers.size) return pumping;
     const snapshot = store.read(), rows = Object.values(snapshot.operations);
     const due = (row) => row.status === 'unknown' && !row.queue?.released_at
       && (!Number.isFinite(Date.parse(row.unknown_since || row.updated_at || row.created_at))
@@ -657,10 +657,58 @@ export async function createProductService({ service, directory, target, provide
       await update(record.id, { status: known ? 'blocked' : 'unknown', error: operationError(known ? error.code || 'DEPLOYMENT_PRECHECK_FAILED' : 'STACK_OUTCOME_UNKNOWN', !known) });
     }
   }
+  async function generateApplicationPlan(record, asynchronous = true) {
+    const { id, action, application_id: applicationId } = record.public;
+    const sessionId = record.session_id;
+    const cancelling = record.cancelling_deployment_id;
+    try {
+      const state = store.read(), application = applicationFor(state, applicationId, sessionId, true);
+      if (record.application_snapshot !== applicationSnapshot(state, application, Boolean(cancelling)))
+        throw new ProductError(409, 'APPLICATION_PLAN_STALE', '계획 확인 중 앱 상태가 바뀌었습니다. 새 계획을 확인하세요.');
+      lifecycleAvailable(state, application, action, cancelling);
+      // Cloud inspection must not hold the store's writer queue for up to ten minutes.
+      const plan = cancelling ? await applicationAdapter.planPendingDeletion(application, { id, deploymentId: cancelling })
+        : await applicationAdapter.planLifecycle(application, { id, action });
+      if (plan.public?.id !== id || plan.public.application_id !== applicationId || plan.public.action !== action)
+        throw new EnvironmentError('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
+      if (cancelling && (plan.private?.deferred !== true || plan.private.deployment_id !== cancelling))
+        throw new EnvironmentError('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
+      return await store.transaction((state) => {
+        const current = applicationFor(state, applicationId, sessionId, true);
+        if (record.application_snapshot !== applicationSnapshot(state, current, Boolean(cancelling)))
+          throw new ProductError(409, 'APPLICATION_PLAN_STALE', '계획 확인 중 앱 상태가 바뀌었습니다. 새 계획을 확인하세요.');
+        if (cancelling) plan.public.resources = [...plan.public.resources, { kind: 'DeploymentOperation', name: cancelling }];
+        plan.public = { ...plan.public, status: 'ready', created_at: record.public.created_at, updated_at: new Date().toISOString() };
+        state.plans[id] = { ...record, ...plan };
+        return structuredClone(plan.public);
+      });
+    } catch (cause) {
+      await store.transaction((state) => {
+        const code = cause instanceof ProductError || cause instanceof EnvironmentError ? cause.code : 'APPLICATION_PLAN_UNAVAILABLE';
+        Object.assign(state.plans[id].public, { status: 'failed', updated_at: new Date().toISOString(),
+          error: { code, outcome_unknown: false, message: cause instanceof ProductError ? cause.message
+            : '실행 계획을 확인하지 못했습니다. 앱 변경은 실행되지 않았습니다. 다시 확인하거나 오류 코드를 운영자에게 전달하세요.' } });
+      });
+      if (!asynchronous) throw cause;
+    }
+  }
+  // Recover only read-only plans. Applying an operation still requires its original
+  // confirmation and idempotency key; uncertain mutations are never replayed here.
+  for (const record of Object.values(store.read().plans)) {
+    if (record.kind === 'application-lifecycle' && record.public?.status === 'planning')
+      launch(() => generateApplicationPlan(record));
+  }
+  let releasePaused = false;
   const queueTimer = setInterval(pump, Math.min(pollInterval, 1000));
   queueTimer.unref();
   void pump();
   return {
+    pauseForRelease() {
+      if (workers.size || pumping) return false;
+      releasePaused = true;
+      return true;
+    },
+    resumeAfterRelease() { releasePaused = false; void pump(); },
     dashboard: store.dashboard,
     registrations: store.registrations,
     createUpdate, startUpdate,
@@ -714,41 +762,11 @@ export async function createProductService({ service, directory, target, provide
         state.plans[id] = record;
         return { record, application: structuredClone(application), replay: false };
       });
-      const generate = async () => {
-        const { record, application } = pending, { id, action } = record.public;
-        const cancelling = record.cancelling_deployment_id;
-        try {
-          // Cloud inspection must not hold the store's writer queue for up to ten minutes.
-          const plan = cancelling ? await applicationAdapter.planPendingDeletion(application, { id, deploymentId: cancelling })
-            : await applicationAdapter.planLifecycle(application, { id, action });
-          if (plan.public?.id !== id || plan.public.application_id !== applicationId || plan.public.action !== action)
-            throw new EnvironmentError('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
-          if (cancelling && (plan.private?.deferred !== true || plan.private.deployment_id !== cancelling))
-            throw new EnvironmentError('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
-          return await store.transaction((state) => {
-            const current = applicationFor(state, applicationId, sessionId, true);
-            if (record.application_snapshot !== applicationSnapshot(state, current, Boolean(cancelling)))
-              throw new ProductError(409, 'APPLICATION_PLAN_STALE', '계획 확인 중 앱 상태가 바뀌었습니다. 새 계획을 확인하세요.');
-            if (cancelling) plan.public.resources = [...plan.public.resources, { kind: 'DeploymentOperation', name: cancelling }];
-            plan.public = { ...plan.public, status: 'ready', created_at: record.public.created_at, updated_at: new Date().toISOString() };
-            state.plans[id] = { ...record, ...plan };
-            return structuredClone(plan.public);
-          });
-        } catch (cause) {
-          await store.transaction((state) => {
-            const code = cause instanceof ProductError || cause instanceof EnvironmentError ? cause.code : 'APPLICATION_PLAN_UNAVAILABLE';
-            Object.assign(state.plans[id].public, { status: 'failed', updated_at: new Date().toISOString(),
-              error: { code, outcome_unknown: false, message: cause instanceof ProductError ? cause.message
-                : '실행 계획을 확인하지 못했습니다. 앱 변경은 실행되지 않았습니다. 다시 확인하거나 오류 코드를 운영자에게 전달하세요.' } });
-          });
-          if (!asynchronous) throw cause;
-        }
-      };
       if (asynchronous) {
-        if (!pending.replay) launch(generate); // Failure is persisted for the owning session to inspect.
+        if (!pending.replay) launch(() => generateApplicationPlan(pending.record)); // Durable read-only work survives a process restart.
         return structuredClone(pending.record.public);
       }
-      return generate();
+      return generateApplicationPlan(pending.record, false);
     },
     getApplicationPlan(applicationId, planId, sessionId = null) {
       const state = store.read();

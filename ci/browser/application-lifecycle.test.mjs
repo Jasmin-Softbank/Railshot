@@ -301,7 +301,7 @@ test('cancel during inventory refresh never sends a hidden plan request', { time
 });
 
 test('proxy HTML failure is readable and retryable without treating an uncertain delete as rejected', { timeout: 45000 }, async (t) => {
-  const { state, page } = await fixture(t); let unavailable = true;
+  const { state, page } = await fixture(t); page.setDefaultTimeout(20000); let unavailable = true;
   await page.route('**/api/v1/applications/app-ready/plans', (route) => unavailable
     ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }) : route.fallback());
   await appAction(page, 'my-app', '삭제').click();
@@ -318,4 +318,24 @@ test('proxy HTML failure is readable and retryable without treating an uncertain
   assert.match(await page.locator('#lifecycle-operation-message').innerText(), /HTTP 502/);
   assert.equal(await appAction(page, 'my-app', '삭제').isDisabled(), true);
   assert.equal(state.writes.length, 0);
+});
+
+ test('brief API replacement is transparent to plan creation and keyed deletion', { timeout: 30000 }, async (t) => {
+  const { state, page } = await fixture(t); let plans = 0; const attempts = [];
+  await page.route('**/api/v1/applications/app-ready/plans', (route) => ++plans === 1
+    ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }) : route.fallback());
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  assert.equal(plans, 2); assert.equal(await page.locator('#lifecycle-retry').isHidden(), true);
+  await page.route('**/api/v1/applications/app-ready/operations', (route) => {
+    attempts.push({ body: route.request().postData(), key: route.request().headers()['idempotency-key'] });
+    return attempts.length === 1
+      ? route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: {
+        code: 'PLATFORM_UPDATING', outcome_unknown: false, retryable: true,
+      } }) }) : route.fallback();
+  });
+  await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-dialog').open);
+  assert.equal(attempts.length, 2); assert.ok(attempts[0].key);
+  assert.deepEqual(attempts[0], attempts[1]); assert.equal(state.writes.length, 1);
 });

@@ -229,11 +229,15 @@ test('adapter pins operator configuration, writes private requests, sanitizes re
   assert.deepEqual(result.residuals, resources); assert.deepEqual(result.steps, [{ name: 'delete', status: 'blocked' }]);
   assert.ok(!JSON.stringify(result).includes('secret')); assert.equal(calls[0].options.mutation, false); assert.equal(calls[1].options.mutation, true);
   assert.deepEqual(calls[1].request, { version: 1, application_id: application.id, environment_id: 'runtime-aws', app: 'calculator',
-    phase: 'apply', action: 'delete', operation_id: operationId, plan_id: id, plan_hash: 'c'.repeat(64), delete_data: true });
+    phase: 'apply', action: 'delete', operation_id: operationId, plan_id: plan.private.native_plan_id, plan_hash: 'c'.repeat(64), delete_data: true });
   await assert.rejects(adapter.applyLifecycle(application, plan, { id: operationId, deleteData: true }), { code: 'APPLICATION_OPERATION_RECONCILE_REQUIRED' });
+  const recovered = await adapter.planLifecycle(application, { id, action: 'delete' });
+  assert.equal(recovered.public.id, id);
+  assert.notEqual(recovered.private.native_plan_id, plan.private.native_plan_id);
+  assert.equal(calls[2].options.mutation, false);
   await writeFile(configPath, JSON.stringify({ ...config, changed: true }));
   await assert.rejects(adapter.verifyLifecyclePlan(application, plan), { code: 'APPLICATION_POLICY_CHANGED' });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
 });
 
 test('HTTP plan and operation routes enforce session, JSON, idempotency and polling headers', async (t) => {
@@ -671,16 +675,16 @@ test('async plan failures are inspectable and private executor errors stay priva
   assert.equal(f.calls.apply, 0);
 });
 
-test('restart makes unfinished read-only plans retryable without replaying cloud work', async (t) => {
+test('restart resumes the same read-only plan without applying any operation', async (t) => {
   const f = await fixture(t); const plan = await f.plan(); await f.product.close();
   const store = await createProductStore(f.directory);
   await store.transaction((state) => { state.plans[plan.id].public.status = 'planning'; }); await store.close();
   const restarted = await createProductService(f.options);
   try {
+    for (let i = 0; i < 100 && restarted.getApplicationPlan(app.id, plan.id, f.owner.id).status === 'planning'; i++) await pause(5);
     const value = restarted.getApplicationPlan(app.id, plan.id, f.owner.id);
-    assert.equal(value.status, 'failed'); assert.equal(value.error.code, 'APPLICATION_PLAN_INTERRUPTED');
-    assert.equal(f.calls.plan, 1); assert.equal(f.calls.apply, 0);
-    await assert.rejects(restarted.createApplicationOperation(app.id, f.input(value), 'interrupted-plan', f.owner.id), { code: 'APPLICATION_PLAN_STALE' });
+    assert.equal(value.status, 'ready'); assert.equal(value.id, plan.id);
+    assert.equal(f.calls.plan, 2); assert.equal(f.calls.apply, 0);
   } finally { await restarted.close(); }
 });
 
@@ -721,4 +725,19 @@ test('HTTP async plan exposes a session-bound status URL and polling never appli
     assert.equal((await fetch(base + location, { method: 'POST', headers })).status, 405);
     assert.equal(f.calls.apply, 0);
   } finally { release(); }
+});
+
+ test('restart rejects a changed application snapshot before native planning', async (t) => {
+  const f = await fixture(t); const plan = await f.plan(); await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction((state) => {
+    state.plans[plan.id].public.status = 'planning';
+    state.applications[app.id].status = 'stopped';
+  }); await store.close();
+  const restarted = await createProductService(f.options);
+  try {
+    for (let i = 0; i < 100 && restarted.getApplicationPlan(app.id, plan.id, f.owner.id).status === 'planning'; i++) await pause(5);
+    assert.equal(restarted.getApplicationPlan(app.id, plan.id, f.owner.id).error.code, 'APPLICATION_PLAN_STALE');
+    assert.equal(f.calls.plan, 1); assert.equal(f.calls.apply, 0);
+  } finally { await restarted.close(); }
 });
