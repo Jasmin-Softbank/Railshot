@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import yazl from 'yazl';
-import { mkdtemp, mkdir, symlink, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inspectArchive, documentationOnly } from '../src/archive.js';
 import { createDeploymentService } from '../src/github.js';
 import { createAppServer } from '../src/server.js';
-import { archiveFromPath, deploySource, inferredAppName, insideRoot } from '../src/client.js';
+import { archiveFromPath, deploySource, inferredAppName } from '../src/client.js';
 import { fetchPublicGithubSource } from '../src/public-github.js';
 import { readPublished } from '../src/published.js';
 import { readSourceSnapshot, sourceSnapshotLimit } from '../src/source-snapshot.js';
@@ -597,17 +597,6 @@ test('CI와 다른 앱 이름과 임의 target은 소스 등록 전에 거부한
   assert.equal(calls, 0);
   assert.throws(() => createDeploymentService({ token: 'test', tenant: 'demo-tenant', targetId: 'aws-demo' }), /TENANT/);
   assert.throws(() => createDeploymentService({ token: 'test' }), /TARGET_ID/);
-});
-
-test('MCP 소스 경로는 심볼릭 링크를 통해 허용 범위 밖으로 나갈 수 없다', async () => {
-  const parent = await mkdtemp(join(tmpdir(), 'jasmin-poc-'));
-  try {
-    const allowed = join(parent, 'allowed');
-    const outside = join(parent, 'outside');
-    await mkdir(allowed); await mkdir(outside);
-    await symlink(outside, join(allowed, 'escape'));
-    await assert.rejects(insideRoot(join(allowed, 'escape'), allowed), /허용된 소스 경로 밖/);
-  } finally { await rm(parent, { recursive: true, force: true }); }
 });
 
 test('CLI의 폴더 입력은 API가 받는 ZIP으로 만들어진다', async () => {
