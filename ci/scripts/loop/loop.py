@@ -413,7 +413,10 @@ def execute(a, run, state, progress_sink=None):
             state.step(f'lesson:{attempt}', lesson_step)
         role = 'fixer' if attempt or ev['intake'].get('has_spec') else 'adapter'
         current_failure = f
-    ev['result'] = 'stop: attempt limit reached'
+    ev['result'] = ('baseline failed: ' + str(f.get('excerpt') or f.get('signature') or 'see gate verdict')
+                    if not a.max_attempts else 'stop: attempt limit reached')
+    ev['error'] = verdict.get('error')
+    ev['status'] = verdict.get('status', 'FAIL')
     return finish(run, ev, state.data['started'], state)
 
 

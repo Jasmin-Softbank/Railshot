@@ -165,6 +165,17 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual(evidence['sdk_invocations'], 0)
         self.assertTrue((self.run / 'work/Dockerfile').is_file())
 
+    def test_zero_ai_failure_reports_the_gate_cause_instead_of_attempt_limit(self):
+        error = StateError('GATE_CHECK_FAILED', component='gate', phase='L1', outcome='FAIL').as_dict()
+        verdict = {'ok': False, 'status': 'FAIL', 'error': error,
+                   'failure': {'layer': 'L1', 'class': 'F5', 'excerpt': 'application port is missing', 'signature': 'missing-port'}}
+        with self.gate_result(verdict), patch.object(loop, 'agent') as agent, redirect_stdout(io.StringIO()):
+            self.assertEqual(self.cli(False, '--max-attempts', '0'), 1)
+            agent.assert_not_called()
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual('baseline failed: application port is missing', evidence['result'])
+        self.assertEqual(error, evidence['error'])
+
     def test_resume_after_agent_checkpoint_skips_agent_and_baseline(self):
         fail = {'ok': False, 'status': 'FAIL', 'failure': {'class': 'F1', 'layer': 'L1', 'signature': 'missing'}}
         original_step = RunState.step

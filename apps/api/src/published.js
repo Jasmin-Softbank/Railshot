@@ -4,7 +4,11 @@ import { APP_NAME, SOURCE_COMMIT, TARGET_ID, TENANT_NAME } from './contract.js';
 const HASH = /^[a-f0-9]{64}$/;
 const IMAGE = /^ghcr\.io\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/;
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const LAYERS = ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'];
+const RELEASE_ORDERS = [
+  ['L0', 'L1', 'L2', 'L3'],
+  ['L0', 'L1', 'L2', 'L4', 'L3'],
+  ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'],
+];
 const HANDOFF_FIELDS = ['version', 'status', 'source_commit', 'target_id', 'tenant', 'app',
   'run_id', 'producer_attempt', 'bundle_artifact_id', 'files', 'registry'];
 const sameKeys = (a, b) => JSON.stringify(Object.keys(a || {}).sort()) === JSON.stringify(Object.keys(b || {}).sort());
@@ -56,7 +60,8 @@ export function readPublished(files, { runId, attempt, headSha, targetId, tenant
   require(HASH.test(manifest.source_sha256) && manifest.source_sha256 === verdict.source_sha256, 'source digest');
   require(manifest.files?.[spec] === handoff.files[spec] && manifest.files?.['verdict.json'] === handoff.files['verdict.json'], 'bundle 파일 해시');
   require(verdict.ok === true && verdict.release_eligible === true && verdict.status === 'PASS', 'gate 판정');
-  require(Array.isArray(verdict.layers) && verdict.layers.length === LAYERS.length && verdict.layers.every((row, index) => row.layer === LAYERS[index] && (qualityAdvisory(row) || row.ok === true && !row.blocked && !row.errors?.length)), 'gate 단계');
+  require(Array.isArray(verdict.layers) && RELEASE_ORDERS.some((order) => verdict.layers.length === order.length
+    && verdict.layers.every((row, index) => row.layer === order[index] && (qualityAdvisory(row) || row.ok === true && !row.blocked && !row.errors?.length))), 'gate 단계');
   require(sameKeys(images, manifest.images) && sameKeys(images, verdict.images) && sameKeys(images, verdict.image_ids), 'service 목록');
   for (const name of Object.keys(images)) {
     require(manifest.images[name]?.local_ref === verdict.images[name] && manifest.images[name]?.id === verdict.image_ids[name], '검사 이미지 ID');

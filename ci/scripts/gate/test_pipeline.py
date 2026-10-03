@@ -115,7 +115,7 @@ class PipelineTest(unittest.TestCase):
             self.assertTrue(any("deleted file: app.py" in error for error in errors), errors)
             self.assertTrue(any("forbidden pattern" in error for error in errors), errors)
 
-    def test_full_gate_scans_and_runs_the_built_image_id(self):
+    def test_default_gate_runs_the_built_image_id_without_optional_scan(self):
         spec = {"services": [{"name": "web"}]}
         image_id = "sha256:" + "a" * 64
         with tempfile.TemporaryDirectory() as tmp, patch.object(gate, "l0", return_value=([], [])), \
@@ -127,7 +127,7 @@ class PipelineTest(unittest.TestCase):
             verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.ORDER))
         self.assertTrue(verdict["release_eligible"])
         self.assertEqual(verdict["image_ids"], {"web": image_id})
-        scan.assert_called_once_with({"web": image_id}, network=None)
+        scan.assert_not_called()
         self.assertEqual(runtime.call_args.args[1], {"web": image_id})
         self.assertEqual([r["layer"] for r in verdict["layers"]], list(gate.ORDER))
 
