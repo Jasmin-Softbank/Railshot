@@ -29,6 +29,14 @@ async function settled(product, id, owner) {
   }
   assert.fail('Lifecycle operation did not settle');
 }
+async function settledDeployment(product, id, owner) {
+  for (let count = 0; count < 200; count++) {
+    const value = await product.getDeployment(id, owner);
+    if (!['queued', 'running'].includes(value.status)) return value;
+    await pause(5);
+  }
+  assert.fail('Deployment did not settle');
+}
 async function fixture(t, overrides = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'railshot-lifecycle-')));
   const store = await createProductStore(directory), owner = store.dashboard.session(), stranger = store.dashboard.session();
@@ -331,6 +339,80 @@ test('active CD deletion previews without taking its registration lock and waits
     assert.equal(result.status, 'succeeded'); assert.equal(f.calls.plan, 1);
     assert.deepEqual(events, ['cd-completed', 'ci-quiescent', 'cleanup']);
   } finally { finish(); }
+});
+
+test('deletion during resumed CD waits for the registered worker before fresh planning or cleanup', async (t) => {
+  let finish, enter; const entered = new Promise((resolve) => { enter = resolve; });
+  const waiting = new Promise((resolve) => { finish = resolve; });
+  const events = [], allowed = new Set(['runtime-aws']); let registrations = 0, submissions = 0, deliveries = 0;
+  const publication = { run_id: 123, source_commit: 'd'.repeat(40), target_id: app.id, app: app.app,
+    artifact_id: 456, producer_attempt: 1, images: { web: `ghcr.io/example/apps@sha256:${'e'.repeat(64)}` } };
+  const f = await fixture(t, { options: { service: { targetId: 'runtime-aws', get targetIds() { return [...allowed]; },
+    allowTarget: (id) => allowed.add(id), deploy: async () => { submissions++; return { run_id: '123', source_commit: publication.source_commit }; },
+    status: async () => ({ state: 'published', status: 'completed', source_commit: publication.source_commit, publication }),
+    cancel: async () => { events.push('ci-quiescent'); return { status: 'completed' }; },
+  } }, adapter: {
+    register: async (application) => { registrations++; return { ...application, status: 'ready' }; },
+    deployPublished: async () => {
+      if (++deliveries === 1) throw new Error('Interrupted CD');
+      enter(); await waiting; events.push('cd-completed');
+      return { cd: { deployed: true, state: 'succeeded', revision: 'f'.repeat(40) },
+        public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://calculator.example.test' } };
+    },
+    applyLifecycle: async (application) => { assert.deepEqual(events, ['cd-completed', 'ci-quiescent']); events.push('cleanup');
+      return { status: 'succeeded', application_id: application.id, action: 'delete', steps: [], residuals: [] }; },
+  } });
+  const deployment = await f.product.createDeployment(source, 'resume-delete', undefined, f.owner.id);
+  assert.equal((await settledDeployment(f.product, deployment.id, f.owner.id)).status, 'unknown');
+  await f.product.resumeDeployment(deployment.id, f.owner.id); await entered;
+  try {
+    const plan = await f.plan('delete');
+    const operation = await f.product.createApplicationOperation(app.id, f.input(plan), 'delete-resumed', f.owner.id);
+    assert.equal(disk(f.directory, 'operations', deployment.id).deletion_requested, operation.id);
+    await pause(10);
+    assert.equal(f.product.getOperation(operation.id, f.owner.id).stage, 'quiescing');
+    assert.deepEqual(events, []); assert.equal(f.calls.plan, 0);
+    finish(); assert.equal((await settled(f.product, operation.id, f.owner.id)).status, 'succeeded');
+    assert.deepEqual(events, ['cd-completed', 'ci-quiescent', 'cleanup']); assert.equal(f.calls.plan, 1);
+    const cancelled = await f.product.getDeployment(deployment.id, f.owner.id);
+    assert.equal(cancelled.status, 'blocked'); assert.equal(cancelled.stage, 'cancelled');
+    assert.equal(f.product.getApplication(app.id, f.owner.id).status, 'deleted');
+    assert.deepEqual([registrations, submissions, deliveries], [1, 1, 2]);
+  } finally { finish(); }
+});
+
+test('ready application with successful stop and start history can resume its original CD without new CI or registration', async (t) => {
+  const allowed = new Set(['runtime-aws']); let registrations = 0, submissions = 0, deliveries = 0;
+  const publication = { run_id: 123, source_commit: 'd'.repeat(40), target_id: app.id, app: app.app,
+    artifact_id: 456, producer_attempt: 1, images: { web: `ghcr.io/example/apps@sha256:${'e'.repeat(64)}` } };
+  const f = await fixture(t, { options: { service: { targetId: 'runtime-aws', get targetIds() { return [...allowed]; },
+    allowTarget: (id) => allowed.add(id), deploy: async () => { submissions++; return { run_id: '123', source_commit: publication.source_commit }; },
+    status: async () => ({ state: 'published', status: 'completed', source_commit: publication.source_commit, publication }),
+  } }, adapter: {
+    register: async (application) => { registrations++; return { ...application, status: 'ready' }; },
+    deployPublished: async () => {
+      if (++deliveries === 1) throw new Error('Interrupted CD');
+      return { cd: { deployed: true, state: 'succeeded', revision: 'f'.repeat(40) },
+        public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://calculator.example.test' } };
+    },
+  } });
+  let last;
+  for (const action of ['stop', 'start']) {
+    const plan = await f.plan(action); last = await f.product.createApplicationOperation(app.id, f.input(plan), action, f.owner.id);
+    assert.equal((await settled(f.product, last.id, f.owner.id)).status, 'succeeded');
+  }
+  assert.equal(f.product.getApplication(app.id, f.owner.id).status, 'ready');
+  const deployment = await f.product.createDeployment(source, 'after-start', undefined, f.owner.id);
+  const original = await settledDeployment(f.product, deployment.id, f.owner.id);
+  assert.equal(original.status, 'unknown');
+  assert.equal(f.product.getApplication(app.id, f.owner.id).lifecycle_operation_id, last.id);
+  await f.product.resumeDeployment(deployment.id, f.owner.id);
+  const resumed = await settledDeployment(f.product, deployment.id, f.owner.id);
+  assert.equal(resumed.status, 'succeeded'); assert.equal(resumed.id, original.id); assert.equal(resumed.resume_count, 1);
+  assert.equal(resumed.source_commit, original.source_commit);
+  for (const key of ['run_id', 'publication_artifact_id', 'producer_attempt', 'images']) assert.deepEqual(resumed.ci[key], original.ci[key]);
+  assert.equal(f.product.getApplication(app.id, f.owner.id).lifecycle_operation_id, last.id);
+  assert.deepEqual([registrations, submissions, deliveries, f.calls.apply], [1, 1, 2, 2]);
 });
 
 test('GitHub cancellation binds workflow/source/repository and sends a single cancel request before verified completion', async () => {

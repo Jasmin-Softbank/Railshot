@@ -146,7 +146,8 @@ export async function createProductService({ service, directory, target, provide
   }
   function launch(fn, deploymentId = null) {
     const worker = Promise.resolve().then(fn).catch(() => { console.error('RAILSHOT worker could not persist its final state; inspect private workspace state.'); }).finally(() => {
-      workers.delete(worker); if (deploymentId) deploymentWorkers.delete(deploymentId);
+      workers.delete(worker);
+      if (deploymentId && deploymentWorkers.get(deploymentId) === worker) deploymentWorkers.delete(deploymentId);
     });
     workers.add(worker);
     if (deploymentId) deploymentWorkers.set(deploymentId, worker);
@@ -293,17 +294,29 @@ export async function createProductService({ service, directory, target, provide
     return { ...rest, id: runId, app: binding.app, target_id: binding.target_id, source_commit: binding.source_commit,
       status, workflow: { status: workflowStatus, conclusion }, url: null };
   }
-  async function observe(record, runId) {
+  async function observe(record, runId, { resume = false } = {}) {
     try {
       for (;;) {
         if (abort.signal.aborted || deletionRequested(record.id)) return;
         const build = await readBuild(runId);
         if (deletionRequested(record.id)) return;
+        if (resume) {
+          const published = build.publication;
+          const imageEntries = (images) => Object.entries(images || {}).sort(([a], [b]) => a.localeCompare(b));
+          if (build.status !== 'published' || build.source_commit !== record.source_commit
+              || String(published?.run_id) !== runId || published?.source_commit !== record.source_commit
+              || published?.app !== record.app || published?.target_id !== record.target_id
+              || String(published?.artifact_id) !== record.ci.publication_artifact_id
+              || published?.producer_attempt !== record.ci.producer_attempt
+              || digest(imageEntries(published?.images)) !== digest(imageEntries(record.ci.images))) {
+            throw new EnvironmentError('RESUME_PUBLICATION_CHANGED', 409, true);
+          }
+        }
         const ci = ciObservation(build);
         await update(record.id, { ci });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
-          await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
+          if (!resume || !record.cd?.deployed) await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
           if (deletionRequested(record.id)) return;
           const deploy = record.application_id ? (args) => applicationAdapter.deployPublished(store.read().applications[record.application_id], args)
             : record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
@@ -316,7 +329,7 @@ export async function createProductService({ service, directory, target, provide
             return;
           }
           const succeeded = result.cd?.deployed === true && typeof result.cd.revision === 'string' && result.cd.revision.length > 0 && result.public_http?.state === 'succeeded' && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
-          const status = succeeded ? 'succeeded' : result.error?.outcome_unknown ? 'unknown' : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
+          const status = succeeded ? 'succeeded' : resume || result.error?.outcome_unknown ? 'unknown' : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
           await update(record.id, { status, stage: succeeded ? 'complete' : result.cd?.deployed ? 'http' : 'cd', cd: result.cd, public_http: result.public_http,
             url: succeeded ? (result.public_http.site_url || result.public_http.url) : null, error: succeeded ? null : operationError(result.error?.code || 'CD_UNVERIFIED', status === 'unknown') });
           return;
@@ -328,7 +341,8 @@ export async function createProductService({ service, directory, target, provide
       }
     } catch (error) {
       const known = error instanceof EnvironmentError;
-      if (!abort.signal.aborted) await update(record.id, { status: known && !error.outcomeUnknown ? 'blocked' : 'unknown', error: operationError(known ? error.code : 'CD_OUTCOME_UNKNOWN', !known || error.outcomeUnknown) });
+      const unknown = resume || !known || error.outcomeUnknown;
+      if (!abort.signal.aborted) await update(record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(known ? error.code : 'CD_OUTCOME_UNKNOWN', unknown) });
     }
   }
   return {
@@ -536,6 +550,53 @@ export async function createProductService({ service, directory, target, provide
         } catch (error) { await update(reserved.record.id, { status: 'unknown', error: operationError('STACK_OUTCOME_UNKNOWN', true) }); }
       }, reserved.record.id);
       return publicRecord(reserved.record);
+    },
+    async resumeDeployment(id, sessionId = null) {
+      const record = await store.transaction((state) => {
+        const operation = Object.hasOwn(state.operations, id) ? state.operations[id] : null;
+        const application = operation?.application_id && state.applications[operation.application_id];
+        // Unlike the legacy maintenance reads, resume always requires an exact cookie-session owner.
+        if (!sessionId || operation?.kind !== 'deployments' || operation.session_id !== sessionId
+            || !application || application.session_id !== sessionId) {
+          throw new ProductError(404, 'NOT_FOUND', '이 세션에서 재개할 배포를 찾을 수 없습니다.');
+        }
+        const ci = operation.ci;
+        const lifecycleId = application.lifecycle_operation_id;
+        const lifecycle = lifecycleId && Object.hasOwn(state.operations, lifecycleId) ? state.operations[lifecycleId] : null;
+        const completedLifecycle = !lifecycleId || lifecycle?.id === lifecycleId
+          && lifecycle.kind === 'application-lifecycle' && lifecycle.application_id === application.id
+          && lifecycle.session_id === sessionId && lifecycle.target_id === operation.target_id
+          && lifecycle.app === application.app && lifecycle.status === 'succeeded' && ['stop', 'start'].includes(lifecycle.action);
+        if (operation.status !== 'unknown' || !['cd', 'http'].includes(operation.stage)
+            || application.status !== 'ready' || application.deletion_requested || operation.deletion_requested || !completedLifecycle
+            || ci?.state !== 'published'
+            || typeof applicationAdapter?.deployPublished !== 'function'
+            || !/^\d+$/.test(ci.run_id) || !/^[a-f0-9]{40}$/.test(operation.source_commit || '')
+            || typeof ci.publication_artifact_id !== 'string' || !/^[1-9]\d*$/.test(ci.publication_artifact_id)
+            || !Number.isSafeInteger(ci.producer_attempt) || ci.producer_attempt < 1
+            || !ci.images || typeof ci.images !== 'object' || Array.isArray(ci.images) || !Object.keys(ci.images).length
+            || Object.values(ci.images).some((image) => typeof image !== 'string' || !/^ghcr\.io\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/.test(image))) {
+          throw new ProductError(409, 'DEPLOYMENT_NOT_RESUMABLE', '게시 완료 후 결과가 불확실한 앱 배포만 재개할 수 있습니다.');
+        }
+        const binding = state.bindings[ci.run_id];
+        const expected = applicationAdapter.describe(operation.environment_target_id, operation.app);
+        if (!binding || binding.operation_id !== id || binding.app !== operation.app
+            || binding.target_id !== operation.target_id || binding.source_commit !== operation.source_commit
+            || application.id !== operation.application_id || application.target_id !== operation.target_id
+            || application.app !== operation.app || application.environment_target_id !== operation.environment_target_id
+            || expected.id !== application.id || expected.target_id !== application.target_id
+            || expected.provider !== application.provider) {
+          throw new ProductError(409, 'RESUME_BINDING_MISMATCH', '원래 앱·환경·CI 실행과 연결이 일치하지 않습니다.');
+        }
+        if (Object.values(state.operations).some((other) => other.id !== id && active(other))) {
+          throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
+        }
+        Object.assign(operation, { status: 'running', error: null, resumed_at: new Date().toISOString(),
+          resume_count: (operation.resume_count || 0) + 1, updated_at: new Date().toISOString() });
+        return operation;
+      });
+      launch(() => observe(record, String(record.ci.run_id), { resume: true }), record.id);
+      return publicRecord(record);
     },
     async getDeployment(id, sessionId = null) {
       let record = publicRecord(find('deployments', id, sessionId));

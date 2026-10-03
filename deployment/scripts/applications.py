@@ -181,6 +181,12 @@ def register(config_path, request):
             return record
         mutation_started = False
         try:
+            # Resolve existing runtime networking before granting permissions or dispatching CI.
+            if profile['provider'] == 'aws' and profile['ingress'].get('edge_config_file'):
+                try:
+                    runtime.aws_security_group(descriptor, profile['ingress'].get('target_security_group_id'))
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                    raise RegistrationError('APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED') from exc
             with runtime.runtime_kubectl(native) as kube:
                 services = kube('default', 'get', 'services', '-A', '-o', 'json')
                 require(isinstance(services, dict) and isinstance(services.get('items'), list), 'RUNTIME_OBSERVATION_INVALID')

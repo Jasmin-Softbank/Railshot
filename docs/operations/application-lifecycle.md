@@ -35,7 +35,10 @@ A queued/running deployment of the same registered app can be deleted. The API f
 persists `deletion_requested`, waits for its local worker to stop, cancels the exact
 bound GitHub run once and observes completion. Worker guards precede and follow
 registration, CI dispatch and CD. Cleanup begins only after the remote writer is
-known to be stopped. The inventory is refreshed after cancellation: an expanded scope
+known to be stopped. Explicitly resumed CD workers use the same deployment tracking,
+so deletion waits for their completion too. A successful stop/start operation remains
+an audit reference and does not permanently block later deployment resumption.
+The inventory is refreshed after cancellation: an expanded scope
 requires a new confirmation. Queued/registering apps use a deletion plan scoped to their exact application ID
 and deployment. After the writer stops, a fresh private plan must prove ownership.
 If registration never began, absence of its durable pre-write intent and binding under
