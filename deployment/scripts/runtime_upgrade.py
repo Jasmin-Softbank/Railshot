@@ -117,7 +117,10 @@ def inspect(*, include_ca=False):
 
 
 def matches(observed, policy):
-    return all(observed[key] == policy[key] for key in ('runtime', 'cilium_images'))
+    # Helm may retain a tag alongside the immutable digest; keep repository and digest bound.
+    images = {key: re.sub(r':[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}(?=@sha256:[a-f0-9]{64}$)', '', image)
+              for key, image in observed['cilium_images'].items()}
+    return observed['runtime'] == policy['runtime'] and images == policy['cilium_images']
 
 
 def download(url, destination, checksum):
