@@ -71,9 +71,10 @@ export function ingestCiEvents(record, envelope) {
   for (const e of envelope.items || []) {
     if (!Number.isSafeInteger(e.sequence) || !safeId(e.native_run_id)) continue;
     const attributes = { github_run_attempt: envelope.run_attempt, native_run_id: e.native_run_id };
-    for (const key of ['attempt_id', 'completed_steps', 'total_steps', 'duration_s', 'elapsed_ms', 'role', 'provider', 'sdk_invocations'])
-      if (e[key] !== undefined) attributes[key] = e[key];
-    appendEvent(record, e.event_name, e.phase || 'agent', e.outcome || 'RUNNING', { attributes,
+    for (const key of ['attempt_id', 'completed_steps', 'total_steps', 'duration_s', 'elapsed_ms', 'role', 'provider', 'sdk_invocations',
+      'agent_budget', 'process_running', 'snapshot_state', 'sdk_activity_since_previous', 'last_sdk_event_age_ms', 'progress'])
+      if (e[key] !== undefined) attributes[key] = structuredClone(e[key]);
+    appendEvent(record, e.event_name, e.phase || 'agent', e.outcome || (e.process_running ? 'RUNNING' : 'UNKNOWN'), { attributes,
       identity: `ci:${envelope.run_id}:${envelope.run_attempt}:${e.sequence}`, occurred_at: e.occurred_at });
   }
 }

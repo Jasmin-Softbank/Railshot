@@ -1987,7 +1987,7 @@
       "get": {
         "operationId": "getDeploymentEvents",
         "summary": "Read CI progress and the bounded deployment timeline",
-        "description": "The owning session and persisted deployment/run/source/app/target binding are checked before any GitHub read or cache access. Reads only the registered workflow, branch and repository, then the current attempt GitHub Actions check named Railshot agent events. The exact external ID, head SHA, details URL, producer and envelope bindings must match. No previous-attempt fallback. Strict schema rejects raw text, commands, reasoning and unknown fields. At most 60 recent items and 60,000 UTF-8 bytes; truncation is explicit. GitHub reads are bounded to five pages of twenty checks and 2 MiB per response. A process-local cache retains at most 100 source/attempt identities for 15 seconds; run identity is checked before and after reading. Complete describes observation completion, never CI success. Stale means a running observation is over 60 seconds old. Missing older producers remain not_started/not_available. No query parameters or mutation methods are accepted. The timeline field includes session-scoped dispatch/publication/config/controller/workload/HTTP observations, at most 240 events retained for seven days. It is evidence, not execution authority.",
+        "description": "The owning session and persisted deployment/run/source/app/target binding are checked before any GitHub read or cache access. Reads only the registered workflow, branch and repository, then the current attempt GitHub Actions check named Railshot agent events. The exact external ID, head SHA, details URL, producer and envelope bindings must match. No previous-attempt fallback. Strict schema rejects raw text, commands, reasoning and unknown fields. At most 60 recent items and 60,000 UTF-8 bytes; truncation is explicit. GitHub reads are bounded to five pages of twenty checks and 2 MiB per response. A process-local cache retains at most 100 source/attempt identities for 15 seconds; run identity is checked before and after reading. Complete describes observation completion, never CI success. Stale means a running observation is over 60 seconds old. Missing older producers remain not_started/not_available. No query parameters or mutation methods are accepted. The timeline field includes session-scoped dispatch/publication/config/controller/workload/HTTP observations, at most 240 events retained for seven days. It is evidence, not execution authority. The progress projection provides the last observed gate or SDK event, optional executor-declared budget capped at two, and confirmed SDK invocation count or null. Dashboard readers poll after 15 seconds and show stale after 60 seconds. Content-free SDK progress metadata is retained in the central timeline; prompts, source, commands and reasoning text remain excluded.",
         "parameters": [
           {
             "name": "id",
@@ -6719,6 +6719,9 @@
                 ],
                 "minimum": 0,
                 "maximum": 9007199254740991
+              },
+              "agent_budget": {
+                "$ref": "#/components/schemas/AgentBudget"
               }
             },
             "required": [
@@ -6997,6 +7000,9 @@
           },
           "timeline": {
             "$ref": "#/components/schemas/Telemetry"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/CiProgress"
           }
         },
         "required": [
@@ -7016,7 +7022,8 @@
           "status",
           "truncated",
           "items",
-          "next_marker"
+          "next_marker",
+          "progress"
         ],
         "additionalProperties": false
       },
@@ -7899,6 +7906,73 @@
             }
           }
         }
+      },
+      "AgentBudget": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "max_invocations": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          }
+        },
+        "required": [
+          "enabled",
+          "max_invocations"
+        ],
+        "additionalProperties": false,
+        "description": "Executor-declared total SDK invocation budget. enabled must equal max_invocations > 0. Missing older metadata stays null."
+      },
+      "CiProgress": {
+        "type": "object",
+        "properties": {
+          "poll_after_ms": {
+            "const": 15000
+          },
+          "stale_after_seconds": {
+            "const": 60
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentEventItem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "agent_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentBudget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sdk_invocations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "poll_after_ms",
+          "stale_after_seconds",
+          "latest",
+          "agent_budget",
+          "sdk_invocations"
+        ],
+        "additionalProperties": false,
+        "description": "Last observed CI progress, not execution authority. A heartbeat alone never proves an SDK invocation; actual model calls and cost cannot be inferred. Budget may be recovered only from the same run and attempt in the retained timeline."
       }
     },
     "responses": {

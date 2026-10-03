@@ -3,7 +3,7 @@ import { createProductStore } from './product-store.js';
 import { APP_NAME, TARGET_ID, sourceAppName } from './contract.js';
 import { validateFiles, documentationOnly, documentationOnlyMessage } from './archive.js';
 import { createMetricsObserver } from './metrics.js';
-import { emptyAgentEvents } from './agent-events.js';
+import { emptyAgentEvents, summarizeAgentEvents } from './agent-events.js';
 import { EnvironmentError } from './environments.js';
 import { SubmissionError } from './github.js';
 import { createDeploymentDiagnostics } from './deployment-diagnostics.js';
@@ -1173,7 +1173,11 @@ export async function createProductService({ service, directory, target, provide
       const record = find('deployments', id, sessionId);
       const identity = { runId: record.ci?.run_id ? String(record.ci.run_id) : null,
         source_commit: record.source_commit, app: record.app, target_id: record.target_id };
-      const empty = (state, reason) => ({ deployment_id: id, ...emptyAgentEvents(identity, state, reason), timeline: publicTelemetry(record) });
+      const response = (envelope, row) => {
+        const timeline = publicTelemetry(row);
+        return { ...envelope, deployment_id: id, timeline, progress: summarizeAgentEvents(envelope, timeline) };
+      };
+      const empty = (state, reason) => response(emptyAgentEvents(identity, state, reason), record);
       if (!identity.runId) return empty('not_started', 'not_dispatched');
       const bound = () => {
         const current = find('deployments', id, sessionId), state = store.read();
@@ -1188,7 +1192,7 @@ export async function createProductService({ service, directory, target, provide
         const observed = await service.events(identity.runId, { source_commit: identity.source_commit, app: identity.app, target_id: identity.target_id });
         if (!bound()) return empty('unavailable', 'binding_mismatch');
         await store.transaction((state) => ingestCiEvents(state.operations[id], observed));
-        return bound() ? { ...observed, deployment_id: id, timeline: publicTelemetry(find('deployments', id, sessionId)) } : empty('unavailable', 'binding_mismatch');
+        return bound() ? response(observed, find('deployments', id, sessionId)) : empty('unavailable', 'binding_mismatch');
       } catch { return empty('unavailable', 'upstream_unavailable'); }
     },
     async getDeploymentLogs(id, sessionId = null) {

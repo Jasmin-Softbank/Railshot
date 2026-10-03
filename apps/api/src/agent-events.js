@@ -53,8 +53,11 @@ function validateItem(item) {
   requireValid(record(item) && integer(item.sequence) && item.sequence > 0 && timestamp(item.occurred_at)
     && typeof item.native_run_id === 'string' && safeId.test(item.native_run_id));
   if (['loop.started', 'loop.completed'].includes(item.event_name)) {
-    requireValid(exact(item, [...common, 'phase', 'outcome', 'sdk_invocations']) && item.phase === 'loop'
+    requireValid(exact(item, [...common, 'phase', 'outcome', 'sdk_invocations'], ['agent_budget']) && item.phase === 'loop'
       && outcomes.includes(item.outcome) && (item.sdk_invocations === null || integer(item.sdk_invocations)));
+    if (Object.hasOwn(item, 'agent_budget')) requireValid(exact(item.agent_budget, ['enabled', 'max_invocations'])
+      && [0, 1, 2].includes(item.agent_budget.max_invocations)
+      && item.agent_budget.enabled === (item.agent_budget.max_invocations > 0));
   } else if (['gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat'].includes(item.event_name)) {
     requireValid(exact(item, [...common, 'attempt_id', 'phase', 'outcome', 'completed_steps', 'total_steps', 'duration_s'])
       && typeof item.attempt_id === 'string' && safeId.test(item.attempt_id)
@@ -72,6 +75,24 @@ function validateItem(item) {
       && (item.last_sdk_event_age_ms === null || integer(item.last_sdk_event_age_ms)));
     if (Object.hasOwn(item, 'progress')) validateProgress(item.progress);
   }
+}
+
+// A projection for dashboard readers, never a scheduler or an inferred model-call count.
+// Older producers have no budget. A heartbeat alone cannot prove an SDK invocation.
+export function summarizeAgentEvents(envelope, timeline = { items: [] }) {
+  const items = envelope.items || [], latest = items.at(-1) || null;
+  const prior = (timeline.items || []).filter((event) => String(event.correlation?.github_run_id) === String(envelope.run_id)
+    && event.correlation?.github_run_attempt === envelope.run_attempt);
+  const budget = items.findLast((event) => event.agent_budget)?.agent_budget
+    || prior.findLast((event) => event.attributes?.agent_budget)?.attributes.agent_budget || null;
+  let count = null;
+  for (const event of items) {
+    if (event.event_name.startsWith('loop.')) count = event.sdk_invocations;
+    else if (event.event_name.startsWith('agent.')) count = null;
+  }
+  return { poll_after_ms: agentEventLimits.cacheMs, stale_after_seconds: 60,
+    latest: latest ? structuredClone(latest) : null, agent_budget: budget ? structuredClone(budget) : null,
+    sdk_invocations: Number.isSafeInteger(count) ? count : null };
 }
 
 export function readAgentEventCheck(check, binding) {
