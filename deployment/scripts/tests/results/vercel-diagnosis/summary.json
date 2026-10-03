@@ -1,0 +1,75 @@
+{
+  "recorded_at": "2026-10-02T10:13:51.549564+00:00",
+  "repository": "Jasmin-Softbank/Railshot",
+  "branch": "feature/deployment-runtime-seungmin",
+  "start_head": "a50dd1a3239e2f8651ee61b4efe7a0dba55c08b4",
+  "integration_synced": "02f845e029062c34bac8aaa9389b799926917814",
+  "sync_mode": "normal merge; two fast-forwards followed by one merge commit",
+  "new_merge_commit": "0717582b5229a159d5f2b4c07eb74a2902477ace",
+  "conflicts": [],
+  "primary_classification": "G. UNKNOWN",
+  "relation_to_deployment_runtime": "pre_existing",
+  "vercel": {
+    "failing_identifier": "dpl_5oK6ujZo2X7LnxkTvGLagd3Kfzri",
+    "url": "https://vercel.com/ghdwlsrl100-gachonackrs-projects/railshot/5oK6ujZo2X7LnxkTvGLagd3Kfzri",
+    "first_meaningful_build_error": null,
+    "logs_access": "Login required; no current authenticated project settings",
+    "bot_root_directory_snapshot": null,
+    "current_project_settings_verified": false,
+    "new_synced_commit_status_at_observation": "pending with empty statuses; no build conclusion"
+  },
+  "local_reproduction": [
+    {
+      "node": "21.7.1",
+      "npm": "10.5.0",
+      "platform": "darwin/arm64",
+      "npm_ci_exit": 0,
+      "build_exit": 1,
+      "first_error": "Cannot find native binding; @rolldown/binding-darwin-arm64 absent",
+      "engine_supported": false
+    },
+    {
+      "node": "22.22.2",
+      "npm": "10.9.7",
+      "platform": "darwin/arm64",
+      "npm_ci_exit": 0,
+      "build_exit": 0,
+      "engine_supported": true,
+      "output": "apps/dashboard/dist",
+      "root_dist_exists": false,
+      "build_duration_ms": 300
+    }
+  ],
+  "source_and_lock_unchanged": {
+    "package.json": "68724be3f4b60495cd109dc494f5ca5921866db775dc3270f95906d02d24525d",
+    "package-lock.json": "b2c72cd1c739c1cec0a4f46e4a771c2e903810be5971f21fc7b419dd4a066d1b",
+    "apps/dashboard/package.json": "1ca573c3031c2d1ea73a6ca9dc9e25da3a3847ed20f6140b2e324364c6df7e31",
+    "apps/dashboard/app.js": "7dd8d1a8e532c17f45b6ee33a79fd08c0aac92020165ad76aded005e41de4798",
+    "apps/dashboard/index.html": "8e4dd1ca51c4da010aa227c6c6cae515d244ef2d8a99b2ef5be95331edd087ea"
+  },
+  "relevant_checks": {
+    "deployment_unit": 49,
+    "ansible_cilium": 5,
+    "control_cilium": 3,
+    "final_pass": 57,
+    "final_fail": 0,
+    "scope": "offline unit only, no Linux reinstall"
+  },
+  "suspected_causes_not_proven": [
+    "Vercel environment/Node/npm differences",
+    "Root/Output path alignment",
+    "Framework preset/command overrides"
+  ],
+  "fixes_implemented": false,
+  "direct_changes_to_app_vercel_ci_infrastructure": false,
+  "main_direct_change": false,
+  "integration_direct_change": false,
+  "other_branches_direct_change": false,
+  "pr_merge_performed": false,
+  "not_verified": [
+    "Vercel build logs",
+    "Current Vercel project settings",
+    "Linux Vercel build environment",
+    "Preview backend operation"
+  ]
+}
