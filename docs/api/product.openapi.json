@@ -2891,28 +2891,11 @@
                 "type": "object",
                 "required": [
                   "provider",
-                  "project_id",
-                  "user_id",
-                  "auth_type",
                   "enrollment_key"
                 ],
                 "properties": {
                   "provider": {
                     "const": "openstack"
-                  },
-                  "project_id": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
-                  },
-                  "user_id": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
-                  },
-                  "auth_type": {
-                    "enum": [
-                      "token",
-                      "application_credential"
-                    ]
                   },
                   "enrollment_key": {
                     "type": "string",
@@ -2935,9 +2918,6 @@
                   "required": [
                     "id",
                     "provider",
-                    "project_id",
-                    "user_id",
-                    "auth_type",
                     "status",
                     "created_at",
                     "claimed_at",
@@ -2951,18 +2931,6 @@
                     },
                     "provider": {
                       "const": "openstack"
-                    },
-                    "project_id": {
-                      "type": "string"
-                    },
-                    "user_id": {
-                      "type": "string"
-                    },
-                    "auth_type": {
-                      "enum": [
-                        "token",
-                        "application_credential"
-                      ]
                     },
                     "status": {
                       "enum": [
@@ -3168,6 +3136,52 @@
         }
       }
     },
+    "/api/v1/registrations/claim": {
+      "post": {
+        "operationId": "claimOpenStackLinkageToken",
+        "summary": "Consume a one-time linkage token from the customer node",
+        "description": "The token is the credential for this endpoint. Success proves token possession only; no WireGuard tunnel is created.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["linkage_token"],
+                "properties": {
+                  "linkage_token": {
+                    "type": "string",
+                    "pattern": "^rsl_[A-Za-z0-9_-]{43}$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token claimed once; connectivity is not verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["registration_id", "status", "claimed_at"],
+                  "properties": {
+                    "registration_id": { "type": "string", "format": "uuid" },
+                    "status": { "const": "claimed" },
+                    "claimed_at": { "type": "string", "format": "date-time" }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": { "description": "Invalid, expired, or already used token" }
+        }
+      }
+    },
     "/api/v1/installers/openstack": {
       "get": {
         "operationId": "getOpenStackInstaller",
@@ -3183,7 +3197,8 @@
                     "install_sh",
                     "bundle_sha256",
                     "script_url",
-                    "bundle_url"
+                    "bundle_url",
+                    "token_client_url"
                   ],
                   "properties": {
                     "install_sh": {
@@ -3198,6 +3213,9 @@
                     },
                     "bundle_url": {
                       "const": "/api/v1/installers/openstack/bundles"
+                    },
+                    "token_client_url": {
+                      "const": "/api/v1/installers/openstack/client"
                     }
                   }
                 }
@@ -3219,6 +3237,22 @@
                 "schema": {
                   "type": "string"
                 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/client": {
+      "get": {
+        "operationId": "downloadOpenStackTokenClient",
+        "summary": "Download the standalone customer token input file",
+        "responses": {
+          "200": {
+            "description": "Python script",
+            "content": {
+              "text/x-python": {
+                "schema": { "type": "string" }
               }
             }
           }
@@ -6939,9 +6973,6 @@
         "required": [
           "id",
           "provider",
-          "project_id",
-          "user_id",
-          "auth_type",
           "status",
           "created_at",
           "claimed_at"
@@ -6953,18 +6984,6 @@
           },
           "provider": {
             "const": "openstack"
-          },
-          "project_id": {
-            "type": "string"
-          },
-          "user_id": {
-            "type": "string"
-          },
-          "auth_type": {
-            "enum": [
-              "token",
-              "application_credential"
-            ]
           },
           "status": {
             "enum": [
