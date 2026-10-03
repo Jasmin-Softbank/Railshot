@@ -100,6 +100,47 @@ test('verified app URL is visible in inventory and detail, survives a failed upd
   assert.deepEqual(errors, []);
 });
 
+test('execution links require the latest owned active service and disappear on stop, delete, replacement or inventory failure', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors } = await start(t, { service: null });
+  const deployment = { id: 'deployed-v1', application_id: 'calculator-id', app: 'calculator', target_id: 'aws-runtime', status: 'succeeded',
+    cd: { deployed: true, revision: 'a'.repeat(40) },
+    public_http: { state: 'succeeded', verified_at: '2026-10-03T06:00:00Z', site_url: 'https://calculator.example/' } };
+  const app = { id: 'calculator-id', app: 'calculator', status: 'ready', current_deployment_state: 'verified', current_deployment: deployment };
+  let failInventory = false;
+  const json = (route, data, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
+  await page.route('**/api/v1/applications?*', (route) => failInventory
+    ? json(route, { error: { message: 'Unavailable' } }, 503) : json(route, { items: [app] }));
+  await page.route('**/api/v1/deployments?*', (route) => json(route, { items: [deployment] }));
+  await page.route('**/api/v1/deployments/deployed-v1', (route) => json(route, deployment));
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#application-link').hasAttribute('href'));
+  const links = ['#application-link', '#monitor-application-link'];
+  for (const selector of links) assert.equal(await page.locator(selector).getAttribute('href'), 'https://calculator.example/');
+  for (const patch of [{ status: 'stopped' }, { status: 'deleted' },
+    { status: 'ready', current_deployment: { ...deployment, id: 'deployed-v2' } },
+    { current_deployment: deployment, current_deployment_state: 'unverified' }]) {
+    Object.assign(app, patch);
+    await page.locator('[data-view="history"]').click();
+    await page.locator('#applications-refresh').click();
+    await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
+    for (const selector of links) assert.equal(await page.locator(selector).getAttribute('href'), null);
+    assert.match(await page.locator('#history-list').textContent(), /앱 배포 완료/, 'historical success stays visible');
+  }
+  app.current_deployment_state = 'verified';
+  await page.locator('#applications-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#application-link').hasAttribute('href'));
+  failInventory = true;
+  await page.locator('#applications-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#applications-message').textContent.includes('조회 실패'));
+  for (const selector of links) assert.equal(await page.locator(selector).getAttribute('href'), null);
+  // Restoring a previously successful run must still consult current inventory on reload.
+  failInventory = false; app.status = 'deleted';
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+  for (const selector of links) assert.equal(await page.locator(selector).getAttribute('href'), null);
+  assert.deepEqual(errors, []);
+});
+
 test('application detail keeps update and lifecycle controls while active deployments beyond the first app page remain manageable', { timeout: 45000 }, async (t) => {
   const { page, origin, errors } = await start(t, { service: null });
   const baseline = { id: 'stable-deployment', app: 'stable-app', target_id: 'shared-target', status: 'succeeded' };
@@ -598,7 +639,7 @@ test('original dashboard cards submit three source types through backend selecti
   await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
   assert.equal(submitted.length, 1);
   assert.equal(submitted[0].app, 'browser-demo');
-  assert.equal(await page.locator('#application-link').getAttribute('href'), 'https://demo.railshot.io/');
+  assert.equal(await page.locator('#application-link').isVisible(), false, 'legacy success without an owned current application has no live service link');
   assert.equal(await page.locator('#actions-link').getAttribute('href'), 'https://github.com/example/apps/actions/runs/1');
   await page.reload();
   await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
@@ -623,7 +664,7 @@ test('original dashboard cards submit three source types through backend selecti
   assert.equal(submitted.length, 3);
   assert.equal(submitted[2].files[0].content.toString(), 'source from folder');
   assert.equal(cd.length, 3);
-  assert.equal(await page.locator('#application-link').getAttribute('href'), 'https://demo.railshot.io/');
+  assert.equal(await page.locator('#application-link').isVisible(), false, 'legacy success without an owned current application has no live service link');
   assert.equal(requests.some((request) => request.authorization), false, 'no browser credentials');
   assert.equal(requests.some((request) => ['/api/deploy'].includes(request.path)), false, 'dashboard uses product resources');
   const other = await page.context().browser().newContext();
@@ -765,14 +806,14 @@ test('each provider selection keeps the assigned CI and CD target through reload
     assert.equal(submissions.length, 1); assert.equal(deliveries.length, 1);
     assert.equal(submissions[0].target_id, targetId); assert.equal(submissions[0].app, app);
     assert.equal(deliveries[0].targetId, targetId); assert.equal(deliveries[0].publication.target_id, targetId);
-    assert.equal(await page.locator('#application-link').getAttribute('href'), `https://${provider}.example.test/health`);
+    assert.equal(await page.locator('#application-link').isVisible(), false, 'historical provider success does not establish a current application');
     assert.deepEqual(errors, []);
   });
 });
 
 test('deployment monitor binds metrics, restores progress, and distinguishes stale, collection and HTTP failure', { timeout: 45000 }, async (t) => {
   let state = 'ready', age = 0, http = 1, broken = false;
-  const record = { id: 'monitor-demo', app: 'demo-app', target_id: 'demo-aws', status: 'running', stage: 'cd',
+  const record = { id: 'monitor-demo', application_id: 'monitor-app', app: 'demo-app', target_id: 'demo-aws', status: 'running', stage: 'cd',
     actions_url: 'https://github.com/example/apps/actions/runs/123',
     source_commit: 'a'.repeat(40), source_digest: 'b'.repeat(64), ci: { run_id: '123', state: 'published', images: { app: `ghcr.io/example/app@sha256:${'c'.repeat(64)}` }, steps: [{ key: 'release', status: 'completed', conclusion: 'success' }] },
     cd: { state: 'progressing', revision: 'd'.repeat(40), deployed: false }, public_http: { state: 'not_run', verified_at: null, url: null } };
@@ -789,6 +830,7 @@ test('deployment monitor binds metrics, restores progress, and distinguishes sta
         metrics: Object.fromEntries(Object.entries({ pods: 2, cpu_percent: 12.5, memory_percent: 30, http }).map(([name, value]) => [name, { state, value: state === 'ready' ? value : null, observed_at: new Date(Date.now() - age).toISOString() }])) } };
     },
   } });
+  await page.route('**/api/v1/applications?*', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [{ id: 'monitor-app', app: record.app, status: 'ready', current_deployment_state: 'verified', current_deployment: record }] }) }));
   const monitor = async () => { await page.locator('[data-view="monitor"]').click(); };
   const refresh = async () => {
     await page.locator('[data-view="deploy"]').click();

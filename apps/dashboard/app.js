@@ -499,8 +499,7 @@ function renderRun() {
   }
   for (const selector of ['#actions-link', '#monitor-actions-link']) safeLink(selector, current.actions_url || current.ci?.actions_url, true, true);
   document.querySelector('#monitor-message').textContent = document.querySelector('#run-message').textContent;
-  const canOpen = current.kind === 'deployments' && current.status === 'succeeded' && current.public_http?.state === 'succeeded' && Boolean(current.public_http?.verified_at);
-  for (const selector of ['#application-link', '#monitor-application-link']) safeLink(selector, current.public_http?.site_url || current.url || current.public_http?.url, canOpen);
+  renderRunSite();
   const binding = [`앱 / 대상: ${current.app || '—'} / ${current.target_id || '—'}`, `배포: ${current.id}`,
     `현재 단계: ${current.stage || 'ci'}`, `CI run: ${current.ci?.run_id || (current.kind === 'builds' ? current.id : '대기')}`,
     `소스 commit: ${current.source_commit || '대기'}`, `입력 SHA-256: ${current.source_digest || '미제공'}`,
@@ -589,7 +588,10 @@ async function refreshRun() {
     const { data } = await request(`/api/v1/${current.kind}/${encodeURIComponent(current.id)}`, {}, controller);
     if (pollController !== controller) return;
     if (data.id !== current.id || (current.target_id && data.target_id !== current.target_id)) throw new Error('실행 또는 대상이 요청과 일치하지 않습니다.');
-    current = { ...current, ...data }; lastReadAt = Date.now(); observationError = false; remember(); renderRun();
+    current = { ...current, ...data }; lastReadAt = Date.now(); observationError = false; remember();
+    if (current.kind === 'deployments' && current.status === 'succeeded' && !applicationsController) await loadApplications();
+    if (pollController !== controller) return;
+    renderRun();
     if (consoleTab === 'app' && !views.monitor.hidden) refreshLogs();
     if (consoleTab === 'work' && !views.monitor.hidden) refreshEvents();
     if (!terminal.has(current.status) || current.kind === 'deployments') timer = setTimeout(refreshRun, 15000);
@@ -746,20 +748,32 @@ function element(tag, text, className) {
   if (className) node.className = className;
   return node;
 }
-function applicationSite(application) {
-  const group = element('div', '', 'application-site'), deployment = application?.current_deployment;
+function applicationSiteUrl(application) {
+  const deployment = application?.current_deployment;
   if (application?.status !== 'ready' || application.current_deployment_state !== 'verified'
       || deployment?.status !== 'succeeded' || deployment.cd?.deployed !== true || !deployment.cd?.revision
-      || deployment.public_http?.state !== 'succeeded' || !deployment.public_http.verified_at) return group;
+      || deployment.public_http?.state !== 'succeeded' || !deployment.public_http.verified_at) return null;
   try {
     const url = new URL(deployment.public_http.site_url || deployment.url || deployment.public_http.url);
-    if (url.protocol !== 'https:' || url.username || url.password) return group;
+    return url.protocol === 'https:' && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
+}
+function renderRunSite() {
+  const application = applications.find((app) => app.id === current?.application_id);
+  const url = !observationError && current?.kind === 'deployments' && current.status === 'succeeded'
+    && application?.current_deployment?.id === current.id ? applicationSiteUrl(application) : null;
+  for (const selector of ['#application-link', '#monitor-application-link']) safeLink(selector, url, Boolean(url));
+}
+function applicationSite(application) {
+  const group = element('div', '', 'application-site'), deployment = application?.current_deployment;
+  const url = applicationSiteUrl(application);
+  if (url) {
     const link = element('a', '배포한 앱 열기 ↗', 'secondary-button');
-    link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
     link.setAttribute('aria-label', `${application.app} 배포한 앱 열기`);
-    group.append(element('strong', '서비스 주소'), element('span', url.href, 'application-site-url'), link,
+    group.append(element('strong', '서비스 주소'), element('span', url, 'application-site-url'), link,
       element('small', `접속 확인: ${formatTime(deployment.public_http.verified_at)}`, 'field-note'));
-  } catch { /* An absent or unsafe URL is never presented as a deployed app. */ }
+  }
   return group;
 }
 function sourceDownloads(deployment) {
@@ -819,7 +833,7 @@ function renderApplications() {
   }));
   document.querySelector('#applications-more').hidden = applicationPage >= applicationPageEnds.length - 1;
   document.querySelector('#applications-more').disabled = Boolean(applicationsController);
-  renderApplicationActions(); renderHistory();
+  renderApplicationActions(); renderHistory(); renderRunSite();
 }
 async function loadApplications(more = false) {
   if (more) {
