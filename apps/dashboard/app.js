@@ -198,6 +198,15 @@ function updateSelection() {
   const selected = deploymentSelection();
   providerField.hidden = selected.environment !== 'onprem';
   openstackInstallField.hidden = selected.environment !== 'onprem' || selected.provider !== 'openstack';
+  const existingOpenStack = selectedOption()?.available === true;
+  // Keep registration separate from deploying to the existing operator-bound runtime.
+  // Repeated observations must not undo a visitor's disclosure choice.
+  if (!openstackInstallField.hidden && openstackInstallField.dataset.available !== String(existingOpenStack)) {
+    openstackInstallField.open = !existingOpenStack;
+    openstackInstallField.dataset.available = String(existingOpenStack);
+    document.querySelector('#openstack-install-heading').textContent = existingOpenStack
+      ? '다른 OpenStack 환경 등록' : 'OpenStack 환경 등록';
+  }
   document.querySelector('#cloud-provider-field').hidden = selected.environment !== 'cloud';
   const profile = selectedProfile();
   document.querySelector('#deployment-database-field').hidden = !profile?.database;

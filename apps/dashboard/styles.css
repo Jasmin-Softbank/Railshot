@@ -146,6 +146,10 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .radio-mark { margin-left: auto; flex: 0 0 18px; height: 18px; border: 1px solid var(--color-inactive); border-radius: 50%; background: var(--color-surface); }
 .target-option:has(input:checked) .radio-mark { border: 5px solid var(--color-accent); }
 .provider-field { display: grid; gap: 9px; max-width: 480px; }
+details.provider-field { display: block; }
+details.provider-field > summary { cursor: pointer; font-size: 14px; font-weight: 600; padding-block: 4px; }
+details.provider-field[open] > :not(summary) { margin-top: 9px; }
+details.provider-field > summary:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; border-radius: 4px; }
 .installer-result { display: grid; gap: 9px; }
 .installer-result a { display: inline-block; width: fit-content; text-decoration: none; }
 .installer-code { width: 100%; padding: 12px; border: 1px solid #dce6eb; border-radius: 8px; background: var(--color-console); color: var(--color-console-text); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; overflow-wrap: anywhere; }
