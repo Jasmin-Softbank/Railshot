@@ -84,3 +84,9 @@ API 바인딩이 준비되지 않으면 노드 변경 전에 `observer_preflight
 K3s/Cilium 버전이 그대로면 설치나 재시작 없이 정책을 갱신한다. 버전 변경은 같은 minor 안의 전진 patch만 지원하고 `upgrade.recovery_ack=true`와 변경되는 바이너리의 SHA256을 요구한다. 런타임 identity, SQLite·token·config·기존 binary 및 Cilium Helm 설정을 보관한 뒤 갱신한다. 실패한 업그레이드의 자동 rollback이나 minor/major 이동은 하지 않는다. 백업과 실패 지점을 확인한 운영자 복구가 필요하다.
 
 원래 정지된 CronJob은 계속 정지 상태로 유지하며 전체 실행 검증을 통과시키지 않는다. Worker receipt의 `scope="worker_execution"`은 컨트롤러/갱신기 실행 검증이며 고객 앱 빌드 성공을 뜻하지 않는다. 앱 빌드·배포 성공은 별도 CI/CD operation으로 확인한다.
+
+## 부분 배포와 실행 중 요청 복구
+
+일반 플랫폼 배포는 변경된 이미지에 해당하는 Deployment만 교체한다. FE 전용 변경은 대시보드만, API 전용 변경은 API만 빌드·게시하며, 변경하지 않은 Deployment 전체는 현재 deployment/platform 선언에서 보존한다. 최초 설치에는 두 이미지가 모두 필요하다. CI 워커 변경이나 공유 의존성 변경은 필요한 이미지들을 함께 갱신하되 기존 고객 앱 리소스와 실행 중인 runner Job은 교체하지 않는다.
+
+단일 API 재시작으로 INTERRUPTED가 된 요청 중 CI 실행 ID·소스·앱 바인딩이 저장되어 있고 CD가 시작되지 않은 요청은 같은 CI 실행 조회를 재개한다. 소스를 다시 제출하거나 새 CI 실행을 만들지 않는다. 게시 결과가 원래 바인딩과 일치하면 기존 요청 ID로 CD를 이어간다. 이미 CD/HTTP 단계에 진입한 요청, 삭제 요청, 소유권 변경 또는 더 최신 요청이 있는 앱은 자동 재실행하지 않는다.

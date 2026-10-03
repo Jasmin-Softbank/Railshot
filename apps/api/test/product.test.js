@@ -1440,3 +1440,58 @@ test('application submission preserves safe phase diagnostics and only blocks ad
     } else assert.equal((await settle(() => f.product.getDeployment(next.id, owner))).status, 'failed');
   }
 });
+
+test('restart reattaches interrupted CI without resubmitting and delivers the same app once', async (t) => {
+  const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+  const published = f.service.status;
+  f.service.status = async () => ({ state: 'queued' });
+  const accepted = await f.product.createDeployment(applicationSource('restart-app'), 'restart-request', undefined, owner);
+  await settle(() => f.product.getDeployment(accepted.id, owner), (r) => r.stage === 'ci' && r.ci?.run_id);
+  await f.product.close();
+  // CI finishes outside the API process while the API is down.
+  f.service.status = published;
+  const restarted = await createProductService(f.options);
+  try {
+    const result = await settle(() => restarted.getDeployment(accepted.id, owner), (r) => r.status === 'succeeded');
+    assert.equal(result.error, null);
+    assert.equal(result.ci.run_id, '1001');
+    assert.equal(result.application_id, accepted.application_id);
+    assert.equal((await restarted.createDeployment(applicationSource('restart-app'), 'restart-request', undefined, owner)).id, accepted.id);
+    assert.equal(f.submissions.length, 1);
+    assert.equal(f.registrations.length, 1);
+    assert.equal(f.deliveries.length, 1);
+    assert.equal(f.deliveries[0].args.deploymentId, accepted.id);
+  } finally { await restarted.close(); }
+  const again = await createProductService(f.options);
+  try { await pause(30); assert.equal(f.deliveries.length, 1); } finally { await again.close(); }
+});
+
+test('restart never replays uncertain CD, unbound CI, changed ownership or deleted requests', async (t) => {
+  const cases = {
+    cd_started: (s, r) => { r.stage = 'cd'; r.cd.state = 'running'; },
+    missing_binding: (s, r) => { delete s.bindings[r.ci.run_id]; },
+    changed_source: (s, r) => { s.bindings[r.ci.run_id].source_commit = 'f'.repeat(40); },
+    changed_owner: (s, r) => { s.applications[r.application_id].session_id = null; },
+    deletion: (s, r) => { r.deletion_requested = true; },
+    newer_request: (s, r) => { s.operations.newer = { ...r, id: 'newer', status: 'failed', created_at: '2099-01-01T00:00:00Z' }; },
+  };
+  for (const [name, mutate] of Object.entries(cases)) await t.test(name, async (t) => {
+    const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+    const published = f.service.status;
+    f.service.status = async () => ({ state: 'queued' });
+    const accepted = await f.product.createDeployment(applicationSource('restart-app'), name, undefined, owner);
+    await settle(() => f.product.getDeployment(accepted.id, owner), (r) => r.stage === 'ci' && r.ci?.run_id);
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    await store.transaction((s) => mutate(s, s.operations[accepted.id]));
+    await store.close();
+    let reads = 0;
+    f.service.status = async (...args) => { reads++; return published(...args); };
+    const restarted = await createProductService(f.options);
+    try {
+      await pause(40);
+      assert.equal((await restarted.getDeployment(accepted.id, owner)).status, 'unknown');
+      assert.equal(reads, 0); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 0);
+    } finally { await restarted.close(); }
+  });
+});

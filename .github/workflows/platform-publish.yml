@@ -31,7 +31,7 @@ on:
         type: string
         default: ''
       deploy:
-        description: Update the platform deployment branch after publication (dashboard and api required)
+        description: Update the platform deployment branch after publication (unchanged component is preserved)
         type: boolean
         default: false
 
@@ -105,7 +105,7 @@ jobs:
               assert os.environ['VERIFY_ROLE'] == 'arn:aws:iam::721622471953:role/railshot-platform-verifier', 'verification bootstrap role is required'
               assert re.fullmatch(r'[1-9][0-9]*', os.environ['VERIFY_VERSION']) and re.fullmatch(r'[a-f0-9]{64}', os.environ['VERIFY_HASH']), 'verification document version and hash are required'
               assert os.environ['PUBLISH'] == 'true', 'deploy requires publish=true'
-              assert {'dashboard', 'api'} <= set(components), 'deploy requires dashboard and api from this run'
+              assert {'dashboard', 'api'} & set(components), 'deploy requires a changed platform component'
               assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', os.environ['PLATFORM_TARGET']), 'RAILSHOT_PLATFORM_TARGET_ID is required'
               providers = json.loads(os.environ['PROVIDER_TARGETS'])
               assert isinstance(providers, dict) and set(providers) <= {'aws', 'gcp', 'openstack', 'proxmox'}, 'RAILSHOT_PROVIDER_TARGETS must be a supported provider-to-target JSON map'

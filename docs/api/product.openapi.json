@@ -2222,7 +2222,7 @@
       "post": {
         "operationId": "createApplicationLifecyclePlan",
         "summary": "Preview stopping, starting or deleting an owned application",
-        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted. Registered active deployments can be deleted after cancellation/quiescence. Active deployment deletion uses a private, configuration-bound application scope and requires fresh ownership validation before cleanup. Other queued/running or unexpired unknown work blocks the shared slot; expired unknown still fences its own app or environment.",
+        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted. Registered active deployments can be deleted after cancellation/quiescence. Active deployment deletion uses a private, configuration-bound application scope and requires fresh ownership validation before cleanup. Other queued/running or unexpired unknown work blocks the shared slot; expired unknown still fences its own app or environment. Cloud inspection does not hold the product writer queue. A pending or failed plan cannot authorize any mutation. If the app changes during inspection, the plan fails as stale. Interrupted planning is marked failed after restart, without replay.",
         "parameters": [
           {
             "name": "id",
@@ -2231,6 +2231,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "Prefer",
+            "in": "header",
+            "schema": {
+              "type": "string",
+              "example": "respond-async"
+            },
+            "description": "Request durable asynchronous inspection. Same-app/action in-flight requests reuse the plan. The response is 202 with Location; legacy requests without this preference retain 201."
           }
         ],
         "requestBody": {
@@ -2303,6 +2312,45 @@
           },
           "503": {
             "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "description": "Read-only inspection accepted; no deletion has executed. Poll Location.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "2"
+                }
+              },
+              "Preference-Applied": {
+                "schema": {
+                  "const": "respond-async"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationLifecyclePlanProgress"
+                }
+              }
+            }
           }
         }
       }
@@ -3274,6 +3322,75 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/applications/{id}/plans/{plan}": {
+      "get": {
+        "operationId": "getApplicationLifecyclePlan",
+        "summary": "Read the owned application plan status",
+        "description": "Session-bound planning, ready or failed status. Closing the UI only stops polling. Never applies or automatically retries deletion. Failed inspection can be replaced with a new explicit POST; failed GET should retry the same Location.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "plan",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current saved plan status. Retry-After is provided while planning.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationLifecyclePlanStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
           }
         }
       }
@@ -6731,6 +6848,20 @@
           "expires_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
@@ -7134,6 +7265,91 @@
           }
         },
         "additionalProperties": false
+      },
+      "ApplicationLifecyclePlanProgress": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "application_id",
+          "action",
+          "status",
+          "created_at",
+          "updated_at",
+          "resources",
+          "retained"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/components/schemas/LifecycleAction"
+          },
+          "resources": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleResource"
+            }
+          },
+          "retained": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleResource"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "planning",
+              "failed"
+            ]
+          },
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "outcome_unknown"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "outcome_unknown": {
+                "const": false
+              }
+            }
+          }
+        }
+      },
+      "ApplicationLifecyclePlanStatus": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ApplicationLifecyclePlan"
+          },
+          {
+            "$ref": "#/components/schemas/ApplicationLifecyclePlanProgress"
+          }
+        ]
       }
     },
     "responses": {
