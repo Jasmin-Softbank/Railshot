@@ -74,8 +74,18 @@ class WorkflowPolicyTest(unittest.TestCase):
                         self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
                         self.assertEqual(Path(tmp, 'output').read_text(), f'passed={str(loop_exit == 0).lower()}\n')
 
-    def test_repair_defaults_to_three_and_nonzero_still_requires_provider_auth(self):
-        for attempts in (None, '', '1', '2', '3'):
+    def test_default_runs_without_sdk_or_model_credentials(self):
+        for attempts in (None, ''):
+            with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
+                result = self.run_loop_policy(tmp, attempts)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                invocation = json.loads(Path(tmp, 'invocation.json').read_text())
+                self.assertEqual(invocation['args'][invocation['args'].index('--max-attempts') + 1], '0')
+                self.assertEqual(invocation['model_env'], [])
+                self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
+
+    def test_nonzero_repair_requires_explicit_budget_and_provider_auth(self):
+        for attempts in ('1', '2', '3'):
             for provider, sdk in (('codex', 'openai-codex==0.159.3'), ('claude', 'claude-agent-sdk==0.2.158')):
                 for credentials in (False, True):
                     with self.subTest(attempts=attempts, provider=provider, credentials=credentials), tempfile.TemporaryDirectory() as tmp:
@@ -87,7 +97,7 @@ class WorkflowPolicyTest(unittest.TestCase):
                             continue
                         self.assertEqual(result.returncode, 0, result.stderr)
                         args = json.loads(Path(tmp, 'invocation.json').read_text())['args']
-                        self.assertEqual(args[args.index('--max-attempts') + 1], attempts or '1')
+                        self.assertEqual(args[args.index('--max-attempts') + 1], attempts)
                         self.assertEqual(Path(tmp, 'pip.log').read_text().splitlines(),
                                          [f'install -q {sdk}', 'install -q pyyaml jsonschema'])
 
