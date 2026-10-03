@@ -63,14 +63,23 @@ def get(kube, ns, resource, key):
     return call(kube, ns, 'get', resource, key, '--ignore-not-found', '-o', 'json')
 
 
-def listed(kube, ns, path):
+def listed(kube, ns, path, kind, api_version):
     result, cursor = [], ''
     while True:
         response = call(kube, ns, 'get', '--raw', path + '?limit=500' +
                         ('&continue=' + quote(cursor, safe='') if cursor else ''))
         require(isinstance(response, dict) and isinstance(response.get('items'), list),
                 'APPLICATION_RUNTIME_DISCOVERY_FAILED')
-        result.extend(response['items'])
+        # Native typed Lists omit TypeMeta on their items. The discovery entry
+        # (or fixed built-in endpoint) is the authority, never a plural-name guess.
+        require(response.get('kind', kind + 'List') == kind + 'List' and
+                response.get('apiVersion', api_version) == api_version,
+                'APPLICATION_RUNTIME_DISCOVERY_FAILED')
+        for item in response['items']:
+            require(isinstance(item, dict) and item.get('kind', kind) == kind and
+                    item.get('apiVersion', api_version) == api_version,
+                    'APPLICATION_RUNTIME_DISCOVERY_FAILED')
+            result.append({**item, 'kind': kind, 'apiVersion': api_version})
         require(len(result) <= 10000, 'APPLICATION_RUNTIME_INVENTORY_TOO_LARGE')
         next_cursor = response.get('metadata', {}).get('continue', '')
         require(isinstance(next_cursor, str) and (not next_cursor or next_cursor != cursor),
@@ -109,13 +118,13 @@ def discover(kube, ns):
             key = resource.get('name', '')
             if not resource.get('namespaced') or '/' in key or 'list' not in resource.get('verbs', []):
                 continue
-            require(name(key), 'APPLICATION_RUNTIME_DISCOVERY_FAILED')
+            kind = resource.get('kind')
+            require(name(key) and isinstance(kind, str) and re.fullmatch(r'[A-Z][A-Za-z0-9]*', kind),
+                    'APPLICATION_RUNTIME_DISCOVERY_FAILED')
             if (group, key) in seen:
                 continue
             seen.add((group, key))
-            for item in listed(kube, ns, path + '/namespaces/' + ns + '/' + key):
-                require(isinstance(item, dict) and item.get('kind') == resource['kind'] and
-                        item.get('apiVersion') == gv, 'APPLICATION_RUNTIME_DISCOVERY_FAILED')
+            for item in listed(kube, ns, path + '/namespaces/' + ns + '/' + key, kind, gv):
                 require(item['kind'] in SUPPORTED.get(group, set()), 'APPLICATION_RUNTIME_UNSUPPORTED_RESOURCE')
                 if group == 'cilium.io':
                     require(gv == 'cilium.io/v2', 'APPLICATION_RUNTIME_UNSUPPORTED_RESOURCE')
@@ -233,8 +242,9 @@ def storage(kube, ns, objects):
     claims = [item for _, item in objects if item['kind'] == 'PersistentVolumeClaim']
     if not claims:
         return []
-    volumes = listed(kube, ns, '/api/v1/persistentvolumes')
-    attachments = listed(kube, ns, '/apis/storage.k8s.io/v1/volumeattachments')
+    volumes = listed(kube, ns, '/api/v1/persistentvolumes', 'PersistentVolume', 'v1')
+    attachments = listed(kube, ns, '/apis/storage.k8s.io/v1/volumeattachments',
+                         'VolumeAttachment', 'storage.k8s.io/v1')
     result = []
     for claim in claims:
         spec, cm = claim['spec'], claim['metadata']
@@ -329,7 +339,7 @@ def comparable(snapshot, *, controls=True):
 
 
 def running_pods(kube, ns):
-    return [p for p in listed(kube, ns, '/api/v1/namespaces/' + ns + '/pods')
+    return [p for p in listed(kube, ns, '/api/v1/namespaces/' + ns + '/pods', 'Pod', 'v1')
             if p.get('metadata', {}).get('deletionTimestamp') or p.get('status', {}).get('phase') not in ('Succeeded', 'Failed')]
 
 
@@ -365,8 +375,9 @@ def deleted(kube, ns, snapshot):
         return False
     if not snapshot['storage']:
         return True
-    volumes = listed(kube, ns, '/api/v1/persistentvolumes')
-    attachments = listed(kube, ns, '/apis/storage.k8s.io/v1/volumeattachments')
+    volumes = listed(kube, ns, '/api/v1/persistentvolumes', 'PersistentVolume', 'v1')
+    attachments = listed(kube, ns, '/apis/storage.k8s.io/v1/volumeattachments',
+                         'VolumeAttachment', 'storage.k8s.io/v1')
     for stored in snapshot['storage']:
         if any(p['metadata']['name'] == stored['volume']['name'] or
                (p.get('spec', {}).get('csi', {}).get('driver') == stored['driver'] and

@@ -61,6 +61,7 @@ class Kube:
         self.writes = []; self.reads = []; self.quiesce = True; self.clean_storage = True
         self.write_error = False; self.before_write = None; self.workloads_ready = True
         self.discovery = set(RESOURCE) - {'Widget'}
+        self.item_type_meta = False
 
     def find(self, kind, key):
         return next((item for item in self.objects if item['kind'] == kind and item['metadata']['name'] == key), None)
@@ -113,7 +114,12 @@ class Kube:
             items = [o for o in self.objects if o['apiVersion'] == gv and RESOURCE[o['kind']] == resource]
             if 'namespaces' in tail:
                 items = [o for o in items if o['metadata'].get('namespace') == APP]
-            return {'metadata': {}, 'items': copy.deepcopy(items)}
+            kind = next(k for k, value in RESOURCE.items() if value == resource)
+            items = copy.deepcopy(items)
+            if not self.item_type_meta:
+                for item in items:
+                    item.pop('kind'); item.pop('apiVersion')
+            return {'apiVersion': gv, 'kind': kind + 'List', 'metadata': {}, 'items': items}
         assert args[0] == 'get' and args[-3:] == ('--ignore-not-found', '-o', 'json'), args
         kind = next(k for k, resource in RESOURCE.items() if args[1].split('.')[0].lower() in (resource, k.lower()))
         return copy.deepcopy(self.find(kind, args[2]))
@@ -315,6 +321,52 @@ class LifecycleRuntimeTest(unittest.TestCase):
         self.assertEqual(runtime.execute(self.kube, self.binding, 'delete', preview)['status'], 'succeeded')
         self.assertIsNone(self.kube.find('PersistentVolume', 'pv-data'))
         self.assertIsNone(self.kube.find('VolumeAttachment', 'attachment-data'))
+
+    def test_native_typed_lists_without_item_type_meta_preserve_discovery_and_storage_inventory(self):
+        self.storage()
+        raw = self.kube(APP, 'get', '--raw', '/api/v1/persistentvolumes?limit=500')
+        self.assertEqual((raw['kind'], raw['apiVersion']), ('PersistentVolumeList', 'v1'))
+        self.assertNotIn('kind', raw['items'][0]); self.assertNotIn('apiVersion', raw['items'][0])
+        preview = self.inventory('delete')
+        self.assertEqual(preview['storage'][0]['volume'], {'kind': 'PersistentVolume', 'name': 'pv-data'})
+        self.assertEqual(preview['storage'][0]['attachments'], [{'kind': 'VolumeAttachment', 'name': 'attachment-data'}])
+        self.assertTrue(any(row['kind'] == 'Deployment' and row['apiVersion'] == 'apps/v1' for row in preview['records']))
+        self.kube.item_type_meta = True
+        self.assertEqual(self.inventory('delete'), preview)
+        self.kube.item_type_meta = False
+        self.assertEqual(runtime.execute(self.kube, self.binding, 'delete', preview)['status'], 'succeeded')
+
+    def test_declared_list_or_item_type_conflicts_fail_closed_for_discovery_and_storage(self):
+        self.storage()
+        for endpoint in ('/deployments?', '/persistentvolumes?', '/volumeattachments?'):
+            for location, field, value in (('list', 'kind', 'SecretList'), ('list', 'apiVersion', 'foreign.example/v1'),
+                                           ('item', 'kind', 'Secret'), ('item', 'apiVersion', 'foreign.example/v1'),
+                                           ('item', 'kind', None), ('item', 'apiVersion', None)):
+                with self.subTest(endpoint=endpoint, location=location, field=field, value=value):
+                    def invalid(ns, *args, **kwargs):
+                        result = self.kube(ns, *args, **kwargs)
+                        if args[:2] == ('get', '--raw') and endpoint in args[2]:
+                            target = result if location == 'list' else result['items'][0]
+                            target[field] = value
+                        return result
+                    self.blocked('APPLICATION_RUNTIME_DISCOVERY_FAILED', lambda: runtime.inventory(
+                        invalid, self.binding, self.renewal, 'delete'))
+        self.assertFalse(self.kube.writes)
+
+    def test_each_native_list_page_validates_its_type_before_using_items(self):
+        self.storage()
+        def wrong_second_page(ns, *args, **kwargs):
+            result = self.kube(ns, *args, **kwargs)
+            if args[:2] == ('get', '--raw') and '/persistentvolumes?' in args[2]:
+                if '&continue=' not in args[2]:
+                    result['metadata']['continue'] = 'page-two'
+                    result['items'] = []
+                else:
+                    result['kind'] = 'SecretList'
+            return result
+        self.blocked('APPLICATION_RUNTIME_DISCOVERY_FAILED', lambda: runtime.inventory(
+            wrong_second_page, self.binding, self.renewal, 'delete'))
+        self.assertFalse(self.kube.writes)
 
     def test_storage_or_attachment_remaining_is_not_success(self):
         self.storage(); preview = self.inventory('delete'); self.kube.clean_storage = False
