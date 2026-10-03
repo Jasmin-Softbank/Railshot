@@ -71,9 +71,11 @@ export async function createProductService({ service, directory, target, provide
   const sharedTargets = new Set(service?.targetIds || (service?.targetId ? [service.targetId] : []));
   const scopeKey = (kind, key, sessionId) => `${sessionId ? sessionId + ':' : ''}${kind}:${key}`;
   const owns = (value, sessionId) => value && (!sessionId || value.session_id === sessionId);
-  function applicationFor(state, id, sessionId) {
+  function applicationFor(state, id, sessionId, exactOwner = false) {
     const application = Object.hasOwn(state.applications, id) ? state.applications[id] : null;
-    if (!owns(application, sessionId)) throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
+    // Maintenance reads may span sessions; mutations must preserve the exact app owner.
+    if (!owns(application, sessionId) || exactOwner && application.session_id !== sessionId)
+      throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
     return application;
   }
   function lifecycleAvailable(application, action, cancelling = null) {
@@ -404,9 +406,7 @@ export async function createProductService({ service, directory, target, provide
   async function createUpdate(applicationId, input, key, materialize, sessionId = null) {
     key = idempotencyKey(key);
     return store.transaction(async (state) => {
-      const application = applicationFor(state, applicationId, sessionId);
-      // Maintenance reads may span sessions; mutations must preserve the exact app owner.
-      if (application.session_id !== sessionId) throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
+      const application = applicationFor(state, applicationId, sessionId, true);
       if (!input || typeof input !== 'object' || Array.isArray(input)
           || Object.keys(input).some((name) => !['source_type', 'files', 'repository_url', 'source_name'].includes(name))
           || !['folder', 'zip', 'github'].includes(input.source_type)
@@ -507,7 +507,7 @@ export async function createProductService({ service, directory, target, provide
     async createApplicationPlan(applicationId, input, sessionId = null) {
       if (!exact(input, ['action']) || !lifecycleActions.includes(input.action)) throw invalid('action은 stop, start, delete 중 하나여야 합니다.');
       return store.transaction(async (state) => {
-        const application = applicationFor(state, applicationId, sessionId);
+        const application = applicationFor(state, applicationId, sessionId, true);
         const cancelling = deletionCandidate(state, applicationId, input.action);
         checkFree(state, sessionId, cancelling); lifecycleAvailable(application, input.action, cancelling);
         if (Object.keys(state.plans).length >= maxOperations) throw new ProductError(409, 'CAPACITY_EXCEEDED', '계획 보관 한도에 도달했습니다.');
@@ -535,7 +535,7 @@ export async function createProductService({ service, directory, target, provide
           || (input.action === 'delete' ? input.delete_data !== true : input.delete_data !== undefined && input.delete_data !== false))
         throw invalid('유효한 작업·계획·확인이 필요하며 삭제에는 delete_data=true를 입력해야 합니다.');
       const accepted = await store.transaction(async (state) => {
-        const application = applicationFor(state, applicationId, sessionId);
+        const application = applicationFor(state, applicationId, sessionId, true);
         const fingerprint = digest({ application_id: applicationId, action: input.action, plan_id: input.plan_id,
           plan_hash: input.plan_hash, confirmation: input.confirmation, delete_data: input.delete_data === true });
         const existingId = state.keys[scopeKey('application-lifecycle', key, sessionId)];
@@ -546,7 +546,7 @@ export async function createProductService({ service, directory, target, provide
         }
         if (input.confirmation !== application.app) throw invalid('현재 앱 이름을 정확히 입력해야 합니다.');
         const plan = Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
-        if (!owns(plan, sessionId) || plan.kind !== 'application-lifecycle' || plan.public.application_id !== applicationId)
+        if (!plan || plan.session_id !== sessionId || plan.kind !== 'application-lifecycle' || plan.public.application_id !== applicationId)
           throw new ProductError(404, 'NOT_FOUND', '앱 계획을 찾을 수 없습니다.');
         if (plan.operation_id || plan.public.action !== input.action || plan.public.plan_hash !== input.plan_hash
             || !Number.isFinite(Date.parse(plan.public.expires_at)) || Date.parse(plan.public.expires_at) <= Date.now()

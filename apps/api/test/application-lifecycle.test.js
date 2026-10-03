@@ -113,6 +113,52 @@ test('ownership, explicit data consent, strict inputs and stale snapshots fail b
   assert.equal(f.calls.apply, 1);
 });
 
+test('maintenance reads cannot create or replay lifecycle mutations for a browser-owned app', async (t) => {
+  const f = await fixture(t);
+  assert.equal(f.product.getApplication(app.id).id, app.id);
+  for (const action of ['stop', 'start', 'delete']) {
+    await assert.rejects(f.product.createApplicationPlan(app.id, { action }), { status: 404 });
+  }
+  assert.equal(f.calls.plan, 0);
+  const plan = await f.plan(), body = f.input(plan);
+  await assert.rejects(f.product.createApplicationOperation(app.id, body, 'owner-stop'), { status: 404 });
+  assert.equal(f.calls.apply, 0);
+  const operation = await f.product.createApplicationOperation(app.id, body, 'owner-stop', f.owner.id);
+  assert.equal((await settled(f.product, operation.id, f.owner.id)).status, 'succeeded');
+  await assert.rejects(f.product.createApplicationOperation(app.id, body, 'owner-stop'), { status: 404 });
+  assert.equal((await f.product.createApplicationOperation(app.id, body, 'owner-stop', f.owner.id)).id, operation.id);
+  assert.equal(f.calls.apply, 1);
+});
+
+test('explicit null-owned apps retain same-owner lifecycle actions', async (t) => {
+  const f = await fixture(t, { application: { session_id: null } });
+  for (const [action, status] of [['stop', 'stopped'], ['start', 'ready'], ['delete', 'deleted']]) {
+    const plan = await f.product.createApplicationPlan(app.id, { action });
+    const operation = await f.product.createApplicationOperation(app.id, f.input(plan), action);
+    assert.equal((await settled(f.product, operation.id, null)).status, 'succeeded');
+    assert.equal(f.product.getApplication(app.id).status, status);
+    assert.equal((await f.product.createApplicationOperation(app.id, f.input(plan), action)).id, operation.id);
+  }
+  assert.equal(f.calls.apply, 3);
+});
+
+test('lifecycle plans require the exact app session, including null-owned apps', async (t) => {
+  for (const legacy of [false, true]) await t.test(String(legacy), async (t) => {
+    const f = await fixture(t, { application: legacy ? { session_id: null } : {} });
+    const owner = legacy ? null : f.owner.id;
+    const plan = await f.product.createApplicationPlan(app.id, { action: 'delete' }, owner);
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    await store.transaction((state) => { state.plans[plan.id].session_id = legacy ? f.owner.id : null; });
+    await store.close();
+    const restarted = await createProductService(f.options);
+    try {
+      await assert.rejects(restarted.createApplicationOperation(app.id, f.input(plan), 'wrong-plan-owner', owner), { status: 404 });
+      assert.equal(f.calls.apply, 0);
+    } finally { await restarted.close(); }
+  });
+});
+
 test('lifecycle shares the executor limit and an uncertain response never replays after restart', async (t) => {
   let finish, entered; const waiting = new Promise((resolve) => { finish = resolve; });
   const begun = new Promise((resolve) => { entered = resolve; });
