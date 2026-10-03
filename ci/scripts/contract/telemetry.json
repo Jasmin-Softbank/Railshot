@@ -2,20 +2,8 @@
   "version": 1,
   "retention_days": 7,
   "max_events": 240,
-  "outcomes": [
-    "RUNNING",
-    "PASS",
-    "FAIL",
-    "BLOCKED",
-    "UNKNOWN",
-    "NOT_RUN",
-    "INCOMPLETE"
-  ],
-  "severity_numbers": {
-    "INFO": 9,
-    "WARN": 13,
-    "ERROR": 17
-  },
+  "outcomes": ["RUNNING", "PASS", "FAIL", "BLOCKED", "UNKNOWN", "NOT_RUN", "INCOMPLETE"],
+  "severity_numbers": {"INFO": 9, "WARN": 13, "ERROR": 17},
   "error_categories": {
     "GATE_CHECK_FAILED": "check",
     "GATE_CONFIG_INVALID": "configuration",
@@ -56,22 +44,5 @@
     "resource": "확인된 메모리·디스크 증거와 사용량을 점검하세요.",
     "database": "DB 연결과 migration 결과·부작용을 확인한 뒤 재실행 여부를 결정하세요.",
     "unknown": "원인을 확정할 근거가 부족합니다. 누락된 진단을 먼저 확인하세요."
-  },
-  "diagnostic_context": {
-    "version": 1,
-    "max_logs": 3,
-    "failure_bytes": 3000,
-    "log_bytes": 1800,
-    "stages": {
-      "L0": "package.policy",
-      "L1": "package.spec",
-      "Q": "source.quality",
-      "L2": "image.build",
-      "L3": "image.runtime",
-      "L4": "image.scan",
-      "SOURCE": "source.prepare",
-      "CONFIG": "gate.configure",
-      "EVIDENCE": "gate.evidence"
-    }
   }
 }

@@ -14,7 +14,7 @@ One gate step failed after intake or an earlier proposal. Use the shared prepare
 
 ## Procedure
 
-1. Read `failure.txt` and `lessons.md`. Write the root cause as one sentence and point to the log line or `file:line` that proves it.
+1. Start with the supplied initial evidence and previous-attempt summary. Read `failure.txt`, `lessons.md`, and the complete case only when those facts are insufficient. Write the root cause as one sentence and point to the log line or `file:line` that proves it.
 2. Check your remit:
    - class F7 needs source scope; F8 (transient), infrastructure/authentication failures or a destroy/replace in a plan require operator repair, so return `give_up`;
    - the cause lies outside writable paths: return `give_up` with the exact user action.

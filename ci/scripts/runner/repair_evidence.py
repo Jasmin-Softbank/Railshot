@@ -21,28 +21,92 @@ def load(run):
     return path.read_bytes()
 
 
+CONTEXT_VERSION = 2
+FAILURE_BYTES = 4000
+LOG_BYTES = 2000
+MAX_LOGS = 2
+MAX_PATHS = 24
+# File names are discovery hints, not inferred entrypoints or permission grants.
+START_FILES = {'Dockerfile', 'package.json', 'pom.xml', 'build.gradle', 'build.gradle.kts',
+               'requirements.txt', 'pyproject.toml', 'go.mod', 'railshot.yaml', 'jasmin.yaml'}
 
-def context(raw):
-    """Project host evidence for the first read; retain full artifacts for drill-down."""
+
+def read_log(run, item):
+    if not re.fullmatch(r'process-[1-9][0-9]*\.log', item['path']):
+        raise ValueError('repair evidence log invalid')
+    path = Path(run) / 'diagnostics' / item['path']
+    if path.is_symlink() or path.stat().st_size > 65536:
+        raise ValueError('repair evidence log invalid')
+    data = path.read_bytes()
+    if sha(data) != item['sha256']:
+        raise ValueError('repair evidence log changed')
+    return data
+
+
+def previous_attempts(run):
+    """Carry bounded model hypotheses separately from host-recorded application facts."""
+    if run is None:
+        return []
+    paths = [p for p in Path(run).iterdir() if re.fullmatch(r'(adapter|fixer)-[0-9]+\.json', p.name)]
+    result = []
+    for path in sorted(paths, key=lambda p: int(p.stem.rsplit('-', 1)[1]))[-3:]:
+        if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+            raise ValueError('repair evidence history invalid')
+        record = json.loads(path.read_bytes())
+        output = record.get('output') or {}
+        attempt = int(path.stem.rsplit('-', 1)[1])
+        verdict_path = Path(run) / f'gate-{attempt}' / 'verdict.json'
+        gate_result = None
+        if verdict_path.exists():
+            if verdict_path.is_symlink() or verdict_path.stat().st_size > 1024 * 1024:
+                raise ValueError('repair evidence history invalid')
+            verdict = json.loads(verdict_path.read_bytes())
+            gate_result = {'status': verdict.get('status'),
+                           'failure_layer': (verdict.get('failure') or {}).get('layer')}
+        result.append({
+            'attempt': attempt, 'host_gate_result': gate_result,
+            'applied_files': record.get('written') or [],
+            'proposal_rejection': record.get('proposal_rejection'),
+            'model_hypothesis_unverified': bounded(output.get('root_cause') or '', 1000)[0],
+            'model_assumptions_unverified': bounded(json.dumps(output.get('assumptions') or [], ensure_ascii=False), 1000)[0],
+        })
+    return result
+
+
+def context(raw, run=None, role='fixer'):
+    """Supply observed evidence first; leave source semantics to bounded investigation."""
     case = json.loads(raw)
-    contract = json.loads((Path(__file__).resolve().parents[1] / 'contract/telemetry.json').read_text())
-    selection = contract['diagnostic_context']
-    failure = case['failure']
-    excerpt, omitted = bounded(failure['excerpt'], selection['failure_bytes'])
+    failure, files = case['failure'], case['source']['files']
+    excerpt, omitted = bounded(failure['excerpt'], FAILURE_BYTES)
     binding = {'case_id': case['case_id'], 'case_sha256': sha(raw),
                'source_sha256': case['source']['tested_sha256'], 'policy_sha256': case['policy_sha256']}
-    # Only source locations already verified by the producer enter the initial
-    # packet. The complete source inventory remains in case.json, not the prompt.
+    located = {row['path'] for row in failure['locations']}
+    paths = sorted(files, key=lambda name: (name not in located,
+        Path(name).name not in START_FILES and not Path(name).name.lower().startswith('readme'), name))[:MAX_PATHS]
+    logs = [p for p in case['processes'] if p['layer'] == failure['layer'] and p.get('log')]
+    logs.sort(key=lambda p: (p['outcome'] == 'PASS', -int(p['id'].split('-')[1])))
+    selected = []
+    if run is not None:
+        for process in logs[:MAX_LOGS]:
+            item = process['log']
+            text, cut = bounded(read_log(run, item).decode(), LOG_BYTES)
+            selected.append({'id': process['id'], 'command_kind': process['command_kind'],
+                'outcome': process['outcome'], 'text': text, 'reference':
+                {'kind': 'log', 'id': process['id'], 'sha256': item['sha256']},
+                'omitted_bytes': cut + item['omitted_bytes']})
     return {
-        'context_version': selection['version'],
-        'stage': selection['stages'].get(failure['layer'], 'unknown'),
+        'context_version': CONTEXT_VERSION,
+        'task': 'prepare_container' if role == 'adapter' else 'repair_failed_gate',
+        'failed_gate': failure['layer'],
         'evidence_binding': binding,
         'failure': {**failure, 'excerpt': excerpt,
                     'excerpt_omitted_bytes': failure['excerpt_omitted_bytes'] + omitted},
         'failure_reference': {'kind': 'log', 'id': 'failure', 'sha256': sha(failure['excerpt'].encode())},
-        'logs': [{'id': p['id'], 'command_kind': p['command_kind'], 'outcome': p['outcome'],
-                  **p['log']} for p in case['processes'] if p['layer'] == failure['layer'] and p.get('log')],
+        'source_candidates': [{'path': name, **files[name]} for name in paths],
+        'source_paths_omitted': max(0, len(files) - len(paths)),
+        'logs': selected, 'other_log_count': len(logs) - len(selected),
         'checks': [{k: v for k, v in row.items() if k != 'duration_ms'} for row in case['checks']],
+        'previous_attempts': previous_attempts(run),
         'missing_evidence': case['missing_evidence'],
     }
 
@@ -93,14 +157,9 @@ def verify(run, workspace, output, gate_order, repair_scope, expected):
                     raise ValueError('repair evidence failure is empty')
             else:
                 item = logs.get(ref['id'])
-                if not item or not re.fullmatch(r'process-[1-9][0-9]*\.log', item['path']):
-                    raise ValueError('repair evidence log reference invalid')
-                path = Path(run) / 'diagnostics' / item['path']
-                if path.is_symlink() or path.stat().st_size > 65536:
+                if not item:
                     raise ValueError('repair evidence log invalid')
-                data = path.read_bytes()
-                if sha(data) != item['sha256']:
-                    raise ValueError('repair evidence log changed')
+                data = read_log(run, item)
             if sha(data) != ref['sha256']:
                 raise ValueError('repair evidence log hash differs')
         else:

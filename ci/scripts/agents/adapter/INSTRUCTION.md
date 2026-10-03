@@ -6,7 +6,7 @@ Understand the repository and make it deployable on Railshot with the smallest c
 
 ## Inputs (paths given in the task message)
 
-- `contract/stack-contract.md`, `contract/paths.yaml`, `contract/catalog.yaml`, `schemas/railshot.schema.json`: read these first.
+- `contract/stack-contract.md`: required platform rules. Read `schemas/railshot.schema.json` when authoring a workload spec; use `contract/catalog.yaml` for the capabilities actually needed. Writable paths and the response schema are supplied by the runner.
 - Latest verdict, `failure.txt`, and `lessons.md`: why this attempt is running and what was already tried.
 - `ir.json`: deterministic inventory of the repository: languages, package managers, framework hints, candidate entrypoints and ports, existing Dockerfiles, build and data scripts, size.
 - The workspace: a sanitized copy of the user's repository. Only the writable paths may change.
@@ -14,7 +14,7 @@ Understand the repository and make it deployable on Railshot with the smallest c
 
 ## Procedure
 
-1. Read the contract, then `ir.json`. Trace the real entrypoint, imports and asset references. Draft a service map: what runs, on which port, what must be built first (data generation, frontend build), which service users reach.
+1. Read the required platform rules and initial evidence. Inspect relevant build manifests and execution documentation first. Use `ir.json` only for missing inventory hints. Search for entrypoint and asset-loading symbols, then read those ranges; expand to related files when a requirement is still unresolved. Draft a service map: what runs, on which port, what must be built first (data generation, frontend build), which service users reach.
 2. Confirm every fact in the source code, not in docs or comments:
    - the real start command and how to bind `0.0.0.0` (existing CLI flag or env var);
    - the port and whether the app reads `PORT`;
