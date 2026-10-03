@@ -89,6 +89,47 @@ class LogsTest(unittest.TestCase):
             self.execute()
         self.last_read.assert_not_called()
 
+    def test_app_credential_labels_keep_exact_project_and_single_namespace(self):
+        app_id = 'app-' + 'a' * 24
+        review = copy.deepcopy(self.review)
+        review['receipt']['target_id'] = review['application']['spec']['project'] = app_id
+        review['application']['spec']['destination']['namespace'] = app_id
+        self.secret['metadata']['name'] = 'railshot-' + app_id
+        for key in ('name', 'project', 'namespaces'):
+            self.secret['data'][key] = base64.b64encode(app_id.encode()).decode()
+        original = copy.deepcopy(self.secret)
+        for kind in ('cluster', 'railshot-application'):
+            self.secret = copy.deepcopy(original)
+            self.secret['metadata']['labels'] = {**logs.credentials.LABELS, 'argocd.argoproj.io/secret-type': kind}
+            with patch('argo.kubectl', side_effect=self.control):
+                auth, options = logs.customer_auth(self.config, review)
+            self.assertEqual(auth, ('https://192.0.2.1:6443', b'CA', 'synthetic-sensitive-token'))
+            self.assertEqual(options, {})
+            for key, value in [('project', ''), ('project', 'other-project'), ('namespaces', app_id + ',other-namespace')]:
+                self.secret['data'][key] = base64.b64encode(value.encode()).decode()
+                with self.subTest(kind=kind, field=key), patch('argo.kubectl', side_effect=self.control), self.assertRaises(ValueError):
+                    logs.customer_auth(self.config, review)
+                self.secret['data'][key] = original['data'][key]
+
+    def test_projectless_shared_cluster_keeps_legacy_review_and_namespace_binding(self):
+        self.secret['data']['project'] = ''
+        self.secret['data']['namespaces'] = base64.b64encode(b'tenant-demo,tenant-other').decode()
+        output, read = self.execute()
+        self.assertEqual(output['state'], 'ready')
+        self.assertIn('/namespaces/tenant-demo/', read.call_args.args[1])
+        for key, value in [('project', 'foreign'), ('name', 'other-cluster'), ('server', 'https://192.0.2.2:6443'),
+                           ('namespaces', 'tenant-other')]:
+            original = self.secret['data'][key]
+            self.secret['data'][key] = base64.b64encode(value.encode()).decode()
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.execute()
+            self.last_read.assert_not_called()
+            self.secret['data'][key] = original
+        self.secret['metadata']['labels'] = {**logs.credentials.LABELS, 'argocd.argoproj.io/secret-type': 'railshot-application'}
+        with self.assertRaises(ValueError):
+            self.execute()
+        self.last_read.assert_not_called()
+
     def test_registered_private_tls_name_reaches_every_metadata_and_log_request(self):
         auth = json.loads(base64.b64decode(self.secret['data']['config']))
         auth['tlsClientConfig']['serverName'] = self.server_name = '10.66.0.2'

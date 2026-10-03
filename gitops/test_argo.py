@@ -292,6 +292,77 @@ class ArgoTest(unittest.TestCase):
             argo.register_cluster([self.review], 'control', credential)
         client.assert_not_called()
 
+    def test_application_credential_relabels_owned_cluster_without_changing_data(self):
+        app_id = 'app-' + 'a' * 24
+        review = copy.deepcopy(self.review)
+        review['receipt']['target_id'] = review['application']['spec']['project'] = app_id
+        review['application']['spec']['destination']['namespace'] = app_id
+        credential = {'bearerToken': 'synthetic-old-token', 'tlsClientConfig': {
+            'insecure': False, 'caData': base64.b64encode(b'-----BEGIN CERTIFICATE-----\nsynthetic\n').decode()}}
+        stored, writes = {}, []
+        rotate_before_patch = False
+        def kube(_context, _namespace, *args, document=None):
+            if args[0] == 'apply':
+                stored.clear(); stored.update(copy.deepcopy(document))
+                stored['metadata']['uid'] = 'same-secret-uid'
+                stored['metadata']['resourceVersion'] = '1'
+                writes.append(copy.deepcopy(document))
+            elif args[0] == 'patch':
+                self.assertIn('--type=json', args)
+                self.assertEqual(document, [
+                    {'op': 'test', 'path': '/metadata/uid', 'value': 'same-secret-uid'},
+                    {'op': 'test', 'path': '/metadata/resourceVersion', 'value': '1'},
+                    {'op': 'replace', 'path': '/metadata/labels/argocd.argoproj.io~1secret-type', 'value': 'railshot-application'}])
+                if rotate_before_patch:
+                    auth = json.loads(base64.b64decode(stored['data']['config']))
+                    auth['bearerToken'] = 'synthetic-concurrently-renewed-token'
+                    stored['data']['config'] = base64.b64encode(json.dumps(auth).encode()).decode()
+                    stored['metadata']['resourceVersion'] = '2'
+                if stored['metadata']['resourceVersion'] != document[1]['value']:
+                    raise ValueError('resourceVersion test failed')
+                stored['metadata']['labels']['argocd.argoproj.io/secret-type'] = 'railshot-application'
+                writes.append(copy.deepcopy(document))
+            return copy.deepcopy(stored) or None
+        with patch('argo.kubectl', side_effect=kube):
+            argo.register_cluster([review], 'control', credential)
+            original = copy.deepcopy(stored['data'])
+            credential['bearerToken'] = 'synthetic-unused-new-token'
+            result = argo.register_cluster([review], 'control', credential, application_credential=True)
+            self.assertEqual(result['status'], 'application_credential_registered')
+            self.assertEqual(stored['data'], original)
+            self.assertEqual(stored['metadata']['labels']['argocd.argoproj.io/secret-type'], 'railshot-application')
+            self.assertEqual(stored['metadata']['uid'], 'same-secret-uid')
+            argo.register_cluster([review], 'control', credential, application_credential=True)
+            self.assertEqual(len(writes), 2)  # Already private: no credential write or label replay.
+            with self.assertRaises(ValueError):
+                argo.register_cluster([review], 'control', credential)  # Never silently restore Argo discovery.
+            self.assertEqual(len(writes), 2)
+            before = copy.deepcopy(stored)
+            for field, value in [('project', 'other-project'), ('namespaces', app_id + ',other-namespace'),
+                                 ('server', 'https://other.invalid:6443'), ('clusterResources', 'true')]:
+                stored.clear(); stored.update(copy.deepcopy(before))
+                stored['data'][field] = base64.b64encode(value.encode()).decode()
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    argo.register_cluster([review], 'control', credential, application_credential=True)
+                self.assertEqual(len(writes), 2)
+            stored.clear(); stored.update(copy.deepcopy(before))
+            stored['metadata']['labels']['argocd.argoproj.io/secret-type'] = 'cluster'
+            rotate_before_patch = True
+            with self.assertRaisesRegex(ValueError, 'resourceVersion test failed'):
+                argo.register_cluster([review], 'control', credential, application_credential=True)
+            self.assertEqual(len(writes), 2)
+            self.assertEqual(json.loads(base64.b64decode(stored['data']['config']))['bearerToken'],
+                             'synthetic-concurrently-renewed-token')
+            self.assertEqual(stored['metadata']['labels']['argocd.argoproj.io/secret-type'], 'cluster')
+        for field in ('target', 'project', 'namespace'):
+            invalid = copy.deepcopy(review)
+            if field == 'target': invalid['receipt']['target_id'] = 'k3s-aws'
+            if field == 'project': invalid['application']['spec']['project'] = ''
+            if field == 'namespace': invalid['application']['spec']['destination']['namespace'] = 'other-namespace'
+            with self.subTest(field=field), patch('argo.kubectl') as client, self.assertRaises(ValueError):
+                argo.register_cluster([invalid], 'control', credential, application_credential=True)
+            client.assert_not_called()
+
     def test_multiple_applications_keep_partial_results(self):
         second = copy.deepcopy(self.review)
         second['application']['metadata']['name'] = 'k3s-gcp-tenant-demo-demo'

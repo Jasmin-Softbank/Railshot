@@ -234,6 +234,25 @@ def kube_get(kind, name, namespace=None):
     return kube('get', kind, name, *(['-n', namespace] if namespace else []), '--ignore-not-found', '-o', 'json')
 
 
+def renewal_preserved(actual, expected):
+    """Accept only the shared environment scope extension, without replacing it."""
+    if actual == expected:
+        return True
+    fields = {'secret', 'target_id', 'server', 'project', 'namespaces', 'service_account', 'ca_sha256', 'audiences'}
+    if not (isinstance(actual, dict) and isinstance(expected, dict)
+            and fields <= set(expected) <= fields | {'tls_server_name'}
+            and isinstance(expected['target_id'], str) and not expected['target_id'].startswith('app-')
+            and expected['secret'] == 'railshot-' + expected['target_id'] and actual.get('project') == ''
+            and {k: v for k, v in actual.items() if k not in ('project', 'namespaces')} ==
+                {k: v for k, v in expected.items() if k not in ('project', 'namespaces')}):
+        return False
+    old, new = expected['namespaces'], actual.get('namespaces')
+    return (isinstance(old, list) and isinstance(new, list) and bool(old)
+            and all(isinstance(namespace, str) for namespace in old + new)
+            and len(set(new)) == len(new) and set(old) <= set(new)
+            and all(re.fullmatch(r'app-[a-f0-9]{24}', namespace) for namespace in set(new) - set(old)))
+
+
 def ensure_object(document, uids, preserve_existing=False, claim=None):
     key = object_key(document); meta = document['metadata']; ns = meta.get('namespace')
     registrations = (preserve_existing and key == 'Role/argocd/railshot-product-registrations')
@@ -282,7 +301,8 @@ def ensure_object(document, uids, preserve_existing=False, claim=None):
                     set(expected['resourceNames']) <= set(actual['resourceNames']), 'RENEWAL_ROLE_DIFFERS')
         else:
             actual = json.loads(old['data']['policy.json']); expected = json.loads(document['data']['policy.json'])
-            require(actual['version'] == expected['version'] == 1 and all(t in actual['targets'] for t in expected['targets'])
+            require(actual['version'] == expected['version'] == 1 and all(
+                        any(renewal_preserved(row, target) for row in actual['targets']) for target in expected['targets'])
                     and old['data']['kubeconfig'] == document['data']['kubeconfig'], 'RENEWAL_POLICY_DIFFERS')
         return old['metadata']['uid']  # Do not remove later registrations.
     if old and preserve_existing:

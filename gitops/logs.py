@@ -78,11 +78,14 @@ def customer_auth(config, review):
     secret = argo.kubectl(config['context'], app['metadata']['namespace'], 'get', 'secret', 'railshot-' + target, '-o', 'json')
     meta = secret['metadata']
     argo.require(secret['kind'] == 'Secret' and meta['name'] == 'railshot-' + target and
-                 meta['namespace'] == app['metadata']['namespace'] and all(
-                     meta.get('labels', {}).get(k) == v for k, v in credentials.LABELS.items()), 'registered credential required')
+                 meta['namespace'] == app['metadata']['namespace'], 'registered credential required')
     data = {key: base64.b64decode(value, validate=True).decode() for key, value in secret['data'].items()}
+    argo.require(credentials.credential_labels_match(meta.get('labels'), target, data['project'], data['namespaces'].split(',')),
+                 'registered credential owner or application scope differs')
+    shared_cluster = (not re.fullmatch(credentials.APPLICATION_ID, target) and data['project'] == '' and
+                      meta['labels']['argocd.argoproj.io/secret-type'] == 'cluster')
     argo.require(data['name'] == target and data['server'] == spec['destination']['server'] and
-                 data['project'] == spec['project'] and data['clusterResources'] == 'false' and
+                 (data['project'] == spec['project'] or shared_cluster) and data['clusterResources'] == 'false' and
                  spec['destination']['namespace'] in data['namespaces'].split(','), 'registered credential scope differs')
     server = argo.https_url(data['server']); url = urlsplit(server)
     argo.require(not url.path, 'explicit API origin required')
