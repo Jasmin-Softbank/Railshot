@@ -76,8 +76,8 @@ source_commit/target_id를 workflow 입력으로 받아 checkout 및 운영자 t
 
 ## 고객 앱 CI의 기본 실행량
 
-기본 경로는 L0(변경·비밀 경계) → L1(배포 명세) → L2(이미지 빌드) → L4(보안 검사) → L3(실제 기동·HTTP)다. 별도 lint/type/unit Q는 기본 배포에서 실행하지 않는다. `--layers L0,L1,Q,L2,L4,L3`로 명시하면 기존 진단을 실행하며, 이전 6단계 bundle도 계속 검증한다.
+기본 경로는 L0(변경·비밀 경계) → L1(실행 설정) → L2(이미지 빌드) → L3(실제 기동·HTTP)다. 이미지가 게시되면 CD가 같은 digest를 클러스터에 적용하고 외부 HTTPS를 확인한다. 성공 URL은 대시보드의 앱 목록과 상세에 표시한다. 별도 lint/type/unit Q와 취약점 스캔 L4는 기본 배포에서 실행하지 않는다. `--layers L0,L1,L2,L4,L3` 또는 `--layers L0,L1,Q,L2,L4,L3`를 명시하면 추가 검사를 실행하며, 이전 bundle도 계속 검증한다.
 
-표준 단일 Vite 앱은 lockfile과 기존 build 명령을 보존하는 템플릿으로 패키징한다. 계산기처럼 이 조건에 맞으면 AI 호출 없이 baseline을 실행한다. 사용자 Dockerfile·명세, Go 서버, SSR·사용자 출력 디렉터리는 자동으로 덮어쓰지 않는다. 기본 AI 재시도는 0회이며 SDK 설치·인증 준비도 실행하지 않는다. 지원하지 않는 패키징은 실패 근거를 반환한다. 운영자가 `RAILSHOT_MAX_REPAIR_ATTEMPTS=1`을 설정하면 실패 시 Codex medium 추론으로 packaging 수정을 한 번 시도한다. 운영 변수 `REPAIR_SCOPE=source`나 `RAILSHOT_MAX_REPAIR_ATTEMPTS`를 설정한 저장소는 명시한 값이 우선한다.
+GitHub와 ZIP 모두 접수한 소스에 동일한 자동 패키징을 적용한다. 루트 `index.html`이 있는 완성된 HTML/CSS/JavaScript 사이트는 파일 구조를 보존하여 비특권 Nginx 컨테이너로 감싼다. 표준 단일 Vite 앱은 lockfile과 기존 build 명령을 보존한다. 기존 Dockerfile은 마지막 stage에 명시된 단일 `EXPOSE` 포트로 명세만 생성하며, 기존 컨테이너 기동 제약과 HTTP 검사는 계속 적용한다. 포트가 불명확하거나 서버 코드·미빌드 프레임워크가 섞인 앱을 정적 사이트로 오인하지 않는다. 사용자 명세와 앱 소스는 덮어쓰지 않는다. 기본 AI 재시도는 0회이며 SDK 설치·인증 준비도 실행하지 않는다. 지원하지 않는 패키징은 기본 검사 실패 원인을 반환한다. 운영자가 `RAILSHOT_MAX_REPAIR_ATTEMPTS=1`을 설정하면 실패 시 Codex medium 추론으로 packaging 수정을 한 번 시도한다. 운영 변수 `REPAIR_SCOPE=source`나 `RAILSHOT_MAX_REPAIR_ATTEMPTS`를 설정한 저장소는 명시한 값이 우선한다.
 
 Memos의 Go 서버와 영구 `/var/opt/memos` 저장소는 정적 Vite 앱 조건에 해당하지 않는다. CI 축소는 영구 볼륨 지원을 추가하지 않으며, 임시 디스크로 대체하여 배포 성공으로 처리해서는 안 된다.

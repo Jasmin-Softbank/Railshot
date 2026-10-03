@@ -746,6 +746,22 @@ function element(tag, text, className) {
   if (className) node.className = className;
   return node;
 }
+function applicationSite(application) {
+  const group = element('div', '', 'application-site'), deployment = application?.current_deployment;
+  if (application?.status !== 'ready' || application.current_deployment_state !== 'verified'
+      || deployment?.status !== 'succeeded' || deployment.cd?.deployed !== true || !deployment.cd?.revision
+      || deployment.public_http?.state !== 'succeeded' || !deployment.public_http.verified_at) return group;
+  try {
+    const url = new URL(deployment.public_http.site_url || deployment.url || deployment.public_http.url);
+    if (url.protocol !== 'https:' || url.username || url.password) return group;
+    const link = element('a', '배포한 앱 열기 ↗', 'secondary-button');
+    link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    link.setAttribute('aria-label', `${application.app} 배포한 앱 열기`);
+    group.append(element('strong', '서비스 주소'), element('span', url.href, 'application-site-url'), link,
+      element('small', `접속 확인: ${formatTime(deployment.public_http.verified_at)}`, 'field-note'));
+  } catch { /* An absent or unsafe URL is never presented as a deployed app. */ }
+  return group;
+}
 function sourceDownloads(deployment) {
   const actions = element('div', '', 'history-actions');
   const message = element('p', '', 'field-note source-download-message'); message.setAttribute('role', 'status');
@@ -797,7 +813,7 @@ function renderApplications() {
     const detail = element('button', '앱 상세·업데이트', 'secondary-button'); detail.type = 'button';
     detail.setAttribute('aria-label', `${application.app} 앱 상세·업데이트`);
     detail.addEventListener('click', () => loadApplication(application.id));
-    header.append(content, detail); item.append(header, applicationButtons(application)); return item;
+    header.append(content, detail); item.append(header, applicationSite(application), applicationButtons(application)); return item;
   }));
   document.querySelector('#applications-more').hidden = applicationPage >= applicationPageEnds.length - 1;
   document.querySelector('#applications-more').disabled = Boolean(applicationsController);
@@ -1168,6 +1184,7 @@ function renderApplicationActions() {
     else if (current?.kind === 'deployments') holder.append(element('span', '이 배포의 앱 관리 ID를 최신 목록에서 확인하지 못했습니다. 자동 삭제를 지원하지 않습니다.', 'field-note'));
   }
   const detail = applications.find((row) => row.id === applicationDetail?.id);
+  document.querySelector('#detail-application-site').replaceChildren(...(detail ? [applicationSite(detail)] : []));
   document.querySelector('#detail-application-actions').replaceChildren(...(detail ? [applicationButtons(detail)] : []));
   document.querySelector('#application-update').disabled = !detail || Boolean(updateBlocked({ ...applicationDetail, ...detail }));
   if (current) document.querySelector('#resume-run').disabled = observationError || applicationBusy(current.application_id);

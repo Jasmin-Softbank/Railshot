@@ -63,6 +63,37 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   assert.deepEqual(errors, []);
 });
 
+test('verified app URL is visible in inventory and detail, survives a failed update and disappears after stop or uncertain rollout', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors } = await start(t, { service: null });
+  const deployed = { id: 'deployed-v1', status: 'succeeded', cd: { deployed: true, revision: 'a'.repeat(40) },
+    public_http: { state: 'succeeded', verified_at: '2026-10-03T06:00:00Z', url: 'https://calculator.example/health', site_url: 'https://calculator.example/' } };
+  const app = { id: 'calculator-id', app: 'calculator', target_id: 'aws-runtime', status: 'ready',
+    current_deployment_state: 'verified', current_deployment: deployed, latest_deployment: { id: 'failed-v2', status: 'failed' } };
+  const json = (route, data) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
+  await page.route('**/api/v1/applications?*', (route) => json(route, { items: [app] }));
+  await page.route('**/api/v1/applications/calculator-id', (route) => json(route, app));
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  await page.locator('[data-view="history"]').click();
+  const link = page.locator('#applications-list').getByRole('link', { name: 'calculator 배포한 앱 열기' });
+  await link.waitFor();
+  assert.equal(await link.getAttribute('href'), 'https://calculator.example/');
+  assert.equal(await link.getAttribute('target'), '_blank');
+  assert.match(await link.getAttribute('rel'), /noopener/);
+  assert.match(await page.locator('#applications-list').innerText(), /https:\/\/calculator.example\//);
+  await page.getByRole('button', { name: 'calculator 앱 상세·업데이트' }).click();
+  await page.locator('#detail-application-site a').waitFor();
+  assert.equal(await page.locator('#detail-application-site a').getAttribute('href'), 'https://calculator.example/');
+  for (const patch of [{ status: 'stopped' }, { status: 'deleted' }, { status: 'ready', current_deployment_state: 'unverified' },
+    { current_deployment_state: 'not_deployed' }, { current_deployment_state: 'verified', current_deployment: { ...deployed, public_http: { ...deployed.public_http, site_url: 'javascript:alert(1)' } } }]) {
+    Object.assign(app, patch);
+    await page.locator('#applications-refresh').click();
+    await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
+    assert.equal(await page.locator('#applications-list a, #detail-application-site a').count(), 0);
+  }
+  assert.deepEqual(errors, []);
+});
+
 test('application detail keeps update and lifecycle controls while active deployments beyond the first app page remain manageable', { timeout: 45000 }, async (t) => {
   const { page, origin, errors } = await start(t, { service: null });
   const baseline = { id: 'stable-deployment', app: 'stable-app', target_id: 'shared-target', status: 'succeeded' };
