@@ -1,0 +1,129 @@
+{
+  "platform": {
+    "url": "https://railshot.io",
+    "verified_at": "2026-10-02T13:32:09.671417+00:00",
+    "tls_verified": true,
+    "method": "GET",
+    "http_status": 200,
+    "html_received": true,
+    "duration_seconds": 0.161
+  },
+  "platform_health": {
+    "url": "https://railshot.io/health",
+    "verified_at": "2026-10-02T13:32:09.672058+00:00",
+    "tls_verified": true,
+    "method": "GET",
+    "http_status": 404,
+    "error": "HTTP Error 404: Not Found",
+    "duration_seconds": 0.157
+  },
+  "platform_options": {
+    "url": "https://railshot.io/api/v1/deployment-options",
+    "verified_at": "2026-10-02T13:32:09.672180+00:00",
+    "tls_verified": true,
+    "method": "GET",
+    "http_status": 200,
+    "body": {
+      "items": [
+        {
+          "id": "cloud-aws",
+          "environment": "cloud",
+          "provider": "aws",
+          "label": "클라우드 · RailShot AWS",
+          "available": true,
+          "message": "소스 검사부터 앱 배포와 URL 확인까지 진행합니다. 등록된 앱 fixture-npm-js의 소스를 갱신합니다."
+        },
+        {
+          "id": "onprem-openstack",
+          "environment": "onprem",
+          "provider": "openstack",
+          "label": "온프레미스 · OpenStack",
+          "available": false,
+          "message": "온프레미스 · OpenStack에 배포할 인프라가 아직 연결되지 않았습니다. 운영자의 대상 연결이 필요합니다."
+        },
+        {
+          "id": "onprem-proxmox",
+          "environment": "onprem",
+          "provider": "proxmox",
+          "label": "온프레미스 · Proxmox",
+          "available": false,
+          "message": "온프레미스 · Proxmox에 배포할 인프라가 아직 연결되지 않았습니다. 운영자의 대상 연결이 필요합니다."
+        }
+      ],
+      "next_marker": null
+    },
+    "duration_seconds": 0.16
+  },
+  "aws_app": {
+    "url": "https://fixture-npm-js-8461c33ac524.railshot.io/health",
+    "verified_at": "2026-10-02T13:32:09.672296+00:00",
+    "tls_verified": true,
+    "method": "GET",
+    "http_status": 200,
+    "body": {
+      "status": "ready"
+    },
+    "duration_seconds": 0.212
+  },
+  "gcp_app": {
+    "url": "https://fixture-npm-js-3feba5a1b1cf.railshot.io/health",
+    "verified_at": "2026-10-02T13:32:09.672431+00:00",
+    "tls_verified": true,
+    "method": "GET",
+    "http_status": 200,
+    "body": {
+      "status": "ready"
+    },
+    "duration_seconds": 0.166
+  },
+  "platform_healthz": {
+    "url": "https://railshot.io/healthz",
+    "method": "GET",
+    "tls_verified": true,
+    "verified_at": "2026-10-02T13:33:02.370563+00:00",
+    "http_status": 200,
+    "body": "ok\n",
+    "duration_seconds": 0.128
+  },
+  "platform_targets": {
+    "url": "https://railshot.io/api/v1/targets",
+    "method": "GET",
+    "tls_verified": true,
+    "verified_at": "2026-10-02T13:33:02.370817+00:00",
+    "http_status": 200,
+    "body": {
+      "items": [
+        {
+          "id": "k3s-aws",
+          "label": "k3s-aws",
+          "provider": "aws",
+          "environment": "registered",
+          "application_name": "fixture-npm-js",
+          "deployment_scope": "registered_application",
+          "capabilities": {
+            "ci_submission": true,
+            "application_deployment": true,
+            "database_configuration": false
+          },
+          "runtime": {
+            "status": "unknown",
+            "observed_at": null
+          },
+          "blockers": []
+        }
+      ],
+      "next_marker": null
+    },
+    "duration_seconds": 0.129
+  },
+  "local_runtime": {
+    "url": "http://127.0.0.1:30082/",
+    "method": "GET",
+    "tls_verified": false,
+    "verified_at": "2026-10-02T13:33:02.370892+00:00",
+    "http_status": 200,
+    "body": "Railshot Runtime OK\n",
+    "duration_seconds": 0.022,
+    "scope": "Mac -> Lima forwarded NodePort"
+  }
+}

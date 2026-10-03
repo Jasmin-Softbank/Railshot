@@ -1,0 +1,60 @@
+
+> build
+> npm run build --workspace @railshot/dashboard
+
+
+> @railshot/dashboard@0.1.0 build
+> vite build
+
+file:///Users/seungminlee/Desktop/Development/Softbank%20Hackerton%202026/Railshot/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs:603
+			const error = /* @__PURE__ */ new Error("Cannot find native binding. npm has a bug related to optional dependencies (https://github.com/npm/cli/issues/4828). Please try `npm i` again after removing both package-lock.json and node_modules directory.");
+			                              ^
+
+Error: Cannot find native binding. npm has a bug related to optional dependencies (https://github.com/npm/cli/issues/4828). Please try `npm i` again after removing both package-lock.json and node_modules directory.
+    at file:///Users/seungminlee/Desktop/Development/Softbank%20Hackerton%202026/Railshot/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs:603:34
+    at file:///Users/seungminlee/Desktop/Development/Softbank%20Hackerton%202026/Railshot/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs:9:49
+    ... 2 lines matching cause stack trace ...
+    at async ModuleLoader.import (node:internal/modules/esm/loader:323:24) {
+  cause: Error: Cannot find module '@rolldown/binding-wasm32-wasi'
+  Require stack:
+  - <REPOSITORY>/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs
+      at file:///Users/seungminlee/Desktop/Development/Softbank%20Hackerton%202026/Railshot/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs:497:18
+      ... 6 lines matching cause stack trace ...
+      at async ModuleLoader.import (node:internal/modules/esm/loader:323:24) {
+    cause: Error: Cannot find module './rolldown-binding.wasi.cjs'
+    Require stack:
+    - <REPOSITORY>/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs
+        at file:///Users/seungminlee/Desktop/Development/Softbank%20Hackerton%202026/Railshot/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs:497:18
+        ... 6 lines matching cause stack trace ...
+        at async ModuleLoader.import (node:internal/modules/esm/loader:323:24) {
+      cause: Error: Cannot find module '@rolldown/binding-darwin-arm64'
+      Require stack:
+      - <REPOSITORY>/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs
+          at file:///Users/seungminlee/Desktop/Development/Softbank%20Hackerton%202026/Railshot/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs:497:18
+          ... 6 lines matching cause stack trace ...
+          at async ModuleLoader.import (node:internal/modules/esm/loader:323:24) {
+        cause: Error: Cannot find module './rolldown-binding.darwin-arm64.node'
+        Require stack:
+        - <REPOSITORY>/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs
+            at file:///Users/seungminlee/Desktop/Development/Softbank%20Hackerton%202026/Railshot/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs:497:18
+            ... 6 lines matching cause stack trace ...
+            at async ModuleLoader.import (node:internal/modules/esm/loader:323:24) {
+          cause: Error: Cannot find module '@rolldown/binding-darwin-universal'
+          Require stack:
+          - <REPOSITORY>/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs
+              at file:///Users/seungminlee/Desktop/Development/Softbank%20Hackerton%202026/Railshot/node_modules/rolldown/dist/shared/binding-B4m_2rFW.mjs:497:18
+              ... 6 lines matching cause stack trace ...
+              at async ModuleLoader.import (node:internal/modules/esm/loader:323:24) {
+            cause: [Error]
+          }
+        }
+      }
+    }
+  }
+}
+
+Node.js v21.7.1
+npm ERR! Lifecycle script `build` failed with error:
+npm ERR! Error: command failed
+npm ERR!   in workspace: @railshot/dashboard@0.1.0
+npm ERR!   at location: <REPOSITORY>/apps/dashboard

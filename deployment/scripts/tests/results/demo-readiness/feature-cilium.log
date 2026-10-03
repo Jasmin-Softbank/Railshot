@@ -1,0 +1,18 @@
+test_cilium_runs_between_api_and_node_ready (test_cilium.CiliumEntryTests.test_cilium_runs_between_api_and_node_ready) ... ok
+test_copied_online_installer_dependency_closure (test_cilium.CiliumEntryTests.test_copied_online_installer_dependency_closure) ... ok
+test_legacy_identity_rejected_before_mutation (test_cilium.CiliumEntryTests.test_legacy_identity_rejected_before_mutation) ... ok
+test_pins_match_integrated_runtime (test_cilium.CiliumEntryTests.test_pins_match_integrated_runtime) ... ok
+test_reuses_team_installer_with_lock (test_cilium.CiliumEntryTests.test_reuses_team_installer_with_lock) ... ok
+test_cluster_profile_and_api_errors_fail_closed (test_control_cilium.ControlCiliumTests.test_cluster_profile_and_api_errors_fail_closed) ... ok
+test_control_accepts_only_server_and_approved_build_agent (test_control_cilium.ControlCiliumTests.test_control_accepts_only_server_and_approved_build_agent) ... ok
+test_control_waits_for_server_role_patch_but_never_accepts_missing_identity (test_control_cilium.ControlCiliumTests.test_control_waits_for_server_role_patch_but_never_accepts_missing_identity) ... ok
+test_customer_remains_single_node_and_control_waits_for_all_allocations (test_control_cilium.ControlCiliumTests.test_customer_remains_single_node_and_control_waits_for_all_allocations) ... ok
+test_flannel_control_refuses_before_any_mutation (test_control_cilium.ControlCiliumTests.test_flannel_control_refuses_before_any_mutation) ... ok
+test_node_cidrs_must_be_ipv4_nonoverlapping_and_in_profile (test_control_cilium.ControlCiliumTests.test_node_cidrs_must_be_ipv4_nonoverlapping_and_in_profile) ... ok
+test_platform_smoke_pins_all_pods_to_selected_server (test_control_cilium.ControlCiliumTests.test_platform_smoke_pins_all_pods_to_selected_server) ... ok
+test_profiles_and_foreign_cni_refused (test_control_cilium.ControlCiliumTests.test_profiles_and_foreign_cni_refused) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.611s
+
+OK

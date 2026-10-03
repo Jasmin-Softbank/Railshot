@@ -1,0 +1,102 @@
+{
+  "snapshot": "94808d26e36f84bc8e65f7b7e3d3bb085634e334",
+  "scripts": [
+    {
+      "file": "airgap/check-updates.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "airgap/install-offline.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "airgap/preload-images.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "airgap/prepare-bundle.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "airgap/release-download.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "airgap/release-pack.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "airgap/release-upload.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "airgap/verify-bundle.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "bootstrap/cleanup.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "bootstrap/health.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "bootstrap/install-k3s.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "bootstrap/preflight.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "cilium/health.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "cilium/install.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "scripts/cleanup.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "scripts/common.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "scripts/deploy.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "scripts/test-poc.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "scripts/verify.sh",
+      "exit_code": 0,
+      "error": null
+    }
+  ],
+  "pass": 19,
+  "fail": 0
+}

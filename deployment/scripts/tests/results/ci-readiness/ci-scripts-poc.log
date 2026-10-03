@@ -1,0 +1,6 @@
+test_scanner_is_in_real_intake_receipt (test_intake.IntakeDatabaseTests.test_scanner_is_in_real_intake_receipt) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.099s
+
+OK

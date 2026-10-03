@@ -1,0 +1,106 @@
+{
+  "scripts": [
+    {
+      "file": "deployment/airgap/bundles/2026-10-02.1-arm64/artifacts/install-k3s.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/airgap/check-updates.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/airgap/install-offline.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/airgap/preload-images.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/airgap/prepare-bundle.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/airgap/release-download.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/airgap/release-pack.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/airgap/release-upload.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/airgap/verify-bundle.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/bootstrap/cleanup.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/bootstrap/health.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/bootstrap/install-k3s.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/bootstrap/preflight.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/cilium/health.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/cilium/install.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/scripts/cleanup.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/scripts/common.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/scripts/deploy.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/scripts/test-poc.sh",
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "deployment/scripts/verify.sh",
+      "exit_code": 0,
+      "error": null
+    }
+  ],
+  "pass": 20,
+  "fail": 0
+}
