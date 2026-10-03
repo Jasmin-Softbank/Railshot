@@ -62,14 +62,24 @@ preconditions. Shared policy changes use resourceVersion checks and preserve oth
 apps. An empty credential-renewal policy produces an empty Role, never an unrestricted
 `resourceNames: []` rule.
 
+Each physical environment has one canonical Argo cluster credential. Application
+credentials retain their own namespace, ServiceAccount and AppProject but use the
+`railshot-application` discovery label. The plan binds the canonical Secret UID and
+renewal scope; token rotation alone does not invalidate it. The sole permitted
+cross-namespace RoleBinding is the app-owned `railshot-environment-argocd`, pointing at
+the registered environment ServiceAccount and the app's local Role. Its live UID is
+checked again before runtime cleanup; the environment ServiceAccount is never deleted.
+
 Deletion order is deliberate:
 
 1. Persist intent and block future registration/publication for this app.
 2. Remove its CI binding and exact Argo Application after checking no sync is active.
 3. Remove its external traffic resources and owned DNS through the existing provider writer.
-4. Remove its renewal-policy entry and exact Secret permission.
+4. CAS-remove only its namespace from the canonical environment credential and renewal
+   scope; preserve every other namespace and the environment anchor. Remove the app's
+   renewal-policy entry and exact Secret permission.
 5. Delete the UID-bound namespace and wait for supported backing-storage reclamation.
-6. Delete its Argo cluster credential and AppProject; remove exact control permissions.
+6. Delete its private Argo credential and AppProject; remove exact control permissions.
 7. Save the deleted tombstone and release the reserved NodePort only after all checks pass.
 
 Every provider writer revalidates its approved plan immediately before its own writes.
@@ -78,6 +88,14 @@ A late drift or timeout can therefore leave a partially completed operation. It 
 rollback, finalizer removal, or mutation retry. Other writes remain blocked until an
 operator reconciles actual state and the durable journals. Never clear a journal merely
 to make a retry possible.
+The last app leaves the canonical environment credential and renewal entry intact.
+Shared credential access remains `get/patch`; cleanup adds separate `delete` grants
+for the exact app-owned Application, AppProject and private Secret only.
+The shared renewal policy first records the new scope plus the exact previous scope,
+then the Secret scope changes, and finally the previous scope and app renewal entry
+are removed. A failure between these CAS writes still permits environment token renewal
+with either recorded scope. New lifecycle operations block until that transition is
+reconciled; namespace deletion starts only after final readback succeeds.
 
 ## Provider resources
 
@@ -111,6 +129,16 @@ AWS Access Analyzer `ValidatePolicy` returned zero findings on 2026-10-03 for
 `product-edge-policy.json` SHA-256
 `fb401be9f21ee946592cd56f1e2991359df0d60785bca03ddf36decb7a118dfb`.
 That validates the policy document; it is not an effective-permission or deletion test.
+The reviewed policy was applied once from the saved full Terraform plan on 2026-10-03.
+Live readback confirmed default version `v3`, attached only to `railshot-control-poc`,
+with the exact reviewed document; all five scope checks passed against that live policy.
+Only `aws_iam_policy.product_edge[0]` changed. Actual app deletion and organization-level
+effective access still require disposable-app acceptance.
+The same-day GCP preflight obtained a token with the actual API Pod's WIF credential.
+Its existing `railshotExistingEdgeRelease` role permits in-place updates but lacks app
+resource deletion, endpoint detach and required inventory-list permissions. Lifecycle
+rollout remains blocked until the app resource create/delete permissions are installed
+and verified using that same executor. Stop/start also needs recreation permissions.
 
 The API image packages the CLI, runtime inventory helper and provider cleanup writer;
 existing CI discovers their Python and API/browser tests. Dashboard and API must be

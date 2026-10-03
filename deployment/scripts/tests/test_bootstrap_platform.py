@@ -103,7 +103,9 @@ class BootstrapTests(unittest.TestCase):
         adopted = {bootstrap.object_key(wanted): 'registered'}
         actual['rules'] = [{'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch'], 'resourceNames': ['first', 'later']}
                            for group, resource in [('argoproj.io', 'appprojects'), ('argoproj.io', 'applications'), ('', 'secrets')]]
-        for rules in ([], actual['rules']):
+        delete_rule = {'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['delete'],
+                       'resourceNames': ['railshot-app-' + 'a' * 24]}
+        for rules in ([], actual['rules'], actual['rules'] + [delete_rule]):
             observed = {**actual, 'rules': rules}
             with patch.object(bootstrap, 'kube_get', return_value=observed) as read, patch.object(bootstrap, 'kube') as mutate:
                 self.assertEqual(bootstrap.ensure_object(wanted, adopted, True), 'registered')
@@ -114,6 +116,8 @@ class BootstrapTests(unittest.TestCase):
                              ('resourceNames', []), ('resourceNames', ['*']), ('resourceNames', ['Uppercase']), ('nonResourceURLs', ['/'])]:
             rules = copy.deepcopy(actual['rules']); rules[0][field] = value; invalid.append(rules)
         invalid.append(actual['rules'] + [actual['rules'][0]])
+        invalid.append(actual['rules'] + [{**delete_rule, 'resourceNames': ['railshot-k3s-aws']}])
+        invalid.append(actual['rules'] + [{**delete_rule, 'verbs': ['get', 'patch', 'delete']}])
         for rules in invalid:
             with self.subTest(rules=rules), patch.object(bootstrap, 'kube_get', return_value={**actual, 'rules': rules}), \
                     patch.object(bootstrap, 'kube') as mutate, self.assertRaisesRegex(bootstrap.Blocked, 'REGISTRATION_ROLE_DIFFERS'):

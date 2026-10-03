@@ -62,11 +62,16 @@ class Kube:
         self.write_error = False; self.before_write = None; self.workloads_ready = True
         self.discovery = set(RESOURCE) - {'Widget'}
         self.item_type_meta = False
+        self.shared_accounts = {}; self.shared_calls = []
 
     def find(self, kind, key):
         return next((item for item in self.objects if item['kind'] == kind and item['metadata']['name'] == key), None)
 
     def __call__(self, ns, *args, document=None):
+        if ns != APP:
+            self.shared_calls.append((ns, args, document))
+            assert args == ('get', 'serviceaccount', runtime.SA, '--ignore-not-found', '-o', 'json') and document is None
+            return copy.deepcopy(self.shared_accounts.get(ns))
         assert ns == APP
         if args[0] in ('patch', 'delete'):
             self.writes.append((args, copy.deepcopy(document)))
@@ -133,8 +138,20 @@ class LifecycleRuntimeTest(unittest.TestCase):
         self.renewal = {'service_account': {'name': runtime.SA, 'namespace': APP,
                                           'uid': self.kube.find('ServiceAccount', runtime.SA)['metadata']['uid']}}
 
-    def inventory(self, action='stop'):
-        return runtime.inventory(self.kube, self.binding, self.renewal, action)
+    def inventory(self, action='stop', *, shared_renewal=None):
+        return runtime.inventory(self.kube, self.binding, self.renewal, action, shared_renewal=shared_renewal)
+
+    def shared_scope(self):
+        namespace = 'environment-anchor'
+        account = obj('ServiceAccount', runtime.SA, labels={runtime.LABEL: self.binding['environment_id']})
+        account['metadata'].update(namespace=namespace, uid='shared-sa-uid')
+        self.kube.shared_accounts[namespace] = account
+        renewal = {'service_account': {key: account['metadata'][key] for key in ('name', 'namespace', 'uid')}}
+        grant = obj('RoleBinding', 'railshot-environment-argocd',
+                    roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': runtime.SA},
+                    subjects=[{'kind': 'ServiceAccount', 'name': runtime.SA, 'namespace': namespace}])
+        self.kube.objects.append(grant)
+        return renewal, grant
 
     def blocked(self, code, function):
         with self.assertRaises(runtime.LifecycleRuntimeError) as caught:
@@ -162,6 +179,77 @@ class LifecycleRuntimeTest(unittest.TestCase):
         self.assertTrue(any(r['kind'] == 'Namespace' for r in snapshot['resources']))
         self.assertTrue(all(set(r) <= {'kind', 'name', 'namespace'} for r in snapshot['resources'] + snapshot['retained']))
         self.assertEqual(snapshot['service_account'], self.renewal['service_account'])
+
+    def test_environment_grant_allows_stop_start_and_last_app_delete_without_anchor_writes(self):
+        shared, grant = self.shared_scope()
+        original_anchor = copy.deepcopy(self.kube.shared_accounts)
+        original = self.inventory(shared_renewal=shared)
+        self.assertEqual(original['shared_service_account'], shared['service_account'])
+        self.assertFalse(any(row.get('namespace') == 'environment-anchor' for row in original['records'] + original['resources']))
+        self.assertEqual(self.kube.writes, [])
+        self.assertEqual(runtime.execute(self.kube, self.binding, 'stop', original)['status'], 'succeeded')
+        stopped = self.inventory('start', shared_renewal=shared)
+        self.assertEqual(runtime.execute(self.kube, self.binding, 'start', stopped, stopped_inventory=original)['status'], 'succeeded')
+        self.assertEqual(self.kube.find('Deployment', 'web')['spec']['replicas'], 3)
+        self.assertIn(grant, self.kube.objects)
+        preview = self.inventory('delete', shared_renewal=shared)
+        self.assertEqual(runtime.execute(self.kube, self.binding, 'delete', preview)['status'], 'succeeded')
+        self.assertIsNone(self.kube.find('Namespace', APP))
+        self.assertIsNone(self.kube.find('RoleBinding', 'railshot-environment-argocd'))
+        self.assertEqual(self.kube.shared_accounts, original_anchor)
+        self.assertTrue(self.kube.shared_calls)
+        self.assertTrue(all(args[0] == 'get' and body is None for _, args, body in self.kube.shared_calls))
+        deletes = [args for args, _ in self.kube.writes if args[0] == 'delete']
+        self.assertEqual(deletes, [('delete', '--raw', '/api/v1/namespaces/' + APP, '-f', '-')])
+
+    def test_environment_grant_requires_exact_approved_external_subject_role_and_owner(self):
+        for change in ('missing-renewal', 'other-name', 'other-namespace', 'extra-subject', 'other-role', 'other-owner', 'ordinary-cross-namespace'):
+            with self.subTest(change=change):
+                self.setUp(); shared, grant = self.shared_scope()
+                if change == 'missing-renewal':
+                    shared = None
+                elif change == 'other-name':
+                    grant['subjects'][0]['name'] = 'other'
+                elif change == 'other-namespace':
+                    grant['subjects'][0]['namespace'] = 'other'
+                elif change == 'extra-subject':
+                    grant['subjects'].append({'kind': 'ServiceAccount', 'name': runtime.SA, 'namespace': APP})
+                elif change == 'other-role':
+                    grant['roleRef']['name'] = 'other'
+                    self.kube.objects.append(obj('Role', 'other', rules=[]))
+                elif change == 'other-owner':
+                    grant['metadata']['labels'][runtime.LABEL] = 'other'
+                else:
+                    grant['metadata']['name'] = 'ordinary-grant'
+                self.blocked('APPLICATION_RUNTIME_FOREIGN_OWNER', lambda: self.inventory(shared_renewal=shared))
+                self.assertEqual(self.kube.writes, [])
+                self.assertEqual(self.kube.shared_calls, [])
+
+    def test_environment_anchor_missing_replaced_or_terminating_blocks_before_writes(self):
+        for change in ('missing', 'uid', 'namespace', 'terminating', 'owner'):
+            with self.subTest(change=change):
+                self.setUp(); shared, _ = self.shared_scope()
+                if change == 'missing':
+                    self.kube.shared_accounts.clear()
+                else:
+                    meta = self.kube.shared_accounts['environment-anchor']['metadata']
+                    meta.update({'uid': 'replacement'} if change == 'uid' else
+                                {'namespace': 'replacement'} if change == 'namespace' else
+                                {'deletionTimestamp': '2026-10-03T00:00:00Z'} if change == 'terminating' else
+                                {'ownerReferences': [{'uid': 'foreign'}]})
+                self.blocked('APPLICATION_RUNTIME_SHARED_SERVICE_ACCOUNT_MISMATCH', lambda: self.inventory(shared_renewal=shared))
+                self.assertEqual(self.kube.writes, [])
+
+    def test_environment_anchor_identity_is_in_plan_and_rechecked_before_apply(self):
+        shared, _ = self.shared_scope()
+        preview = self.inventory('delete', shared_renewal=shared)
+        altered = copy.deepcopy(preview)
+        altered['shared_service_account']['uid'] = 'replacement'
+        self.assertNotEqual(runtime.comparable(preview), runtime.comparable(altered))
+        self.kube.shared_accounts['environment-anchor']['metadata']['uid'] = 'replacement'
+        self.blocked('APPLICATION_RUNTIME_SHARED_SERVICE_ACCOUNT_MISMATCH',
+                     lambda: runtime.execute(self.kube, self.binding, 'delete', preview))
+        self.assertEqual(self.kube.writes, [])
 
     def test_uid_namespace_label_and_foreign_child_ownership_fail_before_writes(self):
         for change, code in [

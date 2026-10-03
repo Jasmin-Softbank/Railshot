@@ -100,12 +100,26 @@ def control_inventory(binding, profile, *, allow_active=False):
     secret = control('get', 'secret', renewal['secret'], '-o', 'json')
     data = {key: base64.b64decode(secret['data'][key], validate=True).decode() for key in ('name', 'server', 'project', 'namespaces', 'clusterResources')}
     require(data == {'name': app_id, 'server': target['cluster_server'], 'project': app_id, 'namespaces': app_id, 'clusterResources': 'false'}
-            and all(secret['metadata'].get('labels', {}).get(k) == v for k, v in runtime.credentials.LABELS.items()),
+            and runtime.credentials.credential_labels_match(secret['metadata'].get('labels', {}), app_id, app_id, [app_id]),
             'APPLICATION_CREDENTIAL_BINDING_CHANGED')
+    shared = None
+    environment = next((item for item in policy['targets'] if item['target_id'] == binding['environment_id']), None)
+    private = secret['metadata']['labels']['argocd.argoproj.io/secret-type'] == 'railshot-application'
+    require(not private or (environment and environment['project'] == '' and app_id in environment['namespaces']),
+            'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+    if environment and environment['project'] == '' and app_id in environment['namespaces']:
+        _, current_policy, selected, canonical, _, _ = runtime.shared_cluster_snapshot(
+            binding['cd'], binding['registered'], binding['environment_id'])
+        require(current_policy == policy and selected == environment
+                and selected['service_account']['namespace'] != app_id
+                and selected['ca_sha256'] == renewal['ca_sha256']
+                and selected.get('tls_server_name') == renewal.get('tls_server_name'), 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+        # Tokens rotate independently; only identity and exact scope belong in the plan.
+        shared = {'renewal': selected, 'secret': identity(canonical)}
     values, _ = ci_binding(profile, binding)
     return {'renewal': renewal, 'application_name': name, 'application': identity(app, spec=True),
             'skip': app['metadata'].get('annotations', {}).get(SKIP) if app else None,
-            'project': identity(project, spec=True), 'secret': identity(secret), 'ci_bound': app_id in values}
+            'project': identity(project, spec=True), 'secret': identity(secret), 'shared': shared, 'ci_bound': app_id in values}
 
 
 def unbind_ci(profile, binding):
@@ -161,10 +175,25 @@ def delete_control(binding, kind, name, expected):
 
 def remove_renewal(binding, expected):
     control = control_for(binding); selected = expected['renewal']
-    cm = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
-    policy = runtime.credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    shared = expected.get('shared')
+    if shared:
+        cm, policy, environment, secret, _, _ = runtime.shared_cluster_snapshot(
+            binding['cd'], binding['registered'], binding['environment_id'])
+        require(environment == shared['renewal'] and identity(secret) == shared['secret'], 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+        namespaces = [value for value in environment['namespaces'] if value != binding['application_id']]
+        require(binding['application_id'] in environment['namespaces'] and environment['service_account']['namespace'] in namespaces,
+                'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+        updated = {**environment, 'namespaces': namespaces}
+        transition = {**policy, 'targets': [
+            {**updated, 'previous_scope': {key: environment[key] for key in ('project', 'namespaces')}}
+            if item == environment else item for item in policy['targets']]}
+        policy = {**policy, 'targets': [updated if item == environment else item for item in policy['targets']]}
+    else:
+        cm = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
+        policy = runtime.credentials.validate_policy(json.loads(cm['data']['policy.json']))
     require([item for item in policy['targets'] if item['target_id'] == binding['application_id']] == [selected], 'RENEWAL_POLICY_CHANGED')
     policy['targets'] = [item for item in policy['targets'] if item != selected]
+    runtime.credentials.validate_policy(policy)
     role = control('get', 'role', 'railshot-credentials', '-o', 'json')
     rules = role.get('rules') or []
     require(len(rules) == 1 and rules[0].get('apiGroups') == [''] and rules[0].get('resources') == ['secrets']
@@ -172,12 +201,61 @@ def remove_renewal(binding, expected):
     names = [name for name in rules[0]['resourceNames'] if name != selected['secret']]
     # An empty resourceNames list grants every name. Remove the rule instead.
     role['rules'] = [{**rules[0], 'resourceNames': names}] if names else []
-    control('replace', '-f', '-', '-o', 'json', document=role)
+    if shared:
+        # Both exact scopes remain renewable if a write fails between the two objects.
+        runtime.credentials.validate_policy(transition)
+        cm['data']['policy.json'] = json.dumps(transition)
+        control('replace', '-f', '-', '-o', 'json', document=cm)
+        observed = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
+        require(observed['metadata']['uid'] == cm['metadata']['uid'] and
+                json.loads(observed['data']['policy.json']) == transition, 'SHARED_CREDENTIAL_TRANSITION_UNVERIFIED')
+        cm = observed
+        encoded = base64.b64encode(','.join(namespaces).encode()).decode()
+        patch = [{'op': 'test', 'path': '/metadata/uid', 'value': secret['metadata']['uid']},
+                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': secret['metadata']['resourceVersion']},
+                 {'op': 'replace', 'path': '/data/namespaces', 'value': encoded}]
+        control('patch', 'secret', environment['secret'], '--type=json', '--patch-file=/dev/stdin', '-o', 'json', document=patch)
     cm['data']['policy.json'] = json.dumps(policy)
     control('replace', '-f', '-', '-o', 'json', document=cm)
+    control('replace', '-f', '-', '-o', 'json', document=role)
     observed = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
     require(json.loads(observed['data']['policy.json']) == policy
             and (control('get', 'role', 'railshot-credentials', '-o', 'json').get('rules') or []) == role['rules'], 'RENEWAL_REMOVAL_UNVERIFIED')
+    if shared:
+        _, _, observed, canonical, _, _ = runtime.shared_cluster_snapshot(binding['cd'], binding['registered'], binding['environment_id'])
+        require(observed == updated and identity(canonical) == shared['secret'], 'SHARED_CREDENTIAL_REMOVAL_UNVERIFIED')
+
+
+def grant_cleanup(binding, expected):
+    """Grant deletion only for this app, separately from shared get/patch access."""
+    control = control_for(binding)
+    role = control('get', 'role', 'railshot-product-registrations', '-o', 'json')
+    names = {('argoproj.io', 'applications'): expected['application_name'],
+             ('argoproj.io', 'appprojects'): binding['application_id'], ('', 'secrets'): expected['renewal']['secret']}
+    rules = role.get('rules') or []
+    for rule in rules:
+        require(set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
+                and len(rule.get('apiGroups', [])) == len(rule.get('resources', [])) == 1
+                and (rule['apiGroups'][0], rule['resources'][0]) in names
+                and rule.get('verbs') in (['get', 'patch'], ['delete']) and rule.get('resourceNames')
+                and all(runtime.label(name) for name in rule['resourceNames']), 'CONTROL_ROLE_CHANGED')
+        if rule['verbs'] == ['delete']:
+            pattern = {'applications': r'app-[a-f0-9]{24}-[a-z0-9-]+', 'appprojects': r'app-[a-f0-9]{24}',
+                       'secrets': r'railshot-app-[a-f0-9]{24}'}[rule['resources'][0]]
+            require(all(re.fullmatch(pattern, name) for name in rule['resourceNames']), 'CONTROL_ROLE_CHANGED')
+    for (group, resource), name in names.items():
+        matching = [rule for rule in rules if rule['apiGroups'] == [group] and rule['resources'] == [resource]
+                    and rule['verbs'] == ['delete']]
+        require(len(matching) <= 1, 'CONTROL_ROLE_CHANGED')
+        if matching:
+            if name not in matching[0]['resourceNames']:
+                matching[0]['resourceNames'].append(name)
+        else:
+            rules.append({'apiGroups': [group], 'resources': [resource], 'verbs': ['delete'], 'resourceNames': [name]})
+    role['rules'] = rules
+    control('replace', '-f', '-', '-o', 'json', document=role)
+    require(control('get', 'role', 'railshot-product-registrations', '-o', 'json').get('rules') == rules,
+            'CONTROL_GRANT_UNVERIFIED')
 
 
 def revoke_control_grants(binding, expected):
@@ -188,7 +266,7 @@ def revoke_control_grants(binding, expected):
     updated = []
     for rule in role.get('rules') or []:
         key = (rule['apiGroups'][0], rule['resources'][0])
-        require(key in names and rule['verbs'] in (['get', 'patch'], ['get', 'patch', 'delete'])
+        require(key in names and rule['verbs'] in (['get', 'patch'], ['delete'])
                 and rule.get('resourceNames'), 'CONTROL_ROLE_CHANGED')
         remaining = [name for name in rule['resourceNames'] if name != names[key]]
         if remaining:
@@ -202,7 +280,8 @@ def revoke_control_grants(binding, expected):
 def collect(kube, binding, profile, action, approved_edge=None, *, allow_active=False):
     control = control_inventory(binding, profile, allow_active=allow_active)
     require(action == 'delete' or control['application'] is not None, 'APPLICATION_NOT_DEPLOYED')
-    inventory = workloads.inventory(kube, binding, control['renewal'], action)
+    options = {'shared_renewal': control['shared']['renewal']} if control.get('shared') else {}
+    inventory = workloads.inventory(kube, binding, control['renewal'], action, **options)
     if approved_edge is not None:
         edge.validate(binding, action, approved_edge)
     provider = approved_edge if approved_edge is not None else edge.plan(binding, action)
@@ -214,6 +293,8 @@ def collect(kube, binding, profile, action, approved_edge=None, *, allow_active=
     if control['application']:
         refs.append(reference('Application', control['application_name'], 'argocd'))
     (resources if action == 'delete' else retained).extend(refs)
+    if control.get('shared'):
+        retained.append(reference('Credential', control['shared']['renewal']['secret'], 'argocd'))
     retained.extend([reference('SharedRuntime', binding['environment_id']), reference('AuditRecord', app_id), reference('BuildArtifacts', app_id)])
     def unique(items):
         return sorted({applications.digest(item): item for item in items}.values(), key=lambda x: (x['kind'], x['name'], x.get('namespace', '')))
@@ -366,8 +447,8 @@ def lifecycle(config_path, request):
                 expected = snapshot['control']
                 if action in ('stop', 'delete'):
                     step('disable-ci', lambda: unbind_ci(profile, binding))
-                    step('grant-cleanup', lambda: runtime.grant_control_objects(binding['cd'], binding['registered'], binding['application_id']))
                     if action == 'delete':
+                        step('grant-cleanup', lambda: grant_cleanup(binding, expected))
                         step('remove-gitops', lambda: delete_control(binding, 'application', expected['application_name'], expected['application']))
                     else:
                         step('pause-gitops', lambda: patch_skip(binding, expected, 'true'))

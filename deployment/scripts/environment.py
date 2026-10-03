@@ -363,18 +363,22 @@ def grant_control_objects(cd, registered, target_id):
     for rule in rules:
         argo.require(set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
                      and len(rule['apiGroups']) == len(rule['resources']) == 1
-                     and rule['verbs'] in (['get', 'patch'], ['get', 'patch', 'delete']) and rule['resourceNames']
+                     and rule['verbs'] in (['get', 'patch'], ['delete']) and rule['resourceNames']
                      and all(label(value) for value in rule['resourceNames']), 'registration Role must contain exact names only')
         key = (rule['apiGroups'][0], rule['resources'][0])
-        argo.require(key in expected and key not in seen, 'registration Role kind differs')
-        seen.add(key)
+        grant = (*key, tuple(rule['verbs']))
+        argo.require(key in expected and grant not in seen, 'registration Role kind differs')
+        seen.add(grant)
+        if rule['verbs'] == ['delete']:
+            pattern = {'applications': r'app-[a-f0-9]{24}-[a-z0-9-]+', 'appprojects': r'app-[a-f0-9]{24}',
+                       'secrets': r'railshot-app-[a-f0-9]{24}'}[key[1]]
+            argo.require(all(re.fullmatch(pattern, value) for value in rule['resourceNames']), 'app-only deletion grants required')
     original = copy.deepcopy(rules)
     for (group, resource), resource_name in expected.items():
-        rule = next((r for r in rules if r['apiGroups'] == [group] and r['resources'] == [resource]), None)
+        rule = next((r for r in rules if r['apiGroups'] == [group] and r['resources'] == [resource] and r['verbs'] == ['get', 'patch']), None)
         if rule is None:
-            rule = {'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch', 'delete'], 'resourceNames': []}
+            rule = {'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch'], 'resourceNames': []}
             rules.append(rule)
-        rule['verbs'] = ['get', 'patch', 'delete']
         if resource_name not in rule['resourceNames']:
             rule['resourceNames'].append(resource_name)
     if rules != original:
