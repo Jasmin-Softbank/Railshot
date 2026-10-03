@@ -5,7 +5,7 @@ export const LINK_TOKEN_LIFETIME_MS = 10 * 60 * 1000;
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const missing = () => new DashboardError('등록 요청을 찾을 수 없습니다.', 404, 'NOT_FOUND');
 const visible = (row) => ({ id: row.id, provider: row.provider, project_id: row.project_id,
-  user_id: row.user_id, auth_type: row.auth_type, status: row.status,
+  user_id: row.user_id, status: row.status,
   created_at: row.created_at, claimed_at: row.claimed_at });
 const validKey = (value) => typeof value === 'string' && value.length >= 16 && value.length <= 256
   && value.trim() === value && !/[\x00-\x1f\x7f]/.test(value);
@@ -26,11 +26,11 @@ export function createRegistrations(db) {
         throw new DashboardError('세션이 만료되었습니다. 화면을 새로고침하세요.', 409, 'SESSION_EXPIRED');
       }
       if (!input || typeof input !== 'object' || Array.isArray(input)
-        || Object.keys(input).some((key) => !['provider', 'project_id', 'user_id', 'auth_type', 'enrollment_key'].includes(key))
+        || Object.keys(input).some((key) => !['provider', 'project_id', 'user_id', 'enrollment_key'].includes(key))
         || input.provider !== 'openstack'
         || !['project_id', 'user_id'].every((key) => typeof input[key] === 'string' && /^[A-Za-z0-9._-]{1,255}$/.test(input[key]))
-        || !['token', 'application_credential'].includes(input.auth_type) || !validKey(input.enrollment_key)) {
-        throw new DashboardError('OpenStack ID·인증 형식과 16~256자 연계 키를 확인하세요. Keystone 인증정보는 보내지 마세요.');
+        || !validKey(input.enrollment_key)) {
+        throw new DashboardError('OpenStack 프로젝트·사용자 ID와 16~256자 연계 키를 확인하세요. Keystone 인증정보는 보내지 마세요.');
       }
       if (db.prepare('SELECT count(*) AS count FROM registrations WHERE session_id = ?').get(sessionId).count >= 20) {
         throw new DashboardError('등록 요청은 세션당 20개까지 저장할 수 있습니다.', 409, 'CAPACITY_EXCEEDED');
@@ -41,7 +41,7 @@ export function createRegistrations(db) {
         }
       }
       const record = { id: randomUUID(), session_id: sessionId, provider: 'openstack',
-        project_id: input.project_id, user_id: input.user_id, auth_type: input.auth_type,
+        project_id: input.project_id, user_id: input.user_id,
         status: 'pending', created_at: new Date().toISOString(), claimed_at: null };
       const salt = randomBytes(16), keyHash = scryptSync(input.enrollment_key, salt, 32);
       const issued = { registration_id: record.id, token: tokenFor(input.enrollment_key),
@@ -49,8 +49,8 @@ export function createRegistrations(db) {
       const now = Date.now();
       db.exec('BEGIN IMMEDIATE');
       try {
-        db.prepare('INSERT INTO registrations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(record.id, sessionId, record.provider, record.project_id, record.user_id, record.auth_type,
+        db.prepare('INSERT INTO registrations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(record.id, sessionId, record.provider, record.project_id, record.user_id,
             salt, keyHash, record.status, record.created_at, record.claimed_at);
         db.prepare('INSERT INTO registration_tokens VALUES (?, ?, ?, NULL, ?)')
           .run(record.id, hash(issued.token), Date.parse(issued.expires_at), now);

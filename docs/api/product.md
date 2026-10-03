@@ -7,7 +7,7 @@
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
 | 화면 선택 | `GET /api/v1/options` | 기존 환경의 클라우드(AWS/GCP)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. provider에 배정된 대상이 CI 허용 목록과 CD 등록에 모두 있을 때만 available이다. |
-| OpenStack 등록 | `POST /api/v1/registrations`, `GET /api/v1/registrations`, `GET /api/v1/registrations/{id}` | 운영자 Bearer로 인증하고 세션별 프로젝트·사용자 ID, 인증 형식, 사용자가 입력한 연계 키의 salted scrypt 해시를 SQLite에 저장한다. 생성 응답에서 일회성 토큰을 한 번만 반환한다. |
+| OpenStack 등록 | `POST /api/v1/registrations`, `GET /api/v1/registrations`, `GET /api/v1/registrations/{id}` | 운영자 Bearer로 인증하고 세션별 프로젝트·사용자 ID, 사용자가 입력한 연계 키의 salted scrypt 해시를 SQLite에 저장한다. 생성 응답에서 일회성 토큰을 한 번만 반환한다. |
 | 연계 토큰 재발급 | `POST /api/v1/registrations/{id}/tokens` | 같은 세션과 원래 연계 키로, 기존 토큰 만료 뒤에만 10분짜리 새 토큰을 발급한다. |
 | 연계 토큰 접수 | `POST /api/v1/registrations/claim` | 고객 노드에서 입력한 토큰을 본문으로 받아 만료·재사용을 검사하고 원자적으로 한 번만 소비한다. 접수는 터널 연결을 뜻하지 않는다. |
 | OpenStack 설치 파일 | `GET /api/v1/installers/openstack`, `GET /api/v1/installers/openstack/scripts`, `GET /api/v1/installers/openstack/bundles` | 저장소의 기존 `install.sh` 내용, 단독 파일, 필수 동반 파일 ZIP을 제공한다. |
@@ -25,7 +25,7 @@
 
 ### OpenStack 등록과 설치 파일 전달
 
-브라우저는 `POST /api/v1/registrations`에 `provider`, `project_id`, `user_id`, `auth_type`, `enrollment_key`를 보낸다. `enrollment_key`는 16~256자이며 원문을 보관하지 않는다. 서비스는 무작위 salt를 사용한 scrypt 해시만 SQLite에 저장하고, 새 난수와 키에서 만든 10분짜리 연계 토큰을 생성 응답의 `linkage_token`으로 한 번만 보여 준다. 토큰 원문 역시 DB에는 저장하지 않는다. 같은 세션에서 동일한 키의 중복 등록을 거부하며, 상세·목록에는 키와 토큰이 없다. 만료 후 재발급은 같은 키를 다시 제출해야 한다.
+브라우저는 `POST /api/v1/registrations`에 `provider`, `project_id`, `user_id`, `enrollment_key`를 보낸다. OpenStack 인증 방식은 이 단계에서 선택하지 않는다. `enrollment_key`는 16~256자이며 원문을 보관하지 않는다. 서비스는 무작위 salt를 사용한 scrypt 해시만 SQLite에 저장하고, 새 난수와 키에서 만든 10분짜리 연계 토큰을 생성 응답의 `linkage_token`으로 한 번만 보여 준다. 토큰 원문 역시 DB에는 저장하지 않는다. 같은 세션에서 동일한 키의 중복 등록을 거부하며, 상세·목록에는 키와 토큰이 없다. 만료 후 재발급은 같은 키를 다시 제출해야 한다. 기존 SQLite의 미사용 `auth_type` 열은 서버 시작 시 제거한다.
 
 등록·재발급·조회 API는 공개 데모 모드에서도 운영자 Bearer를 요구한다. 운영 Nginx는 서버에서만 읽는 `RAILSHOT_API_TOKEN_FILE`을 `/api/` 프록시에 주입하고, 브라우저에는 이 토큰을 전달하지 않는다. HttpOnly 세션 쿠키가 등록 요청의 소유 범위를 구분한다. 사용자 키는 서비스 로그인 자격이 아니다. 접수 API는 고객 노드가 운영자 Bearer 없이 호출하며, 10분 유효한 일회성 연계 토큰 자체로 접수를 제한한다. 운영 배포에서는 이 API에 HTTPS로 접속해야 한다.
 

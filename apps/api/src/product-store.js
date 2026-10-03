@@ -78,6 +78,10 @@ export async function createProductStore(directory) {
     const version = db.prepare('PRAGMA user_version').get().user_version;
     if (![0, 1, 2].includes(version)) throw new Error('Unsupported database schema');
     db.exec(await readFile(new URL('./dashboard-schema.sql', import.meta.url), 'utf8'));
+    // Existing registrations recorded a choice that was never used by the installer.
+    if (db.prepare('PRAGMA table_info(registrations)').all().some((column) => column.name === 'auth_type')) {
+      db.exec('ALTER TABLE registrations DROP COLUMN auth_type');
+    }
     if (version === 0) {
       try { state = await readPrivate(join(root, 'state.json')); }
       catch (error) { if (error.code !== 'ENOENT') throw error; state = { version: 1, operations: {}, keys: {}, bindings: {}, plans: {} }; }

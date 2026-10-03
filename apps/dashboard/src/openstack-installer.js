@@ -9,7 +9,6 @@ export function initializeOpenStackInstaller() {
     const button = document.querySelector('#prepare-openstack-install');
     const projectId = document.querySelector('#openstack-project-id').value.trim();
     const userId = document.querySelector('#openstack-user-id').value.trim();
-    const authType = document.querySelector('#openstack-auth-type').value;
     const enrollmentKey = openstackEnrollmentKey.value;
     openstackInstallResult.hidden = true;
     document.querySelector('#openstack-linkage-token').value = '';
@@ -31,7 +30,7 @@ export function initializeOpenStackInstaller() {
       const { data: registration } = await request('/api/v1/registrations', { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ provider: 'openstack', project_id: projectId, user_id: userId,
-          auth_type: authType, enrollment_key: enrollmentKey }) });
+          enrollment_key: enrollmentKey }) });
       if (!/^[a-f0-9-]{36}$/.test(registration.id || '')
           || !/^rsl_[A-Za-z0-9_-]{43}$/.test(registration.linkage_token || '')
           || !Number.isFinite(Date.parse(registration.token_expires_at))) throw new Error('등록 결과를 확인하지 못했습니다.');
