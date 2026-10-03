@@ -96,3 +96,39 @@ requests. Deployment/template/selector, ReplicaSet and Pod owner UIDs, immutable
 image digests, observed generation and readiness must agree. Reasons such as
 OOMKilled are recorded without free-form Pod messages. Failed observation remains
 unavailable and does not override the bridge's deployment decision.
+
+## Repair input, separate from cause classification
+
+The CI repair SDK now receives a task-specific first-read packet from
+`runner/repair_evidence.py`. This uses the existing case and previous attempt
+receipts; it does not call Jev, inspect source semantics, or add a classifier.
+`loop.py` owns the adapter/fixer task, the runner owns permissions and invocation,
+and the gate remains the authority for execution success.
+
+- Adapter: discover build/start requirements from manifests and relevant source,
+  then propose packaging. Candidate paths are observations, not known entrypoints.
+- Fixer: start with the failed gate, applied changes, and current failure evidence;
+  request additional files/ranges through existing read tools when needed.
+- Initial evidence includes at most 4,000 failure bytes, two same-layer process
+  excerpts of 2,000 bytes each, and 24 source path/size/line/hash records. Error
+  locations and build/configuration files precede other paths. Existing redaction
+  and head/tail bounding are reused; no source file contents are eagerly injected.
+- Up to three previous attempt receipts supply applied paths, host gate results
+  and separately labelled *unverified* model hypotheses. Full proposals and whole
+  logs are not replayed. This is a bounded summary, not conversation resume.
+- Truncation and omitted counts are explicit. Complete case/history/log files
+  remain readable. These are initial-input limits, not hard tool-read budgets.
+- The required platform rules, workload schema when needed, write restrictions,
+  complete active gate order and source/evidence verification remain in force.
+
+Input version/hash, component byte counts and selected item counts are saved in
+agent receipt metadata alongside existing SDK timing. Bytes are not token counts;
+SDK-reported token/cache usage remains in its progress records. Compare the same
+source, model, repair scope, attempt budget and final gates before claiming lower
+cost, latency or higher success rate. No such model A/B result is claimed here.
+
+The prior follow-up's Jev-specific selector and API coalescing changes have been
+removed; PR #131's original classifier remains unchanged. Disabling/removing that
+existing API feature is a separate product change. No retry-policy, attempt-budget,
+provider, source-write authority, runtime-health or citation-validation changes are
+part of this repair-input work.

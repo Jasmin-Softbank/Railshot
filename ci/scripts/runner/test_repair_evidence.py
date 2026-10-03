@@ -1,5 +1,7 @@
 import copy
 import json
+import subprocess
+import time
 from pathlib import Path
 import sys
 import tempfile
@@ -52,6 +54,85 @@ class RepairEvidenceTest(unittest.TestCase):
             (run/'diagnostics/case.json').write_bytes(raw+b' ')
             with self.assertRaises(ValueError): check(output)
             self.assertEqual((ws/'app.py').read_text(),'print(1)\n')
+
+    def test_initial_context_is_bounded_and_retains_original_reference_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ws, run = Path(directory)/'work', Path(directory)/'run'; ws.mkdir()
+            (ws/'app.py').write_text('print(1)\n')
+            case = json.loads(case_fixture(ws, run))
+            case['failure']['excerpt'] = '실패 TS2322 ' * 2000
+            case['source']['files']['irrelevant.txt'] = {'sha256': 'a'*64, 'bytes': 999, 'lines': 5}
+            raw = json.dumps(case).encode()
+            context = repair_evidence.context(raw)
+            self.assertLessEqual(len(context['failure']['excerpt'].encode()), repair_evidence.FAILURE_BYTES)
+            self.assertNotIn('content', context['source_candidates'][0])
+            self.assertEqual(context['failed_gate'], 'L2')
+            self.assertEqual(context['stage'], 'image.build')
+            self.assertIn('Dockerfile', context['investigation'][0])
+            self.assertNotEqual(repair_evidence.context(raw, role='adapter')['investigation'], context['investigation'])
+            self.assertNotIn('replay', context)
+            self.assertEqual(context['evidence_binding']['case_sha256'], repair_evidence.sha(raw))
+            self.assertEqual(context['failure_reference']['sha256'], repair_evidence.sha(case['failure']['excerpt'].encode()))
+            self.assertGreater(context['failure']['excerpt_omitted_bytes'], 0)
+
+    def test_context_prioritizes_observed_paths_without_reading_source_contents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ws, run = Path(directory)/'work', Path(directory)/'run'; ws.mkdir()
+            (ws/'package.json').write_text('{"scripts":{"start":"node app.js"}}')
+            (ws/'app.js').write_text('private source body not injected\n')
+            raw = case_fixture(ws, run)
+            case = json.loads(raw)
+            for i in range(100):
+                case['source']['files'][f'asset-{i}.txt'] = {'sha256': 'a'*64, 'bytes': 1, 'lines': 1}
+            case['failure']['locations'] = [{'path': 'app.js', 'line': 1, 'column': 1,
+                'blob_sha256': case['source']['files']['app.js']['sha256'], 'mapping_status': 'exact'}]
+            packet = repair_evidence.context(json.dumps(case).encode(), run, 'adapter')
+            self.assertEqual(packet['task'], 'prepare_container')
+            self.assertEqual([p['path'] for p in packet['source_candidates'][:2]], ['app.js', 'package.json'])
+            self.assertEqual(len(packet['source_candidates']), repair_evidence.MAX_PATHS)
+            self.assertEqual(packet['source_paths_omitted'], 78)
+            self.assertNotIn('private source body', json.dumps(packet))
+
+    def test_context_selects_failed_stage_logs_and_verifies_their_original_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ws, run = Path(directory)/'work', Path(directory)/'run'; ws.mkdir(); run.mkdir()
+            (ws/'app.py').write_text('print(1)\n')
+            source = entries_digest(capture(ws))
+            d = Diagnostics(ws, run, 'run', 'run:1', GATE_ORDER, 'packaging', source); d.capture()
+            for layer, code, text in [('L2', 0, 'build passed'), ('L3', 0, 'server failed\n'*1000)]:
+                d.layer = layer
+                d.process(['docker', 'logs'], subprocess.CompletedProcess([], code, text, ''), time.monotonic())
+            d.finish({'source_sha256': source, 'status': 'FAIL', 'release_eligible': False,
+                'layers': [{'layer': 'L2', 'outcome': 'PASS'}, {'layer': 'L3', 'outcome': 'FAIL'}],
+                'failure': {'layer': 'L3', 'class': 'F4', 'signature': 'runtime', 'excerpt': 'health failed'}})
+            raw = repair_evidence.load(run)
+            packet = repair_evidence.context(raw, run)
+            self.assertEqual([p['id'] for p in packet['logs']], ['process-2'])
+            log = packet['logs'][0]
+            self.assertLessEqual(len(log['text'].encode()), repair_evidence.LOG_BYTES)
+            self.assertGreater(log['omitted_bytes'], 0)
+            self.assertEqual(log['reference']['sha256'], repair_evidence.sha((run/'diagnostics/process-2.log').read_bytes()))
+            (run/'diagnostics/process-2.log').write_text('changed')
+            with self.assertRaisesRegex(ValueError, 'log changed'):
+                repair_evidence.context(raw, run)
+
+    def test_history_separates_model_hypotheses_from_host_outcomes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            for i in range(1, 5):
+                (run/f'fixer-{i}.json').write_text(json.dumps({
+                    'written': ['Dockerfile'], 'output': {'root_cause': 'Maybe a port issue',
+                    'assumptions': ['UNVERIFIED'], 'files': [{'content': 'do not replay'}]}}))
+                gate = run/f'gate-{i}'; gate.mkdir()
+                (gate/'verdict.json').write_text(json.dumps({'status': 'FAIL', 'failure': {'layer': 'L3'}}))
+            history = repair_evidence.previous_attempts(run)
+            self.assertEqual([row['attempt'] for row in history], [2, 3, 4])
+            self.assertEqual(history[-1]['host_gate_result'], {'status': 'FAIL', 'failure_layer': 'L3'})
+            self.assertEqual(history[-1]['model_hypothesis_unverified'], 'Maybe a port issue')
+            self.assertNotIn('do not replay', json.dumps(history))
+            (run/'fixer-4.json').unlink(); (run/'fixer-4.json').symlink_to(run/'fixer-3.json')
+            with self.assertRaisesRegex(ValueError, 'history invalid'):
+                repair_evidence.previous_attempts(run)
 
     def test_all_profiles_bind_exact_plan_and_policy(self):
         from runner.run_agent import record_plan, with_files

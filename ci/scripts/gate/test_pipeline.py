@@ -1,5 +1,6 @@
 """Offline contract tests: no Docker daemon, agent, dependency install or cloud calls."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -151,6 +152,42 @@ class PipelineTest(unittest.TestCase):
         scan.assert_not_called()
         self.assertEqual(runtime.call_args.args[1], {"web": image_id})
         self.assertEqual([r["layer"] for r in verdict["layers"]], list(gate.ORDER))
+
+    def test_build_reuse_requires_same_operation_source_spec_network_and_image(self):
+        spec = {"services": [{"name": "web"}]}
+        image_id = "sha256:" + "a" * 64
+        for changed in (None, 'source', 'spec', 'network', 'operation', 'image', 'missing_image'):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as tmp, \
+                    patch.dict(os.environ, {'RAILSHOT_RUN_ID': 'same-operation'}), \
+                    patch.object(gate, 'l0', return_value=([], [])), \
+                    patch.object(gate, 'l1', return_value=([], spec)), patch.object(gate, 'require_ci_network'), \
+                    patch.object(gate, 'docker_ok', return_value=True), \
+                    patch.object(gate, 'l2', return_value=([], {'web': 'test:one'})) as build, \
+                    patch.object(gate, 'sh', return_value=SimpleNamespace(stdout=image_id, returncode=0)) as shell, \
+                    patch.object(gate, 'l3', return_value=[]) as runtime:
+                ws = workspace(tmp)
+                first = Path(tmp) / 'first'
+                self.assertTrue(gate.run_gate(ws, first, list(gate.ORDER))['ok'])
+                receipt = first / 'build.json'
+                if changed == 'source': (ws / 'app.py').write_text('changed')
+                if changed == 'spec':
+                    record = json.loads(receipt.read_text()); record['binding']['spec'] = {}
+                    receipt.write_text(json.dumps(record))
+                if changed == 'operation': os.environ['RAILSHOT_RUN_ID'] = 'another-operation'
+                if changed in ('image', 'missing_image'):
+                    mismatch = [SimpleNamespace(stdout='sha256:' + 'b' * 64,
+                                                returncode=int(changed == 'missing_image'))]
+                    shell.side_effect = lambda *args, **kwargs: (
+                        mismatch.pop() if mismatch and args[0][:3] == ['docker', 'image', 'inspect']
+                        else SimpleNamespace(stdout=image_id, returncode=0))
+                target = Path(tmp) / 'second'
+                result = gate.run_gate(ws, target, list(gate.ORDER), build_receipt=receipt,
+                                       quality_network='changed' if changed == 'network' else None)
+                self.assertTrue(result['ok'], result)
+                self.assertEqual(build.call_count, 1 if changed is None else 2)
+                self.assertEqual(runtime.call_count, 2)  # Runtime is never a cached PASS.
+                self.assertEqual(json.loads((target / 'L2.json').read_text())['reused'], changed is None)
+                self.assertEqual(json.loads((target / 'L3.json').read_text())['stage'], 'image.runtime')
 
     def test_source_mutation_blocks_release(self):
         with tempfile.TemporaryDirectory() as tmp:

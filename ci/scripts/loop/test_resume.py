@@ -176,6 +176,41 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual('baseline failed: application port is missing', evidence['result'])
         self.assertEqual(error, evidence['error'])
 
+    def test_resume_between_import_and_packaging_does_not_import_again(self):
+        original_step = RunState.step
+        def interrupt(state, name, function, **kwargs):
+            result = original_step(state, name, function, **kwargs)
+            if name == 'intake:0': raise KeyboardInterrupt('completed import')
+            return result
+        with patch.object(RunState, 'step', interrupt), self.assertRaises(KeyboardInterrupt):
+            self.cli()
+        from native_packaging import prepare_packaging
+        with patch.object(loop, 'run_json', side_effect=AssertionError('intake repeated')), \
+                patch('native_packaging.prepare_packaging', wraps=prepare_packaging) as packaging, \
+                self.gate_result({'ok': True, 'release_eligible': True, 'status': 'PASS'}):
+            self.assertEqual(self.cli(True), 0)
+            packaging.assert_called_once()
+
+    def test_preparation_does_not_consume_separate_repair_budget(self):
+        verdicts = [
+            {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1', 'class': 'F5', 'signature': 'missing-spec'}},
+            {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L3', 'class': 'F4', 'signature': 'runtime'}},
+            {'ok': True, 'release_eligible': True, 'status': 'PASS'}]
+        def gate(ws, run, attempt, *args, **kwargs):
+            target = run / f'gate-{attempt}'; target.mkdir()
+            (target / 'verdict.json').write_text(json.dumps(verdicts[attempt]))
+            return verdicts[attempt]
+        record = {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
+                  'meta': {'sdk_status': 'completed', 'duration_ms': 1}}
+        with patch.object(loop, 'gate', side_effect=gate), self.agent_result(record) as agent:
+            self.assertEqual(self.cli(False, '--max-attempts', '1', '--max-packaging-attempts', '1'), 0)
+            self.assertEqual([call.args[0] for call in agent.call_args_list], ['adapter', 'fixer'])
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(evidence['budget_used'], {'packaging': 1, 'repair': 1})
+        with patch.object(loop, 'agent') as agent, patch.object(loop, 'gate') as gate:
+            self.assertEqual(self.cli(True, '--max-attempts', '1', '--max-packaging-attempts', '1'), 0)
+            agent.assert_not_called(); gate.assert_not_called()
+
     def test_resume_after_agent_checkpoint_skips_agent_and_baseline(self):
         fail = {'ok': False, 'status': 'FAIL', 'failure': {'class': 'F1', 'layer': 'L1', 'signature': 'missing'}}
         original_step = RunState.step

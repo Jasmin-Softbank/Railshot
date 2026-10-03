@@ -78,6 +78,7 @@ jobs:
         env:
           PROVIDER: ${{ vars.AGENT_PROVIDER || 'codex' }}
           RAILSHOT_MAX_REPAIR_ATTEMPTS: ${{ vars.RAILSHOT_MAX_REPAIR_ATTEMPTS }}
+          RAILSHOT_MAX_PACKAGING_ATTEMPTS: ${{ vars.RAILSHOT_MAX_PACKAGING_ATTEMPTS }}
           QUALITY_NETWORK: ${{ vars.QUALITY_NETWORK }}
           REPAIR_SCOPE: ${{ vars.REPAIR_SCOPE || 'source' }}
           RAILSHOT_AUTH_MODE: ${{ vars.AGENT_AUTH_MODE }}
@@ -91,10 +92,13 @@ jobs:
           unset RAILSHOT_PROGRESS_TOKEN
           MAX_REPAIR_ATTEMPTS=${RAILSHOT_MAX_REPAIR_ATTEMPTS:-2}
           [[ "$MAX_REPAIR_ATTEMPTS" =~ ^[0-3]$ ]] || { echo "RAILSHOT_MAX_REPAIR_ATTEMPTS must be 0, 1, 2 or 3"; exit 1; }
+          # Explicit opt-in preserves existing total budgets and baseline-only runs.
+          MAX_PACKAGING_ATTEMPTS=${RAILSHOT_MAX_PACKAGING_ATTEMPTS:-0}
+          [[ "$MAX_PACKAGING_ATTEMPTS" =~ ^[01]$ ]] || { echo "RAILSHOT_MAX_PACKAGING_ATTEMPTS must be 0 or 1"; exit 1; }
           [[ "$PROVIDER" = codex || "$PROVIDER" = claude ]] || { echo "AGENT_PROVIDER must be claude or codex"; exit 1; }
           test -f .railshot/ci/scripts/loop/checks_progress.py || { echo 'PLATFORM_REF must support isolated progress publishing'; exit 1; }
           python -c 'import os; from pathlib import Path; p=Path.cwd().resolve()/"apps"/os.environ["TENANT"]/os.environ["APP"]; assert p.is_dir() and p.resolve()==p, "app directory must stay within checkout; symlinks forbidden"'
-          if (( MAX_REPAIR_ATTEMPTS > 0 )); then
+          if (( MAX_REPAIR_ATTEMPTS + MAX_PACKAGING_ATTEMPTS > 0 )); then
             case "$RAILSHOT_AUTH_MODE:$PROVIDER" in
               subscription:codex)
                 test -n "$RAILSHOT_CODEX_HOME" && test -f "$RAILSHOT_CODEX_HOME/auth.json"
@@ -113,7 +117,7 @@ jobs:
           fi
           pip install -q pyyaml jsonschema
           [[ "$REPAIR_SCOPE" = packaging || "$REPAIR_SCOPE" = source ]] || exit 1
-          args=(--max-attempts "$MAX_REPAIR_ATTEMPTS" --repair-scope "$REPAIR_SCOPE" --app-id "$APP")
+          args=(--max-attempts "$MAX_REPAIR_ATTEMPTS" --max-packaging-attempts "$MAX_PACKAGING_ATTEMPTS" --repair-scope "$REPAIR_SCOPE" --app-id "$APP")
           if [ -f "$RUN_DIR/state.sqlite3" ]; then args+=(--resume); fi
           if [ -n "$QUALITY_NETWORK" ]; then args+=(--quality-network "$QUALITY_NETWORK"); fi
           if RAILSHOT_PROGRESS_TOKEN="$progress_token" python .railshot/ci/scripts/loop/loop.py "apps/$TENANT/$APP" "$RUN_DIR" --provider "$PROVIDER" "${args[@]}"; then
@@ -144,6 +148,9 @@ jobs:
           path: |
             ${{ env.RUN_DIR }}/evidence.json
             ${{ env.RUN_DIR }}/gate-*/verdict.json
+            ${{ env.RUN_DIR }}/gate-*/build.json
+            ${{ env.RUN_DIR }}/gate-*/L*.json
+            ${{ env.RUN_DIR }}/gate-*/Q.json
             ${{ env.RUN_DIR }}/gate-*/quality.json
             ${{ env.RUN_DIR }}/gate-*/progress.jsonl
           if-no-files-found: warn
@@ -202,22 +209,17 @@ jobs:
             *) echo "BLOCKED: REGISTRY_VISIBILITY must be private or explicitly public" >&2; exit 1 ;;
           esac
       - name: Set registry credential path
-        run: echo "DOCKER_CONFIG=$RUNNER_TEMP/railshot-registry-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
-      - name: Match the CI containerd image store
         run: |
-          set -euo pipefail
-          docker info --format 'Before: {{.ServerVersion}} {{.Driver}} {{json .DriverStatus}}'
-          sudo python3 - <<'PY'
-          import json
-          from pathlib import Path
-          path = Path('/etc/docker/daemon.json')
-          config = json.loads(path.read_text()) if path.exists() else {}
-          config.setdefault('features', {})['containerd-snapshotter'] = True
-          path.parent.mkdir(parents=True, exist_ok=True)
-          path.write_text(json.dumps(config))
-          PY
-          sudo systemctl restart docker
-          docker info --format '{{json .DriverStatus}}' | grep -q 'io.containerd.snapshotter.v1'
+          umask 077
+          credential_dir="$RUNNER_TEMP/railshot-registry-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -m 700 "$credential_dir"
+          echo "DOCKER_CONFIG=$credential_dir" >> "$GITHUB_ENV"
+      - name: Match the CI containerd image store
+        uses: docker/setup-docker-action@e43656e248c0bd0647d3f5c195d116aacf6fcaf4 # v4
+        with:
+          set-host: true
+          daemon-config: |
+            {"features": {"containerd-snapshotter": true}}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {persist-credentials: false}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -237,14 +239,12 @@ jobs:
           [[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ && "$SOURCE_COMMIT" = "$GITHUB_SHA" && "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ]] || { echo "submitted source commit differs from dispatched checkout"; exit 1; }
           python3 -I -c 'import os,sys; sys.path.insert(0,".railshot/ci/scripts"); from publication import validate_target; validate_target(os.environ)'
       - name: Log in to GHCR
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$GHCR_TOKEN" && test -n "$GITHUB_ACTOR"
-          umask 077
-          mkdir -m 700 "$DOCKER_CONFIG"
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          logout: true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: {python-version: "3.13"}
       - name: Recover the same workflow run's publication history
@@ -295,6 +295,3 @@ jobs:
           name: published-${{ github.run_attempt }}
           path: published
           if-no-files-found: error
-      - name: Remove ephemeral registry credentials
-        if: always()
-        run: 'rm -rf -- "$DOCKER_CONFIG"'

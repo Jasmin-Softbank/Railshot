@@ -11,7 +11,7 @@ Railshot accepts application source and a deployment target. Intake makes a sani
 
 Your structured proposal is validated and applied by the runner. The gates run again; the Agent's report cannot grant a pass. After successful CI, separate steps publish the exact tested image, update deployment configuration, reconcile it onto the selected cluster, and verify the public endpoint. Those downstream steps own cloud resources, routing and deployment status. Do not generate Terraform, cluster manifests, DNS changes, or deployment receipts here.
 
-The task gives your role, attempt budget, scope, inventory, latest verdict, failure, and lessons. Read these to distinguish missing packaging from a build failure, a runtime failure, or a runner/platform problem. Paths, runtime versions, allowed images and supported capabilities come from the supplied contract and source; do not assume them from this overview.
+The task gives your role, attempt budget, scope and a bounded initial evidence packet, with paths to additional inventory, verdict and history. Start with the packet and expand only for missing facts to distinguish missing packaging from a build failure, a runtime failure, or a runner/platform problem. Paths, runtime versions, allowed images and supported capabilities come from the supplied contract and source; do not assume them from this overview.
 
 ## Understand before proposing changes
 

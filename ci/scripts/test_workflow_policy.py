@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 
 class WorkflowPolicyTest(unittest.TestCase):
     def run_loop_policy(self, root, attempts, *, provider='codex', credentials=False,
-                        loop_exit=0, entry=None):
+                        loop_exit=0, entry=None, packaging=None):
         """Run the actual workflow shell; pip and the expensive gate are local stand-ins."""
         step = next(s for s in yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())
                     ['jobs']['loop']['steps'] if s.get('id') == 'loop')
@@ -46,10 +46,12 @@ class WorkflowPolicyTest(unittest.TestCase):
                'RAILSHOT_PROGRESS_TOKEN': ''}
         for key in ('CODEX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_HOME',
                     'RAILSHOT_CODEX_HOME', 'RAILSHOT_AUTH_MODE', 'ANTHROPIC_BASE_URL',
-                    'RAILSHOT_MAX_REPAIR_ATTEMPTS'):
+                    'RAILSHOT_MAX_REPAIR_ATTEMPTS', 'RAILSHOT_MAX_PACKAGING_ATTEMPTS'):
             env.pop(key, None)
         if attempts is not None:
             env['RAILSHOT_MAX_REPAIR_ATTEMPTS'] = attempts
+        if packaging is not None:
+            env['RAILSHOT_MAX_PACKAGING_ATTEMPTS'] = packaging
         if credentials:
             env.update(RAILSHOT_AUTH_MODE='api-key', CODEX_API_KEY='synthetic-codex',
                        ANTHROPIC_API_KEY='synthetic-claude', OPENAI_API_KEY='synthetic-openai',
@@ -262,12 +264,12 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(release['permissions'], {'contents': 'read', 'actions': 'read', 'packages': 'write'})
         self.assertNotIn('REGISTRY_', json.dumps(jobs['loop']))
         login = next(s for s in release['steps'] if s.get('name') == 'Log in to GHCR')
-        self.assertEqual(login['env'], {'GHCR_TOKEN': '${{ secrets.GITHUB_TOKEN }}'})
+        self.assertEqual(login['with'], {'registry': 'ghcr.io', 'username': '${{ github.actor }}', 'password': '${{ secrets.GITHUB_TOKEN }}', 'logout': True})
         self.assertEqual([s['name'] for s in release['steps'] if 'secrets.GITHUB_TOKEN' in json.dumps(s)],
                          ['Log in to GHCR', "Recover the same workflow run's publication history"])
         scripts = '\n'.join(s.get('run', '') for s in release['steps'])
         self.assertIn('"$REGISTRY_PREFIX/${TENANT}-${APP}"', scripts)
-        self.assertIn('docker login ghcr.io', scripts)
+        self.assertTrue(login['uses'].startswith('docker/login-action@'))
         self.assertNotIn('REGISTRY_PASSWORD', json.dumps(release))
         self.assertNotIn('REGISTRY_USERNAME', json.dumps(release))
         self.assertNotIn('GITOPS_TOKEN', json.dumps(release))
@@ -305,33 +307,38 @@ class WorkflowPolicyTest(unittest.TestCase):
         for name in ('GHCR_PULL_USERNAME', 'GHCR_PULL_TOKEN', 'PULL_SECRET_NAMESPACE', 'PULL_SECRET_NAME'):
             self.assertNotEqual(subprocess.run(['bash', '-c', guard['run']], env={**configured, name: ''}, capture_output=True).returncode, 0)
 
-    def test_login_uses_password_stdin_and_private_ephemeral_config(self):
+    def test_standard_docker_actions_keep_private_ephemeral_credentials(self):
         release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
-        login = next(s for s in release['steps'] if s.get('name') == 'Log in to GHCR')
-        cleanup = next(s for s in release['steps'] if s.get('name') == 'Remove ephemeral registry credentials')
-        self.assertEqual(cleanup['if'], 'always()')
-        self.assertNotIn('runner.', json.dumps(release['env']))
-        prepare = next(s for s in release['steps'] if s.get('name') == 'Set registry credential path')
+        steps = release['steps']
+        setup = next(s for s in steps if s.get('name') == 'Match the CI containerd image store')
+        self.assertTrue(setup['uses'].startswith('docker/setup-docker-action@'))
+        self.assertTrue(json.loads(setup['with']['daemon-config'])['features']['containerd-snapshotter'])
+        login = next(s for s in steps if s.get('name') == 'Log in to GHCR')
+        self.assertRegex(login['uses'], r'^docker/login-action@[0-9a-f]{40}$')
+        self.assertIs(login['with']['logout'], True)
+        self.assertIs(setup['with']['set-host'], True)
+        prepare = next(s for s in steps if s.get('name') == 'Set registry credential path')
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            env = {**os.environ, 'CAPTURE': tmp, 'RUNNER_TEMP': tmp,
-                   'GITHUB_ENV': str(root / 'env'), 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
-                   'REGISTRY_PREFIX': 'ghcr.io/owner',
-                   'GITHUB_ACTOR': 'workflow-actor', 'GHCR_TOKEN': 'synthetic-test-secret'}
+            env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_ENV': str(root / 'env'),
+                   'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2'}
             subprocess.run(['bash', '-c', prepare['run']], env=env, check=True)
-            self.assertEqual((root / 'env').read_text(), f'DOCKER_CONFIG={tmp}/railshot-registry-123-2\n')
             env['DOCKER_CONFIG'] = str(root / 'railshot-registry-123-2')
-            # This shell function captures the actual workflow's argv/stdin without contacting a registry.
-            stub = 'docker() { printf "%s\\n" "$@" > "$CAPTURE/argv"; cat > "$CAPTURE/stdin"; }\n'
-            result = subprocess.run(['bash', '-c', stub + login['run']], env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / 'argv').read_text().splitlines(),
-                             ['login', 'ghcr.io', '--username', 'workflow-actor', '--password-stdin'])
-            self.assertEqual((root / 'stdin').read_text(), env['GHCR_TOKEN'])
-            self.assertNotIn(env['GHCR_TOKEN'], result.stdout + result.stderr + (root / 'argv').read_text())
             self.assertEqual(Path(env['DOCKER_CONFIG']).stat().st_mode & 0o777, 0o700)
-            subprocess.run(['bash', '-c', cleanup['run']], env=env, check=True)
-            self.assertFalse(Path(env['DOCKER_CONFIG']).exists())
+
+    def test_packaging_budget_is_explicit_and_can_prepare_without_repairs(self):
+        for packaging in ('0', '1', '2', '-1'):
+            with self.subTest(packaging=packaging), tempfile.TemporaryDirectory() as tmp:
+                result = self.run_loop_policy(tmp, '0', packaging=packaging, credentials=True)
+                if packaging not in ('0', '1'):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(Path(tmp, 'pip.log').exists())
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                invocation = json.loads(Path(tmp, 'invocation.json').read_text())
+                args = invocation['args']
+                self.assertEqual(args[args.index('--max-packaging-attempts') + 1], packaging)
+                self.assertEqual('CODEX_API_KEY' in invocation['model_env'], packaging == '1')
 
     def test_pull_credentials_reach_only_trusted_release_validation(self):
         jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
