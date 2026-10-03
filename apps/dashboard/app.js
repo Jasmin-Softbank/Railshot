@@ -790,7 +790,7 @@ function applicationVersion(label, deployment, uncertain = false) {
 function renderApplications() {
   document.querySelector('#applications-list').replaceChildren(...applications.slice(0, applicationPageEnds[applicationPage] || 0).map((application) => {
     const item = document.createElement('li'), header = element('div', '', 'history-row'), content = document.createElement('div');
-    content.append(element('strong', application.app), element('span', applicationStates[application.status] || '상태 확인 필요', 'state-badge'),
+    content.append(element('strong', application.app), element('span', applicationLabel(application), 'state-badge'),
       element('small', `${environmentLabel(application)} · 앱 ID ${application.id}`, 'history-meta'),
       element('small', `${application.current_deployment_state === 'unverified' ? '마지막 검증 성공 (현재 상태 확인 필요)' : '현재 서비스'}: ${application.current_deployment ? application.current_deployment.id : '검증된 배포 없음'}`, 'history-meta'),
       element('small', `최근 시도: ${application.latest_deployment ? `${executionLabel(application.latest_deployment)} · ${application.latest_deployment.id}` : '없음'}`, 'history-meta'));
@@ -821,7 +821,7 @@ async function loadApplications(more = false) {
       const { data } = await request(`/api/v1/applications?${query}`, {}, controller);
       if (!Array.isArray(data.items) || data.items.some((item) => !resourceId(item.id) || typeof item.app !== 'string')
           || data.next_marker != null && typeof data.next_marker !== 'string') throw new Error('앱 목록을 확인하지 못했습니다.');
-      rows.push(...data.items); pageEnds.push(rows.length); marker = data.next_marker;
+      rows.push(...data.items.filter((app) => app.status !== 'deleted')); pageEnds.push(rows.length); marker = data.next_marker;
       if (rows.length > 1000 || marker && markers.has(marker)) throw new Error('앱 목록 범위를 확인하지 못했습니다.');
       markers.add(marker);
     } while (marker);
@@ -1129,6 +1129,14 @@ const lifecycleDialog = document.querySelector('#lifecycle-dialog');
 const lifecycleNames = { stop: '중지', start: '재개', delete: '삭제' };
 const applicationStates = { ready: '실행 중', stopped: '중지됨', deleted: '삭제됨', unknown: '확인 필요',
   stopping: '중지 중', starting: '재개 중', deleting: '삭제 중', queued: '배포 대기', registering: '배포 준비 중' };
+function applicationLabel(app) {
+  if (app.status !== 'ready') return applicationStates[app.status] || '상태 확인 필요';
+  if (app.current_deployment_state === 'unverified') return '서비스 확인 필요';
+  if (app.current_deployment) return '배포 확인됨';
+  if (['queued', 'running'].includes(app.latest_deployment?.status)) return '배포 중';
+  if (['failed', 'blocked', 'cancelled'].includes(app.latest_deployment?.status)) return '배포 실패';
+  return '미배포';
+}
 let lifecycleDraft, lifecycleBusy = false, lifecycleTimer, lifecycleReadBusy = false;
 let lifecycleOperation = null;
 try { lifecycleOperation = JSON.parse(sessionStorage.getItem('railshot.application-operation') || 'null'); } catch { /* No writes are replayed on reload. */ }
@@ -1148,6 +1156,7 @@ function updateBlocked(app) {
 }
 function applicationAllowed(app, action) {
   return !applicationBusy(app.id)
+    && (action === 'delete' || app.current_deployment_state !== 'not_deployed')
     && (action === 'start' ? app.status === 'stopped' : action === 'stop' ? app.status === 'ready' : ['ready', 'stopped', 'queued', 'running', 'registering'].includes(app.status));
 }
 function applicationButtons(app) {
@@ -1164,7 +1173,7 @@ function renderApplicationActions() {
   const app = applications.find((row) => row.id === current?.application_id);
   for (const id of ['run-application-actions', 'monitor-application-actions']) {
     const holder = document.getElementById(id); holder.replaceChildren();
-    if (app) holder.append(element('strong', `${app.app} · ${applicationStates[app.status] || '상태 확인 필요'}`), applicationButtons(app));
+    if (app) holder.append(element('strong', `${app.app} · ${applicationLabel(app)}`), applicationButtons(app));
     else if (current?.kind === 'deployments') holder.append(element('span', '이 배포의 앱 관리 ID를 최신 목록에서 확인하지 못했습니다. 자동 삭제를 지원하지 않습니다.', 'field-note'));
   }
   const detail = applications.find((row) => row.id === applicationDetail?.id);
@@ -1219,7 +1228,7 @@ async function reviewApplication(id, action) {
 function renderLifecycleOperation() {
   const operation = lifecycleOperation;
   document.querySelector('#lifecycle-operation').hidden = !operation;
-  if (!operation) return;
+  if (!operation) { renderApplications(); return; }
   const title = `${operation.app || '앱'} ${lifecycleNames[operation.action] || '관리'}`;
   document.querySelector('#lifecycle-operation-title').textContent = title;
   document.querySelector('#lifecycle-operation-state').textContent = `${({ queued: '접수됨', running: '실행 중', succeeded: '완료', blocked: '실행 차단', failed: '실행 실패', unknown: '결과 확인 필요' })[operation.status] || '결과 확인 필요'}${operation.stage ? ' · ' + operation.stage : ''}`;
@@ -1258,6 +1267,7 @@ document.querySelector('#lifecycle-form').addEventListener('submit', async (even
   lifecycleBusy = true; lifecycleConfirmState(); renderApplications(); lifecycleDialog.setAttribute('aria-busy', 'true');
   document.querySelector('#lifecycle-cancel').disabled = true;
   let submitted = false;
+  const previousOperation = lifecycleOperation;
   try {
     if (!await loadApplications()) throw new Error('최신 앱 상태를 확인하지 못했습니다. 요청을 보내지 않았습니다.');
     const app = applications.find((row) => row.id === draft.id);
@@ -1273,7 +1283,10 @@ document.querySelector('#lifecycle-form').addEventListener('submit', async (even
     lifecycleOperation = { ...lifecycleOperation, ...data, application_id: app.id, app: app.app, action: draft.action };
     storeLifecycleOperation(); lifecycleDialog.close(); refreshLifecycleOperation();
   } catch (cause) {
-    if (submitted) {
+    if (submitted && cause.status >= 400 && cause.status < 500 && cause.outcomeUnknown === false) {
+      lifecycleOperation = previousOperation; storeLifecycleOperation();
+      lifecycleError(`요청이 접수되지 않았습니다: ${cause.message} 취소 후 새 계획을 확인하세요.`);
+    } else if (submitted) {
       lifecycleOperation.readError = `요청 결과를 확인하지 못했습니다: ${cause.message} 중복 실행을 막기 위해 다시 보내지 않습니다. 운영자에게 실행 확인을 요청하세요.`;
       storeLifecycleOperation(); lifecycleDialog.close();
     } else lifecycleError(cause.message);

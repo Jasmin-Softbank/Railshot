@@ -90,6 +90,9 @@ export async function createProductService({ service, directory, target, provide
   function lifecycleAvailable(state, application, action, cancelling = null) {
     checkUncertainResource(state, application, cancelling);
     if (!['planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle'].every((name) => typeof applicationAdapter?.[name] === 'function')) throw unavailable();
+    const versions = applicationVersions(state, application);
+    if (action !== 'delete' && versions.latest && !versions.current)
+      throw new ProductError(409, 'APPLICATION_NOT_DEPLOYED', '성공한 배포가 없어 중지하거나 재개할 앱이 없습니다. 실패한 앱은 삭제할 수 있습니다.');
     // The normal native plan must prove no registration intent/binding exists before a local tombstone.
     if (action === 'delete' && !cancelling && application.status === 'queued') return;
     if (action === 'delete' && cancelling && ['queued', 'registering'].includes(application.status)
@@ -634,7 +637,7 @@ export async function createProductService({ service, directory, target, provide
       if (!['submitted', 'deployed'].includes(variant)) throw invalid('지원하지 않는 소스 종류입니다.');
       return variant === 'submitted' ? submittedFiles(record) : deployedFiles(record);
     },
-    applications(sessionId = null) { const state = store.read(); return Object.values(state.applications).filter((row) => owns(row, sessionId)).map((row) => publicApplication(state, row)); },
+    applications(sessionId = null) { const state = store.read(); return Object.values(state.applications).filter((row) => owns(row, sessionId) && row.status !== 'deleted').map((row) => publicApplication(state, row)); },
     getApplication(id, sessionId = null) {
       const state = store.read();
       return publicApplication(state, applicationFor(state, id, sessionId));

@@ -89,6 +89,7 @@ test('stop/start/delete consume private plans once, preserve data on stop, and r
     const result = await settled(f.product, first.id, f.owner.id);
     assert.equal(result.status, 'succeeded'); assert.equal(result.stage, 'complete');
     assert.equal(f.product.getApplication(app.id, f.owner.id).status, status);
+    assert.equal(f.product.applications(f.owner.id).length, status === 'deleted' ? 0 : 1);
     assert.equal((await f.product.createApplicationOperation(app.id, body, action, f.owner.id)).id, first.id);
     await assert.rejects(f.product.createApplicationOperation(app.id, { ...body, confirmation: 'another' }, action, f.owner.id), { code: 'IDEMPOTENCY_CONFLICT' });
     if (status !== 'ready') await assert.rejects(f.product.createDeployment(source, 'deploy-' + action, undefined, f.owner.id), { code: 'APPLICATION_STATE_CONFLICT' });
@@ -608,4 +609,26 @@ test('GitHub cancellation binds workflow/source/repository and sends a single ca
     assert.equal(cancels, ['source_mismatch', 'initial_attempt_changed'].includes(mode) ? 0 : 1);
     assert.equal(reads, ['lost_cancel', 'source_mismatch', 'initial_attempt_changed'].includes(mode) ? 1 : 2);
   }
+});
+
+test('failed initial deployment cannot stop or start but remains deletable', async (t) => {
+  const f = await fixture(t);
+  await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction((state) => { state.operations['failed-initial'] = {
+    id: 'failed-initial', kind: 'deployments', application_id: app.id, app: app.app,
+    target_id: app.target_id, session_id: f.owner.id, status: 'failed', stage: 'ci',
+    created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    cd: { state: 'not_started' }, public_http: { state: 'not_run' }
+  }; });
+  await store.close();
+  const product = await createProductService(f.options);
+  try {
+    assert.equal(product.getApplication(app.id, f.owner.id).current_deployment_state, 'not_deployed');
+    for (const action of ['stop', 'start']) await assert.rejects(product.createApplicationPlan(app.id, { action }, f.owner.id), { code: 'APPLICATION_NOT_DEPLOYED' });
+    const plan = await product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id);
+    const operation = await product.createApplicationOperation(app.id, f.input(plan), 'delete-failed', f.owner.id);
+    assert.equal((await settled(product, operation.id, f.owner.id)).status, 'succeeded');
+    assert.deepEqual(product.applications(f.owner.id), []);
+  } finally { await product.close(); }
 });
