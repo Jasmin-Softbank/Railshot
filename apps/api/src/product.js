@@ -633,6 +633,18 @@ export async function createProductService({ service, directory, target, provide
     dashboard: store.dashboard,
     registrations: store.registrations,
     createUpdate, startUpdate,
+    resolveApplication({ environment, provider, app }, sessionId = null) {
+      if (typeof app !== 'string' || !APP_NAME.test(app)) throw invalid('앱 이름을 확인하세요.');
+      const selected = resolveSelection({ deployment_selection: { environment, provider }, source_name: app });
+      const state = store.read();
+      const identity = applicationAdapter?.targets?.[selected.target_id]
+        ? applicationAdapter.describe(selected.target_id, selected.app) : null;
+      const application = identity && state.applications[identity.id];
+      if (application && application.session_id !== sessionId)
+        throw new ProductError(409, 'APPLICATION_OWNERSHIP_CONFLICT', '같은 환경의 이 앱 이름은 다른 세션에 등록되어 있습니다. 다른 이름을 사용하세요.');
+      return { app: selected.app, environment_target_id: selected.target_id,
+        application: application ? publicApplication(state, application) : null };
+    },
     async sourceFiles(id, variant, sessionId = null) {
       const record = find('deployments', id, sessionId);
       if (!['submitted', 'deployed'].includes(variant)) throw invalid('지원하지 않는 소스 종류입니다.');

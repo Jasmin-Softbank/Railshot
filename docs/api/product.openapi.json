@@ -3243,6 +3243,136 @@
           }
         }
       }
+    },
+    "/api/v1/applications/resolve": {
+      "get": {
+        "operationId": "resolveApplication",
+        "summary": "Resolve the submitted app name to an existing session-owned application",
+        "description": "Read-only lookup before source upload. Uses the same provider-to-environment and app identity mapping as new deployment, independent of app inventory pagination. Same-owner successful applications use the existing update preview/start flow. Does not transfer ownership, register an app, or dispatch CI.",
+        "parameters": [
+          {
+            "name": "environment",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "cloud",
+                "onprem"
+              ]
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "aws",
+                "gcp",
+                "openstack",
+                "proxmox"
+              ]
+            }
+          },
+          {
+            "name": "app",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact existing app match in the server-selected environment, or null. Another session owner returns 409 without app details.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "app",
+                    "environment_target_id",
+                    "application"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "app": {
+                      "type": "string"
+                    },
+                    "environment_target_id": {
+                      "type": "string"
+                    },
+                    "application": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Application"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
     }
   },
   "components": {
