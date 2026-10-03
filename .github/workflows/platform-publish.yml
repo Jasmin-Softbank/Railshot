@@ -97,6 +97,8 @@ jobs:
               assert providers.get('aws', os.environ['PLATFORM_TARGET']) == os.environ['PLATFORM_TARGET'], 'provider targets must preserve the default AWS target'
               selections = {'aws': os.environ['PLATFORM_TARGET'], **providers}
               assert len(set(selections.values())) == len(selections), 'provider target IDs must be distinct'
+              if 'ci-runner' in components:
+                  assert re.fullmatch(r'[1-9][0-9]*', os.environ['RELEASE_VERSION']) and re.fullmatch(r'[a-f0-9]{64}', os.environ['RELEASE_HASH']), 'release document version and hash are required'
               if os.environ.get('MULTICLOUD') == 'true':
                   assert {'dashboard', 'api', 'ci-runner'} <= set(components), 'multicloud release requires the central worker images'
                   assert set(selections) == {'aws', 'gcp', 'openstack'}, 'multicloud release requires all three provider bindings'
@@ -256,9 +258,58 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  multicloud:
-    if: ${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' }}
+  ci-runtime:
+    if: ${{ always() && !cancelled() && contains(fromJSON(inputs.components), 'ci-runner') && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' }}
     needs: [deploy, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions: {contents: read, actions: read, id-token: write}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with: {ref: '${{ github.sha }}', persist-credentials: false}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: platform-image-*-${{ github.sha }}
+          path: ${{ runner.temp }}/platform-published
+          merge-multiple: true
+      - name: Assume the fixed release document role
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c
+        with:
+          aws-region: ap-northeast-2
+          role-to-assume: arn:aws:iam::721622471953:role/railshot-multicloud-release
+          role-duration-seconds: 1800
+          role-session-name: railshot-release-${{ github.run_id }}
+          allowed-account-ids: '721622471953'
+      - name: Recheck current source and CI gate immediately before remote release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ inputs.ci_run_id }}
+        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"
+      - name: Promote the tested CI controller runner and workflow source
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          REVISION: ${{ needs.deploy.outputs.revision }}
+          DOCUMENT_VERSION: ${{ vars.RAILSHOT_RELEASE_DOCUMENT_VERSION }}
+          DOCUMENT_HASH: ${{ vars.RAILSHOT_RELEASE_DOCUMENT_SHA256 }}
+        run: |
+          python3 deployment/scripts/remote_release.py --scope ci-runtime \
+            --source-sha "$SOURCE_SHA" --revision "$REVISION" \
+            --publication-run-id "$GITHUB_RUN_ID" --publication-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --artifacts "$RUNNER_TEMP/platform-published" \
+            --document-version "$DOCUMENT_VERSION" --document-hash "$DOCUMENT_HASH" \
+            --receipt "$RUNNER_TEMP/ci-runtime-release.json"
+      - name: Preserve the CI runtime rollout result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-runtime-release-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-runtime-release.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  multicloud:
+    if: ${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' && needs.ci-runtime.result == 'success' }}
+    needs: [deploy, verify, ci-runtime]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions: {contents: read, actions: read, id-token: write}

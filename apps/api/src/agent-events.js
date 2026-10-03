@@ -71,7 +71,9 @@ function validateItem(item) {
 export function readAgentEventCheck(check, binding) {
   const { runId, attempt, source_commit, owner, repo } = binding;
   requireValid(check?.name === agentEventCheckName && check.external_id === `railshot-events:${runId}:${attempt}`
-    && check.head_sha === source_commit && check.details_url === `https://github.com/${owner}/${repo}/actions/runs/${runId}`
+    && check.head_sha === source_commit
+    // GitHub Actions replaces details_url with this check's native URL.
+    && [`https://github.com/${owner}/${repo}/actions/runs/${runId}`, `https://github.com/${owner}/${repo}/runs/${check.id}`].includes(check.details_url)
     && check.app?.slug === 'github-actions' && check.app?.id === 15368 && Number.isSafeInteger(check.id) && check.id > 0
     && ['in_progress', 'completed'].includes(check.status)
     && (check.status === 'completed' ? check.conclusion === 'neutral' : check.conclusion === null), 'producer_mismatch');

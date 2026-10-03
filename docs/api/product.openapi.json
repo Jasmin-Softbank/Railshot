@@ -2217,6 +2217,71 @@
           }
         }
       }
+    },
+    "/api/v1/deployments/{id}/actions": {
+      "post": {
+        "operationId": "resumeDeployment",
+        "summary": "Resume the same published application deployment",
+        "description": "Accept only action=resume and no query parameters. Requires an exact cookie-session owner on both the deployment and ready application, status=unknown, stage=cd or http, and the original published CI evidence. Reject deletion/lifecycle intents, changed app/environment/run/source bindings and another active operation. Atomically admit one worker for this existing deployment. Recheck publication artifact ID, producer attempt and image digests before updating CI evidence. Do not register an app, submit CI, replace source, or clear native journals. Native uncertain writes remain blocked or read-only reconciled according to their existing contracts; resume does not guarantee success. Concurrent duplicate calls return 409. Idempotency-Key is not required; the existing resource ID and recorded state govern admission.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeploymentAction"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "$ref": "#/components/responses/Accepted"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2228,7 +2293,11 @@
             "type": "string"
           },
           "action": {
-            "const": "create"
+            "type": "string",
+            "enum": [
+              "create",
+              "resume"
+            ]
           },
           "status": {
             "const": "accepted"
@@ -2912,6 +2981,16 @@
           "environment_target_id": {
             "type": "string",
             "description": "Existing runtime environment ID; node observations use this ID."
+          },
+          "resume_count": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Explicitly admitted CD resume attempts; absent before the first resume."
+          },
+          "resumed_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Most recent explicit CD resume admission time."
           }
         },
         "required": [
@@ -5255,6 +5334,18 @@
           "next_marker"
         ],
         "additionalProperties": false
+      },
+      "DeploymentAction": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "resume"
+          }
+        }
       }
     },
     "responses": {

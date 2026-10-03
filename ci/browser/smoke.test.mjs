@@ -157,6 +157,46 @@ test('original dashboard cards submit three source types through backend selecti
   }
 });
 
+test('dashboard resumes the same published deployment without another upload or CI dispatch', { timeout: 60000 }, async (t) => {
+  let registrations = 0, submissions = 0, deliveries = 0;
+  const commit = 'a'.repeat(40), image = `ghcr.io/example/calculator@sha256:${'b'.repeat(64)}`;
+  const describe = (environment_target_id, app) => ({ id: 'app-calculator', target_id: 'app-calculator', environment_target_id, app, provider: 'aws' });
+  const applicationAdapter = {
+    targets: { 'runtime-aws': { provider: 'aws', automaticDelivery: true } }, describe,
+    register: async (application) => { registrations++; return { ...application, status: 'ready' }; },
+    deployPublished: async (_application, args) => {
+      deliveries++;
+      assert.equal(args.publication.images.web, image);
+      if (deliveries === 1) return { cd: { state: 'unknown', deployed: false }, public_http: { state: 'not_run' },
+        error: { code: 'APPLICATION_ROUTE_RECONCILE_REQUIRED', outcome_unknown: true } };
+      return { cd: { state: 'deployed', revision: 'c'.repeat(40), deployed: true },
+        public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://calculator.example.test/' } };
+    },
+  };
+  const service = { targetId: 'runtime-aws', targetIds: [], allowTarget: () => {},
+    deploy: async () => { submissions++; return { run_id: 123, source_commit: commit }; },
+    status: async () => ({ state: 'published', publication: { run_id: '123', app: 'calculator', target_id: 'app-calculator',
+      source_commit: commit, artifact_id: 456, producer_attempt: 1, images: { web: image } } }),
+  };
+  const { page, origin, errors, requests } = await start(t, { service, target: { id: 'runtime-aws', provider: 'aws' },
+    applicationAdapter, sourceLoader: async () => ({ files: [{ path: 'app.js', content: Buffer.from('user calculator source') }] }) });
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('URL 확인'));
+  await page.locator('#repository-url').fill('https://github.com/example/calculator');
+  await page.locator('#deploy-form button[type="submit"]').click();
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => !document.querySelector('#resume-run').hidden, undefined, { timeout: 30000 });
+  const identity = await page.locator('#run-meta').innerText();
+  await page.getByRole('button', { name: '게시된 이미지로 배포 이어가기' }).click();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
+  assert.equal(await page.locator('#run-meta').innerText(), identity);
+  assert.equal(await page.locator('#resume-run').isVisible(), false);
+  assert.equal(await page.locator('#application-link').getAttribute('href'), 'https://calculator.example.test/');
+  assert.deepEqual([registrations, submissions, deliveries], [1, 1, 2]);
+  assert.equal(requests.filter((row) => row.method === 'POST' && row.path.endsWith('/actions')).length, 1);
+  assert.deepEqual(errors, []);
+});
+
 test('anonymous browser sessions persist settings and write-only OpenStack connections separately', { timeout: 45000 }, async (t) => {
   const { page, origin, errors } = await start(t, { service: null });
   await page.goto(origin);
