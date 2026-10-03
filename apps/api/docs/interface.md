@@ -28,3 +28,12 @@ attempt 조회는 최대 100 attempt, 각 attempt는 최대 100 jobs다. 그 범
 서버의 GitHub token과 target 설정은 local operator가 관리한다. 앱 업로드는 이 설정을 바꾸지 않는다. Provider application credential, Ansible SSH key, admin kubeconfig를 이 API 요청이나 게시 artifact에 넣지 않는다. Provider·Ansible·CD 실행은 각각 담당 인터페이스이며, 현재 API가 자동 호출하지 않는다.
 
 localhost 기본 bind와 Host/Origin 검사는 그대로다. 운영 ALB backend에 연결하려면 인증과 허용 Host/Origin 설정을 따로 구현해야 한다.
+
+
+### 앱 관리 계획의 비동기 조회
+
+`POST /api/v1/applications/:id/plans`에 `Prefer: respond-async`를 보내면 `202`, `Location`, `Retry-After: 2`와 `status: planning`인 계획을 반환한다. `GET /api/v1/applications/:id/plans/:plan_id`는 같은 세션의 `planning | ready | failed` 상태를 반환한다. 준비된 계획만 기존 승인/실행 요청에 사용할 수 있다. 구 클라이언트의 헤더 없는 POST는 기존 201 응답을 유지한다.
+
+클라우드 조회는 상태 저장의 쓰기 대기열 밖에서 실행한다. 같은 앱·같은 작업의 진행 중 계획은 재사용한다. 서버 재시작은 미완료 계획을 `APPLICATION_PLAN_INTERRUPTED`로 종료하며 자동 실행하지 않는다. 계획 확인 중 앱 상태가 바뀌면 `APPLICATION_PLAN_STALE`로 실패한다. 실패 코드와 안전한 안내만 공개하며 자격정보·실행 경로는 공개하지 않는다. 창 닫기는 화면의 조회만 중단한다. 실제 삭제는 별도 confirmation, delete_data, plan_hash, Idempotency-Key와 기존 소유권·공유 자원 검사를 유지한다.
+
+설계 근거: [RFC 7240 respond-async](https://www.rfc-editor.org/rfc/rfc7240#section-4.1), [RFC 9110 202 Accepted](https://www.rfc-editor.org/rfc/rfc9110#section-15.3.3).

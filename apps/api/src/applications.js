@@ -92,7 +92,7 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
     async planLifecycle(application, { id, action }) {
       const result = await lifecycleRequest(application, { phase: 'plan', action, operation_id: id }, false);
       const expires = Date.parse(result.expires_at);
-      if (result.status !== 'planned') throw fail('APPLICATION_PLAN_BLOCKED');
+      if (result.status !== 'planned') throw fail(/^[A-Z][A-Z0-9_]{1,95}$/.test(result.error?.code) ? result.error.code : 'APPLICATION_PLAN_BLOCKED');
       if (result.plan_id !== id || !lifecycleHash.test(result.plan_hash || '') || !Number.isFinite(expires)
           || expires <= Date.now() || expires > Date.now() + 600_000) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
       return { public: { id, application_id: application.id, action, plan_hash: result.plan_hash,

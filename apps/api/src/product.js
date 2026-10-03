@@ -665,28 +665,72 @@ export async function createProductService({ service, directory, target, provide
       const state = store.read();
       return publicApplication(state, applicationFor(state, id, sessionId));
     },
-    async createApplicationPlan(applicationId, input, sessionId = null) {
+    async createApplicationPlan(applicationId, input, sessionId = null, { asynchronous = false } = {}) {
       if (!exact(input, ['action']) || !lifecycleActions.includes(input.action)) throw invalid('action은 stop, start, delete 중 하나여야 합니다.');
-      return store.transaction(async (state) => {
+      const pending = await store.transaction((state) => {
         const application = applicationFor(state, applicationId, sessionId, true);
         const cancelling = deletionCandidate(state, applicationId, input.action);
         checkFree(state, sessionId, cancelling); lifecycleAvailable(state, application, input.action, cancelling);
-        if (Object.keys(state.plans).length >= maxOperations) throw new ProductError(409, 'CAPACITY_EXCEEDED', '계획 보관 한도에 도달했습니다.');
-        const id = randomUUID(), pending = Boolean(cancelling);
-        if (pending && typeof applicationAdapter.planPendingDeletion !== 'function') throw unavailable();
-        const plan = pending ? await applicationAdapter.planPendingDeletion(application, { id, deploymentId: cancelling })
-          : await applicationAdapter.planLifecycle(application, { id, action: input.action });
-        if (plan.public?.id !== id || plan.public.application_id !== applicationId || plan.public.action !== input.action) throw new EnvironmentError('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
-        if (pending && (plan.private?.deferred !== true || plan.private.deployment_id !== cancelling)) throw new EnvironmentError('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
-        plan.kind = 'application-lifecycle'; plan.session_id = sessionId;
-        if (cancelling) {
-          plan.cancelling_deployment_id = cancelling;
-          plan.public.resources = [...plan.public.resources, { kind: 'DeploymentOperation', name: cancelling }];
+        const existing = Object.values(state.plans).find((plan) => plan.kind === 'application-lifecycle'
+          && plan.session_id === sessionId && plan.public.application_id === applicationId && plan.public.status === 'planning');
+        if (existing) {
+          if (asynchronous && existing.public.action === input.action) return { record: existing, replay: true };
+          throw new ProductError(409, 'APPLICATION_PLAN_IN_PROGRESS', '이미 앱의 실행 계획을 확인하고 있습니다. 기존 계획 상태를 다시 조회하세요.');
         }
-        plan.application_snapshot = applicationSnapshot(state, application, Boolean(plan.private?.deferred));
-        state.plans[id] = plan;
-        return structuredClone(plan.public);
+        if (Object.keys(state.plans).length >= maxOperations) throw new ProductError(409, 'CAPACITY_EXCEEDED', '계획 보관 한도에 도달했습니다.');
+        if (cancelling && typeof applicationAdapter.planPendingDeletion !== 'function') throw unavailable();
+        const id = randomUUID(), now = new Date().toISOString();
+        const record = { kind: 'application-lifecycle', session_id: sessionId,
+          application_snapshot: applicationSnapshot(state, application, Boolean(cancelling)),
+          cancelling_deployment_id: cancelling,
+          public: { id, application_id: applicationId, action: input.action, status: 'planning',
+            created_at: now, updated_at: now, resources: [], retained: [] } };
+        state.plans[id] = record;
+        return { record, application: structuredClone(application), replay: false };
       });
+      const generate = async () => {
+        const { record, application } = pending, { id, action } = record.public;
+        const cancelling = record.cancelling_deployment_id;
+        try {
+          // Cloud inspection must not hold the store's writer queue for up to ten minutes.
+          const plan = cancelling ? await applicationAdapter.planPendingDeletion(application, { id, deploymentId: cancelling })
+            : await applicationAdapter.planLifecycle(application, { id, action });
+          if (plan.public?.id !== id || plan.public.application_id !== applicationId || plan.public.action !== action)
+            throw new EnvironmentError('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
+          if (cancelling && (plan.private?.deferred !== true || plan.private.deployment_id !== cancelling))
+            throw new EnvironmentError('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
+          return await store.transaction((state) => {
+            const current = applicationFor(state, applicationId, sessionId, true);
+            if (record.application_snapshot !== applicationSnapshot(state, current, Boolean(cancelling)))
+              throw new ProductError(409, 'APPLICATION_PLAN_STALE', '계획 확인 중 앱 상태가 바뀌었습니다. 새 계획을 확인하세요.');
+            if (cancelling) plan.public.resources = [...plan.public.resources, { kind: 'DeploymentOperation', name: cancelling }];
+            plan.public = { ...plan.public, status: 'ready', created_at: record.public.created_at, updated_at: new Date().toISOString() };
+            state.plans[id] = { ...record, ...plan };
+            return structuredClone(plan.public);
+          });
+        } catch (cause) {
+          await store.transaction((state) => {
+            const code = cause instanceof ProductError || cause instanceof EnvironmentError ? cause.code : 'APPLICATION_PLAN_UNAVAILABLE';
+            Object.assign(state.plans[id].public, { status: 'failed', updated_at: new Date().toISOString(),
+              error: { code, outcome_unknown: false, message: cause instanceof ProductError ? cause.message
+                : '실행 계획을 확인하지 못했습니다. 앱 변경은 실행되지 않았습니다. 다시 확인하거나 오류 코드를 운영자에게 전달하세요.' } });
+          });
+          if (!asynchronous) throw cause;
+        }
+      };
+      if (asynchronous) {
+        if (!pending.replay) launch(generate); // Failure is persisted for the owning session to inspect.
+        return structuredClone(pending.record.public);
+      }
+      return generate();
+    },
+    getApplicationPlan(applicationId, planId, sessionId = null) {
+      const state = store.read();
+      applicationFor(state, applicationId, sessionId, true);
+      const plan = Object.hasOwn(state.plans, planId) ? state.plans[planId] : null;
+      if (!plan || plan.session_id !== sessionId || plan.kind !== 'application-lifecycle' || plan.public.application_id !== applicationId)
+        throw new ProductError(404, 'NOT_FOUND', '앱 계획을 찾을 수 없습니다.');
+      return structuredClone(plan.public);
     },
     async createApplicationOperation(applicationId, input, key, sessionId = null) {
       idempotencyKey(key);
@@ -709,7 +753,7 @@ export async function createProductService({ service, directory, target, provide
         const plan = Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
         if (!plan || plan.session_id !== sessionId || plan.kind !== 'application-lifecycle' || plan.public.application_id !== applicationId)
           throw new ProductError(404, 'NOT_FOUND', '앱 계획을 찾을 수 없습니다.');
-        if (plan.operation_id || plan.public.action !== input.action || plan.public.plan_hash !== input.plan_hash
+        if ((plan.public.status && plan.public.status !== 'ready') || plan.operation_id || plan.public.action !== input.action || plan.public.plan_hash !== input.plan_hash
             || !Number.isFinite(Date.parse(plan.public.expires_at)) || Date.parse(plan.public.expires_at) <= Date.now()
             || plan.application_snapshot !== applicationSnapshot(state, application, Boolean(plan.private?.deferred))) throw new ProductError(409, 'APPLICATION_PLAN_STALE', '계획이 만료되었거나 앱 상태가 바뀌었습니다. 새 계획을 확인하세요.');
         const cancelling = deletionCandidate(state, applicationId, input.action);
