@@ -259,6 +259,10 @@ export async function createProductService({ service, directory, target, provide
           if (recovery) {
             const recoveringDelivery = ['cd', 'http'].includes(recovery.stage);
             Object.assign(recovery, { status: 'running', error: null, updated_at: iso });
+            // Hold the writer while a read may advance into CD; yield only after
+            // persisting the next read time. HTTP lifecycle writes use this same slot.
+            const phase = recoveringDelivery ? recovery.cd : recovery.ci;
+            if (phase.observation) phase.observation.next_retry_at = null;
             if (recovery.queue) { delete recovery.queue.released_at; delete recovery.queue.release_reason; }
             return { ...structuredClone(recovery), recoveringCI: !recoveringDelivery, recoveringDelivery };
           }

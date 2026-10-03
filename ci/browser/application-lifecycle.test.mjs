@@ -99,7 +99,7 @@ test('a failed lifecycle read retains execution state and retries reads without 
     window.setTimeout = (fn, delay, ...args) => original(fn, delay === 15000 ? 200 : delay, ...args);
   });
   await appAction(page, 'my-app', '중지').click();
-  await page.getByRole('button', { name: '중지', exact: true }).click();
+  await page.getByRole('button', { name: '앱 중지', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('실행 중'));
   let failed = false;
   await page.route('**/api/v1/operations/*', route => {
