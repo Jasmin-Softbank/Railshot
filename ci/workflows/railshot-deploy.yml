@@ -88,7 +88,7 @@ jobs:
           set -euo pipefail
           progress_token="$RAILSHOT_PROGRESS_TOKEN"
           unset RAILSHOT_PROGRESS_TOKEN
-          MAX_REPAIR_ATTEMPTS=${RAILSHOT_MAX_REPAIR_ATTEMPTS:-1}
+          MAX_REPAIR_ATTEMPTS=${RAILSHOT_MAX_REPAIR_ATTEMPTS:-0}
           [[ "$MAX_REPAIR_ATTEMPTS" =~ ^[0-3]$ ]] || { echo "RAILSHOT_MAX_REPAIR_ATTEMPTS must be 0, 1, 2 or 3"; exit 1; }
           [[ "$PROVIDER" = codex || "$PROVIDER" = claude ]] || { echo "AGENT_PROVIDER must be claude or codex"; exit 1; }
           test -f .railshot/ci/scripts/loop/checks_progress.py || { echo 'PLATFORM_REF must support isolated progress publishing'; exit 1; }
