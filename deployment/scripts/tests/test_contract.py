@@ -21,6 +21,28 @@ def fixture(provider='aws'):
 
 
 class ContractTests(unittest.TestCase):
+    def test_sample_supports_observed_nginx_digest_without_provider_branching(self):
+        data = fixture()
+        data['workload']['image'] = 'docker.io/library/nginx@sha256:' + 'a' * 64
+        specs = []
+        for provider in ('aws', 'gcp', 'openstack'):
+            data['provider'] = provider
+            specs.append(parse_input(data).spec)
+        self.assertEqual(specs[0], specs[1])
+        self.assertEqual(specs[1], specs[2])
+        self.assertEqual(render(specs[0])['items'][1]['spec']['template']['spec']['containers'][0]['image'], data['workload']['image'])
+
+    def test_sample_digest_does_not_allow_unrelated_image_or_probe(self):
+        for image, port, path in [('other/nginx@sha256:'+'a'*64, 80, '/'),
+                                 ('nginx@sha256:bad', 80, '/'),
+                                 ('nginx@sha256:'+'a'*64, 8080, '/'),
+                                 ('nginx@sha256:'+'a'*64, 80, '/health')]:
+            with self.subTest(image=image, port=port, path=path):
+                data = fixture()
+                data['workload'].update(image=image, container_port=port, health_path=path)
+                with self.assertRaises(InputError):
+                    parse_input(data)
+
     def test_provider_normalization_has_identical_core_spec_and_manifests(self):
         requests=[parse_input(fixture(provider)) for provider in ('aws','gcp','openstack')]
         self.assertEqual(len({repr(r.spec) for r in requests}),1)

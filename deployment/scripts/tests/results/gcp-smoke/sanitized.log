@@ -1,0 +1,13 @@
+GCP Runtime controller preflight — current run
+[PASS] Correct feature branch; clean starting working tree
+[PASS] Integration normal merge: bc61a5a -> 87095ea; no conflicts
+[BLOCKED] gcloud --version: command not found (exit 127)
+[INFO] Known SDK and default config locations absent
+[INFO] Credential-related environment variables unset; values not read
+[INFO] User confirmed authentication and test node not prepared
+[NOT_RUN] Auth/project/instance discovery and node preflight
+[NOT_RUN] Remote deploy/verify/HTTP/cleanup
+[PASS] Local unit tests: 65 passed
+[SKIP] Local native Argo schema: required manifest not prepared (1 skipped)
+[PASS] Shell syntax: 20 scripts
+[BLOCKED] Real GCP smoke test; no cloud resource changes

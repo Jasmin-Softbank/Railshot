@@ -1,0 +1,112 @@
+{
+  "recorded_at": "2026-10-02T21:24:55.839822+09:00",
+  "repository": "Jasmin-Softbank/Railshot",
+  "origin": "https://github.com/Jasmin-Softbank/Railshot.git",
+  "branch": "feature/deployment-runtime-seungmin",
+  "feature_head": "5f893ff2cf991561698524fe0d76cabcd2c07323",
+  "initial_integration": "b9cfd2969b261d1279aae927bbb5886209716c62",
+  "reviewed_integration": "dec1251af69e8690a0a620243dccf7a42f857aee",
+  "branches": {
+    "origin/feature/dashboard-ui": {
+      "commit": "a173c8df5565f10c3c3c904a85af5cb9b76c16f0",
+      "included_in_integration": true
+    },
+    "origin/feat/observability-ui-20261002": {
+      "commit": "818555906fa38caf9e6ad184e1bc1351e5126025",
+      "included_in_integration": true
+    },
+    "origin/feature/dispatch-actions": {
+      "commit": "d73056261603e1a5e564a7b0f9c85de8f1ca6d23",
+      "included_in_integration": false
+    },
+    "origin/feature/db-app-stack-20261002": {
+      "commit": "9a05ba64e98a3517d6e69e0b67e7356fdeca0b30",
+      "included_in_integration": false
+    },
+    "origin/feat/runtime-target-registration-20261002": {
+      "commit": "ad5b49b78420b9c33fbd670efcbdd7cafc6aed9d",
+      "included_in_integration": true
+    },
+    "origin/feat/runtime-observation-registration-20261002": {
+      "commit": "09a7f792df75a50a09b535f574fd1e963bae081f",
+      "included_in_integration": false
+    },
+    "origin/feat/app-domain-routing-20261002": {
+      "commit": "dbe20af43b76262735f0cd6e5c02b926c3c42ef4",
+      "included_in_integration": false
+    }
+  },
+  "core_contract_equals_integration": true,
+  "integration_merged_into_feature": false,
+  "s1_named_api_or_function_identified": false,
+  "app_flow": "multipart source -> product API -> GitHub workflow dispatch -> CI publication -> CD bridge -> Argo/public HTTP",
+  "environment_flow": "plan/profile -> environment API -> provider descriptor -> Ansible guest/runtime -> shared shell bootstrap -> runtime receipt",
+  "environment_calls_json_deployment_engine": false,
+  "environment_calls_merged_registration_helper": false,
+  "registration_helper_present_in_integration": true,
+  "raw_dashboard_payload_directly_accepted_by_runtime": false,
+  "production_dashboard_adapter_added": false,
+  "runtime_source_changed": false,
+  "fixture_contains_operator_completed_example_not_production_mapper": true,
+  "tests": {
+    "feature_runtime_final": {
+      "total": 59,
+      "pass": 58,
+      "fail": 0,
+      "skip": 1
+    },
+    "integration_runtime_dec1251": {
+      "total": 66,
+      "pass": 65,
+      "fail": 0,
+      "skip": 1
+    },
+    "integration_api": {
+      "pass": 45,
+      "fail": 0,
+      "skip": 0,
+      "mocked_external_executors": true,
+      "tested_snapshot": "b9cfd29",
+      "api_files_identical_at_final_snapshot": true
+    },
+    "integration_ansible": {
+      "total": 57,
+      "pass": 55,
+      "fail": 0,
+      "skip": 2,
+      "tested_snapshot": "b9cfd29",
+      "ansible_files_identical_at_final_snapshot": true
+    },
+    "integration_publication": {
+      "pass": 4,
+      "fail": 0,
+      "skip": 0
+    },
+    "feature_shell_syntax": 20,
+    "integration_shell_syntax": 19,
+    "first_b9cfd29_runtime_attempt": {
+      "total": 58,
+      "pass": 55,
+      "fail": 2,
+      "skip": 1,
+      "issue": "Child python3 did not use validation venv; global yaml missing",
+      "source_fix": false,
+      "path_only_retry_passed": true
+    }
+  },
+  "not_executed": [
+    "live Dashboard browser E2E",
+    "real GitHub dispatch",
+    "other application repository workflow inspection",
+    "cloud provisioning or firewall/IAM/VPC/VM changes",
+    "target node Runtime deployment or cleanup",
+    "live Argo/public exposure"
+  ],
+  "other_ownership_files_modified": false,
+  "main_written": false,
+  "integration_written": false,
+  "other_branches_written": false,
+  "commit_created": false,
+  "push_performed": false,
+  "pr_created_or_merged": false
+}

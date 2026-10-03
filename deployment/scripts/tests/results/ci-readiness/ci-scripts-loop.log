@@ -1,0 +1,45 @@
+test_attempt_sidecar_references_match_renamed_files (test_resume.ResumeTest.test_attempt_sidecar_references_match_renamed_files) ... ok
+test_binding_tracks_gate_and_schema_but_not_test_files (test_resume.ResumeTest.test_binding_tracks_gate_and_schema_but_not_test_files) ... ok
+test_completed_loop_resume_recreates_projection_without_any_call (test_resume.ResumeTest.test_completed_loop_resume_recreates_projection_without_any_call) ... ok
+test_configuration_drift_and_artifact_tamper_are_rejected (test_resume.ResumeTest.test_configuration_drift_and_artifact_tamper_are_rejected) ... ok
+test_definite_start_failure_is_safe_to_resume_but_is_not_checkpointed (test_resume.ResumeTest.test_definite_start_failure_is_safe_to_resume_but_is_not_checkpointed) ... ok
+test_duplicate_active_and_non_resume_runs_are_refused (test_resume.ResumeTest.test_duplicate_active_and_non_resume_runs_are_refused) ... ok
+test_effective_codex_home_drift_is_bound_without_reading_credentials (test_resume.ResumeTest.test_effective_codex_home_drift_is_bound_without_reading_credentials) ... ok
+test_existing_run_root_is_private_before_outputs_and_symlink_is_refused (test_resume.ResumeTest.test_existing_run_root_is_private_before_outputs_and_symlink_is_refused) ... ok
+test_final_runner_event_error_overrides_completed_disk_receipt (test_resume.ResumeTest.test_final_runner_event_error_overrides_completed_disk_receipt) ... ok
+test_finish_rejects_error_outcome_contradiction (test_resume.ResumeTest.test_finish_rejects_error_outcome_contradiction) ... ok
+test_gate_stdout_unknown_cannot_be_promoted_by_stale_pass_receipt (test_resume.ResumeTest.test_gate_stdout_unknown_cannot_be_promoted_by_stale_pass_receipt) ... ok
+test_honest_attempt_sdk_and_model_counts_distinguish_pre_call_failure (test_resume.ResumeTest.test_honest_attempt_sdk_and_model_counts_distinguish_pre_call_failure) ... ok
+test_intake_overlap_and_secret_filename_guard_preserve_original (test_resume.ResumeTest.test_intake_overlap_and_secret_filename_guard_preserve_original) ... ok
+test_known_sdk_failure_preserves_structured_error_in_cli_and_evidence (test_resume.ResumeTest.test_known_sdk_failure_preserves_structured_error_in_cli_and_evidence) ... ok
+test_missing_required_artifact_blocks_checkpoint_and_resume (test_resume.ResumeTest.test_missing_required_artifact_blocks_checkpoint_and_resume) ... ok
+test_missing_sdk_receipt_keeps_safe_stdout_error_and_blocks_unknown (test_resume.ResumeTest.test_missing_sdk_receipt_keeps_safe_stdout_error_and_blocks_unknown) ... ok
+test_native_artifacts_and_git_baseline_are_bound (test_resume.ResumeTest.test_native_artifacts_and_git_baseline_are_bound) ... ok
+test_optional_artifact_can_be_absent_and_final_error_is_in_event (test_resume.ResumeTest.test_optional_artifact_can_be_absent_and_final_error_is_in_event) ... ok
+test_output_limit_is_unknown_and_never_safe_to_retry (test_resume.ResumeTest.test_output_limit_is_unknown_and_never_safe_to_retry) ... ok
+test_partial_gate_claim_cannot_become_release (test_resume.ResumeTest.test_partial_gate_claim_cannot_become_release) ... ok
+test_provider_unknown_receipt_is_blocked_even_with_an_output (test_resume.ResumeTest.test_provider_unknown_receipt_is_blocked_even_with_an_output) ... ok
+test_real_intake_policy_rejection_is_fail_not_execution_unknown (test_resume.ResumeTest.test_real_intake_policy_rejection_is_fail_not_execution_unknown) ... ok
+test_real_process_exit_inflight_is_never_automatically_retried (test_resume.ResumeTest.test_real_process_exit_inflight_is_never_automatically_retried) ... ok
+test_real_process_exit_retains_completed_checkpoint_and_stable_id (test_resume.ResumeTest.test_real_process_exit_retains_completed_checkpoint_and_stable_id) ... ok
+test_resume_after_agent_checkpoint_skips_agent_and_baseline (test_resume.ResumeTest.test_resume_after_agent_checkpoint_skips_agent_and_baseline) ... ok
+test_selected_root_is_forwarded_to_gate_and_changes_resume_binding (test_resume.ResumeTest.test_selected_root_is_forwarded_to_gate_and_changes_resume_binding) ... ok
+test_sql_commit_and_final_artifact_failures_preserve_typed_causes (test_resume.ResumeTest.test_sql_commit_and_final_artifact_failures_preserve_typed_causes) ... ok
+test_timeout_kills_real_descendant_even_when_it_ignores_term (test_resume.ResumeTest.test_timeout_kills_real_descendant_even_when_it_ignores_term) ... ok
+test_timeout_start_and_invalid_output_have_distinct_safe_errors (test_resume.ResumeTest.test_timeout_start_and_invalid_output_have_distinct_safe_errors) ... ok
+test_uncertain_agent_failure_blocks_resume_and_partial_cannot_pass (test_resume.ResumeTest.test_uncertain_agent_failure_blocks_resume_and_partial_cannot_pass) ... ok
+test_workspace_and_lessons_are_preserved_and_tamper_rejected (test_resume.ResumeTest.test_workspace_and_lessons_are_preserved_and_tamper_rejected) ... ok
+
+----------------------------------------------------------------------
+Ran 31 tests in 3.054s
+
+OK
+{"result": "passed", "passed": true, "agent_attempts": 0, "sdk_invocations": 0, "llm_calls": 0, "cost_usd": 0, "cost_status": "no_calls", "duration_s": 0.1, "status": "PASS", "error": null}
+{"result": "passed", "passed": true, "agent_attempts": 0, "sdk_invocations": 0, "llm_calls": 0, "cost_usd": 0, "cost_status": "no_calls", "duration_s": 0.1, "status": "PASS", "error": null}
+{"result": "Source, configuration, request or harness differs from the recorded run.", "passed": false, "status": "BLOCKED", "error": {"code": "STATE_BINDING_MISMATCH", "summary": "Source, configuration, request or harness differs from the recorded run.", "component": "loop.state", "phase": "resume", "outcome": "BLOCKED", "retry_policy": "after_configuration", "side_effect": "none", "causes": []}}
+{"result": "incomplete: partial gates are diagnostic only", "passed": false, "agent_attempts": 0, "sdk_invocations": 0, "llm_calls": 0, "cost_usd": 0, "cost_status": "no_calls", "duration_s": 0.1, "status": "INCOMPLETE", "error": null}
+{"result": "The model operation outcome is unknown; do not automatically invoke it again.", "passed": false, "status": "UNKNOWN", "error": {"code": "SDK_OUTCOME_UNKNOWN", "summary": "The model operation outcome is unknown; do not automatically invoke it again.", "component": "loop", "phase": "agent", "outcome": "UNKNOWN", "retry_policy": "after_reconcile", "side_effect": "unknown", "causes": []}}
+{"result": "A previously started step has no durable completion; reconcile before retry.", "passed": false, "status": "UNKNOWN", "error": {"code": "STATE_INFLIGHT_UNCERTAIN", "summary": "A previously started step has no durable completion; reconcile before retry.", "component": "loop.state", "phase": "agent:1", "outcome": "UNKNOWN", "retry_policy": "after_reconcile", "side_effect": "unknown", "causes": []}}
+{"result": "passed", "passed": true, "agent_attempts": 1, "sdk_invocations": 1, "llm_calls": null, "cost_usd": null, "cost_status": "unknown", "duration_s": 0.1, "status": "PASS", "error": null}
+{"result": "The model operation outcome is unknown; do not automatically invoke it again.", "passed": false, "status": "UNKNOWN", "error": {"code": "SDK_OUTCOME_UNKNOWN", "summary": "The model operation outcome is unknown; do not automatically invoke it again.", "component": "loop", "phase": "agent", "outcome": "UNKNOWN", "retry_policy": "after_reconcile", "side_effect": "unknown", "causes": []}}
+{"result": "A previously started step has no durable completion; reconcile before retry.", "passed": false, "status": "UNKNOWN", "error": {"code": "STATE_INFLIGHT_UNCERTAIN", "summary": "A previously started step has no durable completion; reconcile before retry.", "component": "loop.state", "phase": "agent:1", "outcome": "UNKNOWN", "retry_policy": "after_reconcile", "side_effect": "unknown", "causes": []}}

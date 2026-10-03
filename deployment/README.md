@@ -110,7 +110,7 @@ sudo apt-get install -y python3 curl ca-certificates iproute2 util-linux procps
 | `workload.replicas` | 앱 개수이며 기본 1개, 입력 범위는 1~10개입니다. 여러 앱 복제본은 다중 노드 지원을 의미하지 않습니다. |
 | `workload.container_port` | 앱이 실제로 듣는 포트이며 기본 80입니다. 이미지 내부의 서버 설정을 자동 변경하지 않습니다. |
 | `workload.health_path` | HTTP 정상 응답 확인 주소이며 기본 `/`입니다. query와 fragment는 받지 않습니다. |
-| `workload.sample_content` | 기본 `false`입니다. 샘플 nginx에서는 `true`로 지정하여 `Railshot Runtime OK` 본문을 제공합니다. nginx tag·포트 80·경로 `/` 조합으로 제한합니다. |
+| `workload.sample_content` | 기본 `false`입니다. 샘플 nginx에서는 `true`로 지정하여 `Railshot Runtime OK` 본문을 제공합니다. nginx의 명시적 tag 또는 SHA256 digest(이미지 고정값)·포트 80·경로 `/` 조합으로 제한합니다. |
 | `exposure.type` | `0.1`은 `nodeport`입니다. `0.2`는 기존 공개 URL을 확인하는 선택 `cloudflare-tunnel` hook(연결 지점)도 받습니다. 터널을 자동 설치하지는 않습니다. |
 | `exposure.node_port` | 기본 30080, 범위 30000~32767입니다. |
 | `exposure.verification_url` | 선택 추가 HTTP(S) 검사 URL입니다. **health path를 포함한 전체 주소**를 지정합니다. 자격정보·query·fragment는 거부합니다. |
@@ -195,6 +195,7 @@ K3s 구성 근거는 [K3s configuration](https://docs.k3s.io/installation/config
 - `verify`는 설치나 앱 apply를 수행하지 않습니다. Cilium·Node·Deployment 준비와 입력 대비 실제 이미지·포트·준비 경로·Service 설정을 확인합니다.
 - 임의 앱 이미지에 `curl`이나 `wget`이 있다고 가정하지 않습니다. 일시적인 `curlimages/curl:8.12.1` 검사 Pod를 생성하여 DNS → Service → HTTP 200 경로를 확인하고 삭제합니다. 이 이미지의 다운로드 권한과 검사 Pod의 통신 권한이 필요합니다.
 - 노드에서 InternalIP·NodePort·health path에 HTTP 요청합니다. nginx 샘플 모드에서는 정상 본문도 확인합니다. 일반 앱은 HTTP 200을 필수 확인합니다.
+- 추가 `exposure.verification_url`은 전체 health URL을 그대로 검사합니다. 노드 내부 검증에 성공한 뒤 최대 3초의 별도 외부 접근 진단을 수행하며, 실패해도 Runtime `status=ready`와 node-local endpoint를 유지합니다. 0.2 출력은 `exposure_status.status=degraded`와 `additional_verification`에 이유를 기록합니다. 0.1 출력 필드와 상태 순서는 유지하지만, 외부 URL 실패의 의미는 Runtime 실패에서 외부 의존성 경고로 바뀝니다. offline 경로에서는 외부 요청을 하지 않습니다.
 - 실패 시 대기 이유와 최근 이벤트를 수집하며, Secret·컨테이너 환경변수·kubeconfig 내용은 조회하지 않습니다. 앱 상태를 자동으로 정상이라고 간주하지 않습니다.
 - 자동 rollback(이전 정상 버전 복원)은 구현하지 않습니다. 잘못된 새 이미지가 준비되지 않으면 rollout 실패로 반환하고, 가능하면 기존 준비 Pod가 계속 실행됩니다. 재시도나 이전 이미지 선택은 상위 계층이 결정합니다.
 - Cilium Helm release(설치 상태)가 `pending-install` 등에 남은 경우 자동 복구를 보장하지 않습니다. 전용 노드 재설치 또는 승인된 별도 복구 절차가 필요합니다.
@@ -229,16 +230,21 @@ sudo ./deployment/scripts/cleanup.sh --input input.json --all --disposable-node
 
 ## 자동 테스트
 
+발표에서는 기존 준비 상태를 조회하는 [Runtime 데모 실행 안내](DEMO-RUNBOOK.md)를 사용합니다. `demo_preflight.py`는 공통 JSON 입력을 읽고 최대 25초 동안 조회만 수행합니다. `verify`와 달리 검사 Pod도 만들지 않습니다. `ready`는 노드 내부 Runtime 정상이며 공개 주소 접근 성공을 의미하지 않습니다.
+
 ### 로컬 계약·엔진 검사
 
 ```bash
 python3 -m venv /tmp/railshot-runtime-tests
 /tmp/railshot-runtime-tests/bin/pip install -r deployment/scripts/tests/requirements.txt
-PYTHONDONTWRITEBYTECODE=1 /tmp/railshot-runtime-tests/bin/python \
+kubectl kustomize gitops/argo > /tmp/railshot-runtime-argocd-schema.yaml
+PATH=/tmp/railshot-runtime-tests/bin:$PATH \
+  RAILSHOT_ARGO_SCHEMA_MANIFEST=/tmp/railshot-runtime-argocd-schema.yaml \
+  PYTHONDONTWRITEBYTECODE=1 python \
   -m unittest discover -s deployment/scripts/tests -v
 ```
 
-runtime 자체는 Python 표준 라이브러리만 사용합니다. `jsonschema`는 테스트에서 공개 schema까지 검증하기 위한 개발 의존성입니다. 설치하지 않으면 schema 검사 한 개를 SKIP하고 나머지 계약·엔진 검사를 수행합니다.
+runtime 자체는 Python 표준 라이브러리만 사용합니다. `jsonschema`와 `PyYAML`은 계약·선언 검증용 개발 의존성입니다. 위 CRD 렌더링은 고정된 선언의 schema를 읽기 위한 작업이며 Argo CD를 설치하지 않습니다. 전체 테스트에는 해당 파일과 개발 의존성이 필요합니다. GitHub Actions의 `Deployment Runtime`은 이 검사와 Runtime 파일 문법 검사만 수행하며 실제 CSP(클라우드 제공자) 자원을 만들지 않습니다.
 
 ### 실제 Linux 검사
 

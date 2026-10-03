@@ -1,0 +1,23 @@
+test_cli_exit_codes_and_secret_redaction (test_database.DatabaseOptionsTest.test_cli_exit_codes_and_secret_redaction) ... ok
+test_conflicting_target_and_invalid_secret_reference_are_rejected (test_database.DatabaseOptionsTest.test_conflicting_target_and_invalid_secret_reference_are_rejected) ... ok
+test_conflicts_and_invented_evidence_do_not_choose_engine (test_database.DatabaseOptionsTest.test_conflicts_and_invented_evidence_do_not_choose_engine) ... ok
+test_existing_mysql_is_not_changed_by_framework_or_default (test_database.DatabaseOptionsTest.test_existing_mysql_is_not_changed_by_framework_or_default) ... ok
+test_invalid_scalar_types_fail_closed (test_database.DatabaseOptionsTest.test_invalid_scalar_types_fail_closed) ... ok
+test_local_sqlite_keeps_engine_and_exposes_missing_persistence (test_database.DatabaseOptionsTest.test_local_sqlite_keeps_engine_and_exposes_missing_persistence) ... ok
+test_managed_connection_uses_only_secret_reference (test_database.DatabaseOptionsTest.test_managed_connection_uses_only_secret_reference) ... ok
+test_prisma_commands_follow_evidenced_major_version (test_database.DatabaseOptionsTest.test_prisma_commands_follow_evidenced_major_version) ... ok
+test_requested_engine_conversion_is_a_plan_not_execution (test_database.DatabaseOptionsTest.test_requested_engine_conversion_is_a_plan_not_execution) ... ok
+test_sqlite_scale_out_is_blocked_even_if_only_maximum_is_two (test_database.DatabaseOptionsTest.test_sqlite_scale_out_is_blocked_even_if_only_maximum_is_two) ... ok
+test_stack_without_database_evidence_is_not_a_recommendation (test_database.DatabaseOptionsTest.test_stack_without_database_evidence_is_not_a_recommendation) ... ok
+test_conflicting_engines_do_not_choose_a_default (test_database.WorkspaceDBScanTest.test_conflicting_engines_do_not_choose_a_default) ... ok
+test_django_config_and_docstring_false_positive (test_database.WorkspaceDBScanTest.test_django_config_and_docstring_false_positive) ... ok
+test_no_signal_is_unknown_and_tests_are_not_production_evidence (test_database.WorkspaceDBScanTest.test_no_signal_is_unknown_and_tests_are_not_production_evidence) ... ok
+test_prisma_datasource_is_evidence_but_dependency_alone_is_not (test_database.WorkspaceDBScanTest.test_prisma_datasource_is_evidence_but_dependency_alone_is_not) ... ok
+test_source_connection_values_and_env_credentials_are_never_returned (test_database.WorkspaceDBScanTest.test_source_connection_values_and_env_credentials_are_never_returned) ... ok
+test_sqlite_source_and_header_are_hash_bound_and_not_opened (test_database.WorkspaceDBScanTest.test_sqlite_source_and_header_are_hash_bound_and_not_opened) ... ok
+test_symlink_fifo_large_file_and_limit_are_partial_not_silent_success (test_database.WorkspaceDBScanTest.test_symlink_fifo_large_file_and_limit_are_partial_not_silent_success) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.170s
+
+OK

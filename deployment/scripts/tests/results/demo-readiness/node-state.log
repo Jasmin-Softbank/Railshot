@@ -1,0 +1,15 @@
+NAME                              STATUS   ROLES           AGE   VERSION         INTERNAL-IP    EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION      CONTAINER-RUNTIME
+node/lima-railshot-runtime-test   Ready    control-plane   15h   v1.34.11+k3s1   192.168.5.15   <none>        Ubuntu 24.04.4 LTS   6.8.0-134-generic   containerd://2.2.7-k3s1
+
+NAMESPACE       NAME                                     READY   STATUS    RESTARTS     AGE   IP             NODE                         NOMINATED NODE   READINESS GATES
+kube-system     pod/cilium-envoy-9gz9p                   1/1     Running   3 (8h ago)   15h   192.168.5.15   lima-railshot-runtime-test   <none>           <none>
+kube-system     pod/cilium-operator-7dcb85f7-dwnpq       1/1     Running   4 (8h ago)   15h   192.168.5.15   lima-railshot-runtime-test   <none>           <none>
+kube-system     pod/cilium-sd26k                         1/1     Running   3 (8h ago)   15h   192.168.5.15   lima-railshot-runtime-test   <none>           <none>
+kube-system     pod/coredns-fddcf74bb-9sh2b              1/1     Running   3 (8h ago)   15h   10.42.0.184    lima-railshot-runtime-test   <none>           <none>
+railshot-demo   pod/railshot-workload-56b77967cd-jld8v   1/1     Running   3 (8h ago)   15h   10.42.0.251    lima-railshot-runtime-test   <none>           <none>
+
+NAMESPACE       NAME                        TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)                  AGE   SELECTOR
+default         service/kubernetes          ClusterIP   10.43.0.1    <none>        443/TCP                  15h   <none>
+kube-system     service/cilium-envoy        ClusterIP   None         <none>        9964/TCP                 15h   k8s-app=cilium-envoy
+kube-system     service/kube-dns            ClusterIP   10.43.0.10   <none>        53/UDP,53/TCP,9153/TCP   15h   k8s-app=kube-dns
+railshot-demo   service/railshot-workload   NodePort    10.43.9.70   <none>        80:30080/TCP             15h   railshot.io/app=railshot-workload

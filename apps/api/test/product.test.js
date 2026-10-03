@@ -10,6 +10,7 @@ import { createProductStore } from '../src/product-store.js';
 import { createAppServer } from '../src/server.js';
 import { createApplicationAdapter } from '../src/applications.js';
 import { EnvironmentError } from '../src/environments.js';
+import { fetchPublicGithubSource } from '../src/public-github.js';
 
 function diskState(directory) {
   const db = new DatabaseSync(join(directory, 'dashboard.sqlite3'), { readOnly: true });
@@ -39,6 +40,31 @@ async function settle(get, predicate = (record) => !['queued', 'running'].includ
   do { record = await get(); if (predicate(record)) return record; await pause(5); } while (performance.now() < deadline);
   assert.fail(`Operation did not settle: status=${record?.status}, stage=${record?.stage}`);
 }
+
+test('source lookup failure is a traceable 422, not a missing deployment API, and reserves nothing', async (t) => {
+  const f = await fixture(t), logs = [];
+  t.mock.method(console, 'error', (line) => logs.push(JSON.parse(line)));
+  const sourceLoader = (url) => fetchPublicGithubSource(url, async () => Response.json({ message: 'Not Found' }, { status: 404 }));
+  const server = createAppServer({ product: f.product, service: f.service, sourceLoader });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const form = new FormData();
+  for (const [key, value] of Object.entries({ app: 'demo-app', target_id: 'demo', repository_url: 'https://github.com/example/missing' })) form.set(key, value);
+  const response = await fetch(`${base}/api/v1/deployments`, { method: 'POST', headers: { 'Idempotency-Key': 'missing-source' }, body: form });
+  const body = await response.json();
+  assert.equal(response.status, 422);
+  assert.equal(body.error.code, 'SOURCE_NOT_FOUND');
+  assert.match(body.error.message, /ZIP·폴더/);
+  assert.equal(body.error.request_id, response.headers.get('x-request-id'));
+  assert.equal(body.error.outcome_unknown, false);
+  assert.deepEqual(logs[0], { event: 'api.request_failed', request_id: body.error.request_id, status: 422, code: 'SOURCE_NOT_FOUND' });
+  assert.deepEqual(diskState(f.directory).operations, {});
+  assert.equal(f.dispatches(), 0);
+  const absent = await fetch(`${base}/api/v1/no-such-route`);
+  assert.equal(absent.status, 404);
+  assert.equal((await absent.json()).error.code, 'NOT_FOUND');
+});
 
 test('snapshot and intent are durable before one dispatch; replay returns the same completed deployment', async (t) => {
   let f;

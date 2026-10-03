@@ -79,7 +79,7 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertIs(dispatch["deploy"]["default"], False)
         self.assertEqual(self.workflow["concurrency"], {"group": "platform-release", "cancel-in-progress": False})
         deploy = self.workflow["jobs"]["deploy"]
-        self.assertEqual(deploy["if"], "${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.admission.result == 'success' && needs.publish.result == 'success' }}")
+        self.assertEqual(deploy["if"], "${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.admission.result == 'success' && needs.admission.outputs.admitted == 'true' && needs.publish.result == 'success' }}")
         self.assertIn("publish", deploy["needs"])
         self.assertEqual(deploy["permissions"], {"contents": "write", "actions": "read"})
         for job, name in [('admission', 'Validate publication and deployment inputs'),
@@ -99,7 +99,7 @@ class PlatformReleaseTests(unittest.TestCase):
                 self.assertNotEqual(self.run_step("admission", name, overrides).returncode, 0)
         self.assertIsNone(self.remote_revision())
         verification = self.workflow["jobs"]["verify"]
-        self.assertEqual(verification['if'], "${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.deploy.result == 'success' }}")
+        self.assertEqual(verification['if'], "${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.deploy.outputs.admitted == 'true' }}")
         self.assertEqual(verification["needs"], "deploy")
         self.assertEqual(verification["permissions"], {"contents": "read", "id-token": "write"})
 
@@ -108,11 +108,11 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertIs(triggers['workflow_call']['inputs']['skip_build']['default'], False)
         self.assertNotIn('skip_build', triggers['workflow_dispatch']['inputs'])
         jobs = self.workflow['jobs']
-        self.assertEqual(jobs['build']['if'], '${{ !inputs.skip_build }}')
+        self.assertEqual(jobs['build']['if'], "${{ !inputs.skip_build && (!inputs.deploy || needs.admission.outputs.admitted == 'true') }}")
         self.assertEqual(jobs['publish']['needs'], ['admission', 'build'])
-        self.assertEqual(jobs['publish']['if'], "${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}")
+        self.assertEqual(jobs['publish']['if'], "${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (!inputs.deploy || needs.admission.outputs.admitted == 'true') && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}")
         self.assertEqual(jobs['multicloud']['needs'], ['deploy', 'verify', 'ci-runtime'])
-        self.assertEqual(jobs['multicloud']['if'], "${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' && needs.ci-runtime.result == 'success' }}")
+        self.assertEqual(jobs['multicloud']['if'], "${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' && needs.ci-runtime.result == 'success' && needs.ci-runtime.outputs.admitted == 'true' }}")
         admission = next(step for step in jobs['admission']['steps'] if step.get('name') == 'Require the exact trusted source CI gate before deployment')
         self.assertEqual(admission['env']['CI_RUN_ID'], '${{ inputs.ci_run_id }}')
         self.assertIn('release_admission.py', admission['run'])
@@ -192,7 +192,9 @@ class PlatformReleaseTests(unittest.TestCase):
             index = next(i for i, step in enumerate(steps) if step.get('name') == mutation)
             guard = steps[index - 1]
             self.assertEqual(guard['env'], {'GITHUB_TOKEN': '${{ github.token }}', 'CI_RUN_ID': '${{ inputs.ci_run_id }}'})
-            self.assertEqual(guard['run'], 'python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"')
+            self.assertEqual(guard['run'], 'python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID" --skip-superseded')
+            self.assertEqual(guard['id'], 'source')
+            self.assertEqual(steps[index]['if'], "steps.source.outputs.admitted == 'true'")
             self.assertNotIn('continue-on-error', guard)
             self.assertEqual(self.workflow['jobs'][job]['permissions']['actions'], 'read')
         remote = next(step for step in self.workflow['jobs']['multicloud']['steps']
