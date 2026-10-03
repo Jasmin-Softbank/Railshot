@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createAgent } from '../src/agent.js';
 import { connectTools } from '../src/mcp-client.js';
 import { createAgentServer } from '../src/server.js';
@@ -39,27 +42,48 @@ test('agent queries MCP read tool and requires an exact approval before deployme
   await assert.rejects(agent.approve(`${proposed.approval_token}x`), { status: 422 });
 });
 
-test('MCP stdio tools call the product API with server side token and preserve accepted status', async (t) => {
+test('MCP stdio persists the session from deployment acceptance across process restarts', async (t) => {
   const received = [];
+  const cookie = `railshot_session=${'s'.repeat(43)}`;
+  const sessionDirectory = await mkdtemp(join(tmpdir(), 'railshot-agent-session-'));
+  t.after(() => rm(sessionDirectory, { recursive: true, force: true }));
   const api = createServer(async (request, response) => {
-    received.push({ method: request.method, url: request.url, authorization: request.headers.authorization, key: request.headers['idempotency-key'] });
+    received.push({ method: request.method, url: request.url, authorization: request.headers.authorization,
+      cookie: request.headers.cookie, key: request.headers['idempotency-key'] });
+    if (!request.headers.cookie) response.setHeader('set-cookie', `${cookie}; Path=/; HttpOnly; SameSite=Strict`);
     if (request.url === '/api/v1/targets') response.end(JSON.stringify({ items: [{ id: 'demo' }], next_marker: null }));
     else if (request.url === '/api/v1/deployments') {
       for await (const _ of request) { /* consume form */ }
-      response.writeHead(202, { 'content-type': 'application/json' }).end(JSON.stringify({ resource_id: 'dep-1', status: 'accepted' }));
+      response.writeHead(202, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ resource_id: 'dep-1', status: 'accepted' }));
+    } else if (request.url === '/api/v1/deployments/dep-1') {
+      response.writeHead(request.headers.cookie === cookie ? 200 : 404, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ id: 'dep-1', status: 'succeeded', url: 'https://demo.example' }));
     } else response.writeHead(404).end('{}');
   });
   api.listen(0, '127.0.0.1'); await once(api, 'listening');
   t.after(() => api.close());
-  const client = await connectTools({ env: { ...process.env, RAILSHOT_API_URL: `http://127.0.0.1:${api.address().port}`,
-    RAILSHOT_API_TOKEN: 'a'.repeat(32), RAILSHOT_API_TOKEN_FILE: undefined } });
+  const env = { ...process.env, RAILSHOT_API_URL: `http://127.0.0.1:${api.address().port}`,
+    RAILSHOT_API_TOKEN: 'a'.repeat(32), RAILSHOT_API_TOKEN_FILE: undefined,
+    RAILSHOT_AGENT_SESSION_DIR: sessionDirectory };
+  const client = await connectTools({ env });
   t.after(() => client.close());
-  assert.deepEqual((await client.call('list_targets', {})).items, [{ id: 'demo' }]);
   const submitted = await client.call('deploy_repository', args);
   assert.equal(submitted.status, 'accepted');
-  assert.deepEqual(received.map((item) => item.url), ['/api/v1/targets', '/api/v1/deployments']);
-  assert.equal(received[1].authorization, `Bearer ${'a'.repeat(32)}`);
-  assert.equal(received[1].key, 'same-intent');
+  client.close();
+  const restarted = await connectTools({ env });
+  t.after(() => restarted.close());
+  assert.equal((await restarted.call('get_deployment', { deployment_id: 'dep-1' })).url, 'https://demo.example');
+  assert.deepEqual((await restarted.call('list_targets', {})).items, [{ id: 'demo' }]);
+  assert.deepEqual(received.map((item) => item.url), ['/api/v1/deployments', '/api/v1/deployments/dep-1', '/api/v1/targets']);
+  assert.equal(received[0].cookie, undefined);
+  assert.equal(received[1].cookie, cookie);
+  assert.equal(received[2].cookie, cookie);
+  assert.equal(received[0].authorization, `Bearer ${'a'.repeat(32)}`);
+  assert.equal(received[0].key, 'same-intent');
+  const files = await readdir(sessionDirectory);
+  assert.equal(files.length, 1);
+  assert.equal((await stat(join(sessionDirectory, files[0]))).mode & 0o777, 0o600);
 });
 
 test('HTTP service rejects unauthenticated calls and exposes approval flow', async (t) => {

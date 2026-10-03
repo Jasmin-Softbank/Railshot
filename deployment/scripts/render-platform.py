@@ -34,8 +34,14 @@ def render(images, target_id, dashboard_node_port=None, provider_targets=None, p
         selections[provider] = selected
     for name in ("dashboard", "api"):
         image_ref(images, name)
+    if "mcp" in images:
+        image_ref(images, "mcp")
     source = Path(__file__).resolve().parents[1] / "manifests/platform.yaml"
     documents = list(yaml.safe_load_all(source.read_text()))
+    if "mcp" not in images:
+        documents = [document for document in documents if not
+                     (document['metadata']['name'] == 'railshot-mcp' and document['kind'] == 'Deployment')
+                     and document['metadata']['name'] != 'railshot-mcp-private']
     documents = [document for document in documents if document['kind'] != 'Job' or prepare_api_rollout]
     for document in documents:
         if document['kind'] == 'Job':

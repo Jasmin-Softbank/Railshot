@@ -134,6 +134,11 @@ class PlatformTests(unittest.TestCase):
     def test_pinned_images_private_api_and_configured_readiness(self):
         images = {name: f"ghcr.io/jasmin-softbank/railshot-{name}@sha256:" + "a" * 64 for name in ("dashboard", "api")}
         output = module.render(images, "k3s-aws")
+        self.assertFalse(any(item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-mcp' for item in output['items']))
+        self.assertTrue(any(item['kind'] == 'Service' and item['metadata']['name'] == 'railshot-mcp' for item in output['items']))
+        with_mcp = module.render({**images, 'mcp': f"ghcr.io/jasmin-softbank/railshot-mcp@sha256:{'b' * 64}"}, "k3s-aws")
+        mcp = next(item for item in with_mcp['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-mcp')
+        self.assertEqual(mcp['spec']['template']['spec']['containers'][0]['image'], f"ghcr.io/jasmin-softbank/railshot-mcp@sha256:{'b' * 64}")
         api = next(item for item in output["items"] if item["kind"] == "Deployment" and item["metadata"]["name"] == "railshot-api")
         container = api["spec"]["template"]["spec"]["containers"][0]
         for item in output['items']:

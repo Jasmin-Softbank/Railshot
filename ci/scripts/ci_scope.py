@@ -86,15 +86,19 @@ def container_components(paths):
         if api_native_dependency(path):
             components.add('api')
         if path.startswith(('.github/', 'contracts/')) or path in {
-                '.dockerignore', 'ci/scripts/container-smoke.py'}:
+                '.dockerignore', 'ci/scripts/container-smoke.py', 'ci/scripts/ci_scope.py'}:
             components.update(COMPONENTS)
         elif path in {'package.json', 'package-lock.json', 'apps/api/package.json',
                       'apps/dashboard/package.json'}:
             components.update(('dashboard', 'api', 'mcp'))
+        elif path == 'apps/api/Dockerfile':
+            components.update(('api', 'mcp'))
+        elif path == 'apps/agent/package.json' or path.startswith(('apps/agent/src/', 'apps/agent/test/')):
+            components.add('mcp')
         elif path.startswith('apps/dashboard/'):
             components.add('dashboard')  # Production assets are served by the dashboard gateway.
         elif path.startswith('apps/api/'):
-            components.update(('api', 'mcp'))
+            components.add('api')
         elif path.startswith(('ci/scripts/', 'ci/workflows/')) or path == 'ci/runner-compose.yml':
             components.add('ci-runner')  # The runner image COPYs all CI scripts.
         elif path == 'deployment/manifests/build-runner.yaml' or path == 'infrastructure/ansible/ci.yml':
@@ -137,6 +141,8 @@ def select(paths):
             continue  # Container job below checks all affected image contexts.
         elif path.startswith(('apps/api/', 'apps/dashboard/', 'ci/browser/')):
             selected.add('api-browser')
+        elif path.startswith(('apps/agent/src/', 'apps/agent/test/')) or path == 'apps/agent/package.json':
+            pass  # The MCP container job runs the agent tests.
         elif path.startswith(('apps/agent/', 'deployment/bootstrap/client_setup/',
                               'deployment/bootstrap/templates/')) or path in {
                 'deployment/bootstrap/install.sh', 'deployment/bootstrap/uninstall.sh',
@@ -230,7 +236,7 @@ def previous_release_complete(before):
                          'Promote the tested CI controller runner and workflow source' in successful))
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
         pass
-    # No new admission gate: uncertain history just builds the three deployed images.
+    # No new admission gate: uncertain history builds every platform image.
     return False
 
 
@@ -274,9 +280,6 @@ def main():
         if not previous_release_complete(event.get('before')):
             print('Previous release incomplete or unconfirmed; include platform and CI runner updates.')
             components = set(COMPONENTS)
-        # Only images used by the platform trigger its rollout. Node/LB maintenance
-        # is separate; it must not gate an API or dashboard deployment.
-        components.discard('mcp')
         if 'ci-runner' in components:
             components.update(('dashboard', 'api'))
         release = bool(components)
