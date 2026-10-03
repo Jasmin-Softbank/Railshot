@@ -80,6 +80,7 @@ let timer;
 let pollController;
 let lastReadAt = null;
 let observationError = false;
+let ciSnapshot = null, ciReadError = false;
 let logSnapshot = null, logController;
 let eventSnapshot = null, eventController;
 
@@ -379,6 +380,7 @@ async function startUpdate(draft) {
   if (id !== draft.preview.id || location !== `/api/v1/deployments/${encodeURIComponent(id)}`
       || !['accepted', 'queued', 'running', ...terminal].includes(data.status) || data.status === 'preview') throw new Error('업데이트 실행 응답을 확인하지 못했습니다.');
   current = { ...draft.preview, ...data, id, kind: 'deployments', status: data.status === 'accepted' ? 'queued' : data.status };
+  ciSnapshot = null; ciReadError = false;
   lastReadAt = null; observationError = false; remember(); renderRun();
   reviewed = null; updatePreviewRequest = null; deployButton.disabled = true;
   document.querySelector('#review-panel').hidden = true;
@@ -482,6 +484,49 @@ function taskList(tasks = []) {
   for (const task of tasks) list.append(element('li', `${task.number}. ${task.name}: ${task.conclusion || task.status}`));
   return list;
 }
+const stageStatus = { queued: '대기', pending: '대기', waiting: '대기', in_progress: '진행 중', running: '진행 중',
+  completed: '결과 확인 중', success: '성공', succeeded: '성공', failure: '실패', failed: '실패',
+  cancelled: '취소', timed_out: '시간 초과', skipped: '건너뜀', blocked: '차단', unknown: '결과 확인 필요' };
+function stageResult(value) { return stageStatus[value] || (value ? '결과 확인 필요' : '대기'); }
+function stageTone(value) {
+  if (['success', 'succeeded', 'published'].includes(value)) return 'success';
+  if (['failure', 'failed', 'cancelled', 'timed_out', 'blocked', 'publication_unverified'].includes(value)) return 'failed';
+  if (['in_progress', 'running'].includes(value)) return 'running';
+  return 'pending';
+}
+function renderMonitorSteps() {
+  const runId = current.ci?.run_id || (current.kind === 'builds' ? current.id : null);
+  const direct = current.kind === 'builds' ? current
+    : ciSnapshot?.deployment_id === current.id && String(ciSnapshot.run_id) === String(runId) ? ciSnapshot : null;
+  const steps = direct?.steps || current.ci?.steps || [];
+  const loop = steps.find((step) => step.key === 'loop');
+  const release = steps.find((step) => step.key === 'release');
+  const ciState = direct?.status || current.ci?.state;
+  const checkedAt = current.kind === 'builds' ? lastReadAt : direct?.read_at;
+  document.querySelector('#monitor-ci-status').textContent = runId
+    ? `GitHub Actions #${runId} · ${ciReadError || observationError ? '조회 실패, 마지막 기록 표시' : checkedAt ? `확인 ${new Date(checkedAt).toLocaleTimeString('ko-KR')}` : '서버 기록 표시'}`
+    : 'GitHub Actions 실행 대기';
+  const releaseResult = ciState === 'published' ? '게시 확인' : ciState === 'publication_unverified' ? '게시 검증 실패'
+    : release?.conclusion === 'success' ? 'Actions 성공 · 게시 확인 대기' : stageResult(release?.conclusion || release?.status);
+  const entries = [
+    ['소스 접수', '접수 완료', 'success'],
+    ['앱 검사 및 수정', stageResult(loop?.conclusion || loop?.status), stageTone(loop?.conclusion || loop?.status), loop],
+    ['검증 이미지 게시', releaseResult, stageTone(ciState === 'published' ? 'published' : ciState === 'publication_unverified' ? ciState : release?.conclusion || release?.status), release],
+    ['GitOps 반영', current.cd?.deployed === true ? '적용 확인' : stageResult(current.cd?.state), stageTone(current.cd?.deployed === true ? 'succeeded' : current.cd?.state)],
+    ['URL 및 앱 상태 확인', current.public_http?.state === 'succeeded' && current.public_http.verified_at ? '외부 접속 확인' : stageResult(current.public_http?.state),
+      stageTone(current.public_http?.state === 'succeeded' && current.public_http.verified_at ? 'succeeded' : current.public_http?.state)],
+  ];
+  document.querySelector('#monitor-steps').replaceChildren(...entries.map(([name, result, tone, job]) => {
+    const item = document.createElement('li');
+    item.dataset.state = tone;
+    item.append(element('span', name, 'stage-name'), element('strong', result, 'stage-result'));
+    const tasks = job?.tasks || [];
+    const active = tasks.find((task) => ['failure', 'cancelled', 'timed_out'].includes(task.conclusion))
+      || tasks.find((task) => task.status === 'in_progress') || tasks.filter((task) => task.status === 'completed').at(-1);
+    if (active) item.append(element('small', `Actions 단계 ${active.number}: ${active.name} · ${stageResult(active.conclusion || active.status)}`, 'stage-detail'));
+    return item;
+  }));
+}
 function renderRun() {
   renderApplicationActions();
   document.querySelector('#run-panel').hidden = false;
@@ -524,14 +569,7 @@ function renderRun() {
     `이미지: ${Object.values(current.ci?.images || current.publication?.images || {}).join(', ') || '게시 대기'}`,
     `배포 revision: ${current.cd?.revision || '대기'}`].join('\n');
   document.querySelector('#run-binding').textContent = binding;
-  const stageStates = ['접수 완료', steps.find((step) => step.key === 'loop')?.conclusion || steps.find((step) => step.key === 'loop')?.status,
-    steps.find((step) => step.key === 'release')?.conclusion || steps.find((step) => step.key === 'release')?.status, current.cd?.state, current.public_http?.state];
-  document.querySelector('#monitor-steps').replaceChildren(...['소스 접수', '앱 검사 및 수정', '검증 이미지 게시', 'GitOps 반영', 'URL 및 앱 상태 확인'].map((label, index) => {
-    const item = document.createElement('li'); item.textContent = `${label} · ${stageStates[index] || '대기'}`;
-    const step = steps.find((step) => step.key === ({ 1: 'loop', 2: 'release' })[index]);
-    if (step?.tasks?.length) item.append(taskList(step.tasks));
-    return item;
-  }));
+  renderMonitorSteps();
   renderHistory();
   document.querySelector('#monitor-state').textContent = observationError ? `${label} · 상태 조회 실패` : label;
   renderMetrics();
@@ -564,6 +602,7 @@ deployButton.addEventListener('click', async () => {
     const id = data.resource_id || data.id;
     if (typeof id !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(id) || location !== `/api/v1/${draft.kind}/${encodeURIComponent(id)}`) throw new Error('실행 조회 주소를 확인하지 못했습니다.');
     current = { ...data, id, kind: draft.kind, status: data.status === 'accepted' ? 'queued' : data.status };
+    ciSnapshot = null; ciReadError = false;
     lastReadAt = null; observationError = false; remember(); renderRun();
     reviewed = null;
     historyKind = draft.kind; document.querySelector('#history-kind').value = historyKind;
@@ -610,6 +649,22 @@ async function refreshRun() {
     if (current.kind === 'deployments' && current.status === 'succeeded' && !applicationsController) await loadApplications();
     if (pollController !== controller) return;
     renderRun();
+    if (current.kind === 'deployments' && current.ci?.run_id && !views.monitor.hidden) {
+      const id = current.id, runId = String(current.ci.run_id);
+      try {
+        const { data: ci } = await request(`/api/v1/builds/${encodeURIComponent(runId)}`, {}, controller);
+        if (pollController !== controller || current.id !== id) return;
+        if (ci.id !== runId || ci.app !== current.app || ci.target_id !== current.target_id
+            || (ci.source_commit ?? null) !== (current.source_commit ?? null) || !Array.isArray(ci.steps)) throw new Error('CI 실행 대상 불일치');
+        ciSnapshot = { ...ci, deployment_id: id, run_id: runId, read_at: Date.now() };
+        ciReadError = false;
+        for (const selector of ['#actions-link', '#monitor-actions-link']) safeLink(selector, ci.actions_url, true, true);
+      } catch {
+        if (pollController !== controller || current.id !== id) return;
+        ciReadError = true;
+      }
+      renderMonitorSteps();
+    }
     if (consoleTab === 'app' && !views.monitor.hidden) refreshLogs();
     if (consoleTab === 'work' && !views.monitor.hidden) refreshEvents();
     if (!terminal.has(current.status) || current.kind === 'deployments') timer = setTimeout(refreshRun, 15000);
@@ -938,7 +993,7 @@ function showHistoryError(cause) { historyError = cause.message; document.queryS
 function openExecution(row, tab = 'work') {
   if (row.status === 'preview') { openUpdatePreview(row); return; }
   stopPolling(); logController?.abort(); logSnapshot = null; eventController?.abort(); eventSnapshot = null;
-  current = row; lastReadAt = null; observationError = false; consoleTab = tab;
+  current = row; ciSnapshot = null; ciReadError = false; lastReadAt = null; observationError = false; consoleTab = tab;
   document.querySelectorAll('[data-console]').forEach((button) => button.setAttribute('aria-selected', String(button.dataset.console === tab)));
   showView('monitor'); renderRun(); refreshRun();
   document.querySelector('.execution-heading').scrollIntoView({ block: 'start' });
@@ -1153,7 +1208,7 @@ async function initializeDashboard() {
     await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError)]);
     renderLifecycleOperation();
     if (lifecycle.operation?.id) refreshLifecycleOperation();
-    if (history.length) { current = history[0]; renderRun(); refreshRun(); }
+    if (history.length) { current = history[0]; ciSnapshot = null; ciReadError = false; renderRun(); refreshRun(); }
     if (!views.monitor.hidden || !views.deploy.hidden) loadEnvironments();
   } catch (cause) {
     connectionError = cause.message; updateSelection();
