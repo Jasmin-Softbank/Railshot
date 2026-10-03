@@ -51,7 +51,7 @@ COPY contracts/ansible-request.schema.json contracts/ansible-job.schema.json /ap
 COPY deployment/scripts/common.sh deployment/scripts/environment.py /app/deployment/scripts/
 COPY deployment/scripts/applications.py deployment/scripts/application_release.py deployment/scripts/application_routes.py /app/deployment/scripts/
 COPY deployment/scripts/application_lifecycle.py deployment/scripts/lifecycle_runtime.py /app/deployment/scripts/
-COPY deployment/scripts/openstack_route_worker.py /app/deployment/scripts/
+COPY deployment/scripts/openstack_route_worker.py deployment/scripts/personal_wireguard.py /app/deployment/scripts/
 COPY deployment/cloudflared/register.py deployment/cloudflared/render.py /app/deployment/cloudflared/
 COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh deployment/bootstrap/runtime-healthz.py /app/deployment/bootstrap/
 COPY deployment/cilium/install.sh deployment/cilium/preflight.py deployment/cilium/health.sh /app/deployment/cilium/

@@ -2,7 +2,7 @@
 
 이 문서는 `apps/api/src/server.js`, `product.js`, `environments.js`, `product-store.js`에 구현한 제품 API를 설명한다. 기계 판독 계약은 [product.openapi.json](product.openapi.json)이다. 이 계약의 문서·로컬 검증은 `not_deployed`이며 실제 클라우드 E2E 결과와 별도로 기록한다.
 
-사용자 계정·로그인·팀원 allowlist는 없다. 익명 브라우저 세션별로 접수 기록·계획·화면 설정·연결 정보를 분리한다. 운영자 지정 공용 대상과 실행기의 동시 실행 한도는 공유한다. 세션·스키마·이관 계약은 [dashboard-sessions.md](dashboard-sessions.md)를 따른다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. 실행용 GitHub·Provider·SSH 자격은 서버 설정에만 둔다. 별도 OpenStack 연결 정보 저장은 실행용 자격을 바꾸지 않는다.
+사용자 계정·로그인·팀원 allowlist는 없다. 개인 환경은 별도 장기 소유자 쿠키와 복구키로 유지하며 [개인 OpenStack 환경 호출 규격](personal-environments.md)에 추가 경로·삭제 정책·지원 조건을 정리한다. 익명 브라우저 세션별로 접수 기록·계획·화면 설정·연결 정보를 분리한다. 운영자 지정 공용 대상과 실행기의 동시 실행 한도는 공유한다. 세션·스키마·이관 계약은 [dashboard-sessions.md](dashboard-sessions.md)를 따른다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. 실행용 GitHub·Provider·SSH 자격은 서버 설정에만 둔다. 별도 OpenStack 연결 정보 저장은 실행용 자격을 바꾸지 않는다.
 
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
@@ -18,7 +18,7 @@
 | 앱 작업 계획 | `POST /api/v1/applications/{id}/plans` | 현재 세션이 소유한 앱의 중지·시작·삭제 범위와 보존 자원을 읽어 10분간 유효한 계획을 반환한다. |
 | 앱 작업 | `POST /api/v1/applications/{id}/operations`, `GET /api/v1/operations/{id}` | 확인한 계획을 한 번 실행하고 단계·결과·남거나 확인하지 못한 자원을 기록한다. |
 
-실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`만 받는다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
+실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`를 받는다. 개인 환경 목록에는 추가로 `scope=owned&provider=openstack`을 사용한다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
 
 ### 기존 앱 업데이트
 

@@ -31,6 +31,7 @@ button { cursor: pointer; }
 .brand { color: var(--color-ink); font-size: 23px; font-weight: 800; letter-spacing: -.04em; text-decoration: none; }
 .brand-dot { color: var(--color-accent); }
 .navigation { display: grid; gap: 7px; margin-top: 32px; }
+.nav-divider { height: 1px; margin: 9px 8px 3px; background: var(--color-border); }
 .nav-item { border: 0; border-radius: 9px; background: transparent; padding: 13px 15px; text-align: left; font-size: 14px; color: #65748b; }
 .nav-item:hover { background: #f4f8f7; color: var(--color-accent); }
 .nav-item.active { background: var(--color-accent-soft); color: var(--color-accent); font-weight: 700; }
@@ -58,7 +59,7 @@ h2 { letter-spacing: -.025em; }
 .source-divider { display: flex; align-items: center; gap: 12px; color: var(--color-soft); font-size: 12px; }
 .source-divider::before, .source-divider::after { content: ""; height: 1px; flex: 1; background: #e4eaf0; }
 .field-label { color: #68788d; font-size: 12px; font-weight: 600; }
-input[type="url"], input[type="text"], input[type="password"], select { width: 100%; min-height: 46px; border: 1px solid #e0e7ed; border-radius: 8px; background: var(--color-surface); padding: 11px 13px; color: var(--color-ink); font-size: 13px; }
+input[type="url"], input[type="text"], input[type="password"], input:not([type]), select { width: 100%; min-height: 46px; border: 1px solid #e0e7ed; border-radius: 8px; background: var(--color-surface); padding: 11px 13px; color: var(--color-ink); font-size: 13px; }
 input[type="url"]::placeholder { color: #98a5b5; }
 input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid #8bd4bd; outline-offset: 2px; }
 .selection { margin: 0; overflow-wrap: anywhere; color: var(--color-accent); font-size: 12px; font-weight: 600; }
@@ -75,6 +76,8 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .radio-mark { margin-left: auto; flex: 0 0 18px; height: 18px; border: 1px solid var(--color-inactive); border-radius: 50%; background: var(--color-surface); }
 .target-option:has(input:checked) .radio-mark { border: 5px solid var(--color-accent); }
 .provider-field { display: grid; gap: 9px; max-width: 480px; }
+.onprem-registration-guide { display: grid; gap: 12px; padding: 15px; border-radius: 9px; background: #f4f8f7; color: var(--color-muted); font-size: 12px; line-height: 1.6; }
+.onprem-registration-guide p { margin: 0; }
 .field-note { margin: 0; }
 .form-bottom { display: flex; justify-content: flex-end; align-items: center; gap: 16px; border-top: 1px solid var(--color-border); padding-top: 23px; }
 .form-error { margin: 0 auto 0 0; color: var(--color-error); font-size: 12px; }
@@ -146,6 +149,32 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 /* Session data uses the existing panels and controls. */
 .connection-form { display: grid; gap: 12px; margin-bottom: 24px; }
 #connections-view .panel, #history-view .panel { padding: 24px; }
+.environment-management-intro, .environment-register { padding: 24px; margin-bottom: 24px; }
+.environment-management-intro h2, .environment-register h2, .environment-owned-list h2, .environment-owned-detail h2 { margin-bottom: 10px; font-size: 18px; }
+.environment-management-intro p { line-height: 1.7; }
+.inline-form { display: grid; grid-template-columns: minmax(180px, 1fr) auto; align-items: end; gap: 10px; max-width: 650px; margin-top: 20px; }
+.inline-form .field-label { grid-column: 1 / -1; }
+.environment-register > p { margin-top: 14px; font-size: 12px; }
+.environment-recovery-form { margin-top: 18px; color: var(--color-muted); font-size: 12px; }
+.environment-recovery-form summary { cursor: pointer; color: var(--color-accent); font-weight: 700; }
+.environment-recovery-form > p { margin: 12px 0 0; line-height: 1.7; }
+.enrollment-card { margin-top: 20px; padding: 18px; border: 1px solid #dce9e4; border-radius: 10px; background: #f8fbfa; }
+.enrollment-card h3, .environment-owned-detail h3 { margin: 0 0 10px; font-size: 15px; }
+.enrollment-card pre { margin: 14px 0; padding: 14px; border-radius: 8px; overflow: auto; background: var(--color-console); color: var(--color-console-text); font: 12px/1.6 ui-monospace, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.environment-management-grid { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(360px, 1.2fr); gap: 24px; align-items: start; }
+.environment-owned-list, .environment-owned-detail { padding: 24px; min-height: 250px; }
+.environment-owned-list.recovery-highlight { border-color: var(--color-accent); background: #f3fbf8; box-shadow: 0 0 0 2px rgba(38, 116, 102, .14); }
+.environment-owned-list .saved-list { margin-top: 14px; }
+.environment-owned-list .saved-list button { display: block; margin: 0; padding: 0; font-size: 14px; }
+.environment-owned-list .saved-list button.active { color: var(--color-ink); text-decoration: underline; }
+.environment-owned-list .saved-list small { display: block; margin-top: 7px; color: var(--color-muted); line-height: 1.6; }
+.environment-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; margin: 20px 0 26px; }
+.environment-facts div { padding-bottom: 10px; border-bottom: 1px solid var(--color-border); }
+.environment-facts dt { color: var(--color-muted); font-size: 12px; }
+.environment-facts dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: 13px; }
+.environment-owned-detail section { margin-top: 24px; }
+.delete-confirmation { display: grid; gap: 8px; margin-top: 16px; color: var(--color-muted); font-size: 12px; }
+.delete-confirmation input { max-width: 360px; }
 .connection-form input:not([type="checkbox"]) { width: 100%; padding: 12px; border: 1px solid #d7dedc; border-radius: 8px; font: inherit; }
 .saved-list { list-style: none; padding: 0; margin: 16px 0 0; }
 .saved-list li { padding: 16px 0; border-top: 1px solid #e5e9e7; overflow-wrap: anywhere; }
@@ -203,6 +232,8 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 button:disabled { cursor: default; opacity: .5; }
 #run-steps ul { margin: 8px 0 14px; padding-left: 22px; font-size: 12px; line-height: 1.8; }
 @media (max-width: 680px) { .environment-panel { padding: 18px; } .environment-summary { gap: 12px; } .environment-summary span { font-size: 12px; } }
+@media (max-width: 900px) { .environment-management-grid { grid-template-columns: 1fr; } }
+@media (max-width: 680px) { .inline-form { grid-template-columns: 1fr; } .environment-management-intro, .environment-register, .environment-owned-list, .environment-owned-detail { padding: 19px; } .environment-facts { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
 
 .stages-panel li { flex-wrap: wrap; }

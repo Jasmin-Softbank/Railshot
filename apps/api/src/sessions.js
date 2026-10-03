@@ -4,6 +4,12 @@ import { join } from 'node:path';
 
 export const SESSION_SECONDS = 7 * 24 * 60 * 60;
 export const SESSION_COOKIE = 'railshot_session';
+export const OWNER_COOKIE = 'railshot_owner';
+export function ownerCookie(token, secure) { return `${OWNER_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${secure ? '; Secure' : ''}`; }
+export function ownerToken(header) {
+  const values = (header || '').split(';').map((s) => s.trim()).filter((s) => s.startsWith(`${OWNER_COOKIE}=`));
+  return values.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(values[0].slice(OWNER_COOKIE.length + 1)) ? values[0].slice(OWNER_COOKIE.length + 1) : null;
+}
 export class DashboardError extends Error {
   constructor(message, status = 422, code = 'INVALID_INPUT') { super(message); Object.assign(this, { status, code }); }
 }
@@ -44,6 +50,32 @@ export async function createDashboardData(db, root) {
   const visible = (row) => ({ id: row.id, provider: row.provider, label: row.label, console_url: row.console_url,
     username: row.username, has_password: row.password_encrypted !== null, created_at: row.created_at, updated_at: row.updated_at });
   return {
+    isOwnerSession(id) { return Boolean(id && db.prepare('SELECT 1 FROM owners WHERE session_id = ?').get(id)); },
+    owner(token) {
+      if (!token) return null;
+      const row = db.prepare('SELECT id, session_id FROM owners WHERE token_hash = ?').get(hash(token));
+      return row || null;
+    },
+    createOwner() {
+      if (db.prepare('SELECT count(*) AS count FROM owners').get().count >= 10000) throw new DashboardError('소유자 보관 한도에 도달했습니다.', 409, 'CAPACITY_EXCEEDED');
+      const id = randomUUID(), token = randomBytes(32).toString('base64url'), recovery = randomBytes(32).toString('base64url');
+      const sessionId = hash(randomBytes(32)), now = Date.now();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run(sessionId, now, now, 8640000000000000);
+        db.prepare('INSERT INTO owners VALUES (?, ?, ?, ?, ?)').run(id, sessionId, hash(token), hash(recovery), new Date().toISOString());
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+      return { id, session_id: sessionId, token, recovery_key: recovery };
+    },
+    recoverOwner(input) {
+      if (!input || Object.keys(input).length !== 1 || typeof input.recovery_key !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(input.recovery_key)) throw new DashboardError('복구키를 확인하세요.', 401, 'UNAUTHENTICATED');
+      const row = db.prepare('SELECT id, session_id FROM owners WHERE recovery_hash = ?').get(hash(input.recovery_key));
+      if (!row) throw new DashboardError('복구키를 확인하세요.', 401, 'UNAUTHENTICATED');
+      const token = randomBytes(32).toString('base64url'), recovery = randomBytes(32).toString('base64url');
+      db.prepare('UPDATE owners SET token_hash = ?, recovery_hash = ? WHERE id = ?').run(hash(token), hash(recovery), row.id);
+      return { ...row, token, recovery_key: recovery };
+    },
     session(token) {
       const now = Date.now(), id = token && hash(token);
       const existing = id && db.prepare('SELECT * FROM sessions WHERE id = ? AND expires_at > ?').get(id, now);
@@ -60,7 +92,7 @@ export async function createDashboardData(db, root) {
       live(id);
       if (input !== undefined) {
         if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some((key) => !Object.hasOwn(defaults, key))
-            || ('view' in input && !['deploy', 'history', 'monitor', 'connections'].includes(input.view))
+            || ('view' in input && !['deploy', 'history', 'monitor', 'connections', 'personal'].includes(input.view))
             || ('environment' in input && !['cloud', 'onprem'].includes(input.environment))
             || ('provider' in input && !['', 'aws', 'gcp', 'openstack', 'proxmox'].includes(input.provider))) throw new DashboardError('화면 설정을 확인하세요.');
         const previous = db.prepare('SELECT data FROM preferences WHERE session_id = ?').get(id);

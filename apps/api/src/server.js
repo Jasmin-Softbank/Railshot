@@ -12,7 +12,7 @@ import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
 import { createProductService, ProductError, idempotencyKey } from './product.js';
 import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
 import { createEnvironmentAdapter, EnvironmentError } from './environments.js';
-import { DashboardError, cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
+import { DashboardError, cookieToken, sessionCookie, SESSION_COOKIE, ownerCookie, ownerToken, OWNER_COOKIE } from './sessions.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
 const assets = new Map([
@@ -68,11 +68,12 @@ async function uploadedSource(request, strict = false, allowSelection = false, s
   let selected = {};
   if (selecting) {
     const environment = form.get('environment'), provider = form.get('provider');
-    if (form.has('app') || form.has('target_id') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
+    if (form.has('app') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
     if (!(environment === 'cloud' && ['aws', 'gcp'].includes(provider) || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
     const source_name = form.has('source_name') ? form.get('source_name') : undefined;
     if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
-    selected = { deployment_selection: { environment, provider }, source_name };
+    if (target_id !== undefined && !(environment === 'onprem' && provider === 'openstack')) fail('개인 환경은 OpenStack에서만 선택하세요.');
+    selected = { target_id: undefined, deployment_selection: { environment, provider, ...(target_id !== undefined ? { target_id } : {}) }, source_name };
   } else if (form.has('source_name')) fail('소스 이름은 환경 선택과 함께 입력하세요.');
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
@@ -178,7 +179,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.RAILSHOT_TENANT || process.env.JASMIN_TENANT,
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
-  deployPublished, environmentAdapter, applicationAdapter, observeMetrics, observeLogs, product, pollInterval,
+  deployPublished, environmentAdapter, applicationAdapter, personalAdapter, observeMetrics, observeLogs, product, pollInterval,
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
 } = {}) {
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
@@ -191,7 +192,10 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     }
     const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments'), loadPublished: service?.publishedFiles }) : undefined);
     const { createApplicationAdapter } = await import('./applications.js');
-    const applications = applicationAdapter || (process.env.RAILSHOT_APPLICATIONS_FILE ? await createApplicationAdapter({ configPath: process.env.RAILSHOT_APPLICATIONS_FILE, ciIdentity: service?.identity, loadPublished: service?.publishedFiles }) : undefined);
+    let applications = applicationAdapter || (process.env.RAILSHOT_APPLICATIONS_FILE ? await createApplicationAdapter({ configPath: process.env.RAILSHOT_APPLICATIONS_FILE, ciIdentity: service?.identity, loadPublished: service?.publishedFiles }) : undefined);
+    const { createPersonalAdapter } = await import('./personal-adapter.js');
+    const personal = personalAdapter || (process.env.RAILSHOT_PERSONAL_CONFIG ? await createPersonalAdapter({ configPath: process.env.RAILSHOT_PERSONAL_CONFIG, stateDirectory: join(stateDirectory, 'personal'), service, base: applications }) : undefined);
+    if (personal?.application) applications = personal.application;
     const { createMetricsObserver } = await import('./metrics.js');
     const observer = observeMetrics || createMetricsObserver({
       configPath: process.env.RAILSHOT_OBSERVER_PRODUCT_FILE || process.env.RAILSHOT_OBSERVER_CONFIG,
@@ -199,7 +203,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     const selections = providerTargets ?? (process.env.RAILSHOT_PROVIDER_TARGETS === undefined ? undefined : JSON.parse(process.env.RAILSHOT_PROVIDER_TARGETS));
     const { createAppLogsObserver } = await import('./logs.js');
     const logs = observeLogs || createAppLogsObserver({ configPath: process.env.RAILSHOT_CD_CONFIG });
-    return createProductService({ observeMetrics: observer, observeLogs: logs, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, pollInterval });
+    return createProductService({ observeMetrics: observer, observeLogs: logs, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, personalAdapter: personal, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
@@ -220,7 +224,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       }
       if (url.pathname.startsWith('/api/')) {
         if (request.headers['sec-fetch-site'] === 'cross-site') throw new ServiceError('다른 사이트에서 보낸 요청은 허용되지 않습니다.', 403);
-        if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
+        const clientRoute = /^\/api\/v1\/(enrollments\/[A-Za-z0-9._-]+\/claims|targets\/[A-Za-z0-9._-]+\/(heartbeats|receipts))$/.test(url.pathname);
+        if (!clientRoute && !access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);
         }
@@ -229,12 +234,50 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         // Public visitors are anonymous cookie sessions. Existing localhost maintenance clients
         // without a cookie retain their private maintenance channel and legacy contracts.
         const dashboardRoute = /^\/api\/v1\/(sessions|preferences|connections)(?:\/|$)/.test(url.pathname);
-        const scoped = access.remote || access.publicDemo || dashboardRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
+        const scoped = !clientRoute && (access.remote || access.publicDemo || dashboardRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`) || (request.headers.cookie || '').includes(`${OWNER_COOKIE}=`) || /^\/api\/v1\/(owners|recoveries)$/.test(url.pathname));
         const session = scoped ? products.dashboard.session(cookieToken(request.headers.cookie)) : null;
-        const sessionId = session?.id ?? null;
+        const owner = clientRoute ? null : products.dashboard?.owner?.(ownerToken(request.headers.cookie));
+        const sessionId = owner?.session_id ?? session?.id ?? null;
         if (session?.token) response.setHeader('Set-Cookie', sessionCookie(session.token, access.remote));
         response.setHeader('Vary', 'Cookie');
         if (versioned) {
+          const claimRoute = /^\/api\/v1\/enrollments\/([A-Za-z0-9._-]+)\/claims$/.exec(url.pathname);
+          const personalRoute = /^\/api\/v1\/targets(?:\/([A-Za-z0-9._-]+))?(?:\/(enrollments|heartbeats|receipts|applications|instances|plans|operations))?$/.exec(url.pathname);
+          const ownerRoute = /^\/api\/v1\/(owners|recoveries)$/.exec(url.pathname);
+          const personalHandled = claimRoute || ownerRoute || personalRoute && (personalRoute[2] || personalRoute[1] || request.method === 'POST' || url.searchParams.has('scope') || url.searchParams.has('provider'));
+          if (personalHandled) {
+            const method = (allowed) => { if (!allowed.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = allowed.join(', '); throw error; } };
+            if (request.method !== 'GET' && !clientRoute && request.headers['x-railshot-request'] !== 'dashboard') throw new ServiceError('개인 환경 변경 요청 헤더가 필요합니다.', 403);
+            if ([...url.searchParams].length && !(personalRoute && !personalRoute[1] && request.method === 'GET')) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (ownerRoute) {
+              method(ownerRoute[1] === 'owners' ? ['GET', 'POST'] : ['POST']);
+              if (request.method === 'GET') { json(response, 200, { id: owner?.id || null, recovery_configured: Boolean(owner) }); return; }
+              const input = await jsonInput(request);
+              if (ownerRoute[1] === 'owners' && Object.keys(input).length) throw new ServiceError('알 수 없는 소유권 입력입니다.', 422);
+              if (ownerRoute[1] === 'owners' && owner) { json(response, 200, { id: owner.id, recovery_configured: true }); return; }
+              const result = ownerRoute[1] === 'owners' ? products.dashboard.createOwner() : products.dashboard.recoverOwner(input);
+              response.setHeader('Set-Cookie', ownerCookie(result.token, access.remote));
+              json(response, ownerRoute[1] === 'owners' ? 201 : 200, { id: result.id, recovery_key: result.recovery_key, recovery_key_once: true, recovery_configured: true }); return;
+            }
+            if (claimRoute) { method(['POST']); const result = await products.personal.claim(claimRoute[1], await jsonInput(request), request.headers.authorization); json(response, 201, result, { Location: `/api/v1/targets/${result.target_id}` }); return; }
+            const [, id, child] = personalRoute;
+            if (child === 'heartbeats' || child === 'receipts') { method(['POST']); json(response, 200, await products.personal[child === 'heartbeats' ? 'heartbeat' : 'receipt'](id, await jsonInput(request), request.headers.authorization)); return; }
+            const ownerId = owner?.session_id || null;
+            if (!id) {
+              method(['GET', 'POST']);
+              if (request.method === 'POST') { const result = await products.personal.create(await jsonInput(request), ownerId); json(response, 201, result, { Location: `/api/v1/targets/${result.id}` }); return; }
+              const params = new URLSearchParams(url.searchParams);
+              for (const key of ['scope', 'provider']) if (params.has(key)) { if (params.getAll(key).length !== 1 || params.get(key) !== (key === 'scope' ? 'owned' : 'openstack')) throw new ServiceError('조회 조건이 잘못되었습니다.', 422); params.delete(key); }
+              json(response, 200, page(products.personal.list(ownerId), params)); return;
+            }
+            if (!child) { method(['GET']); json(response, 200, products.personal.get(id, ownerId)); return; }
+            method(['applications', 'instances'].includes(child) ? ['GET'] : ['POST']);
+            if (child === 'instances') { json(response, 200, { items: await products.personal.instances(id, ownerId), next_marker: null }); return; }
+            if (child === 'applications') { json(response, 200, { items: products.personal.applications(id, ownerId), next_marker: null }); return; }
+            if (child === 'enrollments') { const result = await products.personal.enrollment(id, await jsonInput(request), ownerId); json(response, 201, result, { Location: `/api/v1/targets/${id}` }); return; }
+            if (child === 'plans') { const result = await products.personal.plan(id, await jsonInput(request), ownerId); json(response, 201, result, { Location: `/api/v1/plans/${result.id}` }); return; }
+            accepted(response, 'operations', await products.personal.remove(id, await jsonInput(request), requestKey(request), ownerId), requestId, 'delete'); return;
+          }
           if (dashboardRoute) {
             const route = /^\/api\/v1\/(sessions|preferences|connections)(?:\/([a-f0-9-]{36}))?$/.exec(url.pathname);
             if (!route) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);

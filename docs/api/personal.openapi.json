@@ -1,0 +1,1723 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RailShot personal environment API extension",
+    "version": "1.2.0"
+  },
+  "paths": {
+    "/api/v1/owners": {
+      "get": {
+        "operationId": "getPersonalOwner",
+        "summary": "Read persistent ownership capability status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Read persistent ownership capability status",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalOwner"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createPersonalOwner",
+        "summary": "Create recovery capability; recovery key is returned once",
+        "parameters": [
+          {
+            "name": "X-Railshot-Request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "const": "dashboard"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Create recovery capability; recovery key is returned once",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalOwner"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Read persistent ownership capability status",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalOwner"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/recoveries": {
+      "post": {
+        "operationId": "recoverPersonalOwner",
+        "summary": "Rotate both owner cookie and recovery key",
+        "parameters": [
+          {
+            "name": "X-Railshot-Request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "const": "dashboard"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rotate both owner cookie and recovery key",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalOwner"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "recovery_key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "recovery_key"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}": {
+      "get": {
+        "operationId": "getPersonalTarget",
+        "summary": "Read owned personal environment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read owned personal environment",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalTarget"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/enrollments": {
+      "post": {
+        "operationId": "createPersonalEnrollment",
+        "summary": "Rotate single-use 15-minute enrollment token",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Railshot-Request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "const": "dashboard"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Rotate single-use 15-minute enrollment token",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalEnrollment"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/enrollments/{id}/claims": {
+      "post": {
+        "operationId": "claimPersonalEnrollment",
+        "summary": "Claim a registered customer host with independent client credentials",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bearer enrollment token or target-scoped client token. Browser/session/operator credentials cannot replace this capability."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Claim a registered customer host with independent client credentials",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalClaim"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalClaimInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/heartbeats": {
+      "post": {
+        "operationId": "reportPersonalHeartbeat",
+        "summary": "Report customer host checks and scoped measurements",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bearer enrollment token or target-scoped client token. Browser/session/operator credentials cannot replace this capability."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Report customer host checks and scoped measurements",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalHeartbeat"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalHeartbeatInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/applications": {
+      "get": {
+        "operationId": "listPersonalApplications",
+        "summary": "List only this owned environment RailShot applications",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List only this owned environment RailShot applications",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "./product.openapi.json#/components/schemas/ApplicationList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/plans": {
+      "post": {
+        "operationId": "planPersonalDeletion",
+        "summary": "Plan RailShot service and app-private data deletion; retain infrastructure",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Railshot-Request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "const": "dashboard"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Plan RailShot service and app-private data deletion; retain infrastructure",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalPlan"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalPlanInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/operations": {
+      "post": {
+        "operationId": "deletePersonalTarget",
+        "summary": "Accept a confirmed personal environment deletion",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Railshot-Request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "const": "dashboard"
+            }
+          },
+          {
+            "$ref": "./product.openapi.json#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accept a confirmed personal environment deletion",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "2"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalOperationInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/receipts": {
+      "post": {
+        "operationId": "receivePersonalRemovalReceipt",
+        "summary": "Verify client removal evidence before revoking the gateway",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Bearer enrollment token or target-scoped client token. Browser/session/operator credentials cannot replace this capability."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Verify client removal evidence before revoking the gateway",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "./product.openapi.json#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "./product.openapi.json#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "./product.openapi.json#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "./product.openapi.json#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "./product.openapi.json#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "./product.openapi.json#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "./product.openapi.json#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalReceiptInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/targets/{id}/instances": {
+      "get": {
+        "operationId": "listPersonalInstances",
+        "summary": "Run OpenStack server list on the enrolled customer host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fresh bounded OpenStack CLI result",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "next_marker": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "items",
+                    "next_marker"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "./product.openapi.json#/components/responses/Error404"
+          },
+          "409": {
+            "$ref": "./product.openapi.json#/components/responses/Error409"
+          },
+          "502": {
+            "$ref": "./product.openapi.json#/components/responses/Error502"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PersonalOwner": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recovery_configured": {
+            "type": "boolean"
+          },
+          "recovery_key": {
+            "type": "string"
+          },
+          "recovery_key_once": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "recovery_configured"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalTarget": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "provider": {
+            "const": "openstack"
+          },
+          "scope": {
+            "const": "owned"
+          },
+          "environment": {
+            "const": "onprem"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "installing",
+              "connecting",
+              "ready",
+              "offline",
+              "deleting",
+              "attention",
+              "deleted"
+            ]
+          },
+          "deployable": {
+            "type": "boolean"
+          },
+          "generation": {
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "client_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "application_count": {
+            "type": "integer"
+          },
+          "registration_stage": {
+            "type": "string"
+          },
+          "checks": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "deletion_operation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "ci_submission": {
+                "type": "boolean"
+              },
+              "application_deployment": {
+                "type": "boolean"
+              },
+              "openstack_control": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ci_submission",
+              "application_deployment",
+              "openstack_control"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "provider",
+          "scope",
+          "environment",
+          "status",
+          "deployable",
+          "generation",
+          "last_seen_at",
+          "client_version",
+          "project_id",
+          "application_count",
+          "registration_stage",
+          "checks",
+          "blockers",
+          "created_at",
+          "deletion_operation_id",
+          "capabilities"
+        ],
+        "additionalProperties": false,
+        "description": "ready means server-verified OpenStack CLI connectivity. deployable independently requires an existing application adapter configuration prepared by the separate runtime integration."
+      },
+      "PersonalEnrollment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "install_command": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "target_id",
+          "expires_at",
+          "install_command"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalClaimInput": {
+        "type": "object",
+        "properties": {
+          "public_key": {
+            "type": "string"
+          },
+          "client_version": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "object",
+            "properties": {
+              "profile_id": {
+                "type": "string"
+              },
+              "ssh_host_key": {
+                "type": "string"
+              },
+              "resource_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "ssh_host_key"
+            ],
+            "additionalProperties": false
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "public_key",
+          "client_version",
+          "project_id",
+          "runtime"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalClaim": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer"
+          },
+          "client_token": {
+            "type": "string"
+          },
+          "tunnel": {
+            "type": "object",
+            "properties": {
+              "server_public_key": {
+                "type": "string"
+              },
+              "endpoint": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              },
+              "allowed_ips": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "server_public_key",
+              "endpoint",
+              "address",
+              "allowed_ips"
+            ],
+            "additionalProperties": false
+          },
+          "heartbeat_url": {
+            "type": "string"
+          },
+          "runtime_access": {
+            "type": "object",
+            "properties": {
+              "public_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "public_key"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "target_id",
+          "generation",
+          "client_token",
+          "tunnel",
+          "heartbeat_url"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalHeartbeatInput": {
+        "type": "object",
+        "properties": {
+          "generation": {
+            "type": "integer"
+          },
+          "client_version": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "object",
+            "properties": {
+              "tunnel": {
+                "type": "boolean"
+              },
+              "openstack": {
+                "type": "boolean"
+              },
+              "runtime": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "tunnel",
+              "openstack"
+            ],
+            "additionalProperties": false
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "metrics": {
+            "type": "object",
+            "properties": {
+              "cpu_percent": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "memory_percent": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "disk_percent": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "network_receive_bytes_per_second": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "network_transmit_bytes_per_second": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "generation",
+          "client_version",
+          "checks"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalHeartbeat": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "command": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "target_id",
+          "status",
+          "command"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalPlanInput": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "const": "delete"
+          },
+          "delete_data": {
+            "const": true
+          }
+        },
+        "required": [
+          "action",
+          "delete_data"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalPlan": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "action": {
+            "const": "delete"
+          },
+          "delete_data": {
+            "const": true
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "retained": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "executable": {
+            "type": "boolean"
+          },
+          "plan_hash": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "target_id",
+          "action",
+          "delete_data",
+          "expires_at",
+          "resources",
+          "retained",
+          "blockers",
+          "executable",
+          "plan_hash"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalOperationInput": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "const": "delete"
+          },
+          "delete_data": {
+            "const": true
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "plan_hash": {
+            "type": "string"
+          },
+          "confirmation": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "delete_data",
+          "plan_id",
+          "plan_hash",
+          "confirmation"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalOperation": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "target-lifecycle"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "action": {
+            "const": "delete"
+          },
+          "delete_data": {
+            "const": true
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "residuals": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "retained": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "./product.openapi.json#/components/schemas/OperationError"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "target_id",
+          "action",
+          "delete_data",
+          "plan_id",
+          "status",
+          "stage",
+          "steps",
+          "residuals",
+          "retained",
+          "created_at",
+          "updated_at"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalReceiptInput": {
+        "type": "object",
+        "properties": {
+          "operation_id": {
+            "type": "string"
+          },
+          "generation": {
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "residuals": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "client_removed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operation_id",
+          "generation",
+          "status",
+          "steps",
+          "residuals",
+          "client_removed"
+        ],
+        "additionalProperties": false
+      },
+      "PersonalReceipt": {
+        "type": "object",
+        "properties": {
+          "target_id": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id",
+          "operation_id",
+          "status"
+        ],
+        "additionalProperties": false
+      }
+    }
+  }
+}

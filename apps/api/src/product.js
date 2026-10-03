@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
+import { createPersonalEnvironments } from './personal-environments.js';
 import { createProductStore } from './product-store.js';
 import { APP_NAME, TARGET_ID, sourceAppName } from './contract.js';
 import { validateFiles } from './archive.js';
@@ -54,7 +55,7 @@ function checkFree(state, sessionId = null, except = null) {
     { retryable: blocker.status !== 'unknown', admission });
 }
 
-export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const targetId = target?.id || service?.targetId;
   if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
   const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
@@ -76,7 +77,8 @@ export async function createProductService({ service, directory, target, provide
   const deploymentWorkers = new Map();
   const sharedTargets = new Set(service?.targetIds || (service?.targetId ? [service.targetId] : []));
   const scopeKey = (kind, key, sessionId) => `${sessionId ? sessionId + ':' : ''}${kind}:${key}`;
-  const owns = (value, sessionId) => value && (!sessionId || value.session_id === sessionId);
+  const owns = (value, sessionId) => value && (store.dashboard.isOwnerSession(value.session_id)
+    ? Boolean(sessionId && value.session_id === sessionId) : !sessionId || value.session_id === sessionId);
   function applicationFor(state, id, sessionId, exactOwner = false) {
     const application = Object.hasOwn(state.applications, id) ? state.applications[id] : null;
     // Maintenance reads may span sessions; mutations must preserve the exact app owner.
@@ -85,6 +87,7 @@ export async function createProductService({ service, directory, target, provide
     return application;
   }
   function lifecycleAvailable(application, action, cancelling = null) {
+    personal.writable(store.read(), application.environment_target_id, application.session_id);
     if (!['planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle'].every((name) => typeof applicationAdapter?.[name] === 'function')) throw unavailable();
     // The normal native plan must prove no registration intent/binding exists before a local tombstone.
     if (action === 'delete' && !cancelling && application.status === 'queued') return;
@@ -143,10 +146,18 @@ export async function createProductService({ service, directory, target, provide
           : `${label}의 앱 배포 설정이 아직 준비되지 않았습니다.` };
     });
   }
-  function resolveSelection(input) {
+  function resolveSelection(input, sessionId) {
     if (!input.deployment_selection) return input;
     if (input.app !== undefined || input.target_id !== undefined || input.plan_id !== undefined) throw invalid('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
-    const { environment, provider } = input.deployment_selection;
+    const { environment, provider, target_id: personalId } = input.deployment_selection;
+    if (personalId !== undefined) {
+      if (environment !== 'onprem' || provider !== 'openstack') throw invalid('개인 대상은 OpenStack 환경에서만 선택할 수 있습니다.');
+      personal.get(personalId, sessionId);
+      personal.writable(store.read(), personalId, sessionId);
+      let app;
+      try { app = sourceAppName(input.source_name ?? input.repository_url?.split('/').filter(Boolean).at(-1)?.replace(/\.git$/i, '')); } catch { throw invalid('소스 이름을 확인하세요.'); }
+      return { ...input, app, target_id: personalId };
+    }
     const option = deploymentOptions().find((item) => item.environment === environment && item.provider === provider);
     if (!option) throw invalid('배포 환경과 인프라 종류를 확인하세요.');
     if (!option.available) throw new ProductError(409, 'CAPABILITY_UNAVAILABLE', option.message);
@@ -211,6 +222,9 @@ export async function createProductService({ service, directory, target, provide
   async function reserve(kind, input, key, materialize, sessionId = null) {
     return store.transaction(async (state) => {
       validateInput(input);
+      personal.writable(state, input.environment_target_id || input.target_id, sessionId);
+      const linked = Object.values(state.applications).find((app) => app.target_id === input.target_id);
+      if (linked) personal.writable(state, linked.environment_target_id, sessionId);
       const fingerprint = inputFingerprint(input);
       const existingId = key && state.keys[scopeKey(kind, key, sessionId)];
       if (existingId) {
@@ -232,7 +246,7 @@ export async function createProductService({ service, directory, target, provide
       const admittedTarget = sharedTargets.has(input.target_id) || Boolean(savedEnvironment) || Boolean(application);
       const plan = input.plan_id && Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
       if (input.plan_id) {
-        if (kind !== 'deployments' || !owns(plan, sessionId) || plan.kind === 'application-lifecycle' || !environmentAdapter?.deployPublished) throw invalid('실행 가능한 환경 계획이 필요합니다.');
+        if (kind !== 'deployments' || !owns(plan, sessionId) || ['application-lifecycle', 'target-lifecycle'].includes(plan.kind) || !environmentAdapter?.deployPublished) throw invalid('실행 가능한 환경 계획이 필요합니다.');
         if (plan.environment_id) throw new ProductError(409, 'CONFLICT', '이미 실행에 사용된 계획입니다.');
         if (plan.public.name !== input.app || plan.private?.profile?.target?.target_id !== input.target_id
             || !plan.private.profile.deployment) throw invalid('계획의 앱·배포 대상과 일치해야 합니다.');
@@ -313,7 +327,7 @@ export async function createProductService({ service, directory, target, provide
     try {
       for (;;) {
         if (abort.signal.aborted || deletionRequested(record.id)) return;
-        const build = await readBuild(runId);
+        const build = await readBuild(runId, record.session_id);
         if (deletionRequested(record.id)) return;
         if (resume) {
           const published = build.publication;
@@ -333,6 +347,7 @@ export async function createProductService({ service, directory, target, provide
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
           if (!resume || !record.cd?.deployed) await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
           if (deletionRequested(record.id)) return;
+          personal.writable(store.read(), record.environment_target_id || record.target_id, record.session_id);
           const deploy = record.application_id ? (args) => applicationAdapter.deployPublished(store.read().applications[record.application_id], args)
             : record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
           const result = await deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
@@ -386,6 +401,7 @@ export async function createProductService({ service, directory, target, provide
   }
   function readyApplication(state, id, sessionId) {
     const application = applicationFor(state, id, sessionId);
+    personal.writable(state, application.environment_target_id, sessionId);
     if (application.status !== 'ready' || applicationVersions(state, application).state === 'unverified')
       throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '앱 등록 또는 현재 배포 버전을 먼저 확인해야 합니다.');
     if (!service || typeof applicationAdapter?.deployPublished !== 'function') throw unavailable();
@@ -497,8 +513,11 @@ export async function createProductService({ service, directory, target, provide
     }, accepted.record.id);
     return publicRecord(accepted.record);
   }
+  const personal = createPersonalEnvironments({ store, adapter: personalAdapter, applicationAdapter, launch, publicApplication });
+  await personal.restore();
   return {
-    dashboard: store.dashboard,
+    dashboard: store.dashboard, personal,
+    executeOpenStack: (targetId, request, ownerSessionId) => personal.execute(targetId, request, ownerSessionId),
     createUpdate, startUpdate,
     async sourceFiles(id, variant, sessionId = null) {
       const record = find('deployments', id, sessionId);
@@ -616,10 +635,12 @@ export async function createProductService({ service, directory, target, provide
       return publicRecord(accepted.record);
     },
     getOperation(id, sessionId = null) {
-      return publicRecord(find('application-lifecycle', id, sessionId));
+      const record = store.read().operations[id];
+      if (!owns(record, sessionId) || !['application-lifecycle', 'target-lifecycle'].includes(record.kind)) throw new ProductError(404, 'NOT_FOUND', '작업을 찾을 수 없습니다.');
+      return publicRecord(record);
     },
     list(kind, sessionId, pagination) {
-      if (kind === 'plans') return Object.values(store.read().plans).filter((row) => owns(row, sessionId) && row.kind !== 'application-lifecycle').reverse().map((row) => structuredClone(row.public));
+      if (kind === 'plans') return Object.values(store.read().plans).filter((row) => owns(row, sessionId) && !['application-lifecycle', 'target-lifecycle'].includes(row.kind)).reverse().map((row) => structuredClone(row.public));
       const { records, hasMore, total } = store.operationPage(kind, sessionId, pagination);
       const items = records.map((row) => ({ id: kind === 'builds' ? String(row.ci.run_id) : row.id, kind, status: row.status,
         ...Object.fromEntries(['app', 'application_id', 'environment_target_id', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
@@ -634,7 +655,7 @@ export async function createProductService({ service, directory, target, provide
         const id = operation.kind === 'environments' ? operation.runtime_target_id : operation.environment?.runtime_target_id;
         if (registeredEnvironment(state, id, sessionId)) ids.add(id);
       }
-      return [...ids].map((id) => {
+      return [...ids].filter((id) => !state.personal.targets[id]).map((id) => {
         const staticTarget = deployPublished?.targets?.[id];
         const staticAvailable = Boolean(deployPublished && (!deployPublished.targets || staticTarget));
         const registered = staticAvailable ? staticTarget : registeredEnvironment(state, id, sessionId);
@@ -647,14 +668,15 @@ export async function createProductService({ service, directory, target, provide
           capabilities: { ci_submission: Boolean(service), application_deployment: available,
             database_configuration: !staticAvailable && registered?.database_configuration === true },
           runtime: { status: 'unknown', observed_at: null }, blockers: available ? [] : ['CD_ADAPTER_NOT_CONFIGURED'] };
-      });
+      }).concat(personal.list(sessionId));
     },
     async getTargetObservation(id, sessionId = null) {
       const target = TARGET_ID.test(id) && this.targets(sessionId).find((item) => item.id === id);
       if (!target) throw new ProductError(404, 'NOT_FOUND', '등록된 대상을 찾을 수 없습니다.');
-      const observation = await observeMetrics({ target_id: id, app: target.application_name ?? null });
+      let observation = await observeMetrics({ target_id: id, app: target.application_name ?? null });
+      if (target.scope === 'owned') observation = personal.observation(id, sessionId, observation);
       const health = observation.metrics.runtime_healthz ?? { state: 'not_configured', observed_at: null };
-      return { ...observation, environment_id: target.environment_id,
+      return { ...observation, environment_id: target.environment_id ?? null,
         runtime: { status: health.state === 'ready' ? (health.value === 1 ? 'healthy' : 'unhealthy') : 'unknown',
           observation_state: health.state, observed_at: health.observed_at } };
     },
@@ -667,7 +689,8 @@ export async function createProductService({ service, directory, target, provide
     getBuild: readBuild,
     async legacyStatus(id, sessionId = null) { const state = store.read(); if (!Object.hasOwn(state.bindings, id) || !owns(state.operations[state.bindings[id].operation_id], sessionId)) throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.'); return service.status(id, store.read().bindings[id].target_id); },
     async createDeployment(input, key, materialize, sessionId = null) {
-      input = resolveSelection(input);
+      input = resolveSelection(input, sessionId);
+      personal.writable(store.read(), input.target_id, sessionId);
       if (!input.plan_id && applicationAdapter?.targets?.[input.target_id]) {
         const application = applicationAdapter.describe(input.target_id, input.app);
         input = { ...input, environment_target_id: input.target_id, target_id: application.target_id };
@@ -716,6 +739,7 @@ export async function createProductService({ service, directory, target, provide
       const record = await store.transaction((state) => {
         const operation = Object.hasOwn(state.operations, id) ? state.operations[id] : null;
         const application = operation?.application_id && state.applications[operation.application_id];
+        if (application) personal.writable(state, application.environment_target_id, sessionId);
         // Unlike the legacy maintenance reads, resume always requires an exact cookie-session owner.
         if (!sessionId || operation?.kind !== 'deployments' || operation.session_id !== sessionId
             || !application || application.session_id !== sessionId) {
@@ -836,7 +860,7 @@ export async function createProductService({ service, directory, target, provide
           return { record, replay: true };
         }
         const plan = Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
-        if (!owns(plan, sessionId) || plan.kind === 'application-lifecycle') throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.');
+        if (!owns(plan, sessionId) || ['application-lifecycle', 'target-lifecycle'].includes(plan.kind)) throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.');
         if (plan.environment_id) throw new ProductError(409, 'CONFLICT', '이미 실행에 사용된 계획입니다.');
         checkFree(state, sessionId);
         checkCapacity(state);

@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RAILSHOT session-scoped product API",
-    "version": "1.1.0",
-    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Every remote API request is session-scoped, including requests with the existing internal operator bearer. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. Optional OpenStack connection metadata is stored separately, with encrypted write-only passwords; it is not execution configuration. One API process and one persistent SQLite database on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
+    "version": "1.2.0",
+    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Every remote API request is session-scoped, including requests with the existing internal operator bearer. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. Optional OpenStack connection metadata is stored separately, with encrypted write-only passwords; it is not execution configuration. One API process and one persistent SQLite database on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence. Personal environments use a separate persistent owner cookie and one-time-visible recovery key, without adding an external login provider; recovery rotates both capabilities."
   },
   "servers": [
     {
@@ -22,6 +22,20 @@
           },
           {
             "$ref": "#/components/parameters/marker"
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "const": "owned"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "schema": {
+              "const": "openstack"
+            }
           }
         ],
         "responses": {
@@ -87,6 +101,106 @@
           }
         },
         "description": "List configured CI targets and successfully registered environment targets, including application and DB capability. Successful environment bindings restore after API restart; runtime unknown is not a readiness observation."
+      },
+      "post": {
+        "operationId": "createPersonalTarget",
+        "summary": "Create an owned OpenStack environment registration",
+        "parameters": [
+          {
+            "name": "X-Railshot-Request",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "const": "dashboard"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Create an owned OpenStack environment registration",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalTarget"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "provider": {
+                    "const": "openstack"
+                  }
+                },
+                "required": [
+                  "label"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/profiles": {
@@ -810,7 +924,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Plan"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Plan"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PersonalPlan"
+                    }
+                  ]
                 }
               }
             }
@@ -2476,7 +2597,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ApplicationLifecycleOperation"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ApplicationLifecycleOperation"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PersonalOperation"
+                    }
+                  ]
                 }
               }
             }
@@ -2873,6 +3001,39 @@
           }
         }
       }
+    },
+    "/api/v1/owners": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1owners"
+    },
+    "/api/v1/recoveries": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1recoveries"
+    },
+    "/api/v1/targets/{id}": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}"
+    },
+    "/api/v1/targets/{id}/enrollments": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1enrollments"
+    },
+    "/api/v1/enrollments/{id}/claims": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1enrollments~1{id}~1claims"
+    },
+    "/api/v1/targets/{id}/heartbeats": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1heartbeats"
+    },
+    "/api/v1/targets/{id}/applications": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1applications"
+    },
+    "/api/v1/targets/{id}/plans": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1plans"
+    },
+    "/api/v1/targets/{id}/operations": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1operations"
+    },
+    "/api/v1/targets/{id}/receipts": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1receipts"
+    },
+    "/api/v1/targets/{id}/instances": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1instances"
     }
   },
   "components": {
@@ -4305,7 +4466,14 @@
           "items": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Target"
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/Target"
+                },
+                {
+                  "$ref": "#/components/schemas/PersonalTarget"
+                }
+              ]
             }
           },
           "next_marker": {
@@ -4520,7 +4688,8 @@
               "app_pods",
               "target_node",
               "app_probe",
-              "target_runtime"
+              "target_runtime",
+              "client_host"
             ]
           }
         },
@@ -4676,7 +4845,7 @@
         "additionalProperties": false
       },
       "DeploymentSource": {
-        "description": "Either explicit app/target_id with optional plan_id, or the original UI environment/provider choice, never both. A plan binds app to its name and target_id to its runtime_target_id. Without a plan, explicit fields may reuse a successful saved environment registration. For environment/provider selection, the server resolves the target and derives the app name from source_name (required for folders), the ZIP filename or the GitHub repository name using the shared CLI/MCP naming rules. It never substitutes the registered target app. A different app on a fixed target is rejected before source retrieval or execution; a new app needs its own registration or an executable create_per_request plan. Missing or invalid source names are rejected without a placeholder or hash fallback.",
+        "description": "Either explicit app/target_id with optional plan_id, or the original UI environment/provider choice, never both. A plan binds app to its name and target_id to its runtime_target_id. Without a plan, explicit fields may reuse a successful saved environment registration. For environment/provider selection, the server resolves the target and derives the app name from source_name (required for folders), the ZIP filename or the GitHub repository name using the shared CLI/MCP naming rules. It never substitutes the registered target app. A different app on a fixed target is rejected before source retrieval or execution; a new app needs its own registration or an executable create_per_request plan. Missing or invalid source names are rejected without a placeholder or hash fallback. Personal OpenStack selection additionally accepts target_id; multipart deployment_selection JSON is not accepted. Server revalidates owner, connectivity and deletion state.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/Source"
@@ -4712,6 +4881,9 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "target_id": {
+                "type": "string"
               }
             },
             "required": [
@@ -4744,6 +4916,25 @@
                       "openstack",
                       "proxmox"
                     ]
+                  }
+                }
+              }
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "required": [
+                    "target_id"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "environment": {
+                      "const": "onprem"
+                    },
+                    "provider": {
+                      "const": "openstack"
+                    }
                   }
                 }
               }
@@ -4780,6 +4971,9 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "target_id": {
+                "type": "string"
               }
             },
             "required": [
@@ -4812,6 +5006,25 @@
                       "openstack",
                       "proxmox"
                     ]
+                  }
+                }
+              }
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "required": [
+                    "target_id"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "environment": {
+                      "const": "onprem"
+                    },
+                    "provider": {
+                      "const": "openstack"
+                    }
                   }
                 }
               }
@@ -4855,6 +5068,9 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "target_id": {
+                "type": "string"
               }
             },
             "required": [
@@ -4892,6 +5108,25 @@
                   }
                 }
               }
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "required": [
+                    "target_id"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "environment": {
+                      "const": "onprem"
+                    },
+                    "provider": {
+                      "const": "openstack"
+                    }
+                  }
+                }
+              }
             ]
           }
         ]
@@ -4918,7 +5153,8 @@
               "deploy",
               "history",
               "monitor",
-              "connections"
+              "connections",
+              "personal"
             ]
           },
           "environment": {
@@ -4955,7 +5191,8 @@
               "deploy",
               "history",
               "monitor",
-              "connections"
+              "connections",
+              "personal"
             ]
           },
           "environment": {
@@ -5467,6 +5704,12 @@
             ],
             "additionalProperties": false,
             "description": "Fresh native runtime /healthz success or failure. Missing, failed collection or stale samples mean unknown. Independent of app registration, app health and node exporter availability."
+          },
+          "measured_scope": {
+            "const": "client_host"
+          },
+          "measured_target": {
+            "type": "string"
           }
         },
         "required": [
@@ -6513,6 +6756,45 @@
           "reason"
         ],
         "additionalProperties": false
+      },
+      "PersonalOwner": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalOwner"
+      },
+      "PersonalTarget": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalTarget"
+      },
+      "PersonalEnrollment": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalEnrollment"
+      },
+      "PersonalClaimInput": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalClaimInput"
+      },
+      "PersonalClaim": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalClaim"
+      },
+      "PersonalHeartbeatInput": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalHeartbeatInput"
+      },
+      "PersonalHeartbeat": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalHeartbeat"
+      },
+      "PersonalPlanInput": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalPlanInput"
+      },
+      "PersonalPlan": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalPlan"
+      },
+      "PersonalOperationInput": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalOperationInput"
+      },
+      "PersonalOperation": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalOperation"
+      },
+      "PersonalReceiptInput": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalReceiptInput"
+      },
+      "PersonalReceipt": {
+        "$ref": "./personal.openapi.json#/components/schemas/PersonalReceipt"
       }
     },
     "responses": {
