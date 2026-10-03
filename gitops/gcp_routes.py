@@ -93,10 +93,38 @@ def unknown_paths(value, path=()):
             yield from unknown_paths(child, (*path, key))
 
 
+def comparable_resource(address, value):
+    """Normalize only optional GCP fields whose empty representations are equivalent."""
+    result = copy.deepcopy(value)
+    if not isinstance(result, dict):
+        return result
+    if address == 'google_compute_firewall.gfe':
+        # Provider refresh can turn unset selectors into empty lists. Nonempty
+        # selectors, source ranges and ports still require exact comparison.
+        for field in ('source_service_accounts', 'source_tags', 'target_tags'):
+            if result.get(field) is None:
+                result[field] = []
+    elif address in ('google_compute_url_map.app', 'google_compute_url_map.redirect'):
+        for field in ('host_rule', 'path_matcher'):
+            for block in result.get(field) or []:
+                if block.get('description') in (None, ''):
+                    block.pop('description', None)
+    return result
+
+
 def validate_plan(plan, request, values):
     actions = {item['address']: item['change']['actions'] for item in plan.get('resource_changes', [])}
-    require(not plan.get('errored') and all(actions.get(item['address']) == ['no-op']
-            for item in plan.get('resource_drift', [])), 'reconcile writable refresh drift before route writes')
+    require(not plan.get('errored'), 'reconcile writable refresh drift before route writes')
+    for item in plan.get('resource_drift', []):
+        address, change = item['address'], item.get('change', {})
+        # A refreshed resource may also receive the requested additive update,
+        # but only when refresh changed representation, not existing behavior.
+        representation_only = (address in UPDATES and actions.get(address) == ['update'] and
+                               isinstance(change.get('before'), dict) and isinstance(change.get('after'), dict) and
+                               comparable_resource(address, change['before']) ==
+                               comparable_resource(address, change['after']))
+        require(actions.get(address) == ['no-op'] or representation_only,
+                'reconcile writable refresh drift before route writes')
     key = request['application_id']
     expected = copy.deepcopy({**values, 'routes': {**values.get('routes', {}), key: checked_request(request)}})
     actual = copy.deepcopy({k: plan.get('variables', {}).get(k, {}).get('value') for k in expected})
@@ -150,7 +178,8 @@ def validate_plan(plan, request, values):
             require(all(after.get(k) == v for k, v in expected.items()), 'new resource differs from registered route')
             continue
         require(address in UPDATES and actions == ['update'], 'unrelated create, update, delete or replacement forbidden')
-        before, after = change['before'], change['after']
+        before = comparable_resource(address, change['before'])
+        after = comparable_resource(address, change['after'])
         fields = {'allow', 'fingerprint'} if address.endswith('.gfe') else {'host_rule', 'path_matcher', 'fingerprint'}
         require({k: v for k, v in before.items() if k not in fields} ==
                 {k: v for k, v in after.items() if k not in fields}, 'existing edge behavior changed')
