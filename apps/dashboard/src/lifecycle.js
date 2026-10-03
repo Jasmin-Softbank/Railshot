@@ -5,7 +5,7 @@ export const applicationStates = { ready: '실행 중', stopped: '중지됨', de
 
 export function applicationLabel(app) {
   if (app.status !== 'ready') return applicationStates[app.status] || '상태 확인 필요';
-  if (app.current_deployment_state === 'unverified') return '서비스 확인 필요';
+  if (app.current_deployment_state === 'unverified') return '배포 결과 확인 필요';
   if (app.current_deployment) return '배포 확인됨';
   if (['queued', 'running'].includes(app.latest_deployment?.status)) return '배포 중';
   if (['failed', 'blocked', 'cancelled'].includes(app.latest_deployment?.status)) return '배포 실패';
@@ -38,7 +38,7 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
   }
   function applicationAllowed(app, action) {
     return !applicationBusy(app.id)
-      && (action === 'delete' || app.current_deployment_state !== 'not_deployed')
+      && (action === 'delete' || !['not_deployed', 'unverified'].includes(app.current_deployment_state))
       && (action === 'start' ? app.status === 'stopped' : action === 'stop' ? app.status === 'ready' : ['ready', 'stopped', 'queued', 'running', 'registering'].includes(app.status));
   }
   function applicationButtons(app) {

@@ -641,6 +641,70 @@ test('failed initial deployment cannot stop or start but remains deletable', asy
   } finally { await product.close(); }
 });
 
+test('published delivery with a missing CD journal can be deleted only through a fresh native plan', async (t) => {
+  for (const rejected of [false, true]) await t.test(rejected ? 'unverified inventory' : 'verified cleanup', async (t) => {
+    const f = await fixture(t);
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    await store.transaction((state) => { state.operations['missing-cd'] = {
+      id: 'missing-cd', kind: 'deployments', application_id: app.id, app: app.app,
+      target_id: app.target_id, environment_target_id: app.environment_target_id, session_id: f.owner.id,
+      status: 'blocked', stage: 'cd', ci: { state: 'published' }, cd: { state: 'blocked', revision: null, deployed: false },
+      error: { code: 'DEPLOYMENT_NOT_FOUND', outcome_unknown: true },
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }; });
+    await store.close();
+    if (rejected) f.adapter.planLifecycle = async () => { throw new EnvironmentError('APPLICATION_CONTROL_CONFLICT', 409); };
+    const product = await createProductService(f.options);
+    try {
+      assert.equal(product.getApplication(app.id, f.owner.id).current_deployment_state, 'unverified');
+      for (const action of ['stop', 'start']) await assert.rejects(
+        product.createApplicationPlan(app.id, { action }, f.owner.id), { code: 'APPLICATION_RECONCILE_REQUIRED' });
+      await assert.rejects(product.createApplicationPlan(app.id, { action: 'delete' }, f.stranger.id), { status: 404 });
+      if (rejected) {
+        await assert.rejects(product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id), { code: 'APPLICATION_CONTROL_CONFLICT' });
+        assert.equal(f.calls.apply, 0);
+        assert.equal(product.getApplication(app.id, f.owner.id).status, 'ready');
+      } else {
+        const plan = await product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id);
+        assert.equal(f.calls.plan, 1); assert.equal(f.calls.apply, 0);
+        assert.deepEqual(plan.resources, resources);
+        const op = await product.createApplicationOperation(app.id, f.input(plan), 'delete-missing-cd', f.owner.id);
+        assert.equal((await settled(product, op.id, f.owner.id)).status, 'succeeded');
+        assert.equal(product.getApplication(app.id, f.owner.id).status, 'deleted');
+        assert.equal((await product.createApplicationOperation(app.id, f.input(plan), 'delete-missing-cd', f.owner.id)).id, op.id);
+        assert.equal(f.calls.apply, 1);
+      }
+      assert.equal(disk(f.directory, 'operations', 'missing-cd').error.code, 'DEPLOYMENT_NOT_FOUND');
+      assert.equal(f.calls.dispatch, 0);
+    } finally { await product.close(); }
+  });
+});
+
+test('deletion does not bypass uncertain writers, CI, lifecycle or mismatched ownership', async (t) => {
+  for (const [name, patch] of Object.entries({
+    unknown: { status: 'unknown', queue: { released_at: new Date().toISOString() } },
+    ci: { stage: 'ci' }, unpublished: { ci: { state: 'unknown' } },
+    lifecycle: { kind: 'application-lifecycle' }, otherApp: { application_id: 'other' },
+    target: { target_id: 'other' }, environment: { environment_target_id: undefined }, owner: { session_id: null },
+  })) await t.test(name, async (t) => {
+    const f = await fixture(t);
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    await store.transaction((state) => { state.operations.uncertain = {
+      id: 'uncertain', kind: 'deployments', application_id: app.id, app: app.app,
+      target_id: app.target_id, environment_target_id: app.environment_target_id, session_id: f.owner.id,
+      status: 'blocked', stage: 'cd', ci: { state: 'published' }, error: { outcome_unknown: true }, ...patch,
+    }; });
+    await store.close();
+    const product = await createProductService(f.options);
+    try {
+      await assert.rejects(product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id), { code: 'APPLICATION_RECONCILE_REQUIRED' });
+      assert.equal(f.calls.plan, 0); assert.equal(f.calls.apply, 0);
+    } finally { await product.close(); }
+  });
+});
+
 test('async lifecycle preview returns before cloud inspection, deduplicates and leaves the writer queue free', async (t) => {
   let release, calls = 0;
   const gate = new Promise((resolve) => { release = resolve; });

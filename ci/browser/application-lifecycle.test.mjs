@@ -261,6 +261,24 @@ test('failed first deployment is not running and only deletion is enabled', { ti
   assert.equal(state.writes.length, 0);
 });
 
+test('uncertain published delivery offers a fresh delete plan without stop or start controls', { timeout: 45000 }, async (t) => {
+  const { state, page } = await fixture(t);
+  Object.assign(state.applications[0], { current_deployment_state: 'unverified', current_deployment: null,
+    latest_deployment: { id: 'missing-cd', status: 'blocked', error: { code: 'DEPLOYMENT_NOT_FOUND', outcome_unknown: true } } });
+  await page.getByRole('button', { name: '앱 목록 새로고침' }).click();
+  await page.waitForFunction(() => document.querySelector('#applications-list').textContent.includes('배포 결과 확인 필요'));
+  assert.equal(await appAction(page, 'my-app', '중지').isDisabled(), true);
+  assert.equal(await appAction(page, 'my-app', '재개').isDisabled(), true);
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  assert.equal(state.writes.length, 0);
+  assert.match(await page.locator('#lifecycle-retained').innerText(), /shared-node/);
+  await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('완료'));
+  assert.equal(await appAction(page, 'my-app', '삭제').count(), 0);
+  assert.equal(state.writes.length, 1); assert.deepEqual(state.errors, []);
+});
+
 test('definitive admission rejection allows a fresh plan without a permanent unknown lock', { timeout: 45000 }, async (t) => {
   const { state, page } = await fixture(t);
   state.outcome = 'rejected';
