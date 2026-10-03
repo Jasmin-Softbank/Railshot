@@ -69,11 +69,11 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       let url;
       try { url = new URL(request.url, 'http://localhost'); } catch { throw new ServiceError('요청 경로가 잘못되었습니다.', 400); }
       versioned = url.pathname.startsWith('/api/v1');
-      if (request.method === 'GET' && url.pathname === '/healthz') {
+      if (request.method === 'GET' && ['/healthz', '/readyz'].includes(url.pathname)) {
         // Liveness remains local; readiness also requires usable durable state and operator config.
         const configured = !shuttingDown && Boolean(await productReady.catch(() => null))
           && Boolean(product || service?.targetId || environmentAdapter || process.env.RAILSHOT_PROFILES_FILE);
-        json(response, 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
+        json(response, url.pathname === '/readyz' && !configured ? 503 : 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
       // Kept outside the public gateway's /api/ route. Always require the operator
       // token, including public-demo mode. The hook has no database/cloud mounts.
@@ -85,6 +85,10 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         if (!input || Object.keys(input).length !== 1 || !/^[a-f0-9-]{36}$/.test(input.release_id || ''))
           throw new ServiceError('Invalid release identity', 400);
         const products = await productReady;
+        const desired = request.headers['x-railshot-desired-template'];
+        if (!release && /^[a-f0-9]{64}$/.test(desired || '') && desired === process.env.RAILSHOT_POD_TEMPLATE_ID) {
+          json(response, 200, { status: 'current', release_id: input.release_id }); return;
+        }
         if (!products?.pauseForRelease || shuttingDown) throw new ServiceError('Release preparation unavailable', 503);
         if (release && release !== input.release_id) throw new ServiceError('Another release is prepared', 409);
         if (!release) {
