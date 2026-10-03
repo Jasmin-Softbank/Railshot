@@ -13,7 +13,7 @@ import { cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
 import { json, apiError, accepted } from './http/response.js';
 import { jsonInput, pagination, page, requestKey } from './http/request.js';
 import { uploadedSource, sourceArchive } from './http/source.js';
-import { createOpenStackRoutes, isRegistrationRoute } from './http/openstack.js';
+import { createOpenStackRoutes, isRegistrationRoute, isTokenClaimRoute } from './http/openstack.js';
 import { isDashboardRoute, serveDashboard } from './http/dashboard.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
@@ -23,7 +23,6 @@ const assets = new Map([
   ['/src/api.js', ['src/api.js', 'text/javascript; charset=utf-8']],
   ['/src/openstack-installer.js', ['src/openstack-installer.js', 'text/javascript; charset=utf-8']],
   ['/src/lifecycle.js', ['src/lifecycle.js', 'text/javascript; charset=utf-8']],
-  ['/src/connections.js', ['src/connections.js', 'text/javascript; charset=utf-8']],
   ['/contracts/application.mjs', ['../../contracts/application.mjs', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
 ]);
@@ -75,6 +74,13 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       }
       if (url.pathname.startsWith('/api/')) {
         if (request.headers['sec-fetch-site'] === 'cross-site') throw new ServiceError('다른 사이트에서 보낸 요청은 허용되지 않습니다.', 403);
+        if (isTokenClaimRoute(url.pathname)) {
+          if (!access.token) throw new ServiceError('등록 요청에는 운영자 API 토큰 설정이 필요합니다.', 503);
+          let products;
+          try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
+          await openstack.claimToken(request, response, url, products);
+          return;
+        }
         if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);

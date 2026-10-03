@@ -7,7 +7,6 @@ The browser, HTTP API, and MCP agent are separate entry points. The API owns val
 | `dashboard/` | `index.html`, `app.js` | Browser navigation, deployment views, and polling |
 | `dashboard/src/api.js` | Imported by dashboard modules | Same-origin HTTP requests and cancellation |
 | `dashboard/src/openstack-installer.js` | Imported by `app.js` | OpenStack registration and installer presentation |
-| `dashboard/src/connections.js` | Imported by `app.js` | Session connection form and list |
 | `dashboard/src/lifecycle.js` | Imported by `app.js` | Application start, stop, and delete controls |
 | `api/src/server.js` | `npm start --prefix apps/api` | Route dispatch and service setup |
 | `api/src/http/` | Imported by `server.js` | Request parsing, source upload, and response formatting |
