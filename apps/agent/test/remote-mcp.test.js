@@ -61,7 +61,9 @@ test('OAuth joins an existing web session and issues a distinct AI-first session
   for (const [key, value] of Object.entries({ response_type: 'code', client_id,
     redirect_uri: 'http://127.0.0.1:49152/callback', code_challenge: challenge,
     code_challenge_method: 'S256', resource: 'http://127.0.0.1:4181/mcp' })) loopback.searchParams.set(key, value);
-  assert.equal((await fetch(loopback)).status, 200);
+  const loopbackConsent = await fetch(loopback);
+  assert.equal(loopbackConsent.status, 200);
+  assert.match(loopbackConsent.headers.get('content-security-policy'), /form-action 'self' http:\/\/127\.0\.0\.1:49152(?:;|$)/);
   assert.equal((await fetch(`http://127.0.0.1:${restarted.server.address().port}${loopback.pathname}${loopback.search}`)).status, 200);
 
   async function connect(browserCookie) {
@@ -71,6 +73,7 @@ test('OAuth joins an existing web session and issues a distinct AI-first session
       code_challenge_method: 'S256', resource: 'http://127.0.0.1:4181/mcp', state: 'demo-state' })) url.searchParams.set(key, value);
     const consent = await fetch(url);
     assert.equal(consent.status, 200);
+    assert.match(consent.headers.get('content-security-policy'), /form-action 'self' https:\/\/chatgpt\.com(?:;|$)/);
     const approval = /name="approval" value="([A-Za-z0-9_-]{43})"/.exec(await consent.text())?.[1];
     assert.ok(approval);
     const authorized = await fetch(`${base}/mcp/authorize`, { method: 'POST', redirect: 'manual',

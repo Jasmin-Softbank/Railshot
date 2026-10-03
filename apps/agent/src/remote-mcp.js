@@ -153,7 +153,7 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
         const approval = randomToken();
         approvals.set(approval, { clientId, redirectUri, challenge, state: url.searchParams.get('state'), resource, expires: now() + 600000 });
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store',
-          'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'" });
+          'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${new URL(redirectUri).origin}; base-uri 'none'` });
         response.end(`<!doctype html><html lang="ko"><meta charset="utf-8"><title>Railshot AI 연결</title><style>body{font:16px system-ui;max-width:38rem;margin:4rem auto;padding:1rem;line-height:1.6}button{padding:.7rem 1rem}</style><h1>Railshot AI 연결</h1><p>${html(client.client_name || 'AI 클라이언트')}에 이 브라우저의 배포 관리 권한을 연결합니다. 아직 웹 세션이 없다면 새로 발급합니다.</p><p>연결 후 AI가 배포 도구를 호출할 수 있습니다. 배포 요청은 AI 앱에서 확인하고 실행하세요.</p><form method="post" action="/mcp/authorize"><input type="hidden" name="approval" value="${approval}"><button type="submit">연결 승인</button></form></html>`);
         return;
       }
