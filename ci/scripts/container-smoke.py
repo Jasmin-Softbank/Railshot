@@ -213,6 +213,15 @@ def smoke(component, image):
                 assert selector.select(30), 'MCP initialize timed out'
                 response = json.loads(process.stdout.readline())
             assert response.get('id') == 1 and response.get('result', {}).get('serverInfo'), response
+            process.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
+            process.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}}) + '\n')
+            process.stdin.flush()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                assert selector.select(30), 'MCP tools/list timed out'
+                tools = json.loads(process.stdout.readline())
+            names = {item['name'] for item in tools.get('result', {}).get('tools', [])}
+            assert tools.get('id') == 2 and {'deploy_repository', 'get_deployment'} <= names, tools
         finally:
             remove_container(name)
             process.communicate(timeout=15)

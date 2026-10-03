@@ -77,7 +77,7 @@ class PlatformReleaseTests(unittest.TestCase):
     def test_trust_checks_remain_in_the_deployment_job(self):
         name = 'Validate publication and deployment inputs'
         self.assertEqual(self.run_step('deploy', name).returncode, 0)
-        for overrides in ({'PUBLISH': 'false'}, {'COMPONENTS': '["mcp"]'},
+        for overrides in ({'PUBLISH': 'false'}, {'COMPONENTS': '["ci-runner"]'},
                           {'PLATFORM_TARGET': ''}, {'PLATFORM_PORT': '443'},
                           {'GITHUB_REF': 'refs/heads/feature/unreviewed'},
                           {'COMPONENTS': '["dashboard","api","api"]'},
@@ -86,7 +86,7 @@ class PlatformReleaseTests(unittest.TestCase):
                           {'PROVIDER_TARGETS': '{"openstack":"k3s-aws"}'}):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.run_step('deploy', name, overrides).returncode, 0)
-        for component in ('dashboard', 'api'):
+        for component in ('dashboard', 'api', 'mcp'):
             self.assertEqual(self.run_step('deploy', name, {'COMPONENTS': json.dumps([component])}).returncode, 0)
         automatic = {'SKIP_BUILD': 'true', 'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push'}
         self.assertEqual(self.run_step('deploy', name, automatic).returncode, 0)
@@ -254,6 +254,26 @@ class PlatformReleaseTests(unittest.TestCase):
         after = json.loads(self.git('show', f'{self.remote_revision()}:{WORKLOAD}').stdout)
         self.assertEqual(next(item for item in after['items'] if item['kind'] == 'Job'), hook)
         self.assertEqual(next(item for item in after['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-api'), api)
+
+    def test_mcp_only_release_adds_remote_service_and_later_preserves_it(self):
+        self.assertEqual(self.deploy().returncode, 0)
+        self.git('switch', '--detach', self.source_sha)
+        (self.artifacts / 'dashboard.json').unlink()
+        (self.artifacts / 'api.json').unlink()
+        (self.artifacts / 'mcp.json').write_text(json.dumps({'mcp': 'ghcr.io/jasmin-softbank/railshot-mcp@sha256:' + 'b' * 64}))
+        first = self.deploy()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        workload = json.loads(self.git('show', f'{self.remote_revision()}:{WORKLOAD}').stdout)
+        mcp = next(item for item in workload['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-mcp')
+        self.assertTrue(mcp['spec']['template']['spec']['containers'][0]['image'].endswith('b' * 64))
+        self.assertTrue(any(item['kind'] == 'Service' and item['metadata']['name'] == 'railshot-mcp' for item in workload['items']))
+        self.git('switch', '--detach', self.source_sha)
+        (self.artifacts / 'mcp.json').unlink()
+        (self.artifacts / 'dashboard.json').write_text(json.dumps({'dashboard': 'ghcr.io/jasmin-softbank/railshot-dashboard@sha256:' + 'c' * 64}))
+        second = self.deploy()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        after = json.loads(self.git('show', f'{self.remote_revision()}:{WORKLOAD}').stdout)
+        self.assertEqual(next(item for item in after['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-mcp'), mcp)
 
     def test_untrusted_or_missing_digest_fails_before_branch_creation(self):
         image = self.artifacts / "api.json"
