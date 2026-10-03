@@ -18,6 +18,15 @@ location /api/ {
     proxy_read_timeout 610s;
     proxy_hide_header X-Powered-By;
 }
+location = /onpremise/install.sh {
+    access_log off;
+    proxy_pass http://$upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$http_host;
+    proxy_set_header Authorization "";
+    proxy_set_header Connection "";
+    proxy_hide_header X-Powered-By;
+}
 EOF
 unset token
 exec nginx -g 'daemon off;'

@@ -78,9 +78,9 @@ export async function createProductStore(directory) {
     const version = db.prepare('PRAGMA user_version').get().user_version;
     if (![0, 1, 2].includes(version)) throw new Error('Unsupported database schema');
     db.exec(await readFile(new URL('./dashboard-schema.sql', import.meta.url), 'utf8'));
-    // Older registrations stored OpenStack metadata that was never used to issue or claim tokens.
+    // Remove registration fields that are no longer used for token issue or claim.
     const registrationColumns = new Set(db.prepare('PRAGMA table_info(registrations)').all().map((column) => column.name));
-    for (const name of ['auth_type', 'project_id', 'user_id']) {
+    for (const name of ['auth_type', 'project_id', 'user_id', 'key_salt', 'key_hash']) {
       if (registrationColumns.has(name)) db.exec(`ALTER TABLE registrations DROP COLUMN ${name}`);
     }
     if (version === 0) {
