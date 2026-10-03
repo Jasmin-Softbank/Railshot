@@ -6,7 +6,7 @@
 2. `Railshot CI gate`는 기존 필수 상태 이름을 유지하며 선택된 이미지 작업의 결과만 집계한다.
 3. 배포 job이 현재 소스인지 한 번 확인하고, 고정 digest를 `deployment/platform`에 반영한 뒤 Argo 동기화·Pod 이미지·공개 HTTP를 확인한다. 별도 admission·verify job은 없다.
 
-일반 API·대시보드 변경은 두 플랫폼 이미지만 게시한다. 두 이미지를 함께 렌더링하는 기존 선언 계약은 유지한다. MCP는 자동 플랫폼 배포 대상이 아니며 필요한 경우 수동 이미지 빌드·게시로 처리한다. CI runner 또는 앱 CI workflow 변경 시에만 runner 이미지를 추가하고 `ci-runtime`으로 build-controller와 앱 workflow를 갱신한다. 실행 중인 고객 runner Job은 보존한다.
+문서·테스트 전용 변경은 이미지 배포를 생략한다. 일반 API·대시보드 변경은 두 플랫폼 이미지만 게시한다. 두 이미지를 함께 렌더링하는 기존 선언 계약은 유지한다. MCP는 자동 플랫폼 배포 대상이 아니며 필요한 경우 수동 이미지 빌드·게시로 처리한다. CI runner 또는 앱 CI workflow 변경 시에만 runner 이미지를 추가하고 `ci-runtime`으로 build-controller와 앱 workflow를 갱신한다. 실행 중인 고객 runner Job은 보존한다.
 
 AWS/GCP/OpenStack 노드·LB·관측 전체 갱신은 일반 배포에 연결하지 않는다. 필요한 운영 작업일 때 `Publish platform containers`를 수동 실행하고 `multicloud=true`를 명시한다. 이때만 기존 `RAILSHOT_MULTICLOUD_RELEASE=true` 설정과 세 provider 바인딩이 필요하다. 인프라 전용 변경은 플랫폼 이미지를 다시 배포하지 않는다.
 

@@ -19,11 +19,11 @@ class ScopeTests(unittest.TestCase):
                      'infrastructure/terraform/gcp-edge/main.tf', 'infrastructure/terraform/openstack-edge/main.tf',
                      'infrastructure/ansible/runtime.yml', 'gitops/credentials.py',
                      'observability/register.py', 'ci/workflows/railshot-deploy.yml',
-                     'deployment/scripts/tests/test_runtime_update.py', 'docs/api/ansible.openapi.json',
+                     'docs/api/ansible.openapi.json',
                      'new-scope/policy.json', '../README.md'):
             with self.subTest(path=path):
                 self.assertTrue(ci_scope.release_required([path]))
-        for paths in ([], ['README.md'], ['docs/operations/release.md', 'apps/api/README.md']):
+        for paths in ([], ['apps/api/test/product.test.js'], ['deployment/scripts/tests/test_runtime_update.py'], ['README.md'], ['docs/operations/release.md', 'apps/api/README.md']):
             self.assertFalse(ci_scope.release_required(paths))
         self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
 
@@ -31,7 +31,8 @@ class ScopeTests(unittest.TestCase):
         cases = [(['apps/api/src/server.js'], ['dashboard', 'api']),
                  (['ci/workflows/railshot-deploy.yml'], ['dashboard', 'api', 'ci-runner']),
                  (['deployment/scripts/platform_workers.py'], []),
-                 (['docs/operations/release.md'], []), ([], []),
+                 (['docs/operations/release.md'], []), (['apps/api/test/product.test.js'], []),
+                 (['ci/scripts/loop/test_native_packaging.py'], []), ([], []),
                  (None, ['dashboard', 'api', 'ci-runner'])]
         for event in ('push', 'pull_request', 'workflow_dispatch'):
             for paths, automatic_components in cases:

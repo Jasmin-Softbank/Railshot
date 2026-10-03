@@ -54,16 +54,22 @@ def documentation(path):
             or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
 
 
+def test_only(path):
+    return (path.startswith(('apps/api/test/', 'ci/browser/')) or
+            path.startswith(('ci/scripts/', 'deployment/scripts/tests/'))
+            and PurePosixPath(path).name.startswith('test_') and path.endswith('.py'))
+
+
 def release_required(paths):
-    """Release common runtime/worker/IaC policy too; only proven docs-only diffs skip."""
+    """Release common runtime/worker/IaC policy too; proven documentation/test-only diffs skip."""
     return paths is None or any(not path or path.startswith('/') or '..' in PurePosixPath(path).parts
-                                or not documentation(path) for path in paths)
+                                or not (documentation(path) or test_only(path)) for path in paths)
 
 
 def container_components(paths):
     components = set()
     for path in paths:
-        if documentation(path) or path == 'docs/api/product.openapi.json':
+        if documentation(path) or test_only(path) or path == 'docs/api/product.openapi.json':
             continue
         if api_native_dependency(path):
             components.add('api')
