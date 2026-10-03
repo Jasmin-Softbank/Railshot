@@ -16,9 +16,9 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
 
-async function zipOf(files) {
+async function zipOf(files, options = {}) {
   const zip = new yazl.ZipFile();
-  for (const [name, content] of Object.entries(files)) zip.addBuffer(Buffer.from(content), name);
+  for (const [name, content] of Object.entries(files)) zip.addBuffer(Buffer.from(content), name, options[name]);
   zip.end();
   const chunks = [];
   for await (const chunk of zip.outputStream) chunks.push(chunk);
@@ -152,9 +152,18 @@ test('ZIP 경로 이동과 비밀키 파일을 거부한다', async () => {
   await assert.rejects(inspectArchive(Buffer.from(text, 'latin1')), /invalid relative path|안전하지 않은/);
 });
 
+test('ignored dependency symlinks are skipped while application symlinks remain rejected', async () => {
+  const link = 'repo/examples/react/node_modules/.bin/JSONStream';
+  const files = { 'repo/package.json': '{}', 'repo/index.html': 'app', [link]: '../JSONStream/bin.js' };
+  const bytes = await zipOf(files, { [link]: { mode: 0o120777 } });
+  assert.deepEqual((await inspectArchive(bytes, { stripRoot: true })).map((file) => file.path), ['package.json', 'index.html']);
+  await assert.rejects(inspectArchive(await zipOf({ 'repo/app-link': '/etc/passwd' },
+    { 'repo/app-link': { mode: 0o120777 } })), /안전하지 않은 ZIP 경로/);
+});
+
 test('공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 파일 목록으로 변환한다', async () => {
   const sha = 'a'.repeat(40);
-  const zip = await zipOf({ 'sample-a1b2c3/requirements.txt': 'flask', 'sample-a1b2c3/app.py': 'print(1)' });
+  let zip = await zipOf({ 'sample-a1b2c3/requirements.txt': 'flask', 'sample-a1b2c3/app.py': 'print(1)' });
   const calls = [];
   const fakeFetch = async (url, options) => {
     calls.push({ url: String(url), options });
@@ -171,6 +180,9 @@ test('공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 
   assert.deepEqual(result.source, { type: 'github', repository: 'https://github.com/example/sample', sha });
   assert.ok(calls.every((call) => !call.options.headers.authorization));
   assert.ok(calls.every((call) => call.options.signal instanceof AbortSignal), 'Every source read has a deadline');
+  zip = await zipOf({ 'sample-a1b2c3/.env': 'private' });
+  await assert.rejects(fetchPublicGithubSource('https://github.com/example/sample', fakeFetch),
+    (error) => error.status === 422 && /GitHub 소스 검사 실패:.*비밀키/.test(error.message));
 });
 
 test('GitHub 입력은 공개 저장소 기본 URL로만 제한한다', async () => {
