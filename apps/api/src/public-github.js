@@ -57,5 +57,8 @@ export async function fetchPublicGithubSource(input, fetchImpl = fetch) {
     throw new ServiceError('GitHub 소스 다운로드 주소가 허용되지 않습니다.', 502);
   }
   const bytes = await limitedBytes(await fetchImpl(downloadUrl, { redirect: 'manual', headers: { 'user-agent': headers['user-agent'] }, signal: AbortSignal.timeout(30_000) }));
-  return { files: await inspectArchive(bytes, { stripRoot: true }), source: { type: 'github', repository, sha: commit.sha } };
+  let files;
+  try { files = await inspectArchive(bytes, { stripRoot: true }); }
+  catch (error) { throw new ServiceError(`GitHub 소스 검사 실패: ${error.message}`, 422); }
+  return { files, source: { type: 'github', repository, sha: commit.sha } };
 }
