@@ -200,7 +200,7 @@ class PipelineTest(unittest.TestCase):
                     patch.object(gate, "run_quality", return_value=result), \
                     patch.object(gate, "l2", return_value=(build_errors, {})) as build, \
                     patch.object(gate, "l4", return_value=[]), patch.object(gate, "l3", return_value=runtime_errors) as runtime:
-                verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.ORDER))
+                verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.FULL_GATE_ORDER))
             self.assertEqual(verdict["status"], expected)
             self.assertEqual(verdict["release_eligible"], expected == "PASS")
             q = verdict["layers"][2]

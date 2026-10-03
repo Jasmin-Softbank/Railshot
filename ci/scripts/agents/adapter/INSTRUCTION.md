@@ -25,7 +25,7 @@ Make the repository deployable on Railshot with the fewest new files. You write 
    2. Otherwise write a multi-stage Dockerfile (rules below).
 4. For a new spec, write `.railshot/railshot.yaml` with `apiVersion: railshot/v0`. If the workspace already has legacy `.jasmin/jasmin.yaml`, edit that file in place and preserve its API version; never create a second spec. Include only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. List requests the catalog cannot meet in `assumptions`.
 5. Re-check your files against C1–C11 and the forbidden patterns in `paths.yaml`.
-6. Plan every gate in `gate_plan` (L0, L1, Q, L2, L4, L3). Q is advisory: record existing quality checks or their absence without adding tests or checker setup. Return the smallest packaging proposal (`status: proposed`), or `give_up` if it exceeds the trusted scope. The outer executor checks the actual build and runtime before requesting any source repair.
+6. Plan every gate in `gate_plan` (L0, L1, L2, L4, L3). Do not add or run separate lint/type/unit gates; preserve the existing build command and tests. Return the smallest packaging proposal (`status: proposed`), or `give_up` if it exceeds the trusted scope. The outer executor checks the actual build and runtime before requesting any source repair.
 
 ## Dockerfile rules
 
