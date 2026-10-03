@@ -187,9 +187,12 @@ export async function createProductService({ service, directory, target, provide
     return { ...input, app, target_id: id };
   }
   async function update(id, patch) {
+    let newFailure = false;
     await store.transaction((state) => {
       const record = state.operations[id], now = new Date().toISOString();
       const before = structuredClone(record);
+      newFailure = ['failed', 'blocked', 'unknown'].includes(patch.status)
+        && !['failed', 'blocked', 'unknown'].includes(before.status);
       if (patch.status === 'unknown' && record.status !== 'unknown') record.unknown_since = now;
       if (patch.status === 'running' && record.queue) { delete record.queue.released_at; delete record.queue.release_reason; }
       Object.assign(record, patch, { updated_at: now });
@@ -198,7 +201,7 @@ export async function createProductService({ service, directory, target, provide
     });
     const row = store.read().operations[id];
     if (patch.ci) refreshCiJournal(row);
-    if (row.kind === 'deployments' && row.ci?.state === 'failed' && ['failed', 'blocked', 'unknown'].includes(patch.status)) diagnostics.schedule(id);
+    if (newFailure && row.kind === 'deployments' && row.ci?.state === 'failed') diagnostics.schedule(id);
   }
   function launch(fn, deploymentId = null) {
     const worker = Promise.resolve().then(fn).catch(() => { console.error('RAILSHOT worker could not persist its final state; inspect private workspace state.'); }).finally(() => {

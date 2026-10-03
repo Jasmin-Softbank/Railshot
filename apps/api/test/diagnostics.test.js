@@ -141,7 +141,8 @@ test('classification is durable and single-call; GET and another session cannot 
   await store.close();
   let calls = 0, artifactReads = 0, release;
   const wait = new Promise((resolve) => { release = resolve; });
-  const service = { targetId: 'demo', diagnostics: async () => { artifactReads++; return structuredClone(diagnostic); } };
+  const service = { targetId: 'demo', diagnostics: async () => { artifactReads++; return structuredClone(diagnostic); },
+    status: async () => ({ run_id: 123, state: 'failed', status: 'completed', conclusion: 'failure', source_commit: 'a'.repeat(40) }) };
   const classifyFailure = async (input) => { calls++; await wait; return { state: 'succeeded', ...validateClassification(response(input), input, 'req-1') }; };
   product = await createProductService({ directory, service, classifyFailure });
   server = createAppServer({ product }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -150,6 +151,7 @@ test('classification is durable and single-call; GET and another session cannot 
   const denied = await fetch(url + '/classifications', { method: 'POST', headers: { ...headers, cookie: `railshot_session=${other.token}` }, body: '{}' });
   assert.equal(denied.status, 404); assert.equal(calls, 0); assert.equal(artifactReads, 0);
   for (let i = 0; i < 3; i++) assert.equal((await fetch(url + '/diagnostics', { headers })).status, 200);
+  for (let i = 0; i < 3; i++) assert.equal((await fetch(url, { headers })).status, 200);
   assert.equal(calls, 0); assert.equal(artifactReads, 1);
   const requests = await Promise.all(Array.from({ length: 6 }, () => fetch(url + '/classifications', { method: 'POST', headers, body: '{}' })));
   for (const r of requests) { assert.equal(r.status, 202); assert.equal(r.headers.get('location'), '/api/v1/deployments/dep/diagnostics'); }
