@@ -32,6 +32,7 @@ const required = [
   'apps/agent/runner.py',
   'apps/agent/sender.py',
 ];
+const tokenClientPath = 'deployment/bootstrap/claim_token.py';
 
 export async function buildOpenStackInstaller(root = repository) {
   const script = await readFile(join(root, required[0]), 'utf8');
@@ -51,9 +52,16 @@ export async function buildOpenStackInstaller(root = repository) {
     if (total > 2 * 1024 * 1024) throw new Error('OpenStack installer package is too large');
     zip.addBuffer(bytes, name, { mtime: new Date('1980-01-01T00:00:00Z'), mode: 0o644 });
   }
+  const tokenClientFile = join(root, tokenClientPath);
+  const tokenClientMetadata = await lstat(tokenClientFile);
+  if (!tokenClientMetadata.isFile() || tokenClientMetadata.nlink !== 1) throw new Error('Unsafe token client source');
+  const tokenClient = await readFile(tokenClientFile, 'utf8');
+  total += Buffer.byteLength(tokenClient);
+  if (total > 2 * 1024 * 1024) throw new Error('OpenStack installer package is too large');
+  zip.addBuffer(Buffer.from(tokenClient), tokenClientPath, { mtime: new Date('1980-01-01T00:00:00Z'), mode: 0o644 });
   zip.end();
   const chunks = [];
   for await (const chunk of zip.outputStream) chunks.push(chunk);
   const archive = Buffer.concat(chunks);
-  return { archive, sha256: createHash('sha256').update(archive).digest('hex'), script };
+  return { archive, sha256: createHash('sha256').update(archive).digest('hex'), script, tokenClient };
 }

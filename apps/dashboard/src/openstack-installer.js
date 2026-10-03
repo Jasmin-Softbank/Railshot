@@ -26,6 +26,7 @@ export function initializeOpenStackInstaller() {
       if (typeof installer.install_sh !== 'string' || !installer.install_sh.startsWith('#!/usr/bin/env bash')
           || installer.script_url !== '/api/v1/installers/openstack/scripts'
           || installer.bundle_url !== '/api/v1/installers/openstack/bundles'
+          || installer.token_client_url !== '/api/v1/installers/openstack/client'
           || !/^[a-f0-9]{64}$/.test(installer.bundle_sha256)) throw new Error('설치 파일 응답을 확인하지 못했습니다.');
       const { data: registration } = await request('/api/v1/registrations', { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -39,6 +40,7 @@ export function initializeOpenStackInstaller() {
       document.querySelector('#openstack-install-script').value = installer.install_sh;
       document.querySelector('#openstack-script-download').href = installer.script_url;
       document.querySelector('#openstack-bundle-download').href = installer.bundle_url;
+      document.querySelector('#openstack-token-client-download').href = installer.token_client_url;
       openstackEnrollmentKey.value = '';
       openstackInstallResult.hidden = false;
       openstackInstallStatus.textContent = '등록 요청을 저장하고 일회성 연계 토큰을 발급했습니다.';

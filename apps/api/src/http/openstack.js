@@ -7,6 +7,7 @@ const installerPaths = new Set([
   '/api/v1/installers/openstack',
   '/api/v1/installers/openstack/scripts',
   '/api/v1/installers/openstack/bundles',
+  '/api/v1/installers/openstack/client',
 ]);
 
 export const isRegistrationRoute = (path) => /^\/api\/v1\/registrations(?:\/|$)/.test(path);
@@ -31,6 +32,11 @@ export function createOpenStackRoutes() {
           'content-disposition': 'attachment; filename="railshot-openstack-installer.zip"',
           'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
         response.end(packageData.archive);
+      } else if (url.pathname.endsWith('/client')) {
+        response.writeHead(200, { 'content-type': 'text/x-python; charset=utf-8',
+          'content-disposition': 'attachment; filename="claim_token.py"', 'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff' });
+        response.end(packageData.tokenClient);
       } else if (url.pathname.endsWith('/scripts')) {
         response.writeHead(200, { 'content-type': 'text/x-shellscript; charset=utf-8',
           'content-disposition': 'attachment; filename="install.sh"', 'cache-control': 'no-store',
@@ -38,7 +44,8 @@ export function createOpenStackRoutes() {
         response.end(packageData.script);
       } else {
         json(response, 200, { install_sh: packageData.script, bundle_sha256: packageData.sha256,
-          script_url: '/api/v1/installers/openstack/scripts', bundle_url: '/api/v1/installers/openstack/bundles' });
+          script_url: '/api/v1/installers/openstack/scripts', bundle_url: '/api/v1/installers/openstack/bundles',
+          token_client_url: '/api/v1/installers/openstack/client' });
       }
       return true;
     },
