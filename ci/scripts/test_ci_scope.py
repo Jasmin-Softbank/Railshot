@@ -29,11 +29,13 @@ class ScopeTests(unittest.TestCase):
 
     def test_normal_runs_build_only_images_and_manual_runs_keep_full_checks(self):
         cases = [(['apps/api/src/server.js'], ['api']), (['apps/dashboard/app.js'], ['dashboard']),
+                 (['apps/agent/src/remote-mcp.js'], ['mcp']),
+                 (['ci/scripts/ci_scope.py'], ['dashboard', 'api', 'mcp', 'ci-runner']),
                  (['ci/workflows/railshot-deploy.yml'], ['dashboard', 'api', 'ci-runner']),
                  (['deployment/scripts/platform_workers.py'], []),
                  (['docs/operations/release.md'], []), (['apps/api/test/product.test.js'], []),
                  (['ci/scripts/loop/test_native_packaging.py'], []), ([], []),
-                 (None, ['dashboard', 'api', 'ci-runner'])]
+                 (None, ['dashboard', 'api', 'mcp', 'ci-runner'])]
         for event in ('push', 'pull_request', 'workflow_dispatch'):
             for paths, automatic_components in cases:
                 with self.subTest(event=event, paths=paths), tempfile.TemporaryDirectory() as tmp:
@@ -75,7 +77,7 @@ class ScopeTests(unittest.TestCase):
                         patch.object(ci_scope, 'previous_release_complete', return_value=False):
                     ci_scope.main()
                 values = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
-                self.assertEqual(json.loads(values['container_components']), ['dashboard', 'api', 'ci-runner'])
+                self.assertEqual(json.loads(values['container_components']), list(ci_scope.COMPONENTS))
                 self.assertEqual(values['release'], 'true')
                 self.assertEqual(json.loads(values['selected']), ['containers'])
 
@@ -162,6 +164,7 @@ class ScopeTests(unittest.TestCase):
             'package-lock.json': {'dashboard', 'api', 'mcp'},
             '.dockerignore': set(ci_scope.COMPONENTS),
             'ci/scripts/publication.py': {'api', 'ci-runner'},
+            'ci/scripts/ci_scope.py': set(ci_scope.COMPONENTS),
             'ci/scripts/runner/entrypoint.sh': {'ci-runner'},
             'ci/scripts/runner/replenish.py': {'api', 'ci-runner'},
             'ci/runner-compose.yml': {'ci-runner'},
