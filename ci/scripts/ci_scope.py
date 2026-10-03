@@ -54,16 +54,27 @@ def documentation(path):
             or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
 
 
+def test_only(path):
+    return (path.startswith(('apps/api/test/', 'ci/browser/')) or
+            path.startswith(('ci/scripts/', 'deployment/scripts/tests/'))
+            and PurePosixPath(path).name.startswith('test_') and path.endswith('.py'))
+
+
+def multicloud_required(paths):
+    return paths is None or any(not documentation(path) and not test_only(path)
+        and not path.startswith(('apps/dashboard/', 'apps/api/src/')) for path in paths)
+
+
 def release_required(paths):
-    """Release common runtime/worker/IaC policy too; only proven docs-only diffs skip."""
+    """Release common runtime/worker/IaC policy too; proven documentation/test-only diffs skip."""
     return paths is None or any(not path or path.startswith('/') or '..' in PurePosixPath(path).parts
-                                or not documentation(path) for path in paths)
+                                or not (documentation(path) or test_only(path)) for path in paths)
 
 
 def container_components(paths):
     components = set()
     for path in paths:
-        if documentation(path) or path == 'docs/api/product.openapi.json':
+        if documentation(path) or test_only(path) or path == 'docs/api/product.openapi.json':
             continue
         if api_native_dependency(path):
             components.add('api')
@@ -106,7 +117,7 @@ def select(paths):
         if not path or path.startswith('/') or '..' in parts:
             return set(JOBS)
         if path == 'docs/api/product.openapi.json':
-            selected.update(('contracts', 'api-browser'))
+            selected.add('api-browser')
         elif path == 'docs/api/ansible.openapi.json' or path.startswith('examples/ansible/'):
             selected.add('contracts')  # These documents are executable test fixtures.
         elif documentation(path):
@@ -138,14 +149,29 @@ def select(paths):
                       'deployment/manifests/platform.yaml', 'deployment/manifests/build-runner.yaml', 'deployment/manifests/build-controller.yaml', 'deployment/scripts/render-platform.py',
                       'deployment/scripts/tests/test_platform.py'}:
             selected.add('contracts')  # Platform workloads do not install the customer runtime.
+        elif (path.startswith('deployment/cloudflared/')
+              or path.startswith('deployment/scripts/tests/') and test_only(path)
+              or path.startswith('deployment/scripts/') and path in API_NATIVE_FILES
+              and path != 'deployment/scripts/common.sh'):
+            selected.add('contracts')
         elif path.startswith('deployment/'):
             selected.update(('contracts', 'runtime-smoke'))
         elif path.startswith('gitops/'):
             selected.add('contracts')
         elif path.startswith('observability/'):
             selected.add('observability')
+        elif path.startswith('ci/scripts/'):
+            selected.add('contracts')
+            if path in {'ci/scripts/integration_e2e.py', 'ci/scripts/prepare-cni-smoke.sh'}:
+                selected.add('runtime-smoke')
+            elif path == 'ci/scripts/check-bootstrap.sh':
+                selected.add('openstack')
+            elif path == 'ci/scripts/check-ansible.sh':
+                selected.add('database-ansible')
+            elif path.startswith('ci/scripts/infra/'):
+                selected.add('terraform')
         elif path.startswith('ci/'):
-            selected.update(JOBS)  # Shared CI scripts/workflows serve several consumers.
+            selected.update(JOBS)
         else:
             selected.update(JOBS)
         if api_native_dependency(path):
@@ -225,10 +251,15 @@ def main():
     if release and os.environ.get('AUTO_RELEASE') == 'true':
         selected.add('containers')
         components = set(COMPONENTS)
+    # Hackathon fast path: build release images once after merge, not again on every PR.
+    if os.environ['GITHUB_EVENT_NAME'] == 'pull_request':
+        selected.discard('containers')
+        components.clear()
     result = json.dumps([job for job in JOBS if job in selected])
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         stream.write(f'selected={result}\n')
         stream.write(f'release={str(release).lower()}\n')
+        stream.write(f'multicloud={str(multicloud_required(paths)).lower()}\n')
         stream.write('container_components=' + json.dumps([name for name in COMPONENTS if name in components]) + '\n')
         for job in JOBS:
             stream.write(f'{job}={str(job in selected).lower()}\n')

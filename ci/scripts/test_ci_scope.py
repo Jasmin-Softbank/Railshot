@@ -19,11 +19,11 @@ class ScopeTests(unittest.TestCase):
                      'infrastructure/terraform/gcp-edge/main.tf', 'infrastructure/terraform/openstack-edge/main.tf',
                      'infrastructure/ansible/runtime.yml', 'gitops/credentials.py',
                      'observability/register.py', 'ci/workflows/railshot-deploy.yml',
-                     'deployment/scripts/tests/test_runtime_update.py', 'docs/api/ansible.openapi.json',
+                     'docs/api/ansible.openapi.json',
                      'new-scope/policy.json', '../README.md'):
             with self.subTest(path=path):
                 self.assertTrue(ci_scope.release_required([path]))
-        for paths in ([], ['README.md'], ['docs/operations/release.md', 'apps/api/README.md']):
+        for paths in ([], ['apps/api/test/product.test.js'], ['deployment/scripts/tests/test_runtime_update.py'], ['README.md'], ['docs/operations/release.md', 'apps/api/README.md']):
             self.assertFalse(ci_scope.release_required(paths))
         self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
 
@@ -66,6 +66,10 @@ class ScopeTests(unittest.TestCase):
             'apps/api/src/metrics.js': {'api-browser', 'observability', 'containers'},
             'apps/dashboard/app.js': {'api-browser', 'containers'},
             'ci/browser/smoke.test.mjs': {'api-browser'},
+            'ci/scripts/publication.py': {'contracts', 'api-browser', 'containers'},
+            'ci/scripts/test_publication.py': {'contracts'},
+            'deployment/scripts/application_routes.py': {'contracts', 'api-browser', 'containers'},
+            'deployment/scripts/tests/fixtures/aws.json': {'contracts', 'runtime-smoke'},
             'package.json': {'api-browser', 'containers'},
             'package-lock.json': {'api-browser', 'containers'},
             '.dockerignore': {'containers'},
@@ -88,7 +92,7 @@ class ScopeTests(unittest.TestCase):
             'gitops/argo/render.py': {'contracts'},
             'observability/compose.yaml': {'observability', 'api-browser', 'containers'},
             'docs/api/ansible.openapi.json': {'contracts'},
-            'docs/api/product.openapi.json': {'contracts', 'api-browser'},
+            'docs/api/product.openapi.json': {'api-browser'},
             'examples/ansible/runtime-single-node.json': {'contracts'},
         }
         for path, expected in cases.items():
@@ -97,10 +101,33 @@ class ScopeTests(unittest.TestCase):
 
     def test_shared_and_unknown_changes_validate_everything(self):
         for path in ('contracts/ansible-job.schema.json', '.github/workflows/railshot-ci.yml',
-                     '.github/workflows/platform-containers.yml', 'ci/scripts/publication.py',
+                     '.github/workflows/platform-containers.yml',
                      'new-owner/service.py', 'docs/new-executable.json', '../bad'):
             with self.subTest(path=path):
                 self.assertEqual(ci_scope.select([path]), set(ci_scope.JOBS))
+
+    def test_pull_request_skips_images_but_manual_keeps_full_validation(self):
+        for event in ('pull_request', 'workflow_dispatch'):
+            with self.subTest(event=event), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / 'event').write_text('{}')
+                env = {'AUTO_RELEASE': 'false', 'GITHUB_EVENT_NAME': event,
+                       'GITHUB_EVENT_PATH': str(root / 'event'), 'GITHUB_OUTPUT': str(root / 'output'),
+                       'GITHUB_STEP_SUMMARY': str(root / 'summary')}
+                with patch.dict(os.environ, env), patch('sys.argv', ['ci_scope.py', 'select']), \
+                        patch.object(ci_scope, 'changed_paths', return_value=None):
+                    ci_scope.main()
+                outputs = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
+                expected = set(ci_scope.JOBS) - ({'containers'} if event == 'pull_request' else set())
+                self.assertEqual(set(json.loads(outputs['selected'])), expected)
+                self.assertEqual(json.loads(outputs['container_components']),
+                                 [] if event == 'pull_request' else list(ci_scope.COMPONENTS))
+
+    def test_multicloud_only_for_native_changes(self):
+        self.assertFalse(ci_scope.multicloud_required(['apps/dashboard/styles.css', 'apps/api/src/server.js']))
+        for paths in (None, ['apps/dashboard/styles.css', 'deployment/bootstrap/install-k3s.sh'],
+                      ['unknown/file'], ['apps/api/Dockerfile']):
+            self.assertTrue(ci_scope.multicloud_required(paths))
 
     def test_scope_union(self):
         self.assertEqual(ci_scope.select(['docs/api/README.md', 'apps/dashboard/styles.css',

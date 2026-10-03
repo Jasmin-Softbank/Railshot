@@ -145,7 +145,7 @@ class PlatformReleaseTests(unittest.TestCase):
             self.assertIs(triggers[trigger]['inputs']['multicloud']['default'], False)
         ci = yaml.safe_load((ROOT / '.github/workflows/railshot-ci.yml').read_text())
         release = ci['jobs']['release']
-        self.assertEqual(release['with']['multicloud'], "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}")
+        self.assertEqual(release['with']['multicloud'], "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && needs.changes.outputs.multicloud == 'true' }}")
         self.assertIn("vars.RAILSHOT_AUTO_RELEASE == 'true'", release['if'])
         self.assertNotIn('RAILSHOT_MULTICLOUD_RELEASE', release['if'])
         runtime = self.workflow['jobs']['ci-runtime']

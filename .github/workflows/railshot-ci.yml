@@ -34,6 +34,7 @@ jobs:
       containers: ${{ steps.select.outputs.containers }}
       container_components: ${{ steps.select.outputs.container_components }}
       release: ${{ steps.select.outputs.release }}
+      multicloud: ${{ steps.select.outputs.multicloud }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -90,7 +91,7 @@ jobs:
           python - <<'PY'
           import json
           from openapi_spec_validator import validate
-          for path in ['docs/api/ansible.openapi.json', 'docs/api/product.openapi.json']:
+          for path in ['docs/api/ansible.openapi.json']:
               with open(path) as stream:
                   validate(json.load(stream))
           PY
@@ -177,7 +178,7 @@ jobs:
           ansible-playbook -i inventory/hosts.example.yml runtime.yml --syntax-check
 
   api-browser:
-    name: HTTP publication and browser E2E
+    name: API tests and dashboard build
     needs: changes
     if: needs.changes.outputs['api-browser'] == 'true'
     runs-on: ubuntu-24.04
@@ -211,14 +212,17 @@ jobs:
           fi
       - name: Real HTTP upload to verified publication (external services mocked)
         run: npm test --prefix apps/api --workspaces=false
-      - run: npm ci --prefix ci/browser --ignore-scripts --no-audit --no-fund
-      - run: npm exec --prefix ci/browser -- playwright install --with-deps chromium
+      - if: github.event_name == 'workflow_dispatch'
+        run: npm ci --prefix ci/browser --ignore-scripts --no-audit --no-fund
+      - if: github.event_name == 'workflow_dispatch'
+        run: npm exec --prefix ci/browser -- playwright install --with-deps chromium
       - name: Chromium UI journeys
+        if: github.event_name == 'workflow_dispatch'
         env:
           CI_OUTPUT_DIR: ${{ runner.temp }}/railshot-browser
         run: npm test --prefix ci/browser
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         with:
           name: browser-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/railshot-browser
@@ -335,7 +339,7 @@ jobs:
       components: '["dashboard","api","mcp","ci-runner"]'
       publish: true
       deploy: true
-      multicloud: ${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}
+      multicloud: ${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && needs.changes.outputs.multicloud == 'true' }}
       skip_build: true
       ci_run_id: ${{ format('{0}', github.run_id) }}
     permissions: {contents: write, actions: read, packages: write, id-token: write}

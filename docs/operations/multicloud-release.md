@@ -1,6 +1,6 @@
 # 공통 릴리스 배포
 
-`railshot-ci.yml`의 성공한 `Railshot CI gate`가 같은 커밋의 플랫폼 릴리스를 호출한다. `RAILSHOT_AUTO_RELEASE=true`이고 현재 브랜치가 `RAILSHOT_PLATFORM_VERIFY_REF`와 일치하면 문서 전용 변경을 제외한 플랫폼·런타임·공통 정책 변경을 자동 게시하고 플랫폼 배포를 검증한다. 기존 플랫폼 자동 릴리스는 이 변수로 계속 운영한다. 중앙 워커와 AWS/GCP/OpenStack까지 같은 릴리스를 적용하려면 별도로 `RAILSHOT_MULTICLOUD_RELEASE=true`를 설정한다. 이 두 번째 변수는 미설정·`false`가 기본이며, 초기 운영 바인딩과 세 환경 검증을 준비한 뒤 활성화한다. 수동 실행도 저장소 변수가 `true`일 때만 `multicloud` 입력을 허용한다. `false`·미설정 상태에서 입력만 켜면 admission에서 차단한다.
+`railshot-ci.yml`의 성공한 `Railshot CI gate`가 같은 커밋의 플랫폼 릴리스를 호출한다. `RAILSHOT_AUTO_RELEASE=true`이고 현재 브랜치가 `RAILSHOT_PLATFORM_VERIFY_REF`와 일치하면 문서·테스트 전용 변경을 제외한 플랫폼·런타임·공통 정책 변경을 자동 게시하고 플랫폼 배포를 검증한다. 기존 플랫폼 자동 릴리스는 이 변수로 계속 운영한다. 중앙 워커와 AWS/GCP/OpenStack까지 같은 릴리스를 적용하려면 별도로 `RAILSHOT_MULTICLOUD_RELEASE=true`를 설정한다. 이 두 번째 변수는 미설정·`false`가 기본이며, 초기 운영 바인딩과 세 환경 검증을 준비한 뒤 활성화한다. 수동 실행도 저장소 변수가 `true`일 때만 `multicloud` 입력을 허용한다. `false`·미설정 상태에서 입력만 켜면 admission에서 차단한다.
 
 1. dashboard/API/ci-runner를 시험하고 같은 실행에서 얻은 GHCR digest를 고정한다.
 2. 기존 `deployment/platform` 브랜치에 플랫폼 선언을 반영하고 실제 Argo 상태·파드 digest·공개 HTTPS를 검증한다.
@@ -82,3 +82,5 @@ API 바인딩이 준비되지 않으면 노드 변경 전에 `observer_preflight
 K3s/Cilium 버전이 그대로면 설치나 재시작 없이 정책을 갱신한다. 버전 변경은 같은 minor 안의 전진 patch만 지원하고 `upgrade.recovery_ack=true`와 변경되는 바이너리의 SHA256을 요구한다. 런타임 identity, SQLite·token·config·기존 binary 및 Cilium Helm 설정을 보관한 뒤 갱신한다. 실패한 업그레이드의 자동 rollback이나 minor/major 이동은 하지 않는다. 백업과 실패 지점을 확인한 운영자 복구가 필요하다.
 
 원래 정지된 CronJob은 계속 정지 상태로 유지하며 전체 실행 검증을 통과시키지 않는다. Worker receipt의 `scope="worker_execution"`은 컨트롤러/갱신기 실행 검증이며 고객 앱 빌드 성공을 뜻하지 않는다. 앱 빌드·배포 성공은 별도 CI/CD operation으로 확인한다.
+
+해커톤 기본 CI는 PR의 Docker 이미지 빌드를 생략하고 병합 후 배포 직전에 한 번 빌드·검사한다. Chromium 전체 E2E는 `Railshot CI` 수동 실행에서만 수행한다. 일반 UI/API 소스 변경에서는 다중 공급자 공통 노드 릴리스를 생략하며, 인프라 변경 검사는 해당 경로 변경 또는 수동 전체 실행에서 유지한다.

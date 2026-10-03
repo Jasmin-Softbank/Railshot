@@ -71,7 +71,7 @@ Terraform plan에 delete·replace가 있거나 기존 VM의 AMI/subnet/root disk
 
 이미지 게시는 기존 `platform-publish.yml`의 `publish=true, deploy=false`를 사용한다. 같은 run의 dashboard/API/runner artifact만 읽고 기존 `publish-platform.py`를 깨끗한 전용 checkout에서 실행한다. `verify-platform.py remote`가 정확한 Argo revision, 소유 ReplicaSet/Ready Pod의 imageID, 외부 HTTPS를 모두 확인해야 마지막 `verified`를 출력한다. 향후 workflow의 자동 deploy를 위한 고정 target/port/verifier 변수도 준비하고 readback한다. GitHub OIDC subject 설정과 계정 권한은 검토된 verifier 정책에 맞아야 한다.
 
-최초 bootstrap 이후 자동 업데이트는 저장소 Actions 변수 `RAILSHOT_AUTO_RELEASE=true`와 `RAILSHOT_PLATFORM_VERIFY_REF`에 지정한 브랜치의 push로 시작한다. 문서 전용 변경을 제외한 플랫폼·런타임·공통 정책 변경이 대상이며, 기존 플랫폼 자동 릴리스는 이 설정으로 계속 운영한다. 중앙 워커와 AWS/GCP/OpenStack 공통 릴리스는 별도 변수 `RAILSHOT_MULTICLOUD_RELEASE=true`로 활성화한다. 이 두 번째 변수는 초기 운영 바인딩과 세 환경 검증을 준비할 때까지 미설정 또는 `false`로 유지한다. CI가 검사한 이미지 artifact를 같은 실행에서 GHCR 게시·GitOps 선언 갱신·운영 검증에 사용한다. 수동 publish/deploy 경로도 유지하며, 수동 `deploy=false` bootstrap 기록은 자동 업데이트의 성공 근거가 아니다. `platform-verification-<source SHA>` artifact의 exact revision·running digest·HTTPS 검증 결과를 확인한다.
+최초 bootstrap 이후 자동 업데이트는 저장소 Actions 변수 `RAILSHOT_AUTO_RELEASE=true`와 `RAILSHOT_PLATFORM_VERIFY_REF`에 지정한 브랜치의 push로 시작한다. 문서·테스트 전용 변경을 제외한 플랫폼·런타임·공통 정책 변경이 대상이며, 기존 플랫폼 자동 릴리스는 이 설정으로 계속 운영한다. 중앙 워커와 AWS/GCP/OpenStack 공통 릴리스는 별도 변수 `RAILSHOT_MULTICLOUD_RELEASE=true`로 활성화한다. 이 두 번째 변수는 초기 운영 바인딩과 세 환경 검증을 준비할 때까지 미설정 또는 `false`로 유지한다. CI가 검사한 이미지 artifact를 같은 실행에서 GHCR 게시·GitOps 선언 갱신·운영 검증에 사용한다. 수동 publish/deploy 경로도 유지하며, 수동 `deploy=false` bootstrap 기록은 자동 업데이트의 성공 근거가 아니다. `platform-verification-<source SHA>` artifact의 exact revision·running digest·HTTPS 검증 결과를 확인한다.
 
 재실행은 receipt만으로 단계를 건너뛰지 않는다. instance/volume/lineage/node UID와 현재 Kubernetes 객체를 다시 읽는다. 기존 Secret의 회전된 자격은 보존하고 executor binding이 바뀌면 중단한다. 검증 Job은 deterministic 이름으로 한 번 생성하고 같은 Job 결과를 다시 읽는다. native CI 검증 전에는 runner를 중단시키지 않고, active runner가 있으면 차단한다. 검증 실패 시 controller가 suspend 상태로 남을 수 있으며 이를 숨기거나 자동 성공으로 처리하지 않는다.
 
@@ -98,3 +98,5 @@ SDK 초기 자격은 별도 운영자가 active CODEX_HOME인 `/var/lib/railshot
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deployment/scripts/tests -p test_bootstrap_platform.py -v
 ```
+
+해커톤 기본 CI는 PR의 Docker 이미지 빌드를 생략하고 병합 후 배포 직전에 한 번 빌드·검사한다. Chromium 전체 E2E는 `Railshot CI` 수동 실행에서만 수행한다. 일반 UI/API 소스 변경에서는 다중 공급자 공통 노드 릴리스를 생략하며, 인프라 변경 검사는 해당 경로 변경 또는 수동 전체 실행에서 유지한다.

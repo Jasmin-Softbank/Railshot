@@ -169,6 +169,13 @@ class WorkflowPolicyTest(unittest.TestCase):
                 self.assertEqual(Path(env['GITHUB_OUTPUT']).read_text(), 'passed=true\n')
                 self.assertNotIn('sentinel-progress-token', result.stdout + result.stderr)
 
+    def test_browser_journeys_are_manual_only(self):
+        workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())
+        steps = workflow['jobs']['api-browser']['steps']
+        browser = [step for step in steps if 'ci/browser' in step.get('run', '')]
+        self.assertEqual(len(browser), 3)
+        self.assertTrue(all(step['if'] == "github.event_name == 'workflow_dispatch'" for step in browser))
+
     def test_repository_scope_outputs_and_required_gate_cover_every_job(self):
         import ci_scope
         workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())
@@ -177,7 +184,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(set(jobs['gate']['needs']), set(ci_scope.JOBS) | {'changes'})
         self.assertEqual(jobs['gate']['if'], 'always()')
         self.assertEqual(set(jobs['changes']['outputs']),
-                         set(ci_scope.JOBS) | {'selected', 'container_components', 'release'})
+                         set(ci_scope.JOBS) | {'selected', 'container_components', 'release', 'multicloud'})
         events = workflow.get('on', workflow.get(True))  # PyYAML's YAML 1.1 "on" key.
         for event in ('pull_request', 'push'):
             self.assertFalse({'paths', 'paths-ignore'} & set(events[event] or {}))
@@ -197,7 +204,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(release['if'], "${{ always() && !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.release == 'true' && " + trusted + ' }}')
         self.assertEqual(release['uses'], './.github/workflows/platform-publish.yml')
         self.assertEqual(release['with'], {'components': '["dashboard","api","mcp","ci-runner"]',
-            'publish': True, 'deploy': True, 'multicloud': "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}", 'skip_build': True,
+            'publish': True, 'deploy': True, 'multicloud': "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && needs.changes.outputs.multicloud == 'true' }}", 'skip_build': True,
             'ci_run_id': "${{ format('{0}', github.run_id) }}"})
         self.assertEqual(release['permissions'], {'contents': 'write', 'actions': 'read', 'packages': 'write', 'id-token': 'write'})
 
