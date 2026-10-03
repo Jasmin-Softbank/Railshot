@@ -96,6 +96,8 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 
 최초 `stage=registration`에서 실제 노드의 Service와 영속 예약을 읽어 NodePort를 할당하고 namespace·pull Secret·Argo 권한·CI binding을 연결한다. VM 생성이나 runtime 재설치는 하지 않는다. 등록 `ready`는 배포 완료가 아니다. `running/unknown` 등록은 재실행하지 않고 운영자 조정이 필요하다. CI의 정확한 source commit·앱·target·image digest를 검증한 뒤 실제 spec의 포트·health·route로 CD와 공개 경로를 준비한다. 앱 URL은 해당 revision/digest가 실행되고 실제 health와 서비스 경로가 HTTPS 200을 반환할 때만 제공한다.
 
+AWS 경로 사전 검사가 등록 시작 전에 `APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED`와 `outcome_unknown=false`를 반환하면 배포 operation은 `blocked`로 보존하고 앱 등록만 `queued`로 남긴다. 이 `queued`는 자동 실행 대기가 아니라 native 등록을 시작하지 않은 상태다. 운영자가 원인을 수정한 뒤 사용자가 새 `Idempotency-Key`로 명시적으로 업로드하면 같은 앱 binding으로 등록을 다시 시도한다. 기존 키 재요청은 원래 실패 기록만 반환한다. 다른 blocked 오류나 불확실한 등록에는 이 예외를 적용하지 않는다.
+
 환경의 `ingress`는 `base_domain`, `edge_config_file`, `dns_config_file`을 참조한다. AWS는 기존 ALB에 앱 전용 target group·host rule과 해당 NodePort 권한을 추가하고 Cloudflare CNAME을 만든다. GCP는 기존 전역 IP·proxy·certificate map에 앱별 backend·인증서와 host rule을 추가하고 인증용 CNAME과 앱 A 레코드를 만든다. DNS writer는 `railshot:<application_id>` 소유 표식과 레코드 재조회를 확인하며 외부 소유 레코드를 덮어쓰지 않는다. DNS API 성공은 `https_verified=false`인 경로 준비 결과이고 배포 성공이 아니다.
 
 운영 참조 파일과 Terraform state는 단일 API PVC에 둔다. `railshot-cloudflare` Secret의 `cloudflare-token`·`cloudflare.json`은 init container가 0600으로 복사한다. GCP WIF 설정은 `railshot-environments.google_credentials_file`로 참조하며 정적 서비스 계정 키를 이미지에 넣지 않는다. 기존 Terraform state의 lineage·resource ID를 유지하고 이전 writer를 중지한 뒤 이관한다. 원본 state 복사본으로 별도 apply하지 않는다.
