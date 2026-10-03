@@ -236,7 +236,10 @@ button:disabled { cursor: default; opacity: .5; }
 .lifecycle-operation li, .lifecycle-preview li { margin-block: 8px; font-size: 13px; }
 .danger-button { color: var(--color-error); }
 .primary-button.danger-button { background: var(--color-error); color: white; }
-#lifecycle-dialog { width: min(660px, calc(100% - 36px)); max-height: calc(100% - 36px); padding: 28px; border: 1px solid var(--color-border); border-radius: 12px; color: var(--color-ink); background: var(--color-surface); overflow: auto; overscroll-behavior: contain; }
+#lifecycle-dialog { width: min(660px, calc(100% - 36px)); max-height: calc(100dvh - 36px); padding: 28px; border: 1px solid var(--color-border); border-radius: 12px; color: var(--color-ink); background: var(--color-surface); overflow: hidden; overscroll-behavior: contain; }
+#lifecycle-form { display: flex; flex-direction: column; max-height: calc(100dvh - 94px); }
+.lifecycle-plan-content { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+#lifecycle-title, .lifecycle-dialog-actions { flex-shrink: 0; }
 #lifecycle-dialog::backdrop { background: rgb(19 35 48 / 55%); }
 #lifecycle-dialog h2 { margin-top: 0; font-size: 21px; }
 #lifecycle-description { line-height: 1.7; }
@@ -245,4 +248,4 @@ button:disabled { cursor: default; opacity: .5; }
 .lifecycle-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
 #lifecycle-error { margin: 16px 0 0; }
 #monitor-application-actions { margin-bottom: 20px; }
-@media (max-width: 680px) { #lifecycle-dialog { padding: 20px; } .lifecycle-preview { grid-template-columns: 1fr; gap: 0; } .applications-panel .review-heading { align-items: start; gap: 12px; flex-wrap: wrap; } }
+@media (max-width: 680px) { #lifecycle-dialog { padding: 20px; } #lifecycle-form { max-height: calc(100dvh - 78px); } .lifecycle-preview { grid-template-columns: 1fr; gap: 0; } .applications-panel .review-heading { align-items: start; gap: 12px; flex-wrap: wrap; } }

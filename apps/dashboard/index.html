@@ -253,11 +253,14 @@
     </div>
     <dialog id="lifecycle-dialog" aria-labelledby="lifecycle-title" aria-describedby="lifecycle-description">
       <form id="lifecycle-form">
-        <h2 id="lifecycle-title">앱 관리 계획</h2><p id="lifecycle-description"></p>
+        <h2 id="lifecycle-title">앱 관리 계획</h2>
+        <div class="lifecycle-plan-content" tabindex="0" aria-label="계획 상세">
+        <p id="lifecycle-description"></p>
         <p id="lifecycle-progress" class="field-note" role="status" aria-live="polite" hidden></p>
         <p id="lifecycle-expiry" class="field-note"></p>
         <div class="lifecycle-preview"><section><h3>변경할 리소스</h3><ul id="lifecycle-resources"></ul></section><section><h3>보존할 리소스</h3><ul id="lifecycle-retained"></ul></section></div>
         <p id="lifecycle-error" class="form-error" role="alert" hidden></p>
+        </div>
         <div class="lifecycle-dialog-actions"><button id="lifecycle-retry" class="secondary-button" type="button" hidden>계획 다시 확인</button><button id="lifecycle-cancel" class="secondary-button" type="button" autofocus>취소</button><button id="lifecycle-confirm" class="primary-button" type="submit" disabled>계획 확인 중</button></div>
       </form>
     </dialog>
