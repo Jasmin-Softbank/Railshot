@@ -75,7 +75,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(set(proof['artifacts']), set(admission.COMPONENTS))
         self.run['path'] = '.github/workflows/railshot-ci.yml'
         self.run['event'] = 'push'
-        for job in self.jobs: job['name'] = 'Promote the verified multicloud release / ' + job['name']
+        for job in self.jobs: job['name'] = 'Build, smoke and publish images / ' + job['name']
         self.artifacts[0].pop('digest')  # Older metadata may omit a digest; archive hash is still recorded.
         self.assertEqual(self.verify()['artifacts']['dashboard']['sha256'], hashlib.sha256(self.bodies[1]).hexdigest())
 
