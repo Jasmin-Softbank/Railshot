@@ -1,5 +1,7 @@
-# Bootstrap authority installs federation; the release service account cannot
-# change IAM, enable services, create/delete resources, or modify the backend VM.
+# Bootstrap authority installs federation and the reviewed edge API permissions.
+# Application lifecycle uses create/delete/attach verbs below; the executor checks
+# exact app ownership where IAM cannot constrain resource names. No IAM mutation,
+# service enable, VM mutation, or shared frontend deletion is granted.
 locals {
   gcp_project_id     = "railshot-poc-20261001"
   gcp_project_number = "359201781699"
@@ -60,8 +62,10 @@ resource "google_service_account" "edge_release" {
   project      = data.google_project.release.project_id
   account_id   = "railshot-gcp-edge-release"
   display_name = "Railshot existing GCP edge release"
-  description  = "Keyless AWS control-host federation; existing edge read and in-place updates only."
-  depends_on   = [google_project_service.federation]
+  # Retain historical identity metadata to avoid an unrelated service-account
+  # update. The roles below, not this original description, define its authority.
+  description = "Keyless AWS control-host federation; existing edge read and in-place updates only."
+  depends_on  = [google_project_service.federation]
 }
 
 resource "google_service_account_iam_member" "control_federation" {
@@ -112,7 +116,7 @@ resource "google_project_iam_custom_role" "edge_release" {
   project     = data.google_project.release.project_id
   role_id     = "railshotExistingEdgeRelease"
   title       = "Railshot existing edge release"
-  description = "Refresh and in-place update operations used by the pinned gcp-edge module; no create/delete."
+  description = "Existing edge updates and app lifecycle API families; project/parent scope, with exact app ownership enforced by the executor."
   permissions = [
     # google_project_service.Read checks project existence and lists enabled APIs.
     "resourcemanager.projects.get",
@@ -122,7 +126,7 @@ resource "google_project_iam_custom_role" "edge_release" {
     "compute.instances.get",
     "compute.instances.list",
     "compute.disks.get",
-    # Immutable NEG/endpoint resources: observe only; use permits backend binding.
+    # Existing NEG reads and backend reference permission are preserved.
     "compute.networkEndpointGroups.get",
     "compute.networkEndpointGroups.use",
     # Existing Compute edge resources and references used by their updates.
@@ -163,15 +167,63 @@ resource "google_project_iam_custom_role" "edge_release" {
     "certificatemanager.certmapentries.get",
     "certificatemanager.certmapentries.update",
     "certificatemanager.operations.get",
+    # These 23 additional permissions use project/parent scope or resource types
+    # without documented IAM resource.name support. They are not app-name scoped
+    # IAM grants; gcp_routes/application_cleanup enforce exact app-owned plans.
+    "compute.networkEndpointGroups.create",
+    "compute.networkEndpointGroups.delete",
+    "compute.networkEndpointGroups.attachNetworkEndpoints",
+    "compute.networkEndpointGroups.detachNetworkEndpoints",
+    "compute.networkEndpointGroups.list",
+    "compute.networks.use",
+    "compute.subnetworks.use",
+    "compute.zoneOperations.get",
+    "compute.healthChecks.create",
+    "compute.healthChecks.delete",
+    "compute.healthChecks.list",
+    "compute.backendServices.create",
+    "compute.backendServices.list",
+    "certificatemanager.dnsauthorizations.create",
+    "certificatemanager.dnsauthorizations.delete",
+    "certificatemanager.dnsauthorizations.list",
+    "certificatemanager.dnsauthorizations.use",
+    "certificatemanager.certs.create",
+    "certificatemanager.certs.delete",
+    "certificatemanager.certs.list",
+    "certificatemanager.certmapentries.create",
+    "certificatemanager.certmapentries.delete",
+    "certificatemanager.certmapentries.list",
   ]
 }
 
-# IAM limits verbs and project; edge_update.py additionally binds the exact
-# existing state lineage/resource IDs and rejects creation, replacement or drift.
+# Preserve the original binding and its existing read/update scope. This role
+# cannot contain backend deletion or VM use: its binding is unconditional.
 resource "google_project_iam_member" "edge_release" {
   project = data.google_project.release.project_id
   role    = google_project_iam_custom_role.edge_release.name
   member  = "serviceAccount:${google_service_account.edge_release.email}"
+}
+
+# Only these two added permissions support the resource names needed here.
+# gcp-edge's default name is railshot-gcp-edge; app names append a hyphen and
+# 16 hex characters from the application ID hash. The baseline has no suffix.
+resource "google_project_iam_custom_role" "app_edge_bound" {
+  project     = data.google_project.release.project_id
+  role_id     = "railshotAppBoundEdgeUse"
+  title       = "Railshot app backend deletion and existing VM endpoint use"
+  description = "App backend prefix deletion; use only the registered runtime VM as a NEG endpoint."
+  permissions = ["compute.backendServices.delete", "compute.instances.use"]
+}
+
+resource "google_project_iam_member" "app_edge_bound" {
+  project = data.google_project.release.project_id
+  role    = google_project_iam_custom_role.app_edge_bound.name
+  member  = "serviceAccount:${google_service_account.edge_release.email}"
+  condition {
+    title       = "registered-app-backend-and-runtime"
+    description = "Existing baseline backend excluded; VM use does not permit VM mutation or deletion."
+    expression  = "(resource.type == 'compute.googleapis.com/BackendService' && resource.name.startsWith('projects/${local.gcp_project_id}/global/backendServices/railshot-gcp-edge-')) || (resource.type == 'compute.googleapis.com/Instance' && resource.name == 'projects/${local.gcp_project_id}/zones/asia-northeast3-a/instances/railshot-gcp-poc')"
+  }
 }
 
 output "gcp_release_identity" {
