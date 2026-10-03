@@ -292,6 +292,63 @@ class GcpRoutesTest(unittest.TestCase):
         plan['resource_drift'].append({'address': 'google_compute_url_map.app'})
         with self.assertRaisesRegex(ValueError, 'writable refresh'): routes.validate_plan(plan, app(), self.values)
 
+    def test_empty_gcp_fields_allow_additive_plan_without_mutating_evidence(self):
+        # Reproduce the failed clock plan: refresh emits [] for unset firewall
+        # selectors and the URL map plan emits null for an empty description.
+        plan = plan_for(app(), self.values)
+        firewall = plan['resource_changes'][9]
+        before = copy.deepcopy(firewall['change']['before'])
+        after = copy.deepcopy(before)
+        for field in ('source_service_accounts', 'source_tags', 'target_tags'):
+            before[field] = None
+            after[field] = []
+            firewall['change']['before'][field] = []
+            firewall['change']['after'][field] = []
+        plan['resource_drift'] = [{'address': firewall['address'], 'change': {
+            'actions': ['update'], 'before': before, 'after': after}}]
+        for item in plan['resource_changes'][7:9]:
+            change = item['change']
+            for field in ('host_rule', 'path_matcher'):
+                for block in change['before'][field]:
+                    block['description'] = ''
+                for block in change['after'][field]:
+                    block['description'] = None
+                change['after'][field][-1]['description'] = ''
+        original = copy.deepcopy(plan)
+        self.assertEqual(len(routes.validate_plan(plan, app(), self.values)), 7)
+        self.assertEqual(plan, original)
+
+    def test_real_firewall_drift_is_rejected_even_with_empty_field_normalization(self):
+        for field, value in (('source_tags', ['foreign']), ('target_tags', ['foreign']),
+                             ('source_service_accounts', ['foreign@example.com']),
+                             ('source_ranges', ['0.0.0.0/0']), ('description', 'changed')):
+            with self.subTest(field=field):
+                plan = plan_for(app(), self.values)
+                firewall = plan['resource_changes'][9]
+                before = copy.deepcopy(firewall['change']['before'])
+                after = copy.deepcopy(before)
+                before[field] = None
+                after[field] = value
+                plan['resource_drift'] = [{'address': firewall['address'], 'change': {
+                    'actions': ['update'], 'before': before, 'after': after}}]
+                with self.assertRaisesRegex(ValueError, 'writable refresh'):
+                    routes.validate_plan(plan, app(), self.values)
+
+    def test_route_descriptions_and_unknown_values_are_not_generally_ignored(self):
+        for mutation in ('changed_description', 'new_description', 'unknown_description'):
+            with self.subTest(mutation=mutation):
+                plan = plan_for(app(), self.values)
+                change = plan['resource_changes'][7]['change']
+                if mutation == 'changed_description':
+                    change['before']['host_rule'][0]['description'] = 'keep this'
+                    change['after']['host_rule'][0]['description'] = None
+                elif mutation == 'new_description':
+                    change['after']['host_rule'][-1]['description'] = 'unexpected'
+                else:
+                    change['after_unknown']['host_rule'] = [{'description': True}]
+                with self.assertRaises(ValueError):
+                    routes.validate_plan(plan, app(), self.values)
+
 
 if __name__ == '__main__':
     unittest.main()
