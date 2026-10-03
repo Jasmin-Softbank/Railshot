@@ -111,12 +111,12 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertEqual(jobs['build']['if'], '${{ !inputs.skip_build }}')
         self.assertEqual(jobs['publish']['needs'], ['admission', 'build'])
         self.assertEqual(jobs['publish']['if'], "${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}")
-        self.assertEqual(jobs['multicloud']['needs'], ['deploy', 'verify'])
-        self.assertEqual(jobs['multicloud']['if'], "${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' }}")
+        self.assertEqual(jobs['multicloud']['needs'], ['deploy', 'verify', 'ci-runtime'])
+        self.assertEqual(jobs['multicloud']['if'], "${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' && needs.ci-runtime.result == 'success' }}")
         admission = next(step for step in jobs['admission']['steps'] if step.get('name') == 'Require the exact trusted source CI gate before deployment')
         self.assertEqual(admission['env']['CI_RUN_ID'], '${{ inputs.ci_run_id }}')
         self.assertIn('release_admission.py', admission['run'])
-        for job in ('publish', 'deploy', 'multicloud'):
+        for job in ('publish', 'deploy', 'ci-runtime', 'multicloud'):
             downloads = [step for step in jobs[job]['steps'] if step.get('uses', '').startswith('actions/download-artifact@')]
             self.assertEqual(len(downloads), 1)
             self.assertFalse(set(downloads[0]['with']) & {'run-id', 'repository', 'github-token'}, 'reuse must read the calling run artifacts')
@@ -148,7 +148,13 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertEqual(release['with']['multicloud'], "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}")
         self.assertIn("vars.RAILSHOT_AUTO_RELEASE == 'true'", release['if'])
         self.assertNotIn('RAILSHOT_MULTICLOUD_RELEASE', release['if'])
+        runtime = self.workflow['jobs']['ci-runtime']
+        self.assertEqual(runtime['needs'], ['deploy', 'verify'])
+        self.assertNotIn('multicloud', runtime['if'])
+        self.assertIn("contains(fromJSON(inputs.components), 'ci-runner')", runtime['if'])
+        self.assertTrue(any('--scope ci-runtime' in step.get('run', '') for step in runtime['steps']))
         automatic = {'SKIP_BUILD': 'true', 'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push',
+                     'RELEASE_VERSION': '2', 'RELEASE_HASH': 'f' * 64,
                      'COMPONENTS': '["dashboard","api","mcp","ci-runner"]'}
         name = 'Validate publication and deployment inputs'
         result = self.run_step('admission', name, automatic)
@@ -180,6 +186,7 @@ class PlatformReleaseTests(unittest.TestCase):
 
     def test_current_source_gate_is_rechecked_immediately_before_each_mutation(self):
         for job, mutation in (('deploy', 'Commit the tested digest declaration to the platform branch'),
+                              ('ci-runtime', 'Promote the tested CI controller runner and workflow source'),
                               ('multicloud', 'Apply the same approved release and require three verified providers')):
             steps = self.workflow['jobs'][job]['steps']
             index = next(i for i, step in enumerate(steps) if step.get('name') == mutation)
