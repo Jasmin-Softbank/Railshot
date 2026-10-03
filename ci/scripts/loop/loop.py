@@ -2,7 +2,7 @@
 """Intake → deterministic baseline → optional adapter/packaging fixer → evidence.
 
 usage:
-  loop.py UPLOAD_DIR RUN_DIR [--provider claude|codex] [--max-attempts 1] [--layers L0,...] [--request FILE]
+  loop.py UPLOAD_DIR RUN_DIR [--provider claude|codex] [--max-attempts 0] [--layers L0,...] [--request FILE]
   loop.py --self-test
 
 Stops on: gate pass, give_up, class F7/F8/INJ, the same failure signature twice, or N attempts.
@@ -424,7 +424,7 @@ def main():
     ap.add_argument("upload", nargs="?")
     ap.add_argument("run", nargs="?")
     ap.add_argument("--provider", choices=["codex", "claude"], default="codex")
-    ap.add_argument("--max-attempts", type=int, choices=range(0, 4), default=1)
+    ap.add_argument("--max-attempts", type=int, choices=range(0, 4), default=0)
     ap.add_argument("--layers", default=','.join(GATE_ORDER))
     ap.add_argument("--quality-network")
     ap.add_argument("--selected-root", help="Trusted relative build root for repository discovery")
