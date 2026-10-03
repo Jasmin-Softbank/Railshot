@@ -35,7 +35,7 @@ async function fixture(t) {
       state.plans.push({ id: plan[1], input });
       const result = { id: '11111111-1111-4111-8111-111111111111', application_id: state.planMode === 'foreign' ? 'foreign-app' : plan[1],
         action: input.action, plan_hash: 'a'.repeat(64), expires_at: new Date(Date.now() + (state.planMode === 'expired' ? -1000 : 600000)).toISOString(),
-        resources: [{ kind: 'Deployment', namespace: 'app-private', name: 'workload' }, { kind: 'PersistentVolumeClaim', namespace: 'app-private', name: 'database' }],
+        resources: state.resources || [{ kind: 'Deployment', namespace: 'app-private', name: 'workload' }, { kind: 'PersistentVolumeClaim', namespace: 'app-private', name: 'database' }],
         retained: [{ kind: 'Node', name: 'shared-node' }, { kind: 'LoadBalancer', name: 'shared-lb' }] };
       if (state.planMode === 'async') {
         state.planDocument = result;
@@ -364,4 +364,24 @@ test('proxy HTML failure is readable and retryable without treating an uncertain
   await page.waitForFunction(() => !document.querySelector('#lifecycle-dialog').open);
   assert.equal(attempts.length, 2); assert.ok(attempts[0].key);
   assert.deepEqual(attempts[0], attempts[1]); assert.equal(state.writes.length, 1);
+});
+
+ test('long native inventories keep confirmation and cancel visible on desktop and mobile', async (t) => {
+  const { state, page } = await fixture(t);
+  state.resources = Array.from({ length: 40 }, (_, i) => ({ kind: 'Service', namespace: 'app-private', name: `owned-resource-${i}` }));
+  for (const viewport of [{ width: 1280, height: 960 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport);
+    await appAction(page, 'my-app', '삭제').click();
+    await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+    const layout = await page.evaluate(() => {
+      const button = document.querySelector('#lifecycle-confirm').getBoundingClientRect();
+      const content = document.querySelector('.lifecycle-plan-content');
+      return { buttonTop: button.top, buttonBottom: button.bottom, viewportHeight: innerHeight,
+        contentHeight: content.clientHeight, scrollHeight: content.scrollHeight };
+    });
+    assert.ok(layout.buttonTop >= 0 && layout.buttonBottom <= layout.viewportHeight, JSON.stringify(layout));
+    assert.ok(layout.contentHeight > 0 && layout.scrollHeight > layout.contentHeight);
+    await page.getByRole('button', { name: '취소', exact: true }).click();
+    assert.equal(state.writes.length, 0);
+  }
 });

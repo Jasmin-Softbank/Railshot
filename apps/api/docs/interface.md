@@ -39,3 +39,5 @@ localhost 기본 bind와 Host/Origin 검사는 그대로다. 운영 ALB backend�
 설계 근거: [RFC 7240 respond-async](https://www.rfc-editor.org/rfc/rfc7240#section-4.1), [RFC 9110 202 Accepted](https://www.rfc-editor.org/rfc/rfc9110#section-15.3.3).
 
 플랫폼 교체는 운영자 토큰 전용 `POST /internal/releases/prepare`로 준비한다. 진행 중인 HTTP/백그라운드 작업이 있으면 202를 반환하고 계속 서비스한다. 유휴 상태에서는 배포 대기열과 새 API 접수를 함께 잠그고 200을 반환한다. 이때 새 요청은 처리 전에 `503 PLATFORM_UPDATING`, `outcome_unknown: false`, `Retry-After: 1`을 받는다. 교체가 취소되면 120초 뒤 잠금이 해제된다. 이 경로는 공개 대시보드 프록시에 노출하지 않는다. SIGTERM은 서버와 저장소를 닫은 뒤 프로세스를 종료한다.
+
+Argo PreSync Job은 기존 API가 있는 노드에서 새 API 이미지로 실행되므로 다운로드가 끝나기 전 API를 내리지 않는다. Job은 준비 확인 후에만 Sync를 허용한다. 현재 파드 템플릿 ID가 이미 목표 ID와 같으면 잠그지 않고 완료한다. 대시보드만 배포할 때도 이 비교로 API 작업을 방해하지 않는다. `/readyz`는 저장소/설정 준비 여부를 HTTP 상태로 반환하며 2초 주기로 검사한다. 이미지 준비 Job에는 API 토큰만 제공하고 PVC, Kubernetes 서비스 계정 토큰, 클라우드 자격정보는 마운트하지 않는다.

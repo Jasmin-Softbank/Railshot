@@ -80,3 +80,38 @@ test('the API entrypoint handles SIGTERM and exits after graceful closure', { ti
   child.kill('SIGTERM');
   assert.deepEqual(await exited, [0, null]);
 });
+
+test('an already deployed template never pauses service for a dashboard-only sync', async (t) => {
+  const previous = process.env.RAILSHOT_POD_TEMPLATE_ID;
+  process.env.RAILSHOT_POD_TEMPLATE_ID = 'a'.repeat(64);
+  t.after(() => { if (previous === undefined) delete process.env.RAILSHOT_POD_TEMPLATE_ID; else process.env.RAILSHOT_POD_TEMPLATE_ID = previous; });
+  const f = await fixture(t, { pauseForRelease() { assert.fail('current template must not pause'); }, close() {} });
+  const response = await fetch(`http://127.0.0.1:${f.server.address().port}/internal/releases/prepare`, {
+    method: 'POST', headers: { authorization: `Bearer ${'release-test-token-'.repeat(3)}`, 'content-type': 'application/json',
+      'x-railshot-desired-template': 'a'.repeat(64) }, body: JSON.stringify({ release_id: randomUUID() }),
+  });
+  assert.equal(response.status, 200); assert.equal((await response.json()).status, 'current');
+  assert.equal((await f.get('/api/v1/options')).status, 200);
+  assert.equal((await f.get('/readyz')).status, 200);
+});
+
+test('pre-sync waits for active work and refuses malformed or rejected preparation', async () => {
+  const { prepareRelease } = await import('../src/prepare-release.js');
+  const options = { token: 'private-test-token', templateId: 'a'.repeat(64), pollMs: 1, timeoutMs: 100 };
+  const calls = [];
+  await prepareRelease({ ...options, request: async (_url, request) => {
+    calls.push(request);
+    const { release_id } = JSON.parse(request.body);
+    return calls.length === 1 ? Response.json({ status: 'busy' }, { status: 202 })
+      : Response.json({ status: 'prepared', release_id, lease_ms: 120000 });
+  } });
+  assert.equal(calls.length, 2); assert.equal(calls[0].body, calls[1].body);
+  assert.equal(calls[0].headers['x-railshot-desired-template'], options.templateId);
+  for (const response of [() => new Response('Not found', { status: 404 }),
+    () => Response.json({ status: 'prepared', release_id: 'wrong', lease_ms: 120000 }),
+    () => Response.json({ status: 'busy' }, { status: 401 })]) {
+    await assert.rejects(prepareRelease({ ...options, request: async () => response() }));
+  }
+  await assert.rejects(prepareRelease({ ...options, timeoutMs: 5,
+    request: async () => Response.json({ status: 'busy' }, { status: 202 }) }), /API_HANDOVER_BUSY/);
+});

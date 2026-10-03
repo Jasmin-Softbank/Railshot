@@ -51,6 +51,7 @@ export async function request(path, options = {}, controller = new AbortControll
         throw failure;
       }
       return { data, location: response.headers.get('location'), status: response.status };
+
     }
   } finally { clearTimeout(timeout); requests.delete(controller); }
 }

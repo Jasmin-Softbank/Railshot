@@ -9,6 +9,7 @@ spec:
     - {server: 'https://kubernetes.default.svc', namespace: railshot-system}
   clusterResourceWhitelist: []
   namespaceResourceWhitelist:
+    - {group: batch, kind: Job}
     - {group: apps, kind: Deployment}
     - {group: '', kind: Service}
     - {group: '', kind: PersistentVolumeClaim}

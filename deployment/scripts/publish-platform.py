@@ -55,18 +55,28 @@ def render(artifacts, target, port, provider_targets="{}", previous=None):
         containers = matches[0]["spec"]["template"]["spec"]["containers"]
         images[component] = next(c["image"] for c in containers if c["name"] == component)
 
+    previous_api = next((item for item in (previous or {}).get('items', [])
+                         if item.get('kind') == 'Deployment' and item.get('metadata', {}).get('name') == 'railshot-api'), None)
+    prepare = ['--prepare-api-rollout'] if 'api' in changed and previous_api else []
     with tempfile.TemporaryDirectory(prefix="platform-render-") as temporary:
         image_file = Path(temporary) / "images.json"
         image_file.write_text(json.dumps(images))
         rendered = subprocess.run([sys.executable, str(ROOT / "deployment/scripts/render-platform.py"),
                                    str(image_file), "--target-id", target,
-                                   "--dashboard-node-port", str(port), "--provider-targets", provider_targets], text=True, capture_output=True)
+                                   "--dashboard-node-port", str(port), "--provider-targets", provider_targets, *prepare], text=True, capture_output=True)
         if rendered.returncode:
             raise ValueError("platform renderer rejected deployment configuration")
         declaration = json.loads(rendered.stdout)
         # Preserve the entire unchanged Deployment, not only its image: no Pod template churn.
         declaration["items"] = [preserved.get(item.get("metadata", {}).get("name", "").removeprefix("railshot-"), item)
                                 if item.get("kind") == "Deployment" else item for item in declaration["items"]]
+        next_api = next(item for item in declaration['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-api')
+        if previous_api and next_api['spec']['template'] == previous_api['spec']['template']:
+            declaration['items'] = [item for item in declaration['items'] if item['kind'] != 'Job']
+            # Keep the hook byte-identical for no-op/dashboard-only publications.
+            # It checks the running template ID and returns without fencing this API.
+            declaration['items'].extend(item for item in previous['items'] if item['kind'] == 'Job'
+                                        and item['metadata']['name'] == 'railshot-api-prepare')
         return json.dumps(declaration, indent=2) + "\n"
 
 
