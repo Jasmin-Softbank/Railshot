@@ -27,6 +27,12 @@
             <h1 id="deploy-title">앱 배포하기</h1>
           </header>
 
+          <section class="panel update-context" id="update-context" aria-labelledby="update-title" hidden>
+            <div class="review-heading"><h2 id="update-title">기존 앱 업데이트</h2><button class="text-button" id="cancel-update" type="button">새 배포로 돌아가기</button></div>
+            <p id="update-identity"></p>
+            <p class="field-note">앱과 배포 환경은 유지됩니다. 파일·폴더·저장소 이름을 바꿔도 앱 이름은 바뀌지 않습니다.</p>
+          </section>
+
           <form class="panel deploy-form" id="deploy-form" novalidate>
             <section class="form-section" aria-labelledby="source-title">
               <div class="section-heading">
@@ -51,7 +57,7 @@
               </div>
             </section>
 
-            <section class="form-section" aria-labelledby="target-title">
+            <section class="form-section" id="target-section" aria-labelledby="target-title">
               <div class="section-heading">
                 <span class="section-number">02</span>
                 <h2 id="target-title">배포 환경</h2>
@@ -113,6 +119,14 @@
               <div><dt>배포 환경</dt><dd id="review-target"></dd></div>
             </dl>
             <p class="review-note" id="review-note">선택 내용을 확인하세요.</p>
+            <div id="update-review" hidden>
+              <p class="review-note">선택한 소스 전체로 교체합니다. 기존 파일 중 이번 소스에 없는 파일은 삭제됩니다.</p>
+              <p id="update-baseline" class="field-note"></p>
+              <p id="update-origin" class="field-note"></p>
+              <p id="update-diff-summary" role="status"></p>
+              <div id="update-changes" class="update-changes"></div>
+              <label id="rebuild-field" class="rebuild-choice" hidden><input id="update-rebuild" type="checkbox" /> 변경이 없어도 다시 검사·빌드·배포</label>
+            </div>
             <p class="form-error" id="request-error" role="alert" hidden></p>
             <button class="primary-button" id="deploy-button" type="button" disabled>배포 시작</button>
           </section>
@@ -134,6 +148,18 @@
 
         <section class="view" id="history-view" aria-labelledby="history-title" hidden>
           <header class="page-header"><span class="eyebrow">DEPLOYMENTS</span><h1 id="history-title">배포·빌드 내역</h1></header>
+          <section class="panel application-panel" aria-labelledby="applications-title">
+            <div class="review-heading"><h2 id="applications-title">등록된 앱</h2><button id="applications-refresh" class="secondary-button" type="button">앱 새로고침</button></div>
+            <p id="applications-message" class="field-note" role="status"></p>
+            <ul id="applications-list" class="saved-list"></ul>
+            <button id="applications-more" class="text-button" type="button" hidden>앱 더 보기</button>
+            <section id="application-detail" class="application-detail" aria-labelledby="application-detail-title" hidden>
+              <h3 id="application-detail-title" tabindex="-1">앱 상세</h3>
+              <p id="application-detail-message" role="status"></p>
+              <div id="application-versions"></div>
+              <button id="application-update" class="primary-button" type="button">이 앱 업데이트</button>
+            </section>
+          </section>
           <div class="panel">
             <div class="data-toolbar"><label>실행 종류<select id="history-kind"><option value="deployments">배포</option><option value="builds">빌드</option></select></label><button id="history-refresh" class="secondary-button" type="button">최신 내역</button></div>
             <h2 id="history-summary">실행 내역을 불러오는 중입니다</h2><p id="history-detail" role="status"></p>

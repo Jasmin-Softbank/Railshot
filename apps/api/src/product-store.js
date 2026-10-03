@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { DashboardError, createDashboardData } from './sessions.js';
+import { validateFiles } from './archive.js';
 
 const run = promisify(execFile);
 async function processIdentity(pid) {
@@ -139,6 +140,17 @@ export async function createProductStore(directory) {
       return { records: rows.slice(0, limit).map((row) => JSON.parse(row.record)), hasMore: rows.length > limit, total };
     },
     snapshotBytes: () => snapshotBytes,
+    async readSnapshot(id) {
+      if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('Invalid snapshot identifier');
+      const value = await readPrivate(join(root, `${id}.source.json`));
+      if (!Array.isArray(value)) throw new Error('Invalid source snapshot');
+      return validateFiles(value.map((file) => {
+        if (!file || typeof file.content !== 'string') throw new Error('Invalid source snapshot');
+        const content = Buffer.from(file.content, 'base64');
+        if (content.toString('base64') !== file.content) throw new Error('Invalid source encoding');
+        return { path: file.path, content };
+      }));
+    },
     transaction(update) {
       const pending = tail.then(async () => {
         if (closed || poisoned) throw new Error('Workspace requires recovery');
