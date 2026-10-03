@@ -43,7 +43,8 @@ class ScopeTests(unittest.TestCase):
                            'GITHUB_EVENT_PATH': str(root / 'event'), 'GITHUB_OUTPUT': str(root / 'output'),
                            'GITHUB_STEP_SUMMARY': str(root / 'summary')}
                     with patch.dict(os.environ, env), patch('sys.argv', ['ci_scope.py', 'select']), \
-                            patch.object(ci_scope, 'changed_paths', return_value=paths):
+                            patch.object(ci_scope, 'changed_paths', return_value=paths), \
+                            patch.object(ci_scope, 'previous_release_complete', return_value=True):
                         ci_scope.main()
                     values = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
                     components = json.loads(values['container_components'])
@@ -61,6 +62,40 @@ class ScopeTests(unittest.TestCase):
                         checks['containers']['result'] = 'failure'
                         with self.assertRaises(ValueError):
                             ci_scope.validate_gate(checks)
+
+    def test_unfinished_predecessor_catches_up_all_deployed_images(self):
+        for paths in (['apps/api/src/server.js'], ['docs/operations/release.md'], []):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); (root / 'event').write_text('{}')
+                env = {'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push',
+                       'GITHUB_EVENT_PATH': str(root / 'event'), 'GITHUB_OUTPUT': str(root / 'output'),
+                       'GITHUB_STEP_SUMMARY': str(root / 'summary')}
+                with patch.dict(os.environ, env), patch('sys.argv', ['ci_scope.py', 'select']), \
+                        patch.object(ci_scope, 'changed_paths', return_value=paths), \
+                        patch.object(ci_scope, 'previous_release_complete', return_value=False):
+                    ci_scope.main()
+                values = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
+                self.assertEqual(json.loads(values['container_components']), ['dashboard', 'api', 'ci-runner'])
+                self.assertEqual(values['release'], 'true')
+                self.assertEqual(json.loads(values['selected']), ['containers'])
+
+    def test_previous_green_but_skipped_deploy_is_not_a_completed_release(self):
+        runs = {'workflow_runs': [{'id': 12, 'run_attempt': 1, 'head_branch': 'integration/test', 'conclusion': 'success'}]}
+        for conclusion, expected in [('success', True), ('skipped', False), ('failure', False)]:
+            jobs = {'total_count': 1, 'jobs': [{'steps': [{
+                'name': 'Verify the exact Argo revision, running digests and public edge', 'conclusion': conclusion}]}]}
+            with patch.dict(os.environ, {'GITHUB_REF_NAME': 'integration/test'}), \
+                    patch.object(subprocess, 'check_output', side_effect=[json.dumps(runs), json.dumps(jobs)]):
+                self.assertEqual(ci_scope.previous_release_complete('a' * 40), expected)
+        jobs = {'total_count': 2, 'jobs': [
+            {'name': 'Build, smoke and publish images / publish (ci-runner)', 'conclusion': 'success'},
+            {'steps': [{'name': 'Verify the exact Argo revision, running digests and public edge', 'conclusion': 'success'},
+                       {'name': 'Promote the tested CI controller runner and workflow source', 'conclusion': 'skipped'}]}]}
+        with patch.dict(os.environ, {'GITHUB_REF_NAME': 'integration/test'}), \
+                patch.object(subprocess, 'check_output', side_effect=[json.dumps(runs), json.dumps(jobs)]):
+            self.assertFalse(ci_scope.previous_release_complete('a' * 40))
+        with patch.object(subprocess, 'check_output', side_effect=subprocess.TimeoutExpired('gh', 20)):
+            self.assertFalse(ci_scope.previous_release_complete('a' * 40))
 
     def test_directory_dependencies_and_document_fixtures(self):
         cases = {
