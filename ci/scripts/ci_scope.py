@@ -77,7 +77,7 @@ def container_components(paths):
             components.update(('dashboard', 'api'))  # API image retains source asset routes.
         elif path.startswith('apps/api/'):
             components.update(('api', 'mcp'))
-        elif path.startswith('ci/scripts/') or path == 'ci/runner-compose.yml':
+        elif path.startswith(('ci/scripts/', 'ci/workflows/')) or path == 'ci/runner-compose.yml':
             components.add('ci-runner')  # The runner image COPYs all CI scripts.
         elif path == 'deployment/manifests/build-runner.yaml' or path == 'infrastructure/ansible/ci.yml':
             components.add('ci-runner')
@@ -186,15 +186,16 @@ def changed_paths(event_name, event, cwd):
 
 
 def validate_gate(checks):
-    if set(checks) != set(JOBS) | {'changes'}:
+    jobs = set(checks) - {'changes'}
+    if jobs not in (set(JOBS), {'containers'}) or 'changes' not in checks:
         raise ValueError('Gate dependencies do not match the complete check set')
     if checks['changes']['result'] != 'success':
         raise ValueError('Change selection failed or was cancelled')
     selected = json.loads(checks['changes']['outputs']['selected'])
     if (not isinstance(selected, list) or not all(isinstance(job, str) for job in selected)
-            or len(selected) != len(set(selected)) or not set(selected) <= set(JOBS)):
+            or len(selected) != len(set(selected)) or not set(selected) <= jobs):
         raise ValueError('Invalid selected check set')
-    for job in JOBS:
+    for job in jobs:
         expected = 'success' if job in selected else 'skipped'
         if checks[job]['result'] != expected:
             raise ValueError(f'{job}: expected {expected}, got {checks[job]["result"]}')
@@ -220,11 +221,15 @@ def main():
     selected = set(JOBS) if paths is None else select(paths)
     components = set(COMPONENTS) if paths is None else container_components(paths)
     release = release_required(paths)
-    # A trusted automatic release exports all images once, even when only the
-    # native runtime/edge/worker source changes. The gate must require that job.
-    if release and os.environ.get('AUTO_RELEASE') == 'true':
-        selected.add('containers')
-        components = set(COMPONENTS)
+    if os.environ.get('AUTO_RELEASE') == 'true':
+        # Only images used by the platform trigger its rollout. Node/LB maintenance
+        # is separate; it must not gate an API or dashboard deployment.
+        components.discard('mcp')
+        if components:
+            components.update(('dashboard', 'api'))
+        release = bool(components)
+    if os.environ['GITHUB_EVENT_NAME'] in ('push', 'pull_request'):
+        selected = {'containers'} if components else set()
     result = json.dumps([job for job in JOBS if job in selected])
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         stream.write(f'selected={result}\n')

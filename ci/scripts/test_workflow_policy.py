@@ -173,31 +173,35 @@ class WorkflowPolicyTest(unittest.TestCase):
         import ci_scope
         workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())
         jobs = workflow['jobs']
-        self.assertEqual(set(jobs), set(ci_scope.JOBS) | {'changes', 'gate', 'release'})
-        self.assertEqual(set(jobs['gate']['needs']), set(ci_scope.JOBS) | {'changes'})
+        self.assertEqual(set(jobs), {'changes', 'containers', 'gate', 'release'})
+        self.assertEqual(set(jobs['gate']['needs']), {'changes', 'containers'})
         self.assertEqual(jobs['gate']['if'], 'always()')
         self.assertEqual(set(jobs['changes']['outputs']),
-                         set(ci_scope.JOBS) | {'selected', 'container_components', 'release'})
+                         {'containers', 'selected', 'container_components', 'release'})
+        full = yaml.safe_load((HERE.parents[1] / '.github/workflows/platform-checks.yml').read_text())
+        self.assertEqual(set(full.get('on', full.get(True))), {'workflow_dispatch'})
+        self.assertEqual(set(full['jobs']), set(ci_scope.JOBS))
+        self.assertIs(full['jobs']['containers']['with']['publish'], False)
         events = workflow.get('on', workflow.get(True))  # PyYAML's YAML 1.1 "on" key.
         for event in ('pull_request', 'push'):
             self.assertFalse({'paths', 'paths-ignore'} & set(events[event] or {}))
-        for job in ci_scope.JOBS:
+        for job in ('containers',):
             self.assertEqual(jobs[job]['needs'], 'changes')
             output = f"['{job}']" if '-' in job else f'.{job}'
             self.assertEqual(jobs[job]['if'], f"needs.changes.outputs{output} == 'true'")
         self.assertEqual(jobs['containers']['uses'], './.github/workflows/platform-containers.yml')
-        self.assertEqual(jobs['containers']['permissions'], {'contents': 'read'})
+        self.assertEqual(jobs['containers']['permissions'], {'contents': 'read', 'packages': 'write'})
         trusted = "github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && vars.RAILSHOT_AUTO_RELEASE == 'true'"
         selection = next(step for step in jobs['changes']['steps'] if step.get('id') == 'select')
         self.assertEqual(selection['env']['AUTO_RELEASE'], '${{ ' + trusted + ' }}')
         self.assertEqual(jobs['containers']['with']['components'], '${{ needs.changes.outputs.container_components }}')
-        self.assertEqual(jobs['containers']['with']['export_image'], "${{ needs.changes.outputs.release == 'true' && " + trusted + ' }}')
+        self.assertEqual(jobs['containers']['with']['publish'], "${{ needs.changes.outputs.release == 'true' && " + trusted + ' }}')
         release = jobs['release']
         self.assertEqual(release['needs'], ['changes', 'gate'])
         self.assertEqual(release['if'], "${{ always() && !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.release == 'true' && " + trusted + ' }}')
         self.assertEqual(release['uses'], './.github/workflows/platform-publish.yml')
-        self.assertEqual(release['with'], {'components': '["dashboard","api","mcp","ci-runner"]',
-            'publish': True, 'deploy': True, 'multicloud': "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}", 'skip_build': True,
+        self.assertEqual(release['with'], {'components': '${{ needs.changes.outputs.container_components }}',
+            'publish': True, 'deploy': True, 'multicloud': False, 'skip_build': True,
             'ci_run_id': "${{ format('{0}', github.run_id) }}"})
         self.assertEqual(release['permissions'], {'contents': 'write', 'actions': 'read', 'packages': 'write', 'id-token': 'write'})
 

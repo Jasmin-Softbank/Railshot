@@ -27,33 +27,37 @@ class ScopeTests(unittest.TestCase):
             self.assertFalse(ci_scope.release_required(paths))
         self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
 
-    def test_automatic_release_selects_all_same_run_images_and_gate_requires_them(self):
-        for automatic in (False, True):
-            for paths in (['deployment/scripts/platform_workers.py'], ['infrastructure/terraform/gcp-edge/main.tf'],
-                          ['docs/operations/release.md'], [], None):
-                with self.subTest(automatic=automatic, paths=paths), tempfile.TemporaryDirectory() as tmp:
+    def test_normal_runs_build_only_images_and_manual_runs_keep_full_checks(self):
+        cases = [(['apps/api/src/server.js'], ['dashboard', 'api']),
+                 (['ci/workflows/railshot-deploy.yml'], ['dashboard', 'api', 'ci-runner']),
+                 (['deployment/scripts/platform_workers.py'], []),
+                 (['docs/operations/release.md'], []), ([], []),
+                 (None, ['dashboard', 'api', 'ci-runner'])]
+        for event in ('push', 'pull_request', 'workflow_dispatch'):
+            for paths, automatic_components in cases:
+                with self.subTest(event=event, paths=paths), tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
                     (root / 'event').write_text('{}')
-                    env = {'AUTO_RELEASE': str(automatic).lower(), 'GITHUB_EVENT_NAME': 'push',
+                    env = {'AUTO_RELEASE': str(event == 'push').lower(), 'GITHUB_EVENT_NAME': event,
                            'GITHUB_EVENT_PATH': str(root / 'event'), 'GITHUB_OUTPUT': str(root / 'output'),
                            'GITHUB_STEP_SUMMARY': str(root / 'summary')}
                     with patch.dict(os.environ, env), patch('sys.argv', ['ci_scope.py', 'select']), \
                             patch.object(ci_scope, 'changed_paths', return_value=paths):
                         ci_scope.main()
                     values = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
-                    release = ci_scope.release_required(paths)
-                    self.assertEqual(values['release'], str(release).lower())
-                    selected = set(json.loads(values['selected']))
-                    expected = set(ci_scope.JOBS) if paths is None else ci_scope.select(paths)
-                    if automatic and release:
-                        expected.add('containers')
-                        self.assertEqual(json.loads(values['container_components']), list(ci_scope.COMPONENTS))
-                    self.assertEqual(selected, expected)
-                    checks = {job: {'result': 'success' if job in selected else 'skipped'} for job in ci_scope.JOBS}
+                    components = json.loads(values['container_components'])
+                    if event == 'push':
+                        self.assertEqual(components, automatic_components)
+                        self.assertEqual(values['release'], str(bool(components)).lower())
+                    expected = (set(ci_scope.JOBS) if paths is None else ci_scope.select(paths)) \
+                        if event == 'workflow_dispatch' else ({'containers'} if components else set())
+                    self.assertEqual(set(json.loads(values['selected'])), expected)
+                    checks = {job: {'result': 'success' if job in expected else 'skipped'}
+                              for job in (ci_scope.JOBS if event == 'workflow_dispatch' else ['containers'])}
                     checks['changes'] = {'result': 'success', 'outputs': values}
                     ci_scope.validate_gate(checks)
-                    if automatic and release:
-                        checks['containers']['result'] = 'skipped'
+                    if components:
+                        checks['containers']['result'] = 'failure'
                         with self.assertRaises(ValueError):
                             ci_scope.validate_gate(checks)
 
