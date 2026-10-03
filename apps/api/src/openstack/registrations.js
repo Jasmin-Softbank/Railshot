@@ -82,8 +82,7 @@ export function createRegistrations(db) {
         .run(id, hash(token), expiresAt, now);
       return { registration_id: id, token, expires_at: new Date(expiresAt).toISOString() };
     },
-    // The customer-side enrollment flow can call this after the WireGuard handshake is implemented.
-    // A token is consumed atomically; a second claim never succeeds.
+    // Claiming proves possession of the one-time token, not tunnel connectivity.
     claim(token) {
       if (typeof token !== 'string' || !/^rsl_[A-Za-z0-9_-]{43}$/.test(token)) return null;
       const now = Date.now();
@@ -97,7 +96,7 @@ export function createRegistrations(db) {
         db.prepare("UPDATE registrations SET status = 'claimed', claimed_at = ? WHERE id = ?")
           .run(new Date(now).toISOString(), row.id);
         db.exec('COMMIT');
-        return visible({ ...row, status: 'claimed', claimed_at: new Date(now).toISOString() });
+        return { registration_id: row.id, status: 'claimed', claimed_at: new Date(now).toISOString() };
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     },
   };

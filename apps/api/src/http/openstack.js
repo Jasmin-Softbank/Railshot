@@ -10,6 +10,7 @@ const installerPaths = new Set([
 ]);
 
 export const isRegistrationRoute = (path) => /^\/api\/v1\/registrations(?:\/|$)/.test(path);
+export const isTokenClaimRoute = (path) => path === '/api/v1/registrations/claim';
 
 export function createOpenStackRoutes() {
   let installerReady;
@@ -40,6 +41,23 @@ export function createOpenStackRoutes() {
           script_url: '/api/v1/installers/openstack/scripts', bundle_url: '/api/v1/installers/openstack/bundles' });
       }
       return true;
+    },
+
+    async claimToken(request, response, url, products) {
+      if (request.method !== 'POST') {
+        const error = new ServiceError('지원하지 않는 메서드입니다.', 405);
+        error.allow = 'POST';
+        throw error;
+      }
+      if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+      if (!products.registrations) throw new ServiceError('등록 저장소를 사용할 수 없습니다.', 503);
+      const input = await jsonInput(request);
+      if (Object.keys(input).length !== 1 || typeof input.linkage_token !== 'string') {
+        throw new ServiceError('일회성 연계 토큰이 필요합니다.', 422);
+      }
+      const claimed = products.registrations.claim(input.linkage_token);
+      if (!claimed) throw new ServiceError('유효하지 않거나 만료된 연계 토큰입니다.', 401);
+      json(response, 200, claimed);
     },
 
     async serveRegistration(request, response, url, products, sessionId) {
