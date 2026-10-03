@@ -10,8 +10,13 @@
   deployments API에 보낸다. OpenStack 배포에는 선택한 연결 토큰도 보낸다.
   등록 대상의 ID·앱 이름 결정과 실행 가능 여부 검사는 서버가 수행한다.
   미연결 provider는 명확히 차단하며 다른 대상에 배포하지 않는다.
-- OpenStack 새 연결 등록에는 unscoped 토큰만 입력한다. 등록 응답의 RailShot 연결 토큰은
-  한 번만 표시하고, 브라우저 저장소에는 보관하지 않는다.
+- OpenStack 새 연결에는 사용자 환경에서 확인한 프로젝트·사용자 ID와 프로젝트 범위 토큰
+  또는 Application Credential ID/secret을 입력한다. 등록 응답의 RailShot 연결 토큰은
+  한 번만 표시하고 브라우저 저장소에는 보관하지 않는다.
+- 사용자 노드의 OpenStack 초기 설치 진입점은 통합 브랜치의
+  `deployment/bootstrap/install.sh`다. 설치 절차와 필요한 배포 패키지는
+  통합 브랜치의 `docs/architecture/client-bootstrap.md`를 따른다.
+  현재 설치기는 로컬 인증·조회·VM 접근 준비까지만 수행하며 애플리케이션 배포는 실행하지 않는다.
 - 202의 `Location`과 자원 ID를 확인한 뒤 15초마다 상태를 조회한다. 이미지 게시와
   앱 배포 성공을 구분한다. 배포 성공 및 HTTP 검증 시각이 있을 때만 앱 링크를 표시한다.
 - localStorage에는 마지막 실행의 종류·ID·앱 이름만 저장한다. 새로고침 시 서버의 영속

@@ -3,7 +3,7 @@
   "info": {
     "title": "RAILSHOT shared workspace product API",
     "version": "1.0.0",
-    "description": "Implemented local contract. Public demo requires exact configured Host/Origin and no login or browser bearer. OpenStack connection registration accepts one unscoped token; other provider/GitHub/Ansible credentials remain server-side. Private operator mode may require its existing internal bearer. One API process on one host, durable private state, one unfinished operation; no multi-replica scheduler. Legacy POST /api/deploy and GET /api/runs/{run_id} preserve response shape and use the same durable run binding. Local contract tests are not cloud deployment evidence."
+    "description": "Implemented local contract. Public demo requires exact configured Host/Origin and no login or browser bearer. OpenStack connection registration validates a user-provided project token or Application Credential and claimed project/user IDs; other provider/GitHub/Ansible credentials remain server-side. Private operator mode may require its existing internal bearer. One API process on one host, durable private state, one unfinished operation; no multi-replica scheduler. Legacy POST /api/deploy and GET /api/runs/{run_id} preserve response shape and use the same durable run binding. Local contract tests are not cloud deployment evidence."
   },
   "servers": [
     {
@@ -15,26 +15,83 @@
     "/api/v1/connections": {
       "post": {
         "operationId": "createConnection",
-        "summary": "Register one OpenStack project from an unscoped token",
-        "description": "Requires an operator-configured HTTPS Keystone v3 endpoint and encryption key. The returned RailShot connection token is only displayed once. An operator-configured project is selected when accessible; otherwise multiple available projects are rejected.",
+        "summary": "Register a verified user-provided OpenStack identity",
+        "description": "Requires an operator-configured HTTPS Keystone v3 endpoint and encryption key. The user supplies a scoped token or Application Credential plus project and user IDs. The backend validates identity and roles and does not create a credential. The returned RailShot connection token is only displayed once.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "unscoped_token"
-                ],
-                "properties": {
-                  "unscoped_token": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 8192,
-                    "writeOnly": true
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "auth_type",
+                      "project_id",
+                      "user_id",
+                      "token"
+                    ],
+                    "properties": {
+                      "auth_type": {
+                        "const": "token"
+                      },
+                      "project_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "user_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "token": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 8192,
+                        "writeOnly": true
+                      }
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "auth_type",
+                      "project_id",
+                      "user_id",
+                      "application_credential_id",
+                      "application_credential_secret"
+                    ],
+                    "properties": {
+                      "auth_type": {
+                        "const": "application_credential"
+                      },
+                      "project_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "user_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "application_credential_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 255
+                      },
+                      "application_credential_secret": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 8192,
+                        "writeOnly": true
+                      }
+                    }
                   }
-                }
+                ]
               }
             }
           }
@@ -58,7 +115,10 @@
                   "required": [
                     "id",
                     "provider",
+                    "project_id",
                     "project_name",
+                    "user_id",
+                    "auth_type",
                     "connection_token"
                   ],
                   "properties": {
@@ -75,6 +135,18 @@
                     "connection_token": {
                       "type": "string",
                       "writeOnly": true
+                    },
+                    "project_id": {
+                      "type": "string"
+                    },
+                    "user_id": {
+                      "type": "string"
+                    },
+                    "auth_type": {
+                      "enum": [
+                        "token",
+                        "application_credential"
+                      ]
                     }
                   }
                 }
@@ -98,6 +170,9 @@
           },
           "503": {
             "$ref": "#/components/responses/Error503"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
           }
         }
       }

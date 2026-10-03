@@ -2,12 +2,12 @@
 
 이 문서는 `apps/api/src/server.js`, `product.js`, `environments.js`, `product-store.js`에 구현한 제품 API를 설명한다. 기계 판독 계약은 [product.openapi.json](product.openapi.json)이다. 이 계약의 문서·로컬 검증은 `not_deployed`이며 실제 클라우드 E2E 결과와 별도로 기록한다.
 
-사용자 계정·로그인·팀원 allowlist는 없다. 모든 사용자가 같은 workspace의 등록 대상과 접수 기록을 사용한다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. GitHub·SSH 자격은 서버 설정에 둔다. OpenStack 새 연결 등록만 요청에서 unscoped 토큰을 받으며, 등록 후 그 원본 토큰은 저장하지 않는다.
+사용자 계정·로그인·팀원 allowlist는 없다. 모든 사용자가 같은 workspace의 등록 대상과 접수 기록을 사용한다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. GitHub·SSH 자격은 서버 설정에 둔다. OpenStack 연결 등록은 사용자가 제공한 프로젝트 범위 토큰 또는 Application Credential과 프로젝트·사용자 ID를 받아 Keystone에서 대조한다.
 
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
 | 화면 선택 | `GET /api/v1/options` | 기존 환경의 클라우드(AWS)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. OpenStack은 Keystone 연결과 고정 대상 프로젝트 설정도 있어야 available이다. |
-| OpenStack 연결 | `POST /api/v1/connections` | `{unscoped_token}` 하나를 받아 Keystone에서 검증하고 프로젝트별 Application Credential을 만든다. RailShot 연결 토큰은 201 응답에서 한 번만 반환한다. |
+| OpenStack 연결 | `POST /api/v1/connections` | 사용자가 직접 준비한 프로젝트 범위 토큰 또는 Application Credential과 프로젝트·사용자 ID를 Keystone에서 검증한다. 서버는 새 Application Credential을 만들지 않는다. RailShot 연결 토큰은 201 응답에서 한 번만 반환한다. |
 | 대상 | `GET /api/v1/targets` | CI 서비스에 등록한 대상 목록. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
 | 빌드 | `POST /api/v1/builds`, `GET /api/v1/builds/{id}` | ZIP·폴더·공개 GitHub를 기존 CI로 제출한다. ID는 GitHub run ID 문자열이며 등록한 run만 조회한다. `published`는 검증한 이미지 게시다. |
 | 배포 | `POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | 선택한 계획으로 환경 준비·대상 등록을 먼저 수행하거나, 이미 등록된 대상으로 바로 CI를 실행한다. CI 게시 결과를 검증한 후 CD 어댑터를 한 번 호출한다. 같은 source/target의 고정 revision 배포 및 기대 공개 HTTP 검증까지 확인해야 succeeded와 최상위 url을 반환한다. |
@@ -69,13 +69,13 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 
 대시보드는 소스와 `environment=cloud|onprem`, `provider=aws|openstack|proxmox`를 기존 배포 endpoint로 보낸다. 이 모드는 `app`·`target_id`와 함께 사용할 수 없다. API가 `RAILSHOT_TARGET_ID`·`RAILSHOT_TARGET_PROVIDER`와 CD 등록 앱을 결정하며, 등록 앱이 없으면 GitHub/ZIP/폴더 이름에서 유효한 앱 이름을 생성한다. 폴더명은 선택적 `source_name`(1–255자, 제어 문자 금지)으로 전달한다. 알 수 없는 provider와 잘못된 조합은 422, 연결되지 않은 선택은 409이며 다른 대상으로 대체하지 않는다. 기존 app/target_id 요청과 builds API는 유지한다.
 
-OpenStack 새 연결 등록은 운영자가 설정한 HTTPS Keystone v3 주소에서 입력 unscoped 토큰의 유효성·범위·접근 가능 프로젝트를 확인한다. `RAILSHOT_OPENSTACK_PROJECT_ID`가 있으면 그 프로젝트에 접근 가능해야 한다. 설정이 없으면 접근 가능한 프로젝트가 정확히 하나여야 한다. 프로젝트 범위 토큰에 역할이 있을 때 Application Credential을 발급한다.
+사용자는 자신의 OpenStack 환경에서 프로젝트 범위 토큰 또는 Application Credential과 프로젝트·사용자 ID를 직접 확인해 입력한다. 백엔드는 사용자가 제공한 임의 Keystone URL을 호출하지 않고, 운영자가 설정한 HTTPS Keystone v3 주소에서만 인증 정보를 검사한다. 사용자 노드의 설치 진입점은 통합 브랜치의 `deployment/bootstrap/install.sh`다. 이 설치기는 로컬 OpenStack 인증·조회·VM 접근 준비용이며, 단일 파일만으로 설치할 수 없고 애플리케이션 배포도 실행하지 않는다. 필요한 패키지와 실행 명령은 통합 브랜치의 `docs/architecture/client-bootstrap.md`에 있다. 대시보드의 연결 토큰은 API 배포 요청용이며 설치기 등록 키나 터널 인증 토큰이 아니다.
 
-입력한 unscoped 토큰은 저장하지 않는다. SQLite `connections.sqlite3`에는 프로젝트 ID·이름, Application Credential ID, AES-256-GCM으로 암호화한 secret, RailShot 연결 토큰의 SHA-256 해시를 저장한다. 사용자 ID·계정은 저장하지 않는다. 응답의 `connection_token`은 다시 조회할 수 없으므로 발급 시 보관해야 한다.
+등록 입력은 `{auth_type:"token", project_id, user_id, token}` 또는 `{auth_type:"application_credential", project_id, user_id, application_credential_id, application_credential_secret}` 중 하나다. Keystone 응답의 사용자 ID·프로젝트 ID·역할을 확인하고 입력 식별자 및 `RAILSHOT_OPENSTACK_PROJECT_ID`와 대조한다. 서버가 사용자를 대신해 새 Application Credential을 만들지 않는다. SQLite `connections.sqlite3`에는 인증 형식·프로젝트/사용자 ID·이름, 사용자 제공 토큰 또는 secret의 AES-256-GCM 암호문, RailShot 연결 토큰의 SHA-256 해시를 저장한다. 기존 연결 DB는 새 열을 추가해 읽는다. 응답의 `connection_token`은 다시 조회할 수 없으므로 발급 시 보관해야 한다.
 
-등록 요청은 `unscoped_token`만 받는다. 기존 연결 토큰은 배포 multipart의 `connection_token`으로 보낸다. 배포 요청 때 저장된 Application Credential을 Keystone에서 다시 인증하고, 토큰의 프로젝트가 `RAILSHOT_OPENSTACK_PROJECT_ID`와 같을 때만 접수한다. 기존 API Bearer는 별도의 제품 API 접근 경계로 유지된다.
+기존 연결 토큰은 배포 multipart의 `connection_token`으로 보낸다. 배포 요청 때 저장된 토큰 또는 Application Credential을 Keystone에서 다시 검증하고, 프로젝트가 `RAILSHOT_OPENSTACK_PROJECT_ID`와 같을 때만 접수한다. 프로젝트 범위 토큰이 만료되면 새 인증 정보로 연결을 다시 등록해야 한다. 기존 API Bearer는 별도의 제품 API 접근 경계로 유지된다.
 
-운영자는 `RAILSHOT_OPENSTACK_AUTH_URL`에 HTTPS Keystone v3 URL, `RAILSHOT_CONNECTION_KEY`에 base64 32바이트 암호화 키, `RAILSHOT_OPENSTACK_PROJECT_ID`에 배포 대상 프로젝트 ID를 설정한다. 키는 영속적으로 보관해야 한다. 키가 바뀌면 저장된 Application Credential을 복호화할 수 없다.
+운영자는 `RAILSHOT_OPENSTACK_AUTH_URL`에 HTTPS Keystone v3 URL, `RAILSHOT_CONNECTION_KEY`에 base64 32바이트 암호화 키, `RAILSHOT_OPENSTACK_PROJECT_ID`에 배포 대상 프로젝트 ID를 설정한다. 키는 영속적으로 보관해야 한다. 키가 바뀌면 저장된 토큰·Application Credential secret을 복호화할 수 없다.
 
 현재 등록 기능은 연결 권한을 저장·검증한다. 새 프로젝트의 VM 이미지·flavor·네트워크 선택과 VM 생성, 게스트로의 스크립트 전달은 자동 실행 경로에 연결되지 않았다. 운영자가 이 경로를 연결하기 전에는 새 프로젝트가 `/api/v1/options`에서 실행 가능으로 표시되지 않는다. [배포 스크립트](../../deployment/scripts/deploy.sh)는 준비된 VM 내부에서 실행한다.
 

@@ -4,136 +4,137 @@ import { randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { createConnectionService, ConnectionError } from '../src/connections.js';
 import { createAppServer } from '../src/server.js';
 import { apiAccessConfig } from '../src/access.js';
 
-function response(value, token) {
-  return new Response(JSON.stringify(value), {
-    status: 200,
-    headers: token ? { 'X-Subject-Token': token } : {},
-  });
+const identity = { token: { user: { id: 'user1' }, project: { id: 'project1', name: 'test-cloud' }, roles: [{ id: 'member' }] } };
+const tokenInput = { auth_type: 'token', project_id: 'project1', user_id: 'user1', token: 'scoped-secret' };
+const credentialInput = { auth_type: 'application_credential', project_id: 'project1', user_id: 'user1',
+  application_credential_id: 'credential1', application_credential_secret: 'credential-secret' };
+function response(value, subject) {
+  return new Response(JSON.stringify(value), { status: 200, headers: subject ? { 'X-Subject-Token': subject } : {} });
 }
 
-test('unscoped OpenStack token registers the configured project without persisting either input or issued token', async () => {
+async function fixture(t, fetcher, extra = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-connections-'));
-  const encryptionKey = randomBytes(32).toString('base64');
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const settings = { directory, authUrl: 'https://keystone.example.test/v3',
+    encryptionKey: randomBytes(32).toString('base64'), projectId: 'project1', fetcher, ...extra };
+  const service = await createConnectionService(settings);
+  t.after(() => service.close());
+  return { service, directory, settings };
+}
+
+test('user-provided project token is verified and stored encrypted without creating a credential', async (t) => {
   const calls = [];
-  const fetcher = async (url, options) => {
+  const { service, directory } = await fixture(t, async (url, options) => {
     calls.push({ url, options });
-    const path = new URL(url).pathname;
-    if (path === '/v3/auth/tokens' && options.method === 'GET') return response({ token: { user: { id: 'user1' } } });
-    if (path === '/v3/auth/projects') {
-      return response({ projects: [{ id: 'project1', name: 'test-cloud' }, { id: 'other-project' }] });
-    }
-    if (path === '/v3/auth/tokens' && options.method === 'POST') {
-      return response({ token: {
-        project: { id: 'project1' }, user: { id: 'user1' }, roles: [{ id: 'admin' }],
-      } }, 'scoped-token');
-    }
-    if (path === '/v3/users/user1/application_credentials') {
-      return response({ application_credential: { id: 'credential1', secret: 'credential-secret' } });
-    }
-    assert.fail(`Unexpected ${url}`);
-  };
-  let service;
-  try {
-    const settings = { directory, authUrl: 'https://keystone.example.test/v3', encryptionKey, projectId: 'project1', fetcher };
-    service = await createConnectionService(settings);
-    const result = await service.register({ unscoped_token: 'unscoped-secret' });
-    assert.equal(result.project_name, 'test-cloud');
-    assert.match(result.connection_token, /^[A-Za-z0-9_-]{43}$/);
-    assert.equal(calls[0].options.headers['X-Subject-Token'], 'unscoped-secret');
-    assert.deepEqual(JSON.parse(calls[2].options.body).auth.scope, { project: { id: 'project1' } });
-    assert.equal(service.resolve(result.connection_token).credential_secret, 'credential-secret');
-    assert.equal((await service.verify(result.connection_token)).project_id, 'project1');
-    assert.deepEqual(JSON.parse(calls[4].options.body).auth.identity.application_credential,
+    assert.equal(new URL(url).pathname, '/v3/auth/tokens');
+    assert.equal(options.method, 'GET');
+    assert.equal(options.headers['X-Auth-Token'], 'scoped-secret');
+    assert.equal(options.headers['X-Subject-Token'], 'scoped-secret');
+    return response(identity);
+  });
+  const result = await service.register(tokenInput);
+  assert.equal(result.user_id, 'user1');
+  assert.equal(result.project_id, 'project1');
+  assert.equal(result.auth_type, 'token');
+  assert.match(result.connection_token, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal((await service.verify(result.connection_token)).project_id, 'project1');
+  assert.equal(calls.length, 2);
+  const bytes = await readFile(join(directory, 'connections.sqlite3'));
+  assert.equal(bytes.includes('scoped-secret'), false);
+  assert.equal(bytes.includes(result.connection_token), false);
+});
+
+test('user-provided Application Credential is verified without server-side credential creation', async (t) => {
+  const calls = [];
+  const { service, directory } = await fixture(t, async (url, options) => {
+    calls.push({ url, options });
+    assert.equal(new URL(url).pathname, '/v3/auth/tokens');
+    assert.equal(options.method, 'POST');
+    assert.deepEqual(JSON.parse(options.body).auth.identity.application_credential,
       { id: 'credential1', secret: 'credential-secret' });
-    const bytes = await readFile(join(directory, 'connections.sqlite3'));
-    for (const secret of ['unscoped-secret', 'credential-secret', result.connection_token]) {
-      assert.equal(bytes.includes(secret), false);
-    }
-    assert.throws(() => service.resolve('invalid'), { status: 422 });
-    service.close();
-    service = null;
-    service = await createConnectionService(settings);
-    assert.equal(service.resolve(result.connection_token).project_id, 'project1');
-  } finally {
-    service?.close();
-    await rm(directory, { recursive: true, force: true });
-  }
+    return response(identity, 'issued-token');
+  });
+  const result = await service.register(credentialInput);
+  assert.equal(result.auth_type, 'application_credential');
+  assert.equal((await service.verify(result.connection_token)).user_id, 'user1');
+  assert.equal(calls.length, 2);
+  const bytes = await readFile(join(directory, 'connections.sqlite3'));
+  assert.equal(bytes.includes('credential-secret'), false);
 });
 
-test('scoped token and ambiguous project access cannot register', async () => {
+test('claimed identity, operator project, and malformed credentials are rejected', async (t) => {
+  let calls = 0;
+  let unscoped = false;
+  const { service } = await fixture(t, async () => { calls++; return response(unscoped ? { token: { user: { id: 'user1' } } } : identity); });
+  await assert.rejects(service.register({ ...tokenInput, user_id: 'another-user' }), { status: 403 });
+  await assert.rejects(service.register({ ...tokenInput, project_id: 'another-project' }), { status: 403 });
+  await assert.rejects(service.register({ ...tokenInput, token: 'bad\nheader' }), { status: 422 });
+  await assert.rejects(service.register({ ...credentialInput, application_credential_secret: '' }), { status: 422 });
+  await assert.rejects(service.register({ unscoped_token: 'legacy' }), { status: 422 });
+  unscoped = true;
+  await assert.rejects(service.register(tokenInput), { code: 'INVALID_OPENSTACK_CREDENTIALS' });
+  assert.equal(calls, 2);
+});
+
+test('expired project token cannot authorize deployment and existing schema migrates', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-connections-'));
-  const encryptionKey = randomBytes(32).toString('base64');
-  let responseValue = { token: { user: { id: 'user1' }, project: { id: 'project1' } } };
-  const fetcher = async (url) => {
-    const value = new URL(url).pathname.endsWith('/auth/projects')
-      ? { projects: [{ id: 'one' }, { id: 'two' }] }
-      : responseValue;
-    return response(value);
-  };
-  let service;
-  try {
-    service = await createConnectionService({ directory, authUrl: 'https://keystone.example.test/v3', encryptionKey, fetcher });
-    await assert.rejects(service.register({ unscoped_token: 'candidate' }), { status: 422 });
-    responseValue = { token: { user: { id: 'user1' } } };
-    await assert.rejects(service.register({ unscoped_token: 'candidate' }), { status: 422 });
-  } finally {
-    service?.close();
-    await rm(directory, { recursive: true, force: true });
-  }
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const old = new DatabaseSync(join(directory, 'connections.sqlite3'));
+  old.exec(`CREATE TABLE connections (id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL,
+    project_id TEXT NOT NULL, project_name TEXT NOT NULL, credential_id TEXT NOT NULL,
+    credential_ciphertext TEXT NOT NULL, created_at TEXT NOT NULL)`);
+  old.close();
+  let expired = false;
+  const service = await createConnectionService({ directory, authUrl: 'https://keystone.example.test/v3',
+    encryptionKey: randomBytes(32).toString('base64'), projectId: 'project1',
+    fetcher: async () => expired ? new Response('{}', { status: 401 }) : response(identity) });
+  t.after(() => service.close());
+  const registered = await service.register(tokenInput);
+  expired = true;
+  await assert.rejects(service.verify(registered.connection_token), { code: 'INVALID_OPENSTACK_CREDENTIALS' });
 });
 
-test('OpenStack deployment checks a connection token against the configured project before dispatch', async () => {
+test('OpenStack deployment checks a registered identity against the configured project before dispatch', async (t) => {
   let dispatched = 0;
   const apiToken = 'private-api-token-0123456789abcdef';
   const server = createAppServer({
     access: apiAccessConfig({ RAILSHOT_API_TOKEN: apiToken }),
-    openstackProjectId: 'project1',
-    target: { provider: 'openstack' },
-    service: { targetId: 'openstack-main' },
+    openstackProjectId: 'project1', target: { provider: 'openstack' }, service: { targetId: 'openstack-main' },
     connectionService: {
-      register: async () => ({ id: 'new-id', provider: 'openstack', project_name: 'test', connection_token: 'a'.repeat(43) }),
+      register: async (input) => ({ id: 'new-id', provider: 'openstack', project_id: input.project_id,
+        user_id: input.user_id, auth_type: input.auth_type, project_name: 'test', connection_token: 'a'.repeat(43) }),
       verify: async (token) => {
         if (!token) throw new ConnectionError(422, 'INVALID_INPUT', '기존 연결 토큰을 확인하세요.');
-        return { project_id: token === 'correct' ? 'project1' : 'another-project' };
+        return { project_id: token === 'correct' ? 'project1' : 'another-project', user_id: 'user1' };
       },
     },
-    product: {
-      createDeployment: async () => {
-        dispatched++;
-        return { id: 'deployment1', status: 'queued' };
-      },
-    },
+    product: { createDeployment: async () => { dispatched++; return { id: 'deployment1', status: 'queued' }; } },
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
   const form = (token) => {
     const body = new FormData();
-    body.set('environment', 'onprem');
-    body.set('provider', 'openstack');
+    body.set('environment', 'onprem'); body.set('provider', 'openstack');
     body.set('repository_url', 'https://github.com/example/demo');
     if (token) body.set('connection_token', token);
     return body;
   };
-  try {
-    const headers = { Authorization: `Bearer ${apiToken}`, 'Idempotency-Key': 'test-key' };
-    const register = await fetch(`${base}/api/v1/connections`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ unscoped_token: 'unscoped' }),
-    });
-    assert.equal(register.status, 201);
-    assert.equal((await register.json()).connection_token, 'a'.repeat(43));
-    const deploy = (token) => fetch(`${base}/api/v1/deployments`, { method: 'POST', headers, body: form(token) });
-    assert.equal((await deploy()).status, 422);
-    assert.equal((await deploy('wrong')).status, 403);
-    assert.equal(dispatched, 0);
-    assert.equal((await deploy('correct')).status, 202);
-    assert.equal(dispatched, 1);
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
+  const headers = { Authorization: `Bearer ${apiToken}`, 'Idempotency-Key': 'test-key' };
+  const register = await fetch(`${base}/api/v1/connections`, { method: 'POST',
+    headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(tokenInput) });
+  assert.equal(register.status, 201);
+  assert.equal((await register.json()).user_id, 'user1');
+  const deploy = (token) => fetch(`${base}/api/v1/deployments`, { method: 'POST', headers, body: form(token) });
+  assert.equal((await deploy()).status, 422);
+  assert.equal((await deploy('wrong')).status, 403);
+  assert.equal(dispatched, 0);
+  assert.equal((await deploy('correct')).status, 202);
+  assert.equal(dispatched, 1);
 });

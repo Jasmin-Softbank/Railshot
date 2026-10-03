@@ -87,7 +87,7 @@
                 </label>
                 <label class="connection-choice">
                   <input type="radio" name="connection-mode" value="new" />
-                  새 환경 등록 후 연결 토큰 발급
+                  내 OpenStack 인증 정보로 연결 등록
                 </label>
                 <div id="existing-connection-field">
                   <label class="field-label" for="connection-token">기존 연결 토큰</label>
@@ -95,11 +95,27 @@
                     placeholder="RailShot 연결 토큰" />
                 </div>
                 <div id="new-connection-field" hidden>
-                  <label class="field-label" for="unscoped-token">OpenStack unscoped 토큰</label>
-                  <input id="unscoped-token" type="password" autocomplete="off" spellcheck="false"
-                    placeholder="OpenStack unscoped 토큰" />
-                  <p class="field-note">운영자가 설정한 Keystone 서버와 대상 프로젝트에서 검증합니다. 대상 프로젝트가 없으면 접근 가능한 프로젝트가 하나여야 합니다.</p>
-                  <button class="secondary-button" id="register-connection" type="button">연결 등록하고 토큰 발급</button>
+                  <p class="field-note">본인 OpenStack 환경의 프로젝트·사용자 ID와 인증 정보를 입력하세요. 백엔드는 운영자가 설정한 Keystone 서버에서 이를 다시 검증합니다.</p>
+                  <label class="field-label" for="openstack-project-id">프로젝트 ID</label>
+                  <input id="openstack-project-id" type="text" autocomplete="off" spellcheck="false" />
+                  <label class="field-label" for="openstack-user-id">사용자 ID</label>
+                  <input id="openstack-user-id" type="text" autocomplete="off" spellcheck="false" />
+                  <label class="field-label" for="openstack-auth-type">인증 형식</label>
+                  <select id="openstack-auth-type">
+                    <option value="token">프로젝트 범위 토큰</option>
+                    <option value="application_credential">Application Credential (Access Key 형식)</option>
+                  </select>
+                  <div id="openstack-token-field">
+                    <label class="field-label" for="openstack-token">프로젝트 범위 토큰</label>
+                    <input id="openstack-token" type="password" autocomplete="off" spellcheck="false" />
+                  </div>
+                  <div id="openstack-credential-field" hidden>
+                    <label class="field-label" for="openstack-credential-id">Application Credential ID</label>
+                    <input id="openstack-credential-id" type="text" autocomplete="off" spellcheck="false" />
+                    <label class="field-label" for="openstack-credential-secret">Application Credential secret</label>
+                    <input id="openstack-credential-secret" type="password" autocomplete="off" spellcheck="false" />
+                  </div>
+                  <button class="secondary-button" id="register-connection" type="button">인증 정보 확인 및 연결 등록</button>
                 </div>
                 <p class="field-note" id="connection-registration-status" role="status"></p>
                 <div id="issued-connection-field" hidden>

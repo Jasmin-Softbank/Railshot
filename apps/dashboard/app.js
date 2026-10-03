@@ -41,7 +41,12 @@ const connectionFields = {
   registerButton: document.querySelector('#register-connection'),
 };
 const connectionToken = document.querySelector('#connection-token');
-const unscopedToken = document.querySelector('#unscoped-token');
+const openstackProjectId = document.querySelector('#openstack-project-id');
+const openstackUserId = document.querySelector('#openstack-user-id');
+const openstackAuthType = document.querySelector('#openstack-auth-type');
+const openstackToken = document.querySelector('#openstack-token');
+const openstackCredentialId = document.querySelector('#openstack-credential-id');
+const openstackCredentialSecret = document.querySelector('#openstack-credential-secret');
 const deploymentDatabase = document.querySelector('#deployment-database');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
@@ -189,7 +194,16 @@ document.querySelectorAll('[name="connection-mode"]').forEach((input) => input.a
   invalidateReview();
 }));
 connectionToken.addEventListener('input', invalidateReview);
-unscopedToken.addEventListener('input', invalidateReview);
+openstackAuthType.addEventListener('change', () => {
+  document.querySelector('#openstack-token-field').hidden = openstackAuthType.value !== 'token';
+  document.querySelector('#openstack-credential-field').hidden = openstackAuthType.value !== 'application_credential';
+  if (openstackAuthType.value === 'token') openstackCredentialSecret.value = '';
+  else openstackToken.value = '';
+  invalidateReview();
+});
+for (const field of [openstackProjectId, openstackUserId, openstackToken, openstackCredentialId, openstackCredentialSecret]) {
+  field.addEventListener('input', invalidateReview);
+}
 
 async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
@@ -205,8 +219,17 @@ async function request(path, options = {}, controller = new AbortController()) {
 async function registerConnection() {
   const { status, registerButton } = connectionFields;
   status.textContent = '';
-  if (!unscopedToken.value || unscopedToken.value.includes('\n')) {
-    status.textContent = 'OpenStack unscoped 토큰을 입력하세요.';
+  connectionFields.issued.hidden = true;
+  connectionFields.issuedToken.value = '';
+  const project_id = openstackProjectId.value.trim();
+  const user_id = openstackUserId.value.trim();
+  const auth_type = openstackAuthType.value;
+  const credential = auth_type === 'token'
+    ? { token: openstackToken.value.trim() }
+    : { application_credential_id: openstackCredentialId.value.trim(),
+      application_credential_secret: openstackCredentialSecret.value };
+  if (!project_id || !user_id || Object.values(credential).some((value) => !value || /[\r\n]/.test(value))) {
+    status.textContent = '프로젝트·사용자 ID와 선택한 인증 정보를 입력하세요.';
     return;
   }
 
@@ -215,7 +238,7 @@ async function registerConnection() {
     const { data } = await request('/api/v1/connections', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ unscoped_token: unscopedToken.value }),
+      body: JSON.stringify({ auth_type, project_id, user_id, ...credential }),
     });
     if (typeof data.connection_token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.connection_token)) {
       throw new Error('연결 토큰 발급 응답을 확인하지 못했습니다.');
@@ -224,10 +247,11 @@ async function registerConnection() {
     connectionFields.issuedToken.value = data.connection_token;
     connectionFields.issued.hidden = false;
     connectionToken.value = data.connection_token;
-    unscopedToken.value = '';
+    openstackToken.value = '';
+    openstackCredentialSecret.value = '';
     document.querySelector('[name="connection-mode"][value="existing"]').checked = true;
     showConnectionMode('existing');
-    status.textContent = `${data.project_name} 프로젝트 연결을 등록했습니다. 발급된 토큰은 이번 화면에서만 확인할 수 있습니다.`;
+    status.textContent = `${data.project_name} 프로젝트의 ${data.user_id} 사용자 연결을 확인했습니다. 발급된 토큰은 이번 화면에서만 확인할 수 있습니다.`;
     invalidateReview();
   } catch (cause) {
     status.textContent = cause.name === 'AbortError'
