@@ -257,7 +257,8 @@ def instructions(profile, role_cfg):
     text += ("\n\n## How to return files\nYou cannot edit files. Return the full content of every file you create or "
              "change in the `files` array of your JSON output, with paths relative to the workspace root. "
              "For a justified deletion set action=delete and content to an empty string. "
-             "Omit action or use action=write for creation/update. Files you do not list stay unchanged.\n")
+             "Omit action or use action=write for creation/update. Files you do not list stay unchanged. "
+             "Return at most eight files and 20,000 UTF-8 content bytes in total.\n")
     return text
 
 
@@ -266,11 +267,6 @@ def with_files(schema, allow, gate_order=GATE_ORDER):
     if tuple(gate_order) not in RELEASE_ORDERS:
         raise ValueError("invalid repair gate profile")
     s = copy.deepcopy(schema)
-    plan = s["properties"].get("gate_plan")
-    if plan is not None:
-        plan.update(minItems=len(gate_order), maxItems=len(gate_order),
-                    description="Plan the active gate order: " + ",".join(gate_order))
-        plan["items"]["properties"]["gate"]["enum"] = list(gate_order)
     s["properties"]["files"] = {
         "type": "array", "maxItems": 8,
         "items": {"type": "object", "additionalProperties": False, "required": ["path", "content"],
@@ -699,17 +695,20 @@ def record_plan(run, role, output, gate_order=GATE_ORDER, *, workspace=None, rep
     files = output.get("files", [])
     if not files:
         return
-    plan = output.get("gate_plan", [])
-    if [step.get("gate") for step in plan] != list(gate_order):
-        raise ValueError("proposal requires a plan for every gate in execution order")
+    if tuple(gate_order) not in RELEASE_ORDERS:
+        raise ValueError("invalid repair gate profile")
     if {item["path"] for item in output.get("files_changed", [])} != {item["path"] for item in files}:
         raise ValueError("planned files must match proposed files")
     if output.get("status") != "proposed" or role == "fixer" and not output.get("root_cause"):
         raise ValueError("file proposal needs an evidence-backed root cause")
     evidence = repair_evidence.verify(run, workspace, output, gate_order, repair_scope, expected)
+    # Verification order belongs to the host profile, never to generated prose.
     receipt = {"status": "planned", "execution_verified": False, "evidence": evidence,
+               "plan_owner": "host", "gate_plan": [
+                   {"gate": layer, "action": "Run the host-controlled gate; result remains unverified."}
+                   for layer in gate_order],
                "file_actions": {item["path"]: item.get("action", "write") for item in files},
-               **{key: output.get(key) for key in ("root_cause", "addresses_failure", "gate_plan", "files_changed", "assumptions")},
+               **{key: output.get(key) for key in ("root_cause", "addresses_failure", "files_changed", "assumptions")},
                "files_sha256": {item["path"]: hashlib.sha256(item["content"].encode()).hexdigest() for item in files}}
     with (run / f"{role}-plan.json").open("x") as stream:
         os.fchmod(stream.fileno(), 0o600)
@@ -724,9 +723,12 @@ def record_plan(run, role, output, gate_order=GATE_ORDER, *, workspace=None, rep
 
 def proposal_rejection(exc):
     """Only registered guidance enters the next prompt; never echo invalid output."""
+    if isinstance(exc, repair_evidence.ProposalEvidenceError):
+        return exc.rejection
+    # Host evidence drift cannot be repaired by generating a different proposal.
+    if isinstance(exc, repair_evidence.EvidenceStateError):
+        return None
     reasons = {
-        "repair evidence": ("EVIDENCE_BINDING_REQUIRED", "Use the unchanged host repair case, exact failure fingerprint and valid source or log references. Do not guess missing evidence."),
-        "proposal requires a plan": ("PLAN_REQUIRED", "Plan every gate in execution order before returning files."),
         "planned files": ("PLAN_FILES_MISMATCH", "List the exact proposed file paths and reasons in files_changed."),
         "file proposal needs": ("ROOT_CAUSE_REQUIRED", "Return an evidence-backed root_cause for the proposal."),
         "existing tests": ("TEST_IMMUTABLE", "Preserve existing test bytes; fix application source instead."),
@@ -785,7 +787,6 @@ def execute(a):
         schema = with_files(json.loads((PLATFORM / role_cfg["schema"]).read_text()), allow, gate_order)
         system = instructions(profile, role_cfg)
         system += (f"\n\n## Authority for this run\nRepair scope: {a.repair_scope}.\n"
-                   f"Active gate order: {','.join(gate_order)}. Return gate_plan in this exact order.\n"
                    f"Writable paths: {json.dumps(allow)}\nProtected paths: {json.dumps(protect)}\n"
                    "These concrete bounds replace packaging-only restrictions when source scope is explicitly selected. "
                    "Never weaken tests, lint/type rules, CI gates or approval policy. Return a proposal only.\n")
@@ -794,7 +795,6 @@ def execute(a):
         case_bytes = repair_evidence.load(run)
         if case_bytes is not None:
             context = repair_evidence.context(case_bytes, run, a.role)
-            trusted_binding = context['evidence_binding']
             encoded_context = json.dumps(context, ensure_ascii=False)
             context_metrics = {'version': context['context_version'], 'bytes': len(encoded_context.encode()),
                                'sha256': hashlib.sha256(encoded_context.encode()).hexdigest(),
@@ -806,8 +806,10 @@ def execute(a):
                      "Candidates are observed paths, not confirmed entrypoints. Search relevant symbols and read targeted ranges before expanding. "
                      "Read the full file before proposing its replacement. Open diagnostics/case.json only for missing inventory or references. "
                      "Previous model hypotheses are not verified facts.\n")
-            system += "\nReturn this exact evidence_binding with any file proposal: " + json.dumps(trusted_binding)
-            system += "\nReturn addresses_failure equal to the case failure fingerprint. Include evidence_refs with kind=source/path/line/sha256 or kind=log/id/sha256. Log id failure means SHA-256 of the case failure excerpt UTF-8 bytes. Process ids use the recorded log hash. Never invent file:line references."
+            system += ("\nWith file proposals, copy evidence_binding from the initial evidence and set addresses_failure "
+                       "to its failure fingerprint. Cite evidence only in evidence_refs: source/path/line/sha256 or "
+                       "log/id/sha256. Use the recorded original hashes, including failure_reference for log id failure. "
+                       "Explain hypotheses in root_cause and assumptions; prose is not a verified reference.")
     except Exception as exc:
         raise OperationError("SDK_CONFIG_INVALID", component="runner", phase="config",
                              retry_policy="after_configuration", cause=exc) from exc

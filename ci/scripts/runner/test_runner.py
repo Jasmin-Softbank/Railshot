@@ -597,7 +597,6 @@ class RunnerTest(unittest.TestCase):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
             from runner.test_repair_evidence import bind_proposal
             return bind_proposal(run, {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
-                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in run_agent.GATE_ORDER],
                     'files_changed':[{'path':name,'why':'fixture repair'} for name in ('Dockerfile','.dockerignore')], 'assumptions':[], 'confidence':'high',
                     'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}), {}
         with tempfile.TemporaryDirectory() as directory:
@@ -630,7 +629,6 @@ class RunnerTest(unittest.TestCase):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
             from runner.test_repair_evidence import bind_proposal
             return bind_proposal(run, {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
-                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in run_agent.GATE_ORDER],
                     'files_changed':[{'path':'../private-canary.py','why':'invalid fixture'}], 'assumptions':[], 'confidence':'high',
                     'files':[{'path':'../private-canary.py','content':'wrong'}]}), {}
         with tempfile.TemporaryDirectory() as directory:
@@ -649,6 +647,72 @@ class RunnerTest(unittest.TestCase):
             self.assertTrue(receipt['proposal_rejection']['safe_to_replan'])
             self.assertNotIn('private-canary', json.dumps(receipt['proposal_rejection']))
             self.assertFalse((base/'private-canary.py').exists())
+
+    def test_structured_evidence_feedback_and_host_drift_never_write_invalid_proposals(self):
+        from runner.test_repair_evidence import bind_proposal, case_fixture
+        cases = [
+            ('valid', {}, None, None),
+            ('path', {'path': 'private-canary.py'}, 'EVIDENCE_SOURCE_NOT_FOUND', 'evidence_refs[0].path'),
+            ('line', {'line': 999}, 'EVIDENCE_LINE_OUT_OF_RANGE', 'evidence_refs[0].line'),
+            ('hash', {'sha256': '0' * 64}, 'EVIDENCE_HASH_MISMATCH', 'evidence_refs[0].sha256'),
+            ('binding', {}, 'EVIDENCE_BINDING_MISMATCH', 'addresses_failure'),
+            ('log-id', {}, 'EVIDENCE_LOG_NOT_FOUND', 'evidence_refs[0].id'),
+            ('log-hash', {}, 'EVIDENCE_HASH_MISMATCH', 'evidence_refs[0].sha256'),
+            ('host-drift', {}, None, None),
+            ('model-plan', {}, 'PROPOSAL_CONTRACT', None),
+        ]
+        for name, change, reason, field in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve(); workspace = base/'workspace'; workspace.mkdir()
+                run, task = base/'run', base/'task.md'; task.write_text('prepare container')
+                source = workspace/'Dockerfile'; source.write_text('FROM node:22-alpine\n')
+                raw = case_fixture(workspace, run)
+                digest = json.loads(raw)['source']['files']['Dockerfile']['sha256']
+
+                def provider(cfg, system, task, schema, workspace, run, deny, emit):
+                    emit('session.finished', sdk_status='completed', session_id='offline-fixture')
+                    proposal = bind_proposal(run, {
+                        'status': 'proposed', 'summary': 'offline', 'confidence': 'high',
+                        'root_cause': 'The listener defaults to 0.0.0.0:8080.',
+                        'assumptions': ['An endpoint such as https://example.com:443 is prose, not a citation.'],
+                        'files_changed': [{'path': 'Dockerfile', 'why': 'fixture repair'}],
+                        'files': [{'path': 'Dockerfile', 'content': 'FROM node:22-alpine\nEXPOSE 8080\n'}]})
+                    proposal['evidence_refs'] = [{
+                        'kind': 'source', 'path': 'Dockerfile', 'line': 1, 'sha256': digest, **change}]
+                    if name == 'binding':
+                        proposal['addresses_failure'] = 'private-canary'
+                    if name in ('log-id', 'log-hash'):
+                        proposal['evidence_refs'] = [{'kind': 'log', 'sha256': '0' * 64,
+                                                     'id': 'process-999' if name == 'log-id' else 'failure'}]
+                    if name == 'host-drift':
+                        source.write_text('FROM node:24-alpine\n')
+                    if name == 'model-plan':
+                        proposal['gate_plan'] = [{'gate': 'L2', 'action': 'skip validation'}]
+                    return proposal, {}
+
+                argv = ['runner', 'adapter', '--workspace', str(workspace), '--run', str(run), '--task', str(task)]
+                with patch.object(run_agent, 'run_codex', side_effect=provider), patch('sys.argv', argv), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run_agent.main(), 0 if name == 'valid' else 1)
+                receipt = json.loads((run/'adapter.json').read_text())
+                if name == 'valid':
+                    self.assertEqual(receipt['written'], ['Dockerfile'])
+                    plan = json.loads((run/'adapter-plan.json').read_text())
+                    self.assertEqual(plan['plan_owner'], 'host')
+                    self.assertFalse(plan['execution_verified'])
+                    self.assertFalse(plan['evidence']['causal_claim_verified'])
+                else:
+                    self.assertEqual(receipt['written'], [])
+                    self.assertNotIn('EXPOSE', source.read_text())
+                    self.assertFalse((run/'adapter-plan.json').exists())
+                    if name == 'host-drift':
+                        self.assertNotIn('proposal_rejection', receipt)
+                    else:
+                        rejection = receipt['proposal_rejection']
+                        self.assertEqual(rejection['reason'], reason)
+                        self.assertEqual(rejection.get('field'), field)
+                        self.assertTrue(rejection['safe_to_replan'])
+                        self.assertNotIn('private-canary', json.dumps(rejection))
 
     def test_private_directory_refuses_foreign_owner_and_auth_route_has_no_secret(self):
         from runtime_boundary import private_directory, effective_auth_route

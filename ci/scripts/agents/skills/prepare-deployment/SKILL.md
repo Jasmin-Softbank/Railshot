@@ -1,36 +1,24 @@
 ---
 name: prepare-deployment
-description: Understand an uploaded application and propose the smallest evidence-backed file changes needed for Railshot packaging, build, or HTTP startup failures.
+description: Propose evidence-backed packaging or repairs for an observed build/start/health failure.
 ---
 
 # Prepare an application for Railshot
 
-## Where this work fits
+## Responsibility
 
-Railshot accepts application source and a deployment target. Intake makes a sanitized working copy and inventories it. Deterministic packaging handles known layouts, then gates check the patch, service description, image build and actual container HTTP response, with optional vulnerability scanning. You are called only when a repairable check fails. This is a CI working copy, not the running cluster or the user's original repository.
+Work inside the sanitized CI copy, not the user's repository or running cluster. Intake and deterministic packaging have already run. The supplied role and failed stage identify what needs investigation. After validating your proposal, the host applies files and runs its configured gates. Publication, GitOps, routing and public endpoint verification happen downstream; do not generate their infrastructure or receipts.
 
-Your structured proposal is validated and applied by the runner. The gates run again; the Agent's report cannot grant a pass. After successful CI, separate steps publish the exact tested image, update deployment configuration, reconcile it onto the selected cluster, and verify the public endpoint. Those downstream steps own cloud resources, routing and deployment status. Do not generate Terraform, cluster manifests, DNS changes, or deployment receipts here.
+## Investigation
 
-The task gives your role, attempt budget, scope and a bounded initial evidence packet, with paths to additional inventory, verdict and history. Start with the packet and expand only for missing facts to distinguish missing packaging from a build failure, a runtime failure, or a runner/platform problem. Paths, runtime versions, allowed images and supported capabilities come from the supplied contract and source; do not assume them from this overview.
+Start with the bounded evidence and previous-attempt summary. Follow only the relevant build/start command, imports, assets and runtime configuration. Inventory and README claims are leads to verify; a `public` directory alone does not establish a static site. Read additional source ranges or referenced logs only to resolve missing facts. Read a complete file before returning its replacement.
 
-## Understand before proposing changes
+Preserve application behavior, identity, persistence requirements and toolchain. Prefer an existing supported flag or container definition. Under packaging scope change only deployment artifacts. Source scope permits changes needed for an observed build/start/health failure, not suspected future defects. Cite observed source/log locations in `evidence_refs`; explanations remain hypotheses, not proof of cause.
 
-Follow the actual entrypoint through its imports, build commands, assets and runtime configuration. Identify the application root, services, dependencies and lockfiles, build outputs, working directory, listener, routes, writable data, and external dependencies. Inspect only the relevant files; inventory and README claims are leads to verify against code. A directory called `public` or an HTML file does not prove the application is a static site.
+## Proposal and feedback
 
-Connect each proposed change to a source location or observed failure. Preserve the application's behavior, selected identity, data requirements and existing toolchain. Reuse a working container definition or supported flag before introducing another file or dependency. Prefer a small coherent proposal to a speculative rewrite.
+Explain every changed path in `files_changed.why`. Delete an existing writable text file only after tracing references and establishing that it is redundant or conflicting; explain what preserves its needed behavior. Protected files stay protected for every operation.
 
-## Create, update, or delete deliberately
+The host records the gate plan and applies path, scope and size checks before writing. Do not generate a gate plan or run validation commands. Actual gates determine success and whether another model call is allowed. Use the attempt count supplied in the task; there is no separate fixed SDK budget in these instructions. Stop with a precise `give_up` when evidence is insufficient, the cause needs operator action, or there is no different evidence-backed fix after a repeated failure.
 
-- Create missing deployment artifacts or runtime files only when their role follows from the inspected application and the current scope permits them.
-- Update existing files when they already express the intended build or startup. Read the entire affected file before returning its full replacement.
-- Delete a writable regular text file only when evidence shows it is redundant or conflicting and needed behavior survives. Trace references first; explain what supersedes it in `files_changed.why`. For example, remove a duplicate legacy deployment spec only after comparing both and preserving the intended services in the retained spec.
-- Deletion uses `{"path":"relative/path","action":"delete","content":""}`. Creation/update uses `action: "write"` (or omits it) with full content. All operations share the same path, scope and size checks. Never delete tests, dependency manifests/locks, migrations, data, policies or credentials to silence a failure. A missing file is not a deletion target.
-- Under packaging scope, change deployment artifacts only. Under source scope, make only source changes required by an observed build/start/health failure. The outer loop grants source scope only after such a failure; noticing a possible future defect does not expand this attempt's authority.
-
-## Use feedback, then stop
-
-Inspect the latest failed gate and earlier changes before selecting a fix. A first missing-spec failure usually needs the adapter; a failed build or container usually needs the fixer. If a valid packaging proposal leaves a suspected source defect, report the defect in assumptions and let the real gate establish whether source repair is needed. Never disguise it with a placeholder, proxy, swallowed error, or fake health response.
-
-Return the existing report schema, reasons for each changed path, and a plan for the complete gate order. Keep unexecuted checks unverified. The normal budget is at most two SDK attempts, optionally three; a successful initial gate uses none. Stop when the gate passes, the budget is exhausted, the same failure repeats, or the cause requires operator action. Do not spend another attempt on authentication, network provisioning, sandbox failure, or an unknown execution outcome.
-
-For Java/server templates, duplicate specs, and runtime repair examples, read [references/examples.md](references/examples.md) when relevant. These are decision examples, not files to copy blindly.
+Read [references/examples.md](references/examples.md) only when a Java/server template, duplicate spec, or runtime repair example is relevant.

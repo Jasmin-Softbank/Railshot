@@ -305,7 +305,8 @@ s.step('agent:1', lambda: os._exit(9))
         error = StateError('SDK_PATCH_REJECTED', component='runner', phase='patch', outcome='FAIL', side_effect='none').as_dict()
         rejected = {'output': {'status': 'proposed'}, 'written': [], 'error': error,
                     'meta': {'sdk_status': 'completed', 'status': 'failed'},
-                    'proposal_rejection': {'safe_to_replan': True, 'reason': 'PATH_SCOPE', 'guidance': 'Use writable paths.'}}
+                    'proposal_rejection': {'safe_to_replan': True, 'reason': 'EVIDENCE_LINE_OUT_OF_RANGE',
+                                           'field': 'evidence_refs[0].line', 'guidance': 'Choose an existing source line.'}}
         original_step = RunState.step
         def crash(state, name, function, **kwargs):
             result = original_step(state, name, function, **kwargs)
@@ -315,7 +316,7 @@ s.step('agent:1', lambda: os._exit(9))
         with self.gate_result(failed), self.agent_result(rejected, rc=1), patch.object(RunState, 'step', crash):
             with self.assertRaises(KeyboardInterrupt):
                 self.cli()
-        self.assertIn('PATH_SCOPE', (self.run / 'failure.txt').read_text())
+        self.assertIn('EVIDENCE_LINE_OUT_OF_RANGE', (self.run / 'failure.txt').read_text())
         self.assertEqual('original\n', (self.run / 'work/app.py').read_text())
         def corrected(*args):
             self.assertEqual(('fixer', 2), (args[0], args[4]))
@@ -329,6 +330,8 @@ s.step('agent:1', lambda: os._exit(9))
         evidence = json.loads((self.run / 'evidence.json').read_text())
         self.assertEqual(2, evidence['agent_attempts'])
         self.assertEqual([], evidence['attempts'][1]['written'])
+        self.assertEqual(evidence['attempts'][1]['proposal_rejection'], rejected['proposal_rejection'])
+        self.assertEqual(json.loads((self.run/'rejection-1.json').read_text())['field'], 'evidence_refs[0].line')
         self.assertTrue(evidence['passed'])
 
     def test_binding_tracks_gate_and_schema_but_not_test_files(self):

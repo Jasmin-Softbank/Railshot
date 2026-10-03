@@ -20,13 +20,13 @@ Understand the repository and make it deployable on Railshot with the smallest c
    - the port and whether the app reads `PORT`;
    - a health path that returns 2xx without auth or side effects. Prefer an existing health route, then a cheap read-only route, then `/`. Never invent an endpoint;
    - external hosts the code calls at runtime (HTTP clients, SDK base URLs). They go to `egress`; outbound traffic to anything else is blocked.
-   Record each fact with `file:line` in `assumptions`.
+   Put inspected source/log references in `evidence_refs`; keep unresolved conditions and hypotheses in `assumptions`.
 3. Choose the build per service, in this order:
    1. An existing Dockerfile that meets the contract: keep it; fix only contract violations.
    2. Otherwise write a multi-stage Dockerfile (rules below).
 4. For a new spec, write `.railshot/railshot.yaml` with `apiVersion: railshot/v0`. If only legacy `.jasmin/jasmin.yaml` exists, edit it in place and preserve its API version. If both specs exist, compare them and retain one complete intended definition; propose deletion of a proven redundant duplicate. Never create a second spec. Include only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. If the app requires a capability listed in `unsupported_mvp` (such as persistent volumes for SQLite data or attachments), return `give_up` and name the missing capability. Never relocate persistent data to `/tmp` or disable persistence to pass health checks.
 5. Re-check your files against C1–C11 and the forbidden patterns in `paths.yaml`.
-6. Plan every active gate in the exact harness order in `gate_plan`. Do not add or run separate lint/type/unit gates; preserve the existing build command and tests. Return the smallest packaging proposal (`status: proposed`), or `give_up` if no useful valid proposal is possible within the trusted scope. Record suspected later source defects in assumptions instead of hiding them. The outer executor checks the actual build and runtime before requesting any source repair.
+6. Return the smallest packaging proposal (`status: proposed`), or `give_up` when evidence or scope prevents one. Record suspected later source defects in `assumptions`. The host owns the verification plan and checks build/runtime before requesting source repair.
 
 ## Dockerfile rules
 
