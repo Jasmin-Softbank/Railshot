@@ -28,7 +28,7 @@ def git(*args, check=True):
     return result
 
 
-def render(artifacts, target, port, provider_targets="{}"):
+def render(artifacts, target, port, provider_targets="{}", previous=None):
     images = {}
     for item in sorted(artifacts.iterdir()):
         if item.is_symlink() or not item.is_file() or item.suffix != ".json" or item.stem not in COMPONENTS:
@@ -41,8 +41,20 @@ def render(artifacts, target, port, provider_targets="{}"):
                 rf"ghcr\.io/jasmin-softbank/railshot-{item.stem}@sha256:[a-f0-9]{{64}}", image):
             raise ValueError("published component requires its immutable GHCR digest")
         images.update(value)
-    if not {"dashboard", "api"} <= images.keys():
-        raise ValueError("dashboard and api publication artifacts are required")
+    changed = set(images) & {"dashboard", "api"}
+    if not changed:
+        raise ValueError("a platform publication artifact is required")
+    preserved = {}
+    for component in {"dashboard", "api"} - changed:
+        matches = [item for item in (previous or {}).get("items", [])
+                   if item.get("kind") == "Deployment" and item.get("metadata", {}).get("name") == "railshot-" + component
+                   and item["metadata"].get("namespace") == "railshot-system"]
+        if len(matches) != 1:
+            raise ValueError("initial deployment requires dashboard and api artifacts")
+        preserved[component] = matches[0]
+        containers = matches[0]["spec"]["template"]["spec"]["containers"]
+        images[component] = next(c["image"] for c in containers if c["name"] == component)
+
     with tempfile.TemporaryDirectory(prefix="platform-render-") as temporary:
         image_file = Path(temporary) / "images.json"
         image_file.write_text(json.dumps(images))
@@ -51,7 +63,11 @@ def render(artifacts, target, port, provider_targets="{}"):
                                    "--dashboard-node-port", str(port), "--provider-targets", provider_targets], text=True, capture_output=True)
         if rendered.returncode:
             raise ValueError("platform renderer rejected deployment configuration")
-        return json.dumps(json.loads(rendered.stdout), indent=2) + "\n"
+        declaration = json.loads(rendered.stdout)
+        # Preserve the entire unchanged Deployment, not only its image: no Pod template churn.
+        declaration["items"] = [preserved.get(item.get("metadata", {}).get("name", "").removeprefix("railshot-"), item)
+                                if item.get("kind") == "Deployment" else item for item in declaration["items"]]
+        return json.dumps(declaration, indent=2) + "\n"
 
 
 def publish(artifacts, source_sha, target, port, provider_targets="{}"):
@@ -59,18 +75,20 @@ def publish(artifacts, source_sha, target, port, provider_targets="{}"):
         raise ValueError("checkout must match the reviewed source SHA")
     if git("status", "--porcelain").stdout:
         raise ValueError("release requires a clean ephemeral checkout")
-    # Render before switching branches so the checked source manifest is used.
-    declaration = render(artifacts, target, port, provider_targets)
-    digests = {container["name"] + "_digest": container["image"].rsplit(":", 1)[1]
-               for item in json.loads(declaration)["items"] if item["kind"] == "Deployment"
-               for container in item["spec"]["template"]["spec"]["containers"]}
     reference = f"refs/heads/{BRANCH}"
     remote = git("ls-remote", "--exit-code", "origin", reference, check=False)
     if remote.returncode == 0:
         git("fetch", "--no-tags", "origin", reference)
-        git("switch", "--detach", "FETCH_HEAD")
     elif remote.returncode != 2:
         raise ValueError("cannot inspect the deployment branch")
+    previous = json.loads(git("show", f"FETCH_HEAD:{WORKLOAD}").stdout) if remote.returncode == 0 else None
+    # Render with reviewed source before switching; untouched Deployment objects stay byte-equivalent.
+    declaration = render(artifacts, target, port, provider_targets, previous)
+    digests = {container["name"] + "_digest": container["image"].rsplit(":", 1)[1]
+               for item in json.loads(declaration)["items"] if item["kind"] == "Deployment"
+               for container in item["spec"]["template"]["spec"]["containers"]}
+    if remote.returncode == 0:
+        git("switch", "--detach", "FETCH_HEAD")
     base = git("rev-parse", "HEAD").stdout.strip()
     path = ROOT / WORKLOAD
     if path.is_symlink() or path.resolve().parent != ROOT / "gitops/applications/railshot-platform":

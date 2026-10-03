@@ -198,15 +198,33 @@ export async function createProductService({ service, directory, target, provide
       enqueued_at: new Date().toISOString() };
     record.status = 'queued';
   }
+  function interruptedCI(state, row) {
+    if (!['deployments', 'builds'].includes(row.kind) || row.status !== 'unknown'
+        || row.error?.code !== 'INTERRUPTED' || row.stage !== 'ci' || row.deletion_requested
+        || row.kind === 'deployments' && (row.cd?.state !== 'not_started' || row.cd?.deployed || row.cd?.revision)) return false;
+    const runId = String(row.ci?.run_id), binding = state.bindings[runId];
+    if (!/^\d+$/.test(runId) || !/^[a-f0-9]{40}$/.test(row.source_commit || '')
+        || !binding || binding.operation_id !== row.id || binding.app !== row.app
+        || binding.target_id !== row.target_id || binding.source_commit !== row.source_commit) return false;
+    if (row.application_id) {
+      const app = state.applications[row.application_id];
+      if (!app || app.status !== 'ready' || app.deletion_requested || app.session_id !== row.session_id
+          || app.app !== row.app || app.target_id !== row.target_id
+          || app.environment_target_id !== row.environment_target_id) return false;
+    }
+    return !Object.values(state.operations).some((other) => other.id !== row.id
+      && other.application_id === row.application_id && other.app === row.app && other.target_id === row.target_id
+      && other.created_at > row.created_at);
+  }
   let pumping;
   function pump() {
     if (pumping || abort.signal.aborted || workers.size) return pumping;
-    const rows = Object.values(store.read().operations);
+    const snapshot = store.read(), rows = Object.values(snapshot.operations);
     const due = (row) => row.status === 'unknown' && !row.queue?.released_at
       && (!Number.isFinite(Date.parse(row.unknown_since || row.updated_at || row.created_at))
         || Date.now() - Date.parse(row.unknown_since || row.updated_at || row.created_at) >= unknownGraceMs);
     const waiting = (row) => row.kind === 'deployments' && row.status === 'queued' && row.queue?.enqueued_at && !row.queue.started_at;
-    if (!rows.some(due) && (!rows.some(waiting) || rows.some((row) => occupiesSlot(row) && !waiting(row)))) return;
+    if (!rows.some((row) => interruptedCI(snapshot, row)) && !rows.some(due) && (!rows.some(waiting) || rows.some((row) => occupiesSlot(row) && !waiting(row)))) return;
     // ponytail: existing SQLite operations are a bounded FIFO for one API replica;
     // use a broker with fenced workers only when the runtime gains multiple writers.
     pumping = (async () => {
@@ -222,7 +240,14 @@ export async function createProductService({ service, directory, target, provide
             if (now - Date.parse(row.unknown_since) >= unknownGraceMs)
               row.queue = { ...row.queue, released_at: iso, release_reason: 'unknown_timeout' };
           }
-          if (Object.values(state.operations).some((row) => occupiesSlot(row) && !(row.status === 'queued' && row.queue?.enqueued_at))) return null;
+          const recovery = Object.values(state.operations).find((row) => interruptedCI(state, row));
+          if (Object.values(state.operations).some((row) => row.id !== recovery?.id && occupiesSlot(row)
+              && !(row.status === 'queued' && row.queue?.enqueued_at))) return null;
+          if (recovery) {
+            Object.assign(recovery, { status: 'running', error: null, updated_at: iso });
+            if (recovery.queue) { delete recovery.queue.released_at; delete recovery.queue.release_reason; }
+            return { ...structuredClone(recovery), recoveringCI: true };
+          }
           const next = Object.values(state.operations).filter((row) => row.kind === 'deployments' && row.status === 'queued' && row.queue?.enqueued_at && !row.queue.started_at)
             .sort((a, b) => a.queue.sequence - b.queue.sequence)[0];
           if (!next) return null;
@@ -236,7 +261,8 @@ export async function createProductService({ service, directory, target, provide
           return structuredClone(next);
         });
         if (!record || abort.signal.aborted) break;
-        if (!record.skipped) await launch(() => runDeployment(record), record.id);
+        if (!record.skipped) await launch(() => record.recoveringCI
+          ? observe(record, String(record.ci.run_id)) : runDeployment(record), record.id);
       }
     })().catch(() => { console.error('RAILSHOT deployment queue could not persist state; inspect private workspace state.'); })
       .finally(() => { pumping = null; });
@@ -398,7 +424,7 @@ export async function createProductService({ service, directory, target, provide
       for (;;) {
         if (abort.signal.aborted || deletionRequested(record.id)) return;
         const build = await readBuild(runId);
-        if (deletionRequested(record.id)) return;
+        if (abort.signal.aborted || deletionRequested(record.id)) return;
         if (resume) {
           const published = build.publication;
           const imageEntries = (images) => Object.entries(images || {}).sort(([a], [b]) => a.localeCompare(b));

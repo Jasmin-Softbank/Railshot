@@ -28,7 +28,7 @@ class ScopeTests(unittest.TestCase):
         self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
 
     def test_normal_runs_build_only_images_and_manual_runs_keep_full_checks(self):
-        cases = [(['apps/api/src/server.js'], ['dashboard', 'api']),
+        cases = [(['apps/api/src/server.js'], ['api']), (['apps/dashboard/app.js'], ['dashboard']),
                  (['ci/workflows/railshot-deploy.yml'], ['dashboard', 'api', 'ci-runner']),
                  (['deployment/scripts/platform_workers.py'], []),
                  (['docs/operations/release.md'], []), (['apps/api/test/product.test.js'], []),
@@ -149,7 +149,7 @@ class ScopeTests(unittest.TestCase):
 
     def test_image_build_context_dependencies(self):
         cases = {
-            'apps/dashboard/styles.css': {'dashboard', 'api'},
+            'apps/dashboard/styles.css': {'dashboard'},
             'apps/dashboard/package.json': {'dashboard', 'api', 'mcp'},
             'apps/api/src/server.js': {'api', 'mcp'},
             'apps/agent/sender.py': {'api'},
@@ -193,6 +193,9 @@ class ScopeTests(unittest.TestCase):
                 files = [file for file in path.rglob('*') if file.is_file()] if path.is_dir() else [path]
                 for file in files:
                     relative = file.relative_to(root).as_posix()
+                    # Bundled static files support standalone API use; production serves the separate FE image.
+                    if relative.startswith('apps/dashboard/') and relative != 'apps/dashboard/package.json':
+                        continue
                     if ci_scope.documentation(relative):
                         continue
                     with self.subTest(path=relative):

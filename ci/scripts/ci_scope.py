@@ -90,7 +90,7 @@ def container_components(paths):
                       'apps/dashboard/package.json'}:
             components.update(('dashboard', 'api', 'mcp'))
         elif path.startswith('apps/dashboard/'):
-            components.update(('dashboard', 'api'))  # API image retains source asset routes.
+            components.add('dashboard')  # Production assets are served by the dashboard gateway.
         elif path.startswith('apps/api/'):
             components.update(('api', 'mcp'))
         elif path.startswith(('ci/scripts/', 'ci/workflows/')) or path == 'ci/runner-compose.yml':
@@ -274,7 +274,7 @@ def main():
         # Only images used by the platform trigger its rollout. Node/LB maintenance
         # is separate; it must not gate an API or dashboard deployment.
         components.discard('mcp')
-        if components:
+        if 'ci-runner' in components:
             components.update(('dashboard', 'api'))
         release = bool(components)
     if os.environ['GITHUB_EVENT_NAME'] in ('push', 'pull_request'):
