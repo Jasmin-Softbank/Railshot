@@ -134,11 +134,17 @@ Live readback confirmed default version `v3`, attached only to `railshot-control
 with the exact reviewed document; all five scope checks passed against that live policy.
 Only `aws_iam_policy.product_edge[0]` changed. Actual app deletion and organization-level
 effective access still require disposable-app acceptance.
-The same-day GCP preflight obtained a token with the actual API Pod's WIF credential.
-Its existing `railshotExistingEdgeRelease` role permits in-place updates but lacks app
-resource deletion, endpoint detach and required inventory-list permissions. Lifecycle
-rollout remains blocked until the app resource create/delete permissions are installed
-and verified using that same executor. Stop/start also needs recreation permissions.
+The reviewed GCP IAM plan was also applied once on 2026-10-03: one existing-role
+update, one conditional role and its member binding, with no infrastructure changes.
+Live readback matched all 67 existing-role permissions and the two conditional
+permissions; both roles remained bound only to the existing edge service account.
+The actual API Pod's WIF identity passed all 67 project permission checks and the
+runtime VM use check. VM deletion and deletion of the shared baseline backend were
+denied. WIF trust and the API PVC's GCP authority files were unchanged.
+The 23 added project/parent permissions are not app-isolated by IAM; the executor's
+ownership and saved-plan checks enforce the application boundary. No registered app
+backend existed for a positive conditional-delete test, so that test and actual
+stop/start/delete execution remain part of disposable-app acceptance.
 
 The API image packages the CLI, runtime inventory helper and provider cleanup writer;
 existing CI discovers their Python and API/browser tests. Dashboard and API must be
