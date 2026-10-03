@@ -91,19 +91,22 @@ test('concurrent different apps persist FIFO while identical keys produce only o
   assert.equal(f.submissions.length, 3);
 });
 
-test('expired unknown frees only the global slot and preserves cross-provider same-app fencing', async (t) => {
+test('expired published delivery frees the global slot but preserves the affected environment fence', async (t) => {
   const grace = 100, f = await fixture(t, { unknownGraceMs: grace });
   const deliver = f.adapter.deployPublished;
-  f.adapter.deployPublished = async (...args) => args[1].app === 'alpha'
+  f.adapter.deployPublished = async (...args) => args[1].app === 'alpha' && args[0].environment_target_id === 'runtime-aws'
     ? { cd: { state: 'unknown', deployed: false }, public_http: { state: 'not_run' }, error: { outcome_unknown: true } }
     : deliver(...args);
   const alpha = await f.create('alpha');
   const uncertain = await until(() => f.read(alpha.id));
   assert.equal(uncertain.status, 'unknown');
   const beta = await f.create('beta');
-  for (const provider of ['aws', 'gcp']) await assert.rejects(
-    f.product.createDeployment(source('alpha', provider), `new-${provider}`, undefined, f.owner),
+  await assert.rejects(
+    f.product.createDeployment(source('alpha', 'aws'), 'new-aws', undefined, f.owner),
     { code: 'APPLICATION_RECONCILE_REQUIRED' });
+  const separate = await f.product.createDeployment(source('alpha', 'gcp'), 'new-gcp', undefined, f.owner);
+  assert.notEqual(separate.application_id, alpha.application_id);
+  assert.equal((await until(() => f.read(separate.id))).status, 'succeeded');
   assert.equal((await until(() => f.read(beta.id))).status, 'succeeded');
   const released = await f.read(alpha.id);
   assert.equal(released.status, 'unknown'); assert.equal(released.error.outcome_unknown, true);
@@ -117,7 +120,7 @@ test('expired unknown frees only the global slot and preserves cross-provider sa
   f.adapter.applyLifecycle = async () => assert.fail('uncertain app must not reach native lifecycle execution');
   for (const action of ['stop', 'delete']) await assert.rejects(
     f.product.createApplicationPlan(alpha.application_id, { action }, f.owner), { code: 'APPLICATION_RECONCILE_REQUIRED' });
-  assert.deepEqual(f.submissions.map((row) => row.app), ['alpha', 'beta']);
+  assert.deepEqual(f.submissions.map((row) => row.app), ['alpha', 'beta', 'alpha']);
 });
 
 test('restart retains waiting source snapshots, never redispatches the started job, and starts each waiting job once', async (t) => {

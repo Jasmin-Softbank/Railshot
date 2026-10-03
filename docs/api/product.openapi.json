@@ -388,7 +388,7 @@
       "post": {
         "operationId": "createDeployment",
         "summary": "Create deployment",
-        "description": "Persist a normalized private source snapshot and execution intent before any external mutation. Without plan_id, require the app-bound target in server CD configuration or a successful saved environment registration; reuse does not provision VMs or databases again. An environment/provider selection resolves the existing registered target server-side. Optional plan_id is only accepted with explicit app/target_id and consumes an executable, unexpired, unchanged plan for the same app and runtime target; its profile must include deployment registration. Complete environment execution and registration before CI, verified publication and CD. Environment or database success alone does not mean application deployment succeeded. Deployments and updates persist in a bounded FIFO; one writer executes at a time. A finished unknown worker releases its global slot after 60 seconds while same-app and uncertain-environment mutations stay fenced. Unclaimed queued deployments survive restart; started operations never auto-replay. Same GitHub URL/key reuses the first SHA without refetching HEAD; plan_id and environment/provider selection are part of idempotent input.",
+        "description": "Persist a normalized private source snapshot and execution intent before any external mutation. Without plan_id, require the app-bound target in server CD configuration or a successful saved environment registration; reuse does not provision VMs or databases again. An environment/provider selection resolves the existing registered target server-side. Optional plan_id is only accepted with explicit app/target_id and consumes an executable, unexpired, unchanged plan for the same app and runtime target; its profile must include deployment registration. Complete environment execution and registration before CI, verified publication and CD. Environment or database success alone does not mean application deployment succeeded. Deployments and updates persist in a bounded FIFO; one writer executes at a time. A finished unknown worker releases its global slot after 60 seconds. An unknown registered CD/HTTP result with verified publication fences that environment; uncertain CI/registration or missing bindings still fence the shared app source across environments. Unclaimed queued deployments survive restart; started operations never auto-replay. Same GitHub URL/key reuses the first SHA without refetching HEAD; plan_id and environment/provider selection are part of idempotent input.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -2939,28 +2939,11 @@
                 "type": "object",
                 "required": [
                   "provider",
-                  "project_id",
-                  "user_id",
-                  "auth_type",
                   "enrollment_key"
                 ],
                 "properties": {
                   "provider": {
                     "const": "openstack"
-                  },
-                  "project_id": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
-                  },
-                  "user_id": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z0-9._-]{1,255}$"
-                  },
-                  "auth_type": {
-                    "enum": [
-                      "token",
-                      "application_credential"
-                    ]
                   },
                   "enrollment_key": {
                     "type": "string",
@@ -2983,9 +2966,6 @@
                   "required": [
                     "id",
                     "provider",
-                    "project_id",
-                    "user_id",
-                    "auth_type",
                     "status",
                     "created_at",
                     "claimed_at",
@@ -2999,18 +2979,6 @@
                     },
                     "provider": {
                       "const": "openstack"
-                    },
-                    "project_id": {
-                      "type": "string"
-                    },
-                    "user_id": {
-                      "type": "string"
-                    },
-                    "auth_type": {
-                      "enum": [
-                        "token",
-                        "application_credential"
-                      ]
                     },
                     "status": {
                       "enum": [
@@ -3216,6 +3184,68 @@
         }
       }
     },
+    "/api/v1/registrations/claim": {
+      "post": {
+        "operationId": "claimOpenStackLinkageToken",
+        "summary": "Consume a one-time linkage token from the customer node",
+        "description": "The token is the credential for this endpoint. Success proves token possession only; no WireGuard tunnel is created.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "linkage_token"
+                ],
+                "properties": {
+                  "linkage_token": {
+                    "type": "string",
+                    "pattern": "^rsl_[A-Za-z0-9_-]{43}$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token claimed once; connectivity is not verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "registration_id",
+                    "status",
+                    "claimed_at"
+                  ],
+                  "properties": {
+                    "registration_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "const": "claimed"
+                    },
+                    "claimed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid, expired, or already used token"
+          }
+        }
+      }
+    },
     "/api/v1/installers/openstack": {
       "get": {
         "operationId": "getOpenStackInstaller",
@@ -3231,7 +3261,8 @@
                     "install_sh",
                     "bundle_sha256",
                     "script_url",
-                    "bundle_url"
+                    "bundle_url",
+                    "token_client_url"
                   ],
                   "properties": {
                     "install_sh": {
@@ -3246,6 +3277,9 @@
                     },
                     "bundle_url": {
                       "const": "/api/v1/installers/openstack/bundles"
+                    },
+                    "token_client_url": {
+                      "const": "/api/v1/installers/openstack/client"
                     }
                   }
                 }
@@ -3264,6 +3298,24 @@
             "description": "Shell script",
             "content": {
               "text/x-shellscript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/client": {
+      "get": {
+        "operationId": "downloadOpenStackTokenClient",
+        "summary": "Download the standalone customer token input file",
+        "responses": {
+          "200": {
+            "description": "Python script",
+            "content": {
+              "text/x-python": {
                 "schema": {
                   "type": "string"
                 }
@@ -3357,6 +3409,136 @@
           },
           "500": {
             "$ref": "#/components/responses/Error500"
+          }
+        }
+      }
+    },
+    "/api/v1/applications/resolve": {
+      "get": {
+        "operationId": "resolveApplication",
+        "summary": "Resolve the submitted app name to an existing session-owned application",
+        "description": "Read-only lookup before source upload. Uses the same provider-to-environment and app identity mapping as new deployment, independent of app inventory pagination. Same-owner successful applications use the existing update preview/start flow. Does not transfer ownership, register an app, or dispatch CI.",
+        "parameters": [
+          {
+            "name": "environment",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "cloud",
+                "onprem"
+              ]
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "aws",
+                "gcp",
+                "openstack",
+                "proxmox"
+              ]
+            }
+          },
+          {
+            "name": "app",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact existing app match in the server-selected environment, or null. Another session owner returns 409 without app details.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "app",
+                    "environment_target_id",
+                    "application"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "app": {
+                      "type": "string"
+                    },
+                    "environment_target_id": {
+                      "type": "string"
+                    },
+                    "application": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Application"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
           }
         }
       }
@@ -7070,9 +7252,6 @@
         "required": [
           "id",
           "provider",
-          "project_id",
-          "user_id",
-          "auth_type",
           "status",
           "created_at",
           "claimed_at"
@@ -7084,18 +7263,6 @@
           },
           "provider": {
             "const": "openstack"
-          },
-          "project_id": {
-            "type": "string"
-          },
-          "user_id": {
-            "type": "string"
-          },
-          "auth_type": {
-            "enum": [
-              "token",
-              "application_credential"
-            ]
           },
           "status": {
             "enum": [

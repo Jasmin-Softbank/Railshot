@@ -2,17 +2,16 @@ import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from '../../contracts/appli
 import { request, requests } from './src/api.js';
 import { initializeOpenStackInstaller } from './src/openstack-installer.js';
 import { applicationLabel, createLifecycleController } from './src/lifecycle.js';
-import { createConnectionsController } from './src/connections.js';
 
 const views = {
   deploy: document.querySelector('#deploy-view'),
   history: document.querySelector('#history-view'),
   monitor: document.querySelector('#monitor-view'),
-  connections: document.querySelector('#connections-view'),
 };
 
 // Navigation and source selection.
 function showView(name) {
+  if (!Object.hasOwn(views, name)) name = 'deploy';
   for (const [key, view] of Object.entries(views)) view.hidden = key !== name;
   for (const button of document.querySelectorAll('[data-view]')) {
     const active = button.dataset.view === name;
@@ -261,11 +260,11 @@ function appendSource(payload, source) {
 }
 
 const resourceId = (value) => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value);
-function setUpdateMode(application) {
+function setUpdateMode(application, preserveSource = false) {
   updateApplication = application; updatePreviewRequest = null;
   applicationName.value = '';
   document.querySelector('#application-name-field').hidden = Boolean(application);
-  archive.value = ''; folder.value = ''; repositoryUrl.value = ''; setSource(null);
+  if (!preserveSource) { archive.value = ''; folder.value = ''; repositoryUrl.value = ''; setSource(null); }
   document.querySelector('#update-context').hidden = !application;
   document.querySelector('#target-section').hidden = Boolean(application);
   document.querySelector('#deploy-title').textContent = application ? '앱 업데이트하기' : '앱 배포하기';
@@ -410,6 +409,26 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
     try {
       app = applicationName.value.trim() || sourceApplication(source);
       if (!APP_NAME.test(app)) throw new Error(APP_NAME_MESSAGE);
+      if (!profile) {
+        const { data } = await request(`/api/v1/applications/resolve?${new URLSearchParams({ ...selected, app })}`);
+        if (generation !== reviewGeneration) return;
+        if (data.app !== app || !resourceId(data.environment_target_id) || !Object.hasOwn(data, 'application'))
+          throw new Error('기존 앱 조회 결과가 선택 내용과 일치하지 않습니다.');
+        const existing = data.application;
+        if (existing) {
+          if (!resourceId(existing.id) || !resourceId(existing.target_id) || existing.app !== app
+              || existing.environment_target_id !== data.environment_target_id || existing.provider !== selected.provider)
+            throw new Error('기존 앱의 이름과 배포 환경을 확인하지 못했습니다.');
+          if (existing.current_deployment) {
+            const blocked = updateBlocked(existing);
+            if (blocked) throw new Error(blocked);
+            setUpdateMode(existing, true);
+            await reviewUpdate();
+            return;
+          }
+          if (existing.status !== 'ready') throw new Error('이 이름의 앱은 준비 중이거나 중지·삭제된 상태입니다. 배포 내역에서 현재 작업을 먼저 확인하세요.');
+        }
+      }
       if (profile) {
         if (!profile.create_per_request && profile.application_name && profile.application_name !== app) {
           throw new Error(`선택한 환경은 ${profile.application_name} 앱 전용입니다. ${app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
@@ -1108,7 +1127,6 @@ document.querySelector('#monitor-provider').addEventListener('change', () => { d
 document.querySelector('#monitor-target').addEventListener('change', loadEnvironments);
 document.querySelector('#monitor-refresh').addEventListener('click', loadEnvironments);
 // Session-owned controls live in focused modules and read current view state through callbacks.
-const { loadConnections } = createConnectionsController(() => sessionReady);
 const lifecycle = createLifecycleController({
   getApplications: () => applications, getCurrent: () => current, getApplicationDetail: () => applicationDetail,
   clearApplicationDetail: () => { applicationDetail = null; document.querySelector('#application-detail').hidden = true; },
@@ -1131,9 +1149,8 @@ async function initializeDashboard() {
     await checkConnection();
     document.querySelector('#session-note').textContent = `이 브라우저 세션 · ${new Date(session.expires_at).toLocaleDateString()}까지 유지`;
     sessionReady = true;
-    await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError), loadConnections().catch((cause) => {
-      document.querySelector('#connection-message').textContent = cause.message;
-    })]);
+    if (!Object.hasOwn(views, saved.view)) savePreferences({ view: 'deploy' });
+    await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError)]);
     renderLifecycleOperation();
     if (lifecycle.operation?.id) refreshLifecycleOperation();
     if (history.length) { current = history[0]; renderRun(); refreshRun(); }
