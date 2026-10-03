@@ -1,3 +1,4 @@
+import { createHistoryDetail, filterHistory } from './src/deployment-history.js';
 import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from '../../contracts/application.mjs';
 import { request, requests } from './src/api.js';
 import { initializeOpenStackInstaller } from './src/openstack-installer.js';
@@ -12,6 +13,7 @@ const views = {
 // Navigation and source selection.
 function showView(name) {
   if (!Object.hasOwn(views, name)) name = 'deploy';
+  if (name !== 'history') historyDetail.close();
   for (const [key, view] of Object.entries(views)) view.hidden = key !== name;
   for (const button of document.querySelectorAll('[data-view]')) {
     const active = button.dataset.view === name;
@@ -1206,31 +1208,37 @@ function openExecution(row, tab = 'work') {
   document.querySelector('.execution-heading').scrollIntoView({ block: 'start' });
 }
 function renderHistory() {
+  const expanded = new Set([...document.querySelectorAll('#history-list .dh-card:has(details[open])')].map((card) => card.dataset.executionId));
   const kindLabel = historyKind === 'builds' ? '빌드' : '배포';
   document.querySelector('#history-summary').textContent = historyError ? '실행 내역을 확인하지 못했습니다' : history.length
     ? `이 세션의 ${kindLabel}${Number.isInteger(historyTotal) ? ` · 전체 ${historyTotal}건` : ''}` : `아직 ${kindLabel} 내역이 없습니다`;
   document.querySelector('#history-page').textContent = `${historyMarkers.length}페이지 · ${history.length}건`;
   document.querySelector('#history-prev').disabled = Boolean(historyController) || historyMarkers.length < 2;
   document.querySelector('#history-next').disabled = Boolean(historyController) || !historyNext;
-  document.querySelector('#history-list').replaceChildren(...history.map((row) => {
-    const item = document.createElement('li'), header = element('div', '', 'history-row'), content = document.createElement('div');
-    const badge = element('span', executionLabel(row), 'state-badge');
-    badge.dataset.state = ['failed', 'blocked'].includes(row.status) ? 'failed' : row.status === 'succeeded' ? 'ready' : 'unknown';
-    content.append(element('strong', row.app || '앱 이름 미제공'), element('small', `${environmentLabel(row)} · ${formatTime(row.created_at)}`, 'history-meta'));
-    header.append(content, badge);
-    const actions = element('div', '', 'history-actions');
-    for (const [label, tab] of [['실행 상세·작업 로그', 'work'], ...(row.kind === 'deployments' ? [['앱 로그', 'app']] : [])]) {
-      const button = element('button', label, 'text-button'); button.type = 'button';
-      button.setAttribute('aria-label', `${row.app || '앱'} ${label}`);
-      button.addEventListener('click', () => openExecution(row, tab)); actions.append(button);
-    }
+  const visible = filterHistory(history, { search: document.querySelector('#history-search').value,
+    status: document.querySelector('#history-status').value, days: document.querySelector('#history-period').value });
+  const empty = document.querySelector('#history-empty');
+  empty.hidden = Boolean(visible.length) || Boolean(historyController) || Boolean(historyError);
+  empty.textContent = history.length ? '선택한 조건에 해당하는 내역이 없습니다. 검색어나 필터를 변경해 주세요.' : '아직 실행 내역이 없습니다. 새 배포에서 첫 배포를 시작해 보세요.';
+  document.querySelector('#history-list').replaceChildren(...visible.map((row) => {
+    const item = element('li', '', 'dh-card'); item.dataset.executionId = `${row.kind}:${row.id}`;
+    const main = element('button', '', 'dh-card-open'); main.type = 'button';
+    main.setAttribute('aria-label', `${row.app || '앱'} 실행 상세·작업 로그`);
+    const badge = element('span', executionLabel(row), 'dh-status');
+    badge.classList.add(['failed'].includes(row.status) ? 'fail' : ['succeeded', 'published', 'unchanged'].includes(row.status) ? 'ok' : ['queued', 'running'].includes(row.status) ? 'run' : 'wait');
+    const foot = element('span', '', 'dh-card-foot'); foot.append(badge, element('span', '›', 'dh-arrow'));
+    main.append(element('strong', row.app || '앱 이름 미제공'), element('small', formatTime(row.created_at)), foot);
+    main.addEventListener('click', () => row.status === 'preview' || row.kind === 'builds' ? openExecution(row) : historyDetail.open(row));
+    item.append(main);
     if (row.kind === 'deployments') {
-      const app = applications.find((item) => item.id === row.application_id);
+      const extra = element('details', '', 'dh-card-extra'); extra.open = expanded.has(item.dataset.executionId); extra.append(element('summary', '배포 관리'));
+      const actions = element('div', '', 'history-actions');
+      const logs = element('button', '앱 로그', 'text-button'); logs.type = 'button'; logs.addEventListener('click', () => openExecution(row, 'app')); actions.append(logs);
+      const app = applications.find((entry) => entry.id === row.application_id);
       if (app) actions.append(applicationButtons(app));
       else actions.append(element('span', '앱 관리 ID를 확인할 수 없어 자동 삭제를 지원하지 않습니다.', 'field-note'));
+      extra.append(actions, sourceDownloads(row)); item.append(extra);
     }
-    item.append(header, element('small', `실행 ${row.id}`, 'history-meta'), actions);
-    if (row.kind === 'deployments') item.append(sourceDownloads(row));
     return item;
   }));
 }
@@ -1262,6 +1270,15 @@ async function loadHistory(markers = historyMarkers) {
     }
   }
 }
+const historyDetail = createHistoryDetail({ host: document.querySelector('#deployment-history-detail'), request,
+  getRecords: () => history, getApplications: () => applications, serviceUrl: applicationSiteUrl,
+  onLogs: (record) => openExecution(record), onMonitor: (record) => openExecution(record), downloads: sourceDownloads,
+  onVisibility: (visible) => { document.querySelector('#history-overview').hidden = visible;
+    document.querySelector('#history-view > .page-header').hidden = visible;
+    if (!visible && !views.history.hidden) document.querySelector('#history-title').focus(); },
+});
+for (const id of ['history-search', 'history-status', 'history-period']) document.querySelector(`#${id}`).addEventListener('input', renderHistory);
+window.addEventListener('pagehide', () => historyDetail.dispose());
 document.querySelector('#history-kind').addEventListener('change', (event) => { historyKind = event.target.value; loadHistory([null]); });
 document.querySelector('#history-refresh').addEventListener('click', () => loadHistory([null]));
 document.querySelector('#history-prev').addEventListener('click', () => loadHistory(historyMarkers.slice(0, -1)));
