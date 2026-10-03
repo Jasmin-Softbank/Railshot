@@ -72,6 +72,12 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           && Boolean(product || service?.targetId || environmentAdapter || process.env.RAILSHOT_PROFILES_FILE);
         json(response, 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
+      if (url.pathname === '/onpremise/install.sh') {
+        let products;
+        try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
+        await openstack.serveTokenizedInstaller(request, response, url, products);
+        return;
+      }
       if (url.pathname.startsWith('/api/')) {
         if (request.headers['sec-fetch-site'] === 'cross-site') throw new ServiceError('다른 사이트에서 보낸 요청은 허용되지 않습니다.', 403);
         if (isTokenClaimRoute(url.pathname)) {

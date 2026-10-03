@@ -7,10 +7,11 @@
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
 | 화면 선택 | `GET /api/v1/options` | 기존 환경의 클라우드(AWS/GCP)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. provider에 배정된 대상이 CI 허용 목록과 CD 등록에 모두 있을 때만 available이다. |
-| OpenStack 등록 | `POST /api/v1/registrations`, `GET /api/v1/registrations`, `GET /api/v1/registrations/{id}` | 운영자 Bearer로 인증하고 세션별 등록 ID와 사용자가 입력한 연계 키의 salted scrypt 해시를 SQLite에 저장한다. 생성 응답에서 일회성 토큰을 한 번만 반환한다. |
-| 연계 토큰 재발급 | `POST /api/v1/registrations/{id}/tokens` | 같은 세션과 원래 연계 키로, 기존 토큰 만료 뒤에만 10분짜리 새 토큰을 발급한다. |
+| OpenStack 등록 | `POST /api/v1/registrations`, `GET /api/v1/registrations`, `GET /api/v1/registrations/{id}` | 운영자 Bearer로 인증하고 세션별 등록 ID를 SQLite에 저장한다. 생성 응답에서 무작위 일회성 토큰을 한 번만 반환한다. |
+| 연계 토큰 재발급 | `POST /api/v1/registrations/{id}/tokens` | 같은 브라우저 세션에서 빈 JSON 객체로 요청하며 기존 토큰 만료 뒤에만 10분짜리 새 토큰을 발급한다. |
 | 연계 토큰 접수 | `POST /api/v1/registrations/claim` | 고객 노드에서 입력한 토큰을 본문으로 받아 만료·재사용을 검사하고 원자적으로 한 번만 소비한다. 접수는 터널 연결을 뜻하지 않는다. |
 | OpenStack 설치 파일 | `GET /api/v1/installers/openstack`, `GET /api/v1/installers/openstack/scripts`, `GET /api/v1/installers/openstack/bundles` | 저장소의 기존 `install.sh` 내용, 단독 파일, 필수 동반 파일 ZIP을 제공한다. |
+| 토큰 포함 설치 파일 주소 | `GET /onpremise/install.sh?token=…` | 유효한 미사용 연계 토큰에 한해 같은 `install.sh`를 내려받는다. 다운로드만으로 토큰을 소비하거나 설치하지 않는다. |
 | 토큰 입력 파일 | `GET /api/v1/installers/openstack/client` | 고객 노드에서 토큰을 숨겨 입력받아 접수 API에 보내는 독립 Python 파일을 제공한다. |
 | 환경 관측 | `GET /api/v1/targets/{id}/observations` | 접근 가능한 등록 대상의 실제 노드·앱 지표와 수집 시각. 배포 이력 없이 조회하며 결측·실패는 null과 상태로 표시한다. |
 | 대상 | `GET /api/v1/targets` | CI 서비스에 등록한 대상 목록. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
@@ -25,11 +26,11 @@
 
 ### OpenStack 등록과 설치 파일 전달
 
-브라우저는 `POST /api/v1/registrations`에 `provider`, `enrollment_key`만 보낸다. OpenStack 프로젝트·사용자 ID 및 인증 방식은 이 단계에서 받지 않는다. `enrollment_key`는 16~256자이며 원문을 보관하지 않는다. 서비스는 무작위 salt를 사용한 scrypt 해시만 SQLite에 저장하고, 새 난수와 키에서 만든 10분짜리 연계 토큰을 생성 응답의 `linkage_token`으로 한 번만 보여 준다. 토큰 원문 역시 DB에는 저장하지 않는다. 같은 세션에서 동일한 키의 중복 등록을 거부하며, 상세·목록에는 키와 토큰이 없다. 만료 후 재발급은 같은 키를 다시 제출해야 한다. 기존 SQLite의 미사용 `auth_type`·`project_id`·`user_id` 열은 서버 시작 시 제거한다.
+브라우저는 `POST /api/v1/registrations`에 `provider: openstack`만 보낸다. OpenStack 프로젝트·사용자 ID 및 인증 방식은 이 단계에서 받지 않는다. 서비스는 32바이트 난수로 10분짜리 연계 토큰을 만들어 생성 응답의 `linkage_token`으로 한 번만 보여 준다. 토큰 원문은 DB에 저장하지 않고 해시만 저장한다. 상세·목록에도 토큰은 없다. 같은 브라우저 세션의 미완료 등록은 기존 토큰 만료 후 빈 JSON 객체를 보내 재발급할 수 있다. 기존 SQLite의 미사용 `auth_type`·`project_id`·`user_id`·`key_salt`·`key_hash` 열은 서버 시작 시 제거한다.
 
-등록·재발급·조회 API는 공개 데모 모드에서도 운영자 Bearer를 요구한다. 운영 Nginx는 서버에서만 읽는 `RAILSHOT_API_TOKEN_FILE`을 `/api/` 프록시에 주입하고, 브라우저에는 이 토큰을 전달하지 않는다. HttpOnly 세션 쿠키가 등록 요청의 소유 범위를 구분한다. 사용자 키는 서비스 로그인 자격이 아니다. 접수 API는 고객 노드가 운영자 Bearer 없이 호출하며, 10분 유효한 일회성 연계 토큰 자체로 접수를 제한한다. 운영 배포에서는 이 API에 HTTPS로 접속해야 한다.
+등록·재발급·조회 API는 공개 데모 모드에서도 운영자 Bearer를 요구한다. 운영 Nginx는 서버에서만 읽는 `RAILSHOT_API_TOKEN_FILE`을 `/api/` 프록시에 주입하고, 브라우저에는 이 토큰을 전달하지 않는다. HttpOnly 세션 쿠키가 등록 요청의 범위를 구분하지만 사용자 신원을 증명하지는 않는다. 접수 API는 고객 노드가 운영자 Bearer 없이 호출하며, 10분 유효한 일회성 연계 토큰 자체로 접수를 제한한다. 운영 배포에서는 이 API에 HTTPS로 접속해야 한다.
 
-설치 파일 API는 저장소의 `deployment/bootstrap/install.sh`를 변경 없이 읽어 단독 파일과 복사 가능한 코드로 제공한다. ZIP에는 현재 저장소의 동반 파일과 `deployment/bootstrap/claim_token.py`가 포함된다. 단독 `install.sh`만으로는 로컬 실행 시 필요한 동반 파일이 준비되지 않는다. 고객은 노드에서 `python3 claim_token.py --service-url https://서비스-주소`를 실행해 토큰을 숨겨 입력한다. 접수 결과는 등록 ID와 접수 시각만 반환하며 OpenStack 인증정보를 보내지 않는다. **현재 `install.sh`는 이 파일을 자동 호출하거나 새 WireGuard 터널을 만들지 않는다.** 따라서 발급·접수·파일 전달을 터널 연결 완료로 표시하지 않는다.
+설치 파일 API는 저장소의 `deployment/bootstrap/install.sh`를 변경 없이 읽어 단독 파일과 복사 가능한 코드로 제공한다. UI는 현재 접속 origin으로 `curl -fsSL 'https://서비스-주소/onpremise/install.sh?token=…' -o install.sh` 명령을 만들고, 이 주소는 미사용·미만료 토큰을 확인해 같은 스크립트를 반환한다. 토큰이 URL에 있으므로 중간 프록시의 요청 URL 기록에 남지 않도록 운영 설정을 확인해야 한다. ZIP에는 현재 저장소의 동반 파일과 `deployment/bootstrap/claim_token.py`가 포함된다. 단독 `install.sh`만으로는 로컬 실행 시 필요한 동반 파일이 준비되지 않는다. 고객은 노드에서 `python3 claim_token.py --service-url https://서비스-주소`를 실행해 토큰을 숨겨 입력한다. 접수 결과는 등록 ID와 접수 시각만 반환하며 OpenStack 인증정보를 보내지 않는다. **현재 `install.sh`는 이 파일을 자동 호출하거나 새 WireGuard 터널을 만들지 않는다.** 따라서 발급·접수·파일 전달을 터널 연결 완료로 표시하지 않는다.
 
 실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`만 받는다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
 

@@ -2938,17 +2938,11 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "provider",
-                  "enrollment_key"
+                  "provider"
                 ],
                 "properties": {
                   "provider": {
                     "const": "openstack"
-                  },
-                  "enrollment_key": {
-                    "type": "string",
-                    "minLength": 16,
-                    "maxLength": 256
                   }
                 },
                 "additionalProperties": false
@@ -3106,7 +3100,7 @@
     "/api/v1/registrations/{id}/tokens": {
       "post": {
         "operationId": "renewOpenStackLinkageToken",
-        "summary": "Issue a new token after expiry with the original enrollment key",
+        "summary": "Issue a new token after expiry for the same browser session",
         "security": [
           {
             "operatorBearer": []
@@ -3129,16 +3123,7 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": [
-                  "enrollment_key"
-                ],
-                "properties": {
-                  "enrollment_key": {
-                    "type": "string",
-                    "minLength": 16,
-                    "maxLength": 256
-                  }
-                },
+                "properties": {},
                 "additionalProperties": false
               }
             }

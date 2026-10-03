@@ -55,8 +55,6 @@ CREATE TABLE IF NOT EXISTS registrations (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),
   provider TEXT NOT NULL CHECK(provider = 'openstack'),
-  key_salt BLOB NOT NULL,
-  key_hash BLOB NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('pending', 'claimed')),
   created_at TEXT NOT NULL,
   claimed_at TEXT
