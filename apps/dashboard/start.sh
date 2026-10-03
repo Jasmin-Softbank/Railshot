@@ -15,6 +15,7 @@ location /api/ {
     proxy_set_header Authorization "Bearer $token";
     proxy_set_header Connection "";
     proxy_request_buffering off;
+    proxy_connect_timeout 2s;
     proxy_read_timeout 610s;
     proxy_hide_header X-Powered-By;
 }

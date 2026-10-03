@@ -385,3 +385,16 @@ test('proxy HTML failure is readable and retryable without treating an uncertain
     assert.equal(state.writes.length, 0);
   }
 });
+
+ test('measured handover delay stays within the plan request deadline without surfacing an error', { timeout: 30000 }, async (t) => {
+  const { page } = await fixture(t); page.setDefaultTimeout(20000); let attempts = 0;
+  await page.route('**/api/v1/applications/app-ready/plans', async (route) => {
+    if (++attempts > 4) return route.fallback();
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    return route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' });
+  });
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  assert.equal(attempts, 5); assert.equal(await page.locator('#lifecycle-retry').isHidden(), true);
+  await page.getByRole('button', { name: '취소', exact: true }).click();
+});
