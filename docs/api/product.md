@@ -11,6 +11,7 @@
 | 대상 | `GET /api/v1/targets` | CI 서비스에 등록한 대상 목록. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
 | 빌드 | `POST /api/v1/builds`, `GET /api/v1/builds/{id}` | ZIP·폴더·공개 GitHub를 기존 CI로 제출한다. ID는 GitHub run ID 문자열이며 등록한 run만 조회한다. `published`는 검증한 이미지 게시다. |
 | 배포 | `POST /api/v1/deployments`, `GET /api/v1/deployments/{id}` | 선택한 계획으로 환경 준비·대상 등록을 먼저 수행하거나, 이미 등록된 대상으로 바로 CI를 실행한다. CI 게시 결과를 검증한 후 CD 어댑터를 한 번 호출한다. 같은 source/target의 고정 revision 배포 및 기대 공개 HTTP 검증까지 확인해야 succeeded와 최상위 url을 반환한다. |
+| 배포 재개 | `POST /api/v1/deployments/{id}/actions` | `{"action":"resume"}`만 받는다. 게시 완료 후 CD·HTTP 결과가 불확실한 기존 앱 배포를 같은 ID와 CI 산출물로 재개한다. |
 | profile | `GET /api/v1/profiles` | 운영자가 등록한 환경 사양, 고정 대상 또는 생성 템플릿, 선택적 앱 이름·DB 역할 수와 지원 범위. 자격·로컬 경로는 포함하지 않는다. |
 | 계획 | `POST /api/v1/plans`, `GET /api/v1/plans/{id}` | 검증·저장한 계획을 201로 반환한다. 계획은 VM 생성 결과가 아니다. |
 | 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | 저장된 계획을 한 번 실행한다. 자원·guest·runtime, 선택적 Patroni DB와 배포 대상 등록을 각각 기록한다. 앱 소스의 CI·배포·공개 HTTP 검증은 이 요청에 포함하지 않는다. |
@@ -41,9 +42,15 @@ profile의 `target_id`는 고정 runtime 대상 또는 새 대상 이름의 기�
 
 배포·환경 생성에는 `Idempotency-Key`가 필요하다. 같은 세션·자원 종류 안에서 같은 키와 입력은 같은 ID를 반환한다. queued/running이면 202, 완료·실패·차단·unknown이면 200 자원 객체와 Location이다. 같은 키로 입력을 바꾸면 409이며 배포의 `plan_id`와 환경·provider 선택도 입력에 포함한다. ZIP의 압축 시각·multipart boundary는 파일 의미에 포함하지 않으며 폴더 파일 순서도 정규화한다. GitHub URL의 첫 SHA·소스 snapshot은 고정하고 같은 키의 재요청에서 다시 다운로드하지 않는다. 빌드 생성에는 이 멱등 계약이 없으므로 응답 유실 시 자동 재전송하지 않는다.
 
+배포 재개는 `POST /api/v1/deployments/{id}/actions`에 `application/json` 본문 `{"action":"resume"}`를 보낸다. 기존 배포와 앱 등록 모두 현재 쿠키 세션 소유여야 하며, 앱은 `ready`, 배포는 `unknown`·`stage=cd|http`, CI는 원래 `published`여야 한다. 삭제·다른 lifecycle 작업이 시작된 앱과 다른 active 작업이 있으면 거절한다. 소스·앱·target·환경·CI 값을 요청으로 교체하거나 query로 전달할 수 없다. 쿠키 없는 유지보수 요청에도 소유권 예외를 두지 않는다.
+
+접수는 기존 deployment의 `Location`, `Retry-After: 2`, `X-Request-ID`와 `202 {resource_id, action:"resume", status:"accepted", request_id}`를 반환한다. 별도 `Idempotency-Key`는 요구하지 않으며, 같은 배포를 동시에 재개하면 먼저 영속 admission을 얻은 요청만 실행하고 나머지는 409다. `resume_count`와 UTC `resumed_at`을 기록한다. CI run·source commit·게시 artifact ID·producer attempt·image digest가 원래 증거와 같은지 확인한 뒤에만 관측을 갱신한다. 불일치는 `RESUME_PUBLICATION_CHANGED` 또는 기존 binding 오류로 중단하고 원래 CI 증거를 보존한다.
+
+재개는 앱 등록과 CI 접수를 반복하지 않는다. 기존 native journal을 유지하므로 Terraform의 불확실한 apply, DNS 생성 intent, GitOps push·sync를 무조건 다시 실행하지 않는다. 확인 가능한 결과를 관측하거나 아직 실행하지 않은 단계를 진행하며, 결과를 확정할 수 없으면 `unknown`이 유지된다. HTTP 단계 재개 중에도 이미 검증된 CD revision을 새 관측 전까지 보존한다. 다른 세션은 404, 재개 대상이 아닌 상태는 `409 DEPLOYMENT_NOT_RESUMABLE`, 내부 연결 불일치는 `409 RESUME_BINDING_MISMATCH`다.
+
 `RAILSHOT_STATE_DIR`는 저장소 밖의 전용 영속 디렉터리로 설정한다. 기본값은 사용자 홈의 `.local/state/railshot`이다. 최종 디렉터리와 state 파일은 현재 OS 사용자 소유이며 다른 사용자 접근 권한과 심볼릭 링크를 거부한다. 소스는 0600 snapshot, 작업·계획·run binding·멱등 키는 dashboard.sqlite3의 WAL 트랜잭션(synchronous=FULL)으로 저장한다. 기존 state.json은 첫 기동에 한 번 이관하고 이후 갱신하지 않는다. snapshot과 의도를 저장한 뒤에만 CI·CD·환경 실행을 시작한다. 기본 보관 상한은 작업 100개, 계획 100개, 소스 snapshot 512 MiB다. 상한 도달 시 409를 반환하며 자동 삭제하지 않는다. 운영자는 작업을 확인하고 보관·정리 정책을 적용해야 한다.
 
-한 API 프로세스가 한 로컬 저장소를 소유한다. 프로세스 ID와 시작 식별자로 같은 호스트의 중복 사용을 막는다. 이 lock은 여러 호스트의 분산 잠금이 아니므로 API replica는 1개로 운영하고 Recreate 전략으로 이전·새 컨테이너의 동시 쓰기를 피한다. 서로 다른 PID namespace와 여러 호스트의 동시 writer는 지원하지 않는다. 미완료 작업과 unknown은 하나의 admission 한도를 공유한다. 재시작 시 queued/running을 unknown으로 저장하고 작업을 자동 재실행하지 않는다. 외부 실행 결과 유실이나 저장 실패도 성공으로 표시하지 않는다. unknown을 해제하는 공개 API는 없으며 운영자가 GitHub·CD·환경 기록을 확인해야 한다.
+한 API 프로세스가 한 로컬 저장소를 소유한다. 프로세스 ID와 시작 식별자로 같은 호스트의 중복 사용을 막는다. 이 lock은 여러 호스트의 분산 잠금이 아니므로 API replica는 1개로 운영하고 Recreate 전략으로 이전·새 컨테이너의 동시 쓰기를 피한다. 서로 다른 PID namespace와 여러 호스트의 동시 writer는 지원하지 않는다. 미완료 작업과 unknown은 하나의 admission 한도를 공유한다. 재시작 시 queued/running을 unknown으로 저장하고 작업을 자동 재실행하지 않는다. 외부 실행 결과 유실이나 저장 실패도 성공으로 표시하지 않는다. 등록된 앱의 게시 완료 이후 CD·HTTP 구간은 아래 명시적 재개 계약을 사용할 수 있다. 그 밖의 unknown은 운영자가 GitHub·CD·환경 기록을 확인해야 한다.
 
 CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사용한다. 기존 대상의 CD는 `RAILSHOT_CD_CONFIG`의 비공개 고정 설정과 검증한 publication 파일만 받는다. 환경은 `RAILSHOT_PROFILES_FILE`과 서버의 Python/Terraform/Ansible 도구를 사용하며, 새 대상의 CD 설정은 해당 환경의 등록 결과에서 읽는다. 현재 코드 경로는 AWS/GCP의 단일 runtime, 선택적 Patroni DB, 배포 대상 등록과 CI/CD를 연결한다. profile 등록·SSH·네트워크·실행 도구가 준비됐다는 사실과 실제 클라우드·DB·공개 앱 검증 성공은 구분한다.
 
@@ -88,6 +95,8 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 같은 앱 재배포는 namespace·NodePort·Argo project·GitOps 경로를 재사용한다. 다른 앱은 별도 등록을 만든다. `deployment.target_id`는 앱 binding이고 `environment_target_id`는 기존 노드다. CI 게시물·CD·로그는 앱 binding을 사용하며 노드 관측만 환경 ID를 사용한다. 다른 세션의 같은 이름은 409이며 다른 세션의 등록 상세는 404다.
 
 최초 `stage=registration`에서 실제 노드의 Service와 영속 예약을 읽어 NodePort를 할당하고 namespace·pull Secret·Argo 권한·CI binding을 연결한다. VM 생성이나 runtime 재설치는 하지 않는다. 등록 `ready`는 배포 완료가 아니다. `running/unknown` 등록은 재실행하지 않고 운영자 조정이 필요하다. CI의 정확한 source commit·앱·target·image digest를 검증한 뒤 실제 spec의 포트·health·route로 CD와 공개 경로를 준비한다. 앱 URL은 해당 revision/digest가 실행되고 실제 health와 서비스 경로가 HTTPS 200을 반환할 때만 제공한다.
+
+AWS 경로 사전 검사가 등록 시작 전에 `APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED`와 `outcome_unknown=false`를 반환하면 배포 operation은 `blocked`로 보존하고 앱 등록만 `queued`로 남긴다. 이 `queued`는 자동 실행 대기가 아니라 native 등록을 시작하지 않은 상태다. 운영자가 원인을 수정한 뒤 사용자가 새 `Idempotency-Key`로 명시적으로 업로드하면 같은 앱 binding으로 등록을 다시 시도한다. 기존 키 재요청은 원래 실패 기록만 반환한다. 다른 blocked 오류나 불확실한 등록에는 이 예외를 적용하지 않는다.
 
 환경의 `ingress`는 `base_domain`, `edge_config_file`, `dns_config_file`을 참조한다. AWS는 기존 ALB에 앱 전용 target group·host rule과 해당 NodePort 권한을 추가하고 Cloudflare CNAME을 만든다. GCP는 기존 전역 IP·proxy·certificate map에 앱별 backend·인증서와 host rule을 추가하고 인증용 CNAME과 앱 A 레코드를 만든다. DNS writer는 `railshot:<application_id>` 소유 표식과 레코드 재조회를 확인하며 외부 소유 레코드를 덮어쓰지 않는다. DNS API 성공은 `https_verified=false`인 경로 준비 결과이고 배포 성공이 아니다.
 

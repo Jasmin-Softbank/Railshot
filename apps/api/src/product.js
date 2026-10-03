@@ -241,23 +241,35 @@ export async function createProductService({ service, directory, target, provide
     return { ...rest, id: runId, app: binding.app, target_id: binding.target_id, source_commit: binding.source_commit,
       status, workflow: { status: workflowStatus, conclusion }, url: null };
   }
-  async function observe(record, runId) {
+  async function observe(record, runId, { resume = false } = {}) {
     try {
       for (;;) {
         if (abort.signal.aborted) return;
         const build = await readBuild(runId);
+        if (resume) {
+          const published = build.publication;
+          const imageEntries = (images) => Object.entries(images || {}).sort(([a], [b]) => a.localeCompare(b));
+          if (build.status !== 'published' || build.source_commit !== record.source_commit
+              || String(published?.run_id) !== runId || published?.source_commit !== record.source_commit
+              || published?.app !== record.app || published?.target_id !== record.target_id
+              || String(published?.artifact_id) !== record.ci.publication_artifact_id
+              || published?.producer_attempt !== record.ci.producer_attempt
+              || digest(imageEntries(published?.images)) !== digest(imageEntries(record.ci.images))) {
+            throw new EnvironmentError('RESUME_PUBLICATION_CHANGED', 409, true);
+          }
+        }
         const ci = ciObservation(build);
         await update(record.id, { ci });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
-          await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
+          if (!resume || !record.cd?.deployed) await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
           const deploy = record.application_id ? (args) => applicationAdapter.deployPublished(store.read().applications[record.application_id], args)
             : record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
           const result = await deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
             sourceCommit: build.source_commit, publication: build.publication, signal: abort.signal,
             onProgress: (progress) => update(record.id, { stage: progress.cd?.deployed ? 'http' : 'cd', cd: progress.cd, public_http: progress.public_http }) });
           const succeeded = result.cd?.deployed === true && typeof result.cd.revision === 'string' && result.cd.revision.length > 0 && result.public_http?.state === 'succeeded' && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
-          const status = succeeded ? 'succeeded' : result.error?.outcome_unknown ? 'unknown' : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
+          const status = succeeded ? 'succeeded' : resume || result.error?.outcome_unknown ? 'unknown' : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
           await update(record.id, { status, stage: succeeded ? 'complete' : result.cd?.deployed ? 'http' : 'cd', cd: result.cd, public_http: result.public_http,
             url: succeeded ? (result.public_http.site_url || result.public_http.url) : null, error: succeeded ? null : operationError(result.error?.code || 'CD_UNVERIFIED', status === 'unknown') });
           return;
@@ -269,7 +281,8 @@ export async function createProductService({ service, directory, target, provide
       }
     } catch (error) {
       const known = error instanceof EnvironmentError;
-      if (!abort.signal.aborted) await update(record.id, { status: known && !error.outcomeUnknown ? 'blocked' : 'unknown', error: operationError(known ? error.code : 'CD_OUTCOME_UNKNOWN', !known || error.outcomeUnknown) });
+      const unknown = resume || !known || error.outcomeUnknown;
+      if (!abort.signal.aborted) await update(record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(known ? error.code : 'CD_OUTCOME_UNKNOWN', unknown) });
     }
   }
   return {
@@ -347,7 +360,9 @@ export async function createProductService({ service, directory, target, provide
               await store.transaction((state) => { Object.assign(state.applications[appId], registered); });
             } catch (error) {
               const unknown = error.outcomeUnknown !== false;
-              await store.transaction((state) => { state.applications[appId].status = unknown ? 'unknown' : 'blocked'; });
+              // This read-only preflight precedes the native registration intent; only a new explicit request may retry it.
+              const unstarted = error.code === 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED' && error.outcomeUnknown === false;
+              await store.transaction((state) => { state.applications[appId].status = unstarted ? 'queued' : unknown ? 'unknown' : 'blocked'; });
               await update(reserved.record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(error.code || 'APPLICATION_REGISTRATION_FAILED', unknown) });
               return;
             }
@@ -365,6 +380,47 @@ export async function createProductService({ service, directory, target, provide
           const result = await submit(reserved.record, reserved.input); await observe(reserved.record, String(result.run_id)); } catch (error) { await update(reserved.record.id, { status: 'unknown', error: operationError('STACK_OUTCOME_UNKNOWN', true) }); }
       });
       return publicRecord(reserved.record);
+    },
+    async resumeDeployment(id, sessionId = null) {
+      const record = await store.transaction((state) => {
+        const operation = Object.hasOwn(state.operations, id) ? state.operations[id] : null;
+        const application = operation?.application_id && state.applications[operation.application_id];
+        // Unlike the legacy maintenance reads, resume always requires an exact cookie-session owner.
+        if (!sessionId || operation?.kind !== 'deployments' || operation.session_id !== sessionId
+            || !application || application.session_id !== sessionId) {
+          throw new ProductError(404, 'NOT_FOUND', '이 세션에서 재개할 배포를 찾을 수 없습니다.');
+        }
+        const ci = operation.ci;
+        if (operation.status !== 'unknown' || !['cd', 'http'].includes(operation.stage)
+            || application.status !== 'ready' || application.deletion_requested || application.lifecycle_operation_id
+            || ci?.state !== 'published'
+            || typeof applicationAdapter?.deployPublished !== 'function'
+            || !/^\d+$/.test(ci.run_id) || !/^[a-f0-9]{40}$/.test(operation.source_commit || '')
+            || typeof ci.publication_artifact_id !== 'string' || !/^[1-9]\d*$/.test(ci.publication_artifact_id)
+            || !Number.isSafeInteger(ci.producer_attempt) || ci.producer_attempt < 1
+            || !ci.images || typeof ci.images !== 'object' || Array.isArray(ci.images) || !Object.keys(ci.images).length
+            || Object.values(ci.images).some((image) => typeof image !== 'string' || !/^ghcr\.io\/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$/.test(image))) {
+          throw new ProductError(409, 'DEPLOYMENT_NOT_RESUMABLE', '게시 완료 후 결과가 불확실한 앱 배포만 재개할 수 있습니다.');
+        }
+        const binding = state.bindings[ci.run_id];
+        const expected = applicationAdapter.describe(operation.environment_target_id, operation.app);
+        if (!binding || binding.operation_id !== id || binding.app !== operation.app
+            || binding.target_id !== operation.target_id || binding.source_commit !== operation.source_commit
+            || application.id !== operation.application_id || application.target_id !== operation.target_id
+            || application.app !== operation.app || application.environment_target_id !== operation.environment_target_id
+            || expected.id !== application.id || expected.target_id !== application.target_id
+            || expected.provider !== application.provider) {
+          throw new ProductError(409, 'RESUME_BINDING_MISMATCH', '원래 앱·환경·CI 실행과 연결이 일치하지 않습니다.');
+        }
+        if (Object.values(state.operations).some((other) => other.id !== id && active(other))) {
+          throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
+        }
+        Object.assign(operation, { status: 'running', error: null, resumed_at: new Date().toISOString(),
+          resume_count: (operation.resume_count || 0) + 1, updated_at: new Date().toISOString() });
+        return operation;
+      });
+      launch(() => observe(record, String(record.ci.run_id), { resume: true }));
+      return publicRecord(record);
     },
     async getDeployment(id, sessionId = null) {
       let record = publicRecord(find('deployments', id, sessionId));
