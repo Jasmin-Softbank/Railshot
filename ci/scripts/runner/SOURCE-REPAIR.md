@@ -1,7 +1,9 @@
 # Source repair in customer CI
 
-The customer workflow defaults to `REPAIR_SCOPE=source`. `REPAIR_SCOPE=packaging`
-retains the prior restricted mode, and direct CLI callers still default to it.
+The customer workflow and direct CLI default to `REPAIR_SCOPE=packaging` and
+zero model repair attempts. Source repair and a positive bounded attempt limit
+require explicit trusted configuration. Jev diagnostics run separately in the API
+and never enable the fixer or change these defaults.
 Set the apps repository's `PLATFORM_REF` to the reviewed platform commit and
 update its workflow from `ci/workflows/railshot-deploy.yml`. A saved run is bound
 to its original harness and source; start a new request after changing these
@@ -58,21 +60,20 @@ The resolver uses the same non-root, capability-free, read-only source mount,
 resource limits and approved network as quality execution. No credential,
 Docker socket, host write, cluster or cloud permission is granted to the model.
 
-The structural new-test check is a minimum, not independent proof of coverage:
-the model must derive expected behavior from the application, and test execution
-must verify it. Custom unsupported test runners, changes to existing oracle or
-checker policy, destructive migrations, unsupported build roots/toolchains, and
-missing Python/Java native lock contracts still require reviewed configuration.
-Source repair is not an unconditional promise to deploy every repository.
+The source validator has legacy additive test syntax support for explicitly reviewed
+work, but the deployment task never asks a model to add tests or checker setup.
+Existing tests and checker configuration remain protected. Q and L4 are NOT_RUN
+unless included in the active profile. The default L3 health check proves only
+startup/health behavior, never application business correctness.
 
-The injected `agents/DONT.md` lists the exact supported test scripts and JavaScript
-import/assertion forms before the first model call. Runtime flags such as
-`node --experimental-strip-types --test` remain unsupported; existing Vite can
-load TypeScript modules from a native Node `.test.mjs` instead. Literal local Vite
-loads, dynamic `import(new URL(...))`, and named Node assertion imports are accepted
-by the same writer and L0 checks. Missing application references, missing assertions
-and unsupported scripts produce separate, concrete correction guidance. These
-syntax checks do not replace execution or protect against every vacuous test.
+Every file proposal must carry the exact case_id, case SHA-256, source digest,
+policy digest and failure fingerprint. At proposal recording and again immediately
+before applying bytes, the runner compares the immutable host case, current source,
+active profile and protected policy. Source references must identify an existing
+line with the exact file digest; log references must match captured redacted bytes.
+Fabricated file:line citations in root_cause or assumptions are rejected. These
+checks verify reference integrity, not the truth of a causal interpretation.
+Missing evidence blocks writes. Gate execution still decides every outcome.
 
 While a Codex call runs, native SDK events update content-free progress counters
 in the existing private lifecycle receipt at most once per five seconds (plus a

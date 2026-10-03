@@ -220,6 +220,16 @@
             <div class="monitor-left">
               <div class="panel monitor-summary"><span class="status-dot muted"></span><div><h2 id="monitor-state">연결된 배포 없음</h2><p id="monitor-message">이미지 게시, 앱 적용, 공개 URL 확인 결과를 구분해 표시합니다.</p><a id="monitor-actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 로그</a></div></div>
               <div class="panel stages-panel"><h2>배포 단계</h2><p id="monitor-ci-status" class="field-note" role="status">GitHub Actions 실행 대기</p><ol id="monitor-steps"><li>소스 접수</li><li>앱 검사 및 수정</li><li>검증 이미지 게시</li><li>GitOps 반영</li><li>URL 및 앱 상태 확인</li></ol><a id="monitor-application-link" target="_blank" rel="noopener noreferrer" hidden>배포한 앱 열기</a></div>
+              <section id="diagnostic-panel" class="panel stages-panel" aria-labelledby="diagnostic-title" hidden>
+                <h2 id="diagnostic-title">실패 원인과 검사 근거</h2>
+                <p id="diagnostic-state" role="status"></p><p id="diagnostic-failure"></p>
+                <ol id="diagnostic-checks" class="diagnostic-checks"></ol>
+                <pre id="diagnostic-excerpt" class="diagnostic-excerpt"></pre>
+                <p id="diagnostic-classification"></p><p id="diagnostic-action" class="field-note"></p>
+                <button id="classify-failure" class="secondary-button" type="button" hidden>원인 분류</button>
+                <a id="diagnostic-source" class="text-button" hidden>실패 당시 소스 다운로드</a>
+                <p id="diagnostic-freshness" class="field-note"></p>
+              </section>
             </div>
             <div class="console panel">
               <div class="console-heading"><h2>배포 환경 콘솔</h2><span id="observation-status" role="status">연결 대기 · 읽기 전용</span></div>
@@ -231,7 +241,7 @@
               <div class="console-metrics" aria-live="polite"><span>Pod <strong id="metric-pods">연결 전</strong><small id="metric-pods-time"></small></span><span>CPU <strong id="metric-cpu_percent">연결 전</strong><small id="metric-cpu_percent-time"></small></span><span>Memory <strong id="metric-memory_percent">연결 전</strong><small id="metric-memory_percent-time"></small></span><span>HTTP <strong id="metric-http">연결 전</strong><small id="metric-http-time"></small></span></div>
               <div class="console-footer" id="collector-note">수집기 수명 정보 미제공</div>
               <div class="console-output" style="white-space:pre-wrap;overflow-wrap:anywhere" id="console-output" role="tabpanel" tabindex="0" aria-label="배포 환경 콘솔 출력"><p>배포가 연결되면 작업 로그가 여기에 표시됩니다.</p></div>
-              <div class="console-footer">자동 조회 주기 15초 · CPU/Memory는 대상 노드 전체 · HTTP probe는 관측 위치의 응답이며 배포 버전 검증과 별개입니다.</div>
+              <div class="console-footer">자동 조회 주기 15초 · 검사·게시·컨트롤러·앱·HTTP 관측을 구분합니다. 원인 분류는 추정이며 수정·배포 결과를 뜻하지 않습니다.</div>
             </div>
           </div>
         </section>

@@ -729,6 +729,15 @@ def finish_verdict(verdict, run, run_id, attempt_id, *, persist=True):
 
 def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None):
     global DIAGNOSTICS, PROGRESS
+    try:
+        return _run_gate(ws, run, layers, selected_root=selected_root, quality_network=quality_network,
+                         repair_scope=repair_scope, native_locks=native_locks, app_id=app_id)
+    finally:
+        DIAGNOSTICS = PROGRESS = None
+
+
+def _run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None):
+    global DIAGNOSTICS, PROGRESS
     DIAGNOSTICS = PROGRESS = None
     observation_id = os.environ.get("RAILSHOT_RUN_ID") or str(uuid.uuid4())
     attempt_id = os.environ.get("RAILSHOT_ATTEMPT_ID")

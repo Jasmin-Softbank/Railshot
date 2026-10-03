@@ -982,7 +982,7 @@ test('work log reads bound agent events over HTTP and marks stale or failed obse
   assert.match(await output.innerText(), /agent.heartbeat/);
   assert.doesNotMatch(await output.innerText(), /private event/);
   mode = 'empty'; attempt = 2; await refresh();
-  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('아직 에이전트 이벤트'));
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('아직 CI 이벤트'));
   assert.doesNotMatch(await output.innerText(), /agent.heartbeat/, 'an earlier attempt is never reused for a new attempt');
   assert.ok(requests.some((request) => request.path === '/api/v1/deployments/events-demo/events'));
   assert.equal(requests.some((request) => request.authorization), false);

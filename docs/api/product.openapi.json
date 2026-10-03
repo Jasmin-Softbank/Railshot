@@ -301,7 +301,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/builds/{id}": {
@@ -541,7 +541,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/deployments/{id}": {
@@ -1011,7 +1011,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/environments/{id}": {
@@ -1986,8 +1986,8 @@
     "/api/v1/deployments/{id}/events": {
       "get": {
         "operationId": "getDeploymentEvents",
-        "summary": "Read content-free SDK progress for the current CI attempt",
-        "description": "The owning session and persisted deployment/run/source/app/target binding are checked before any GitHub read or cache access. Reads only the registered workflow, branch and repository, then the current attempt GitHub Actions check named Railshot agent events. The exact external ID, head SHA, details URL, producer and envelope bindings must match. No previous-attempt fallback. Strict schema rejects raw text, commands, reasoning and unknown fields. At most 60 recent items and 60,000 UTF-8 bytes; truncation is explicit. GitHub reads are bounded to five pages of twenty checks and 2 MiB per response. A process-local cache retains at most 100 source/attempt identities for 15 seconds; run identity is checked before and after reading. Complete describes observation completion, never CI success. Stale means a running observation is over 60 seconds old. Missing older producers remain not_started/not_available. No query parameters or mutation methods are accepted.",
+        "summary": "Read CI progress and the bounded deployment timeline",
+        "description": "The owning session and persisted deployment/run/source/app/target binding are checked before any GitHub read or cache access. Reads only the registered workflow, branch and repository, then the current attempt GitHub Actions check named Railshot agent events. The exact external ID, head SHA, details URL, producer and envelope bindings must match. No previous-attempt fallback. Strict schema rejects raw text, commands, reasoning and unknown fields. At most 60 recent items and 60,000 UTF-8 bytes; truncation is explicit. GitHub reads are bounded to five pages of twenty checks and 2 MiB per response. A process-local cache retains at most 100 source/attempt identities for 15 seconds; run identity is checked before and after reading. Complete describes observation completion, never CI success. Stale means a running observation is over 60 seconds old. Missing older producers remain not_started/not_available. No query parameters or mutation methods are accepted. The timeline field includes session-scoped dispatch/publication/config/controller/workload/HTTP observations, at most 240 events retained for seven days. It is evidence, not execution authority.",
         "parameters": [
           {
             "name": "id",
@@ -2837,7 +2837,7 @@
     "/api/v1/deployments/{id}/source": {
       "get": {
         "operationId": "downloadDeploymentSource",
-        "summary": "Download submitted or gate-verified deployed source",
+        "summary": "Download submitted, verified deployed or exact failed source",
         "parameters": [
           {
             "name": "id",
@@ -2853,7 +2853,8 @@
             "schema": {
               "enum": [
                 "submitted",
-                "deployed"
+                "deployed",
+                "failed"
               ],
               "default": "submitted"
             }
@@ -3196,7 +3197,9 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["linkage_token"],
+                "required": [
+                  "linkage_token"
+                ],
                 "properties": {
                   "linkage_token": {
                     "type": "string",
@@ -3215,18 +3218,32 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "required": ["registration_id", "status", "claimed_at"],
+                  "required": [
+                    "registration_id",
+                    "status",
+                    "claimed_at"
+                  ],
                   "properties": {
-                    "registration_id": { "type": "string", "format": "uuid" },
-                    "status": { "const": "claimed" },
-                    "claimed_at": { "type": "string", "format": "date-time" }
+                    "registration_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "const": "claimed"
+                    },
+                    "claimed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
                   },
                   "additionalProperties": false
                 }
               }
             }
           },
-          "401": { "description": "Invalid, expired, or already used token" }
+          "401": {
+            "description": "Invalid, expired, or already used token"
+          }
         }
       }
     },
@@ -3300,7 +3317,9 @@
             "description": "Python script",
             "content": {
               "text/x-python": {
-                "schema": { "type": "string" }
+                "schema": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -3521,6 +3540,200 @@
           },
           "503": {
             "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}/diagnostics": {
+      "get": {
+        "operationId": "getDeploymentDiagnostics",
+        "summary": "Read exact failed-run evidence without a model call",
+        "description": "Owning session and persisted run/app/target/source identity are required. No query parameters. See docs/api/diagnostics.md for bounds and evidence requirements.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentDiagnostics"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}/classifications": {
+      "post": {
+        "operationId": "classifyDeployment",
+        "summary": "Classify verified failure facts once per input digest",
+        "description": "Owning session and persisted run/app/target/source identity are required. No query parameters. See docs/api/diagnostics.md for bounds and evidence requirements.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailureClassification"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "description": "Classification reserved; poll diagnostics. Repeated requests reuse the input digest.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailureClassification"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 0
+              }
+            }
           }
         }
       }
@@ -4345,6 +4558,12 @@
             "type": "string",
             "format": "date-time",
             "description": "Start of the current unknown interval; reads do not extend the queue release deadline."
+          },
+          "telemetry": {
+            "$ref": "#/components/schemas/Telemetry"
+          },
+          "classification": {
+            "$ref": "#/components/schemas/FailureClassification"
           }
         },
         "required": [
@@ -6605,6 +6824,9 @@
           },
           "next_marker": {
             "type": "null"
+          },
+          "timeline": {
+            "$ref": "#/components/schemas/Telemetry"
           }
         },
         "required": [
@@ -7350,6 +7572,158 @@
             "$ref": "#/components/schemas/ApplicationLifecyclePlanProgress"
           }
         ]
+      },
+      "Telemetry": {
+        "type": "object",
+        "description": "Version 1 bounded central event journal; see docs/api/diagnostics.md.",
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "state": {
+            "type": "string"
+          },
+          "checked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 240,
+            "items": {
+              "type": "object",
+              "required": [
+                "event_id",
+                "event_name",
+                "occurred_at",
+                "observed_at",
+                "correlation",
+                "outcome"
+              ],
+              "properties": {
+                "event_id": {
+                  "type": "string"
+                },
+                "event_name": {
+                  "type": "string"
+                },
+                "occurred_at": {
+                  "type": "string"
+                },
+                "observed_at": {
+                  "type": "string"
+                },
+                "correlation": {
+                  "type": "object"
+                },
+                "outcome": {
+                  "enum": [
+                    "RUNNING",
+                    "PASS",
+                    "FAIL",
+                    "BLOCKED",
+                    "UNKNOWN",
+                    "NOT_RUN",
+                    "INCOMPLETE"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "FailureClassification": {
+        "type": "object",
+        "description": "Durable typed hypothesis with input/rubric/model identity; never grants write or retry authority.",
+        "properties": {
+          "state": {
+            "enum": [
+              "not_requested",
+              "not_configured",
+              "not_failed",
+              "unavailable",
+              "running",
+              "succeeded",
+              "failed"
+            ]
+          },
+          "input_sha256": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "is_hypothesis": {
+            "const": true
+          },
+          "grants_write_authority": {
+            "const": false
+          },
+          "evidence_refs": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "DeploymentDiagnostics": {
+        "type": "object",
+        "required": [
+          "deployment_id",
+          "state"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "not_started",
+              "not_failed",
+              "unavailable",
+              "ready"
+            ]
+          },
+          "binding": {
+            "type": "object"
+          },
+          "case_id": {
+            "type": "string"
+          },
+          "case_sha256": {
+            "type": "string"
+          },
+          "classification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailureClassification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checks": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object"
+            }
+          },
+          "missing_evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       }
     },
     "responses": {

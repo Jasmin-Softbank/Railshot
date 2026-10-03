@@ -107,6 +107,12 @@ export async function createProductStore(directory) {
     }
     for (const app of Object.values(state.applications)) if (['registering', 'stopping', 'starting', 'deleting'].includes(app.status)) app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
+      for (const item of Object.values(operation.classifications || {})) if (item.state === 'running') {
+        Object.assign(item, { state: 'failed', code: 'CLASSIFICATION_INTERRUPTED', outcome_unknown: true, completed_at: new Date().toISOString() });
+      }
+      if (operation.classification?.state === 'running') operation.classification = operation.classifications?.[operation.classification.input_sha256]
+        || { ...operation.classification, state: 'failed', code: 'CLASSIFICATION_INTERRUPTED', outcome_unknown: true };
+      if (operation.diagnostic_evidence && Date.now() - Date.parse(operation.diagnostic_evidence.checked_at) > 7 * 86400000) delete operation.diagnostic_evidence;
       const unclaimed = operation.kind === 'deployments' && operation.status === 'queued'
         && Number.isSafeInteger(operation.queue?.sequence) && operation.queue.sequence > 0
         && operation.queue.enqueued_at && !operation.queue.started_at;

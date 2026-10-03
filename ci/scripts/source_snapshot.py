@@ -17,7 +17,7 @@ from storage import durable_write
 MAX_BYTES = 100 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 140 * 1024 * 1024
 MAX_FILES, MAX_ENTRIES = 2000, 6000
-SECRET = re.compile(rb'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b')
+SECRET = re.compile(rb'-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16}|apikey_[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{16,})\b')
 
 
 def safe_path(name):

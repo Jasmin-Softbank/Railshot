@@ -154,9 +154,11 @@ test('real events HTTP route binds ownership before GitHub reads, rejects contro
     if (state.status === 'succeeded') break;
     await pause(10);
   }
+  await pause(30); // Allow the authorized terminal background collection to settle.
+  const authorizedReads = f.calls.length;
   for (const cookie of [foreign, null]) {
     assert.equal((await fetch(origin + path, { headers: cookie ? { Cookie: cookie } : {} })).status, 404);
-    assert.equal(f.calls.length, 0);
+    assert.equal(f.calls.length, authorizedReads);
   }
   assert.equal((await fetch(origin + path + '?run_id=999', { headers: { Cookie: owner } })).status, 422);
   assert.equal((await fetch(origin + path, { method: 'POST', headers: { Cookie: owner } })).status, 405);

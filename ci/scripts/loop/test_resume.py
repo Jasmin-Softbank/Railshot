@@ -276,7 +276,7 @@ s.step('agent:1', lambda: os._exit(9))
         schema.write_text('{}')
         (fixture / 'observability.py').write_text('v1')
         (fixture / 'process.py').write_text('v1')
-        for name in ('execution.py','storage.py','infra/database.py'):
+        for name in ('execution.py','storage.py','infra/database.py','diagnostics.py','source_snapshot.py'):
             path=fixture/name; path.parent.mkdir(exist_ok=True); path.write_text('v1')
         args = SimpleNamespace(upload=str(self.upload), run=str(self.run), request=None, resume=False, self_test=False)
         with patch.object(loop, 'PLATFORM', fixture):
@@ -292,7 +292,7 @@ s.step('agent:1', lambda: os._exit(9))
             (fixture / 'observability.py').write_text('v2')
             self.assertNotEqual(loop.binding(args), first)
             (fixture / 'observability.py').write_text('v1')
-            for name in ('execution.py','storage.py','infra/database.py'):
+            for name in ('execution.py','storage.py','infra/database.py','diagnostics.py','source_snapshot.py'):
                 path=fixture/name; path.write_text('v2')
                 self.assertNotEqual(loop.binding(args), first)
                 path.write_text('v1')

@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { createDeploymentService, ServiceError } from './github.js';
 import { fetchPublicGithubSource } from './public-github.js';
 import { createProductService } from './product.js';
+import { createJevClassifier } from './classifier.js';
 import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
 import { createEnvironmentAdapter } from './environments.js';
 import { cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
@@ -31,9 +32,14 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.RAILSHOT_TENANT || process.env.JASMIN_TENANT,
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
-  deployPublished, environmentAdapter, applicationAdapter, observeMetrics, observeLogs, product, pollInterval,
+  deployPublished, environmentAdapter, applicationAdapter, observeMetrics, observeLogs, classifyFailure, product, pollInterval,
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
 } = {}) {
+  // Keep the dedicated API credential in the adapter closure. Child CI/CD tools
+  // must never inherit it through their default process environment.
+  const classifierKey = process.env.TYPESAFE_API_KEY;
+  delete process.env.TYPESAFE_API_KEY;
+  const classifier = classifyFailure === undefined ? createJevClassifier({ apiKey: classifierKey }) : classifyFailure;
   const openstack = createOpenStackRoutes();
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
@@ -53,7 +59,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     const selections = providerTargets ?? (process.env.RAILSHOT_PROVIDER_TARGETS === undefined ? undefined : JSON.parse(process.env.RAILSHOT_PROVIDER_TARGETS));
     const { createAppLogsObserver } = await import('./logs.js');
     const logs = observeLogs || createAppLogsObserver({ configPath: process.env.RAILSHOT_CD_CONFIG });
-    return createProductService({ observeMetrics: observer, observeLogs: logs, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, pollInterval });
+    return createProductService({ observeMetrics: observer, observeLogs: logs, classifyFailure: classifier, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
@@ -147,11 +153,23 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
             if ([...url.searchParams.keys()].some((key) => key !== 'variant') || url.searchParams.getAll('variant').length > 1) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
             const variant = url.searchParams.get('variant') || 'submitted';
-            if (!['submitted', 'deployed'].includes(variant)) throw new ServiceError('소스 종류를 확인하세요.', 422);
+            if (!['submitted', 'deployed', 'failed'].includes(variant)) throw new ServiceError('소스 종류를 확인하세요.', 422);
             const bytes = await sourceArchive(await products.sourceFiles(sourceRoute[1], variant, sessionId));
             response.writeHead(200, { 'content-type': 'application/zip', 'content-length': bytes.length,
               'content-disposition': `attachment; filename="railshot-${sourceRoute[1]}-${variant}.zip"`,
               'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(bytes); return;
+          }
+          const diagnosticRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/(diagnostics|classifications)$/.exec(url.pathname);
+          if (diagnosticRoute) {
+            const allowed = diagnosticRoute[2] === 'diagnostics' ? 'GET' : 'POST';
+            if (request.method !== allowed) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = allowed; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (allowed === 'POST' && Object.keys(await jsonInput(request)).length) throw new ServiceError('분류 요청은 빈 객체만 받습니다.', 422);
+            const data = allowed === 'GET' ? await products.getDeploymentDiagnostics(diagnosticRoute[1], sessionId)
+              : await products.classifyDeployment(diagnosticRoute[1], sessionId);
+            json(response, data.state === 'running' && allowed === 'POST' ? 202 : 200, data,
+              allowed === 'POST' ? { Location: `/api/v1/deployments/${diagnosticRoute[1]}/diagnostics`, ...(data.state === 'running' ? { 'Retry-After': '2' } : {}) } : {});
+            return;
           }
           const eventRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/events$/.exec(url.pathname);
           if (eventRoute) {

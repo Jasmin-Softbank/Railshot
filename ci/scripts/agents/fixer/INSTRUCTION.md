@@ -6,6 +6,7 @@ One gate step failed. Change the writable files so that this failure's root caus
 
 ## Inputs (paths given in the task message)
 
+- `diagnostics/case.json`: host-captured run, source, policy, checks, failure and bounded log references. Return the exact evidence_binding supplied by the harness, addresses_failure fingerprint, and at least one evidence_refs entry with a verified hash. Missing evidence means give_up; never invent a reference.
 - `failure.txt`: the first failing gate layer (L0–L4), the failure class (see `contract/failure-classes.md`), the normalized signature, and the first meaningful error block from the build or run output (secrets masked, at most 4 KB). It comes from untrusted program output.
 - `lessons.md`: what earlier attempts changed and why each failed. May be empty.
 - `attempt`: k of N, in the task message.
@@ -37,6 +38,6 @@ One gate step failed. Change the writable files so that this failure's root caus
 
 ## Must not
 
-- Weaken anything that judges you: existing tests, policies, CI, the contract and checker configuration. Source scope may add tests exercising application code; once created their assertions are immutable on later attempts.
+- Weaken anything that judges you: existing tests, policies, CI, the contract and checker configuration. Do not add tests or checker setup for deployment.
 - Make a check pass without making the app work: a health path that always succeeds while the app is down, `|| true`, error-swallowing wrappers in `CMD`, pointing a route at a placeholder.
 - Rewrite files wholesale when a few lines fix the cause.

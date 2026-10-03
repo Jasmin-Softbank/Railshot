@@ -214,6 +214,7 @@ def gate(ws, run, attempt, layers, *, quality_network=None, repair_scope="packag
     rc, out, err = run_json(PY + [str(PLATFORM / "gate/gate.py"), str(ws), str(g), "--layers", layers, *flags], phase='gate',
                            observer=gate_observer(g / "progress.jsonl", os.environ.get("RAILSHOT_RUN_ID"),
                                                   os.environ.get("RAILSHOT_ATTEMPT_ID"), progress_sink))
+    preserve_diagnostics(run, g)
     if out.get('status') == 'UNKNOWN':
         try:
             upstream = StateError.from_dict(out['error'])
@@ -233,11 +234,18 @@ def gate(ws, run, attempt, layers, *, quality_network=None, repair_scope="packag
                          retry_policy='after_reconcile', side_effect='possible')
     if (g / "failure.txt").exists():
         (run / "failure.txt").write_text((g / "failure.txt").read_text())
-    # Separate small redacted diagnostics from the potentially large private source snapshot.
+    return verdict
+
+
+def preserve_diagnostics(run, g):
+    # Clear the previous attempt even when the new attempt has no evidence.
+    # UNKNOWN must preserve current diagnostics too; never serve a stale source.
     for destination, source in ((run / 'diagnostics', g / 'diagnostics'),
                                 (run / 'diagnostic-source', g / 'diagnostic-source.json')):
         try:
-            if destination.exists():
+            if destination.is_symlink() or destination.is_file():
+                destination.unlink()
+            elif destination.exists():
                 shutil.rmtree(destination)
             if source.is_dir():
                 shutil.copytree(source, destination)
@@ -246,7 +254,6 @@ def gate(ws, run, attempt, layers, *, quality_network=None, repair_scope="packag
                 shutil.copyfile(source, destination / 'snapshot.json')
         except OSError:
             pass  # The case retains its source hash; artifact absence is not a successful read.
-    return verdict
 
 
 def decide(verdict, report, seen, repair_scope="packaging"):
@@ -325,7 +332,12 @@ def execute(a, run, state, progress_sink=None):
 
             def agent_step():
                 arguments = (role, a.provider, ws, run, attempt, a.max_attempts, a.request, attempt_scope, app_id)
-                rc, record = agent(*arguments, progress_sink, gate_order=tuple(a.layers.split(",")))
+                kwargs = {}
+                if progress_sink is not None:
+                    kwargs['progress_sink'] = progress_sink
+                if tuple(a.layers.split(',')) != tuple(GATE_ORDER):
+                    kwargs['gate_order'] = tuple(a.layers.split(','))
+                rc, record = agent(*arguments, **kwargs)
                 if record.get('error'):
                     try:
                         upstream = StateError.from_dict(record['error'])
@@ -385,13 +397,30 @@ def execute(a, run, state, progress_sink=None):
         if attempt and attempt_scope == 'source':
             from repair import prepare_locks
             def preparation_step():
+                from diagnostics import Diagnostics
+                from source_snapshot import capture, entries_digest
+                preparation = run / f'prepare-{attempt}'
+                preparation.mkdir(exist_ok=True)
+                diagnostic = Diagnostics(ws, preparation, os.environ['RAILSHOT_RUN_ID'], os.environ['RAILSHOT_ATTEMPT_ID'],
+                                         a.layers.split(','), a.repair_scope, entries_digest(capture(ws)))
+                diagnostic.capture()
                 try:
-                    receipt = prepare_locks(ws, run, network=a.quality_network, selected_root=a.selected_root)
+                    receipt = prepare_locks(ws, run, network=a.quality_network, selected_root=a.selected_root,
+                                            observer=diagnostic.process)
                     atomic_json(run / f'native-locks-{attempt}.json', receipt)
                     return receipt
                 except Exception as exc:
-                    raise StateError('GATE_ENVIRONMENT_UNAVAILABLE', component='loop', phase='dependency-preparation',
-                                     retry_policy='after_configuration', side_effect='possible', cause=exc) from exc
+                    error = StateError('GATE_ENVIRONMENT_UNAVAILABLE', component='loop', phase='dependency-preparation',
+                                       retry_policy='after_configuration', side_effect='possible', cause=exc)
+                    try:
+                        diagnostic.finish({'layers': [], 'status': 'BLOCKED', 'release_eligible': False,
+                            'source_sha256': entries_digest(capture(ws)), 'error': error.as_dict(),
+                            'failure': {'layer': None, 'class': 'F8', 'signature': 'native-dependencies',
+                                        'excerpt': 'Native dependency preparation failed; inspect captured process evidence.'}})
+                        preserve_diagnostics(run, preparation)
+                    except (OSError, ValueError, TypeError):
+                        pass  # The actual preparation error remains authoritative.
+                    raise error from exc
             receipts = state.step(f'prepare:{attempt}', preparation_step, artifacts=(f'native-locks-{attempt}.json',))
             atomic_json(run / 'native-locks.json', receipts)
         verdict = state.step(f'gate:{attempt}', lambda: gate(ws, run, attempt, a.layers, **options),

@@ -5,6 +5,7 @@ import { APP_NAME, APP_NAME_MESSAGE, TENANT_NAME, TARGET_ID, SOURCE_COMMIT } fro
 import { readPublished } from './published.js';
 import { readSourceArchive, readSourceResponse, sourceSnapshotLimit } from './source-snapshot.js';
 import { AgentEventError, agentEventCheckName, agentEventLimits, validateEventBinding, validateEventRun, readAgentEventCheck, emptyAgentEvents } from './agent-events.js';
+import { diagnosticLimits, readDiagnosticArchive, readDiagnosticCase, sha256 } from './diagnostics.js';
 
 const API = 'https://api.github.com';
 const diagnosticLimit = 2 * 1024 * 1024;
@@ -437,7 +438,68 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     }
   }
 
-  return { deploy, status, cancel, events, publishedFiles, sourceFiles, allowTarget, targetId,
+  async function diagnosticArtifact(identity, name, maxBytes) {
+    const list = await request(`${repoPath}/actions/runs/${identity.runId}/artifacts?name=${name}&per_page=100`,
+      { redirect: 'error' }, diagnosticLimits.archive);
+    if (!Number.isSafeInteger(list.total_count) || list.total_count < 0 || list.total_count > 100
+        || !Array.isArray(list.artifacts) || list.artifacts.length !== list.total_count) throw new Error('Invalid artifact listing');
+    const matches = list.artifacts.filter((item) => item.name === name), artifact = matches[0];
+    if (matches.length !== 1 || artifact.expired !== false || !Number.isSafeInteger(artifact.id) || artifact.id < 1
+        || artifact.workflow_run?.id !== Number(identity.runId) || artifact.workflow_run?.head_sha !== identity.source_commit
+        || !Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes < 1 || artifact.size_in_bytes > maxBytes)
+      throw new Error('Invalid diagnostic artifact');
+    const signal = AbortSignal.timeout(60_000);
+    let response = await fetchImpl(`${API}${repoPath}/actions/artifacts/${artifact.id}/zip`, { redirect: 'manual', signal,
+      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' } });
+    if (response.status === 302) {
+      const url = new URL(response.headers.get('location'));
+      if (url.protocol !== 'https:' || url.username || url.password || url.port
+          || !(url.hostname.endsWith('.blob.core.windows.net') || url.hostname.endsWith('.actions.githubusercontent.com')))
+        throw new Error('Invalid diagnostic download destination');
+      await response.body?.cancel();
+      response = await fetchImpl(url.href, { redirect: 'error', signal });
+    }
+    const bytes = await readSourceResponse(response, maxBytes), digest = sha256(bytes);
+    if (artifact.digest != null && artifact.digest !== `sha256:${digest}`) throw new Error('Artifact digest mismatch');
+    return { bytes, artifact: { id: artifact.id, sha256: digest } };
+  }
+
+  async function diagnosticIdentity(runId, binding) {
+    const identity = { ...binding, runId: String(runId), tenant, owner, repo, ref, workflow };
+    validateEventBinding(identity.runId, identity); permittedTarget(identity.target_id);
+    const run = await request(`${repoPath}/actions/runs/${identity.runId}`, { redirect: 'error' }, diagnosticLimits.archive);
+    identity.attempt = validateEventRun(run, identity);
+    if (run.status !== 'completed' || binding.run_attempt != null && binding.run_attempt !== identity.attempt)
+      throw new Error('Diagnostic attempt not final or changed');
+    return identity;
+  }
+
+  async function diagnostics(runId, binding) {
+    const identity = await diagnosticIdentity(runId, binding);
+    const { bytes, artifact } = await diagnosticArtifact(identity, `diagnostics-${identity.attempt}`, diagnosticLimits.archive);
+    const result = readDiagnosticCase(await readDiagnosticArchive(bytes), { run_id: Number(runId), producer_attempt: identity.attempt,
+      source_commit: identity.source_commit, app: identity.app, tenant, target_id: identity.target_id }, artifact);
+    await diagnosticIdentity(runId, { ...binding, run_attempt: identity.attempt });
+    return result;
+  }
+
+  async function diagnosticCurrent(diagnostic) {
+    const binding = diagnostic.binding;
+    await diagnosticIdentity(binding.run_id, { ...binding, run_attempt: binding.producer_attempt });
+  }
+
+  async function diagnosticSource(diagnostic) {
+    const binding = diagnostic?.binding;
+    if (diagnostic?.state !== 'ready' || !binding || !diagnostic.source.snapshot
+        || diagnostic.source.tested_sha256 !== diagnostic.source.after_sha256) throw new Error('Diagnostic source unavailable');
+    const identity = await diagnosticIdentity(binding.run_id, { ...binding, run_attempt: binding.producer_attempt });
+    const { bytes } = await diagnosticArtifact(identity, `diagnostic-source-${identity.attempt}`, sourceSnapshotLimit);
+    const files = await readSourceArchive(bytes, binding, diagnostic.source.tested_sha256, diagnostic.source.snapshot.sha256);
+    await diagnosticIdentity(binding.run_id, { ...binding, run_attempt: binding.producer_attempt });
+    return files;
+  }
+
+  return { deploy, status, cancel, events, diagnostics, diagnosticCurrent, diagnosticSource, publishedFiles, sourceFiles, allowTarget, targetId,
     identity: Object.freeze({ tenant, sourceRepository: `${owner}/${repo}` }),
     get targetIds() { return Object.freeze([...targetIds]); } };
 }

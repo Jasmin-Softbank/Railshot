@@ -38,8 +38,10 @@ def bounded(value, limit=MAX_LOG_BYTES):
     if len(data) <= limit:
         return data.decode(), 0
     # Preserve both the initial diagnostic and terminal context, after redaction.
-    return (data[:limit // 2].decode(errors='replace') + '\n[OUTPUT OMITTED]\n'
-            + data[-limit // 2:].decode(errors='replace')), len(data) - limit
+    marker = '\n[OUTPUT OMITTED]\n'
+    half = (limit - len(marker.encode())) // 2
+    return (data[:half].decode(errors='ignore') + marker
+            + data[-half:].decode(errors='ignore')), len(data) - 2 * half
 
 
 def fingerprint(layer, cls, text):
@@ -108,7 +110,8 @@ class Diagnostics:
                 self.missing.append('process_limit')
             return
         # Commands, argv, environment and git output may contain private source/secrets.
-        command = ('docker.build' if cmd[:3] == ['docker', 'buildx', 'build'] else
+        command = ('native.dependencies' if cmd == ['native.dependencies'] else
+                   'docker.build' if cmd[:3] == ['docker', 'buildx', 'build'] else
                    'docker.logs' if cmd[:2] == ['docker', 'logs'] else
                    'docker.inspect' if cmd[:3] == ['docker', 'inspect', '--format'] else 'process')
         row = {'id': f'process-{len(self.processes) + 1}', 'layer': self.layer, 'command_kind': command,
@@ -117,8 +120,13 @@ class Diagnostics:
                'outcome': 'UNKNOWN' if error else 'PASS' if result.returncode == 0 else 'FAIL',
                'stdout_bytes': len(result.stdout.encode() if isinstance(result.stdout, str) else result.stdout) if result else None,
                'stderr_bytes': len(result.stderr.encode() if isinstance(result.stderr, str) else result.stderr) if result else None}
-        if result is not None and command in {'docker.build', 'docker.logs'} and self.log_bytes < 512 * 1024:
-            output, omitted = bounded(str(result.stdout) + '\n' + str(result.stderr))
+        if error:
+            row['error_code'] = 'PROCESS_TIMEOUT' if error in {'TimeoutExpired', 'TimeoutError'} else 'PROCESS_START_FAILED' if error == 'FileNotFoundError' else 'PROCESS_FAILED'
+        if result is not None and command in {'docker.build', 'docker.logs', 'native.dependencies'} and self.log_bytes < 512 * 1024:
+            stdout = str(result.stdout)
+            if command == 'native.dependencies':
+                stdout = '\n'.join(line for line in stdout.splitlines() if not line.startswith('RAILSHOT_NATIVE_LOCK='))
+            output, omitted = bounded(stdout + '\n' + str(result.stderr))
             self.log_bytes += len(output.encode())
             path = self.directory / (row['id'] + '.log')
             durable_write(path, output.encode())
@@ -129,7 +137,7 @@ class Diagnostics:
     def finish(self, verdict):
         failure = verdict.get('failure') or {}
         excerpt, omitted = bounded(failure.get('excerpt', ''), 16000)
-        case_id = sha(json.dumps([self.run_id, self.attempt_id, self.before]).encode())
+        case_id = sha(json.dumps([self.run_id, self.attempt_id, self.before], separators=(',', ':')).encode())
         checks = [{'check_id': row['layer'], 'outcome': row['outcome'], 'required': not row.get('advisory', False),
                    'duration_ms': round(row.get('duration_s', 0) * 1000)} for row in verdict['layers']]
         for layer in self.layers:
@@ -147,7 +155,9 @@ class Diagnostics:
         policy = {'gate_order': self.layers, 'repair_scope': self.repair_scope,
                   'max_files': 8, 'max_full_content_bytes': 20000, 'allow_publish': False,
                   'protected_policy_sha256': sha((Path(__file__).parent / 'contract/paths.yaml').read_bytes())}
+        detail = verdict.get('error')
         value = {'version': VERSION, 'purpose': 'diagnostic', 'case_id': case_id, 'binding': self.binding,
+                 'error': {k: v for k, v in detail.items() if k != 'summary'} if detail else None,
                  'native_run_id': self.run_id, 'attempt_id': self.attempt_id,
                  'source': {'tested_sha256': self.before, 'after_sha256': verdict.get('source_sha256'),
                             'snapshot': self.snapshot, 'files': self.files},

@@ -32,6 +32,7 @@ sys.path.insert(0, str(PLATFORM))
 from observability import OperationError, event_record
 from execution import GATE_ORDER, RELEASE_ORDERS
 from runner.runtime_boundary import effective_auth_route, private_directory
+from runner import repair_evidence
 from runner.native_preflight import check as codex_preflight, sandbox_failure
 
 
@@ -657,7 +658,7 @@ def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope=
     return applied
 
 
-def record_plan(run, role, output, gate_order=GATE_ORDER):
+def record_plan(run, role, output, gate_order=GATE_ORDER, *, workspace=None, repair_scope="packaging", expected=None):
     """A durable proposal precedes application; it never asserts execution success."""
     files = output.get("files", [])
     if not files:
@@ -669,7 +670,8 @@ def record_plan(run, role, output, gate_order=GATE_ORDER):
         raise ValueError("planned files must match proposed files")
     if output.get("status") != "proposed" or role == "fixer" and not output.get("root_cause"):
         raise ValueError("file proposal needs an evidence-backed root cause")
-    receipt = {"status": "planned", "execution_verified": False,
+    evidence = repair_evidence.verify(run, workspace, output, gate_order, repair_scope, expected)
+    receipt = {"status": "planned", "execution_verified": False, "evidence": evidence,
                **{key: output.get(key) for key in ("root_cause", "addresses_failure", "gate_plan", "files_changed", "assumptions")},
                "files_sha256": {item["path"]: hashlib.sha256(item["content"].encode()).hexdigest() for item in files}}
     with (run / f"{role}-plan.json").open("x") as stream:
@@ -686,6 +688,7 @@ def record_plan(run, role, output, gate_order=GATE_ORDER):
 def proposal_rejection(exc):
     """Only registered guidance enters the next prompt; never echo invalid output."""
     reasons = {
+        "repair evidence": ("EVIDENCE_BINDING_REQUIRED", "Use the unchanged host repair case, exact failure fingerprint and valid source or log references. Do not guess missing evidence."),
         "proposal requires a plan": ("PLAN_REQUIRED", "Plan every gate in execution order before returning files."),
         "planned files": ("PLAN_FILES_MISMATCH", "List the exact proposed file paths and reasons in files_changed."),
         "file proposal needs": ("ROOT_CAUSE_REQUIRED", "Return an evidence-backed root_cause for the proposal."),
@@ -741,7 +744,7 @@ def execute(a):
         provider = a.provider
         workspace, run = Path(a.workspace).resolve(), private_directory(a.run)
         allow, protect = writable_rules(role_cfg["writable"], scope=a.repair_scope)
-        gate_order = tuple(a.gate_order.split(","))
+        gate_order = tuple(getattr(a, 'gate_order', ','.join(GATE_ORDER)).split(","))
         schema = with_files(json.loads((PLATFORM / role_cfg["schema"]).read_text()), allow, gate_order)
         system = instructions(profile, role_cfg)
         system += (f"\n\n## Authority for this run\nRepair scope: {a.repair_scope}.\n"
@@ -750,6 +753,13 @@ def execute(a):
                    "These concrete bounds replace packaging-only restrictions when source scope is explicitly selected. "
                    "Never weaken tests, lint/type rules, CI gates or approval policy. Return a proposal only.\n")
         task = Path(a.task).read_text()
+        case_bytes = repair_evidence.load(run)
+        if case_bytes is not None:
+            case = json.loads(case_bytes)
+            trusted_binding = {"case_id": case["case_id"], "case_sha256": repair_evidence.sha(case_bytes),
+                               "source_sha256": case["source"]["tested_sha256"], "policy_sha256": case["policy_sha256"]}
+            system += "\nReturn this exact evidence_binding with any file proposal: " + json.dumps(trusted_binding)
+            system += "\nReturn addresses_failure equal to the case failure fingerprint. Include evidence_refs with kind=source/path/line/sha256 or kind=log/id/sha256. Log id failure means SHA-256 of the case failure excerpt UTF-8 bytes. Process ids use the recorded log hash. Never invent file:line references."
     except Exception as exc:
         raise OperationError("SDK_CONFIG_INVALID", component="runner", phase="config",
                              retry_policy="after_configuration", cause=exc) from exc
@@ -774,7 +784,8 @@ def execute(a):
         import jsonschema
         phase = "output"
         jsonschema.validate(out, schema)
-        record_plan(run, a.role, out, gate_order)
+        record_plan(run, a.role, out, gate_order, workspace=workspace, repair_scope=a.repair_scope, expected=case_bytes)
+        repair_evidence.verify(run, workspace, out, gate_order, a.repair_scope, case_bytes)
         phase = "patch"
         written = apply_files(workspace, out.get("files", []), allow, protect, applied=written, repair_scope=a.repair_scope)
     except Exception as exc:
