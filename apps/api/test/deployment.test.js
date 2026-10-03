@@ -271,10 +271,10 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
   } finally { server.close(); }
 });
 
-function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app', gateResult, sourceSha256 = 'c'.repeat(64) } = {}) {
+function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app', gateResult, sourceSha256 = 'c'.repeat(64), layers = ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'] } = {}) {
   const hash = (value) => createHash('sha256').update(value).digest('hex');
   const verdict = { ok: true, release_eligible: true, status: 'PASS', source_sha256: sourceSha256,
-    layers: ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'].map((layer) => ({ layer, ok: true, errors: [] })),
+    layers: layers.map((layer) => ({ layer, ok: true, errors: [] })),
     images: { web: 'local/web:gate' }, image_ids: { web: 'sha256:' + 'd'.repeat(64) } };
   if (gateResult) Object.assign(verdict.layers.find((row) => row.layer === gateResult.layer), gateResult);
   const files = { [specName]: 'app: my-app\n', 'verdict.json': JSON.stringify(verdict),
@@ -303,6 +303,18 @@ test('canonical and historical publications retain exact filename/hash bindings;
     const renamed = { ...files, [other]: files[specName] }; delete renamed[specName];
     assert.throws(() => readPublished(entries(renamed), identity));
   }
+});
+
+test('publication accepts complete minimal and historical gates but rejects partial or failed image/runtime verification', () => {
+  const identity = { runId: 789, attempt: 1, headSha: 'a'.repeat(40), targetId: 'aws-demo', tenant: 'demo' };
+  const read = (layers, gateResult) => readPublished(Object.entries(publishedFiles({ layers, gateResult }))
+    .map(([path, content]) => ({ path, content: Buffer.from(content) })), identity);
+  for (const layers of [['L0', 'L1', 'L2', 'L3'], ['L0', 'L1', 'L2', 'L4', 'L3'], ['L0', 'L1', 'Q', 'L2', 'L4', 'L3']]) {
+    assert.equal(read(layers).status, 'published');
+    for (const layer of ['L0', 'L1', 'L2', 'L3']) assert.throws(() => read(layers, { layer, ok: false }), /gate 단계/);
+  }
+  for (const layers of [['L0', 'L1', 'L2'], ['L0', 'L1', 'L3'], ['L0', 'L1', 'L3', 'L2']])
+    assert.throws(() => read(layers), /gate 단계/);
 });
 
 test('publication accepts quality advisories but rejects runtime, isolation and unknown failures', () => {

@@ -228,6 +228,7 @@ class BundleTest(unittest.TestCase):
 
     def test_only_quality_advisories_are_publishable_and_their_failure_is_preserved(self):
         q = {"layer": "Q"}
+        self.verdict["layers"] = [{"layer": layer, "ok": True} for layer in ("L0", "L1", "L2", "L4", "L3")]
         self.verdict["layers"].insert(2, q)
         q.update(ok=False, advisory=True, outcome="BLOCKED", blocked="NO_TESTS",
                  error={"code": "GATE_CONFIG_INVALID", "phase": "Q.discovery", "outcome": "BLOCKED"})
