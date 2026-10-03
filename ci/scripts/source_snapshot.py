@@ -10,7 +10,8 @@ import re
 import stat
 import sys
 
-from gate.bundle import contract, file_hash, require, source_digest, spec_name
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'gate'))
+from bundle import contract, file_hash, require, source_digest, spec_name
 from storage import durable_write
 
 MAX_BYTES = 100 * 1024 * 1024

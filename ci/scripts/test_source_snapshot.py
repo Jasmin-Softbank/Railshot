@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import source_snapshot as snapshot
-from gate.bundle import source_digest
+from bundle import source_digest
 
 
 class SourceSnapshotTest(unittest.TestCase):
