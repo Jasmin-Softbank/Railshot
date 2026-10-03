@@ -63,6 +63,14 @@ USER 1000:1000
 RUN python3 runtime-smoke.py
 # Preserve the local source-asset route for existing CLI/local HTTP clients.
 COPY apps/dashboard/index.html apps/dashboard/app.js apps/dashboard/styles.css /app/apps/dashboard/
+COPY apps/dashboard/src/ /app/apps/dashboard/src/
+# The installer endpoint packages these reviewed public files from the image.
+COPY deployment/bootstrap/install.sh deployment/bootstrap/uninstall.sh deployment/bootstrap/install_payload.py deployment/bootstrap/requirements.lock /app/deployment/bootstrap/
+COPY deployment/bootstrap/client_setup/ /app/deployment/bootstrap/client_setup/
+COPY deployment/bootstrap/templates/agent-authorized-keys.README /app/deployment/bootstrap/templates/
+COPY infrastructure/providers/openstack/__init__.py infrastructure/providers/openstack/cli.py infrastructure/providers/openstack/identity.py infrastructure/providers/openstack/discovery.py infrastructure/providers/openstack/access.py /app/infrastructure/providers/openstack/
+COPY infrastructure/providers/openstack/templates/cloud-init.yaml.tmpl /app/infrastructure/providers/openstack/templates/
+COPY apps/agent/__init__.py apps/agent/install_forced_command.py apps/agent/protocol.py apps/agent/runner.py apps/agent/sender.py /app/apps/agent/
 EXPOSE 4173
 HEALTHCHECK --interval=30s --timeout=3s CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4173)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "src/server.js"]

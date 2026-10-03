@@ -37,11 +37,21 @@ API_NATIVE_FILES = {
     'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
+    'deployment/bootstrap/install.sh', 'deployment/bootstrap/uninstall.sh',
+    'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/requirements.lock',
+    'deployment/bootstrap/templates/agent-authorized-keys.README',
+    'infrastructure/providers/openstack/__init__.py',
+    'infrastructure/providers/openstack/cli.py', 'infrastructure/providers/openstack/identity.py',
+    'infrastructure/providers/openstack/discovery.py', 'infrastructure/providers/openstack/access.py',
+    'infrastructure/providers/openstack/templates/cloud-init.yaml.tmpl',
+    'apps/agent/__init__.py', 'apps/agent/install_forced_command.py',
+    'apps/agent/protocol.py', 'apps/agent/runner.py', 'apps/agent/sender.py',
 }
 API_NATIVE_PREFIXES = ('infrastructure/ansible/roles/', 'infrastructure/ansible/playbooks/',
                        'infrastructure/providers/terraform_tools/',
                        'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/',
-                       'infrastructure/terraform/aws-edge/', 'infrastructure/terraform/gcp-edge/')
+                       'infrastructure/terraform/aws-edge/', 'infrastructure/terraform/gcp-edge/',
+                       'deployment/bootstrap/client_setup/')
 
 
 def api_native_dependency(path):
