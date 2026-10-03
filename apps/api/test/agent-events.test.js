@@ -20,10 +20,10 @@ function fixture() {
       progress: { elapsed_ms: 1000, sdk_event_count: 4, last_sdk_event_at_ms: 1000, item_counts: { reasoning: 1, commandExecution: 1 },
         last_item: { kind: 'reasoning', status: 'inProgress' }, token_usage: { input_tokens: 100, output_tokens: 2 } } }] };
   const check = { id: 500, name: 'Railshot agent events', external_id: 'railshot-events:123:1', head_sha: sourceCommit,
-    details_url: 'https://github.com/org/apps/actions/runs/123', app: { slug: 'github-actions', id: 15368 },
+    details_url: 'https://github.com/org/apps/runs/500', app: { slug: 'github-actions', id: 15368 },
     status: 'in_progress', conclusion: null, output: { text: JSON.stringify(envelope) } };
   const run = { id: 123, path: '.github/workflows/railshot-deploy.yml', head_sha: sourceCommit, head_branch: 'main',
-    event: 'workflow_dispatch', repository: { full_name: 'org/apps' }, html_url: check.details_url, run_attempt: 1, status: 'in_progress' };
+    event: 'workflow_dispatch', repository: { full_name: 'org/apps' }, html_url: 'https://github.com/org/apps/actions/runs/123', run_attempt: 1, status: 'in_progress' };
   const f = { envelope, check, checks: [check], run, calls: [], onRun: null, rawBody: null };
   f.service = createDeploymentService({ token: 'server-secret-canary', owner: 'org', repo: 'apps', targetId: 'demo' }, async (url, options) => {
     f.calls.push(url); assert.equal(options.redirect, 'error'); assert.equal(options.headers.authorization, 'Bearer server-secret-canary');
@@ -68,6 +68,11 @@ test('current attempt cannot fall back to an old producer and a concurrent rerun
   assert.deepEqual(result.items, []);
 });
 
+test('the requested workflow details URL is also accepted', async () => {
+  const f = fixture(); f.check.details_url = f.run.html_url;
+  assert.equal((await f.read()).state, 'live');
+});
+
 test('complete paginated listings reject duplicate external IDs instead of selecting a convenient producer', async () => {
   const f = fixture();
   f.checks = Array.from({ length: 20 }, (_, i) => ({ id: 1000 + i, external_id: `railshot-events:${1000 + i}:1` })).concat(f.check);
@@ -88,6 +93,8 @@ test('malformed, oversized, foreign and raw SDK payloads never leave the API', a
     'wrong producer': (f) => { f.check.app.slug = 'other'; },
     'wrong app id': (f) => { f.check.app.id = 1; },
     'wrong details URL': (f) => { f.check.details_url += '/attempts/1'; },
+    'another check URL': (f) => { f.check.details_url = 'https://github.com/org/apps/runs/501'; },
+    'another repository check URL': (f) => { f.check.details_url = 'https://github.com/other/apps/runs/500'; },
     'wrong check head': (f) => { f.check.head_sha = 'b'.repeat(40); },
     'wrong check name': (f) => { f.check.name = 'other'; },
     'wrong app binding': (f) => { f.envelope.app = 'other-app'; f.save(); },
