@@ -12,9 +12,9 @@
     "addresses_failure": { "type": "string", "maxLength": 300, "description": "Fixer: the failure signature this patch targets." },
     "gate_plan": {
       "type": "array", "minItems": 5, "maxItems": 5,
-      "description": "Before files are applied, plan the complete gate order L0,L1,Q,L2,L4,L3. Say what changes or what existing evidence satisfies each gate; unexecuted checks remain unverified.",
+      "description": "Before files are applied, plan the complete gate order L0,L1,L2,L4,L3. Say what changes or what existing evidence satisfies each gate; unexecuted checks remain unverified.",
       "items": {"type": "object", "additionalProperties": false, "required": ["gate", "action"],
-        "properties": {"gate": {"enum": ["L0", "L1", "Q", "L2", "L4", "L3"]},
+        "properties": {"gate": {"enum": ["L0", "L1", "L2", "L4", "L3"]},
           "action": {"type": "string", "minLength": 1, "maxLength": 400}}}
     },
     "files_changed": {
