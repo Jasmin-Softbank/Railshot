@@ -733,6 +733,7 @@ test('original dashboard cards submit three source types through backend selecti
   const zip = await archiveFromPath(files);
   await page.locator('#archive').setInputFiles({ name: 'archive-app.zip', mimeType: 'application/zip', buffer: zip.bytes });
   await review();
+  await page.locator('#review-panel').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#review-app').innerText(), 'archive-app');
   await run();
   await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('archive-app') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
@@ -740,6 +741,7 @@ test('original dashboard cards submit three source types through backend selecti
   await writeFile(join(files, 'index.js'), 'source from folder');
   await page.locator('#folder').setInputFiles(files);
   await review();
+  await page.locator('#review-panel').waitFor({ state: 'visible' });
   assert.equal(await page.locator('#review-app').innerText(), 'fixture');
   await run();
   await page.waitForFunction(() => document.querySelector('#run-meta').textContent.includes('fixture') && document.querySelector('#run-state').textContent === '앱 배포 완료', undefined, { timeout: 30000 });
@@ -884,6 +886,7 @@ test('each provider selection keeps the assigned CI and CD target through reload
     assert.equal(submissions.length, 0); assert.equal(deliveries.length, 0);
     await page.locator('#repository-url').fill(`https://github.com/example/${app}`);
     await page.locator('#deploy-form button[type="submit"]').click();
+    await page.locator('#review-panel').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#review-app').innerText(), app);
     await page.locator('#deploy-button').click();
     await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
