@@ -160,6 +160,7 @@ test('application updates keep app and environment fixed across all source forma
     assert.equal(await page.locator('#target-section').isVisible(), false);
   };
   await page.locator('[data-view="history"]').click();
+  await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
   assert.match(await page.locator('#applications-list').innerText(), /현재 서비스: deployed-v1/);
   assert.match(await page.locator('#applications-list').innerText(), /최근 시도: 실행 실패 · failed-v2/);
   await page.getByRole('button', { name: 'stable-app 앱 상세·업데이트' }).click();
