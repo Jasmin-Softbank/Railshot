@@ -132,8 +132,8 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 @media (max-width: 680px) {
   .shell { display: block; }
   .sidebar { padding: 19px 20px 14px; }
-  .navigation { display: flex; gap: 4px; margin-top: 16px; overflow-x: auto; }
-  .nav-item { white-space: nowrap; padding: 10px 12px; }
+  .navigation { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; margin-top: 16px; }
+  .nav-item { min-height: 44px; white-space: nowrap; padding: 10px 12px; }
   .sidebar-footer { display: none; }
   .content { padding: 30px 18px 48px; }
   .deploy-form, .review-panel { padding: 19px; }
@@ -183,9 +183,13 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .execution-heading { font-size: 20px; margin: 0; }
 .execution-note { margin: 10px 0 20px; }
 .history-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.history-row > div { flex: 1; min-width: 180px; }
+.history-row > div { flex: 1 1 180px; min-width: 0; }
 .history-row strong { font-size: 14px; }
 .history-actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; }
+.history-actions .history-actions { margin-top: 0; }
+.history-actions .text-button { min-height: 44px; margin-right: 0; padding: 10px 8px; }
+.application-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.application-title strong { min-width: 0; overflow-wrap: anywhere; }
 .application-panel, .update-context { margin-bottom: 24px; }
 .update-context { padding: 24px; }
 .update-context p, .application-detail, .update-changes { overflow-wrap: anywhere; line-height: 1.7; }
@@ -224,7 +228,7 @@ button:disabled { cursor: default; opacity: .5; }
 .lifecycle-operation li, .lifecycle-preview li { margin-block: 8px; font-size: 13px; }
 .danger-button { color: var(--color-error); }
 .primary-button.danger-button { background: var(--color-error); color: white; }
-#lifecycle-dialog { width: min(660px, calc(100% - 36px)); max-height: calc(100% - 36px); padding: 28px; border: 1px solid var(--color-border); border-radius: 12px; color: var(--color-ink); background: var(--color-surface); overflow: auto; }
+#lifecycle-dialog { width: min(660px, calc(100% - 36px)); max-height: calc(100% - 36px); padding: 28px; border: 1px solid var(--color-border); border-radius: 12px; color: var(--color-ink); background: var(--color-surface); overflow: auto; overscroll-behavior: contain; }
 #lifecycle-dialog::backdrop { background: rgb(19 35 48 / 55%); }
 #lifecycle-dialog h2 { margin-top: 0; font-size: 21px; }
 #lifecycle-description { line-height: 1.7; }
