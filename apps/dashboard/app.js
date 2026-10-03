@@ -333,7 +333,6 @@ async function reviewUpdate() {
   else if (!selectedSource) error.textContent = '업데이트할 소스를 선택하세요.';
   else if (selectedSource.kind === 'repository' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s?#]+\/?$/.test(selectedSource.label)) error.textContent = '공개 GitHub 저장소 URL을 입력하세요.';
   else if (selectedSource.kind === 'archive' && !selectedSource.files[0]?.name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
-  else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
     invalidateReview();
     const generation = reviewGeneration, application = updateApplication;
@@ -404,7 +403,6 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else if (selectedSource.kind === 'archive' && !archive.files[0].name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
   else if (selected.environment === 'onprem' && !selected.provider) error.textContent = '온프레미스 인프라 종류를 선택하세요.';
   else if (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available)) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
-  else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
     invalidateReview();
     const generation = reviewGeneration, source = selectedSource;
@@ -481,6 +479,10 @@ function renderRun() {
     ? '15초마다 상태를 확인합니다. 페이지를 닫아도 서버의 실행은 계속됩니다.'
     : current.status === 'published' ? '검증된 이미지가 게시됐습니다. 앱 배포 완료와는 별개입니다.'
     : current.status === 'unknown' ? '결과를 확인하기 전에는 같은 작업을 새로 실행하지 않습니다.' : '서버가 확인한 최종 실행 결과입니다.');
+  if (current.status === 'queued' && current.queue?.enqueued_at)
+    document.querySelector('#run-message').textContent = '소스를 저장하고 대기열에 접수했습니다. 앞선 작업이 끝나면 자동으로 실행됩니다.';
+  if (current.status === 'unknown' && current.queue?.released_at)
+    document.querySelector('#run-message').textContent = `${current.error?.message || '기존 실행 결과는 확인이 필요합니다.'} 대기 제한 시간이 지나 다른 앱의 실행을 허용했습니다. 이 작업을 자동으로 재실행하지 않습니다.`;
   const steps = current.steps || current.ci?.steps || [];
   document.querySelector('#run-steps').replaceChildren(...steps.map((step) => {
     const item = document.createElement('li');
@@ -520,7 +522,7 @@ function renderRun() {
 }
 
 deployButton.addEventListener('click', async () => {
-  if (submitting || !reviewed || deployButton.disabled || activeRun()) return;
+  if (submitting || !reviewed || deployButton.disabled) return;
   submitting = true;
   deployButton.disabled = true;
   requestError.hidden = true;

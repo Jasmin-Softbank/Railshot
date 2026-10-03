@@ -90,7 +90,7 @@ label은 1–80자, URL은 최대 2048자, username은 최대 256자, password�
 
 ## 이관·백업·복구
 
-DB의 `user_version=0`일 때 기존 `state.json`을 한 번 가져오고 트랜잭션에서 version 1을 기록한다. 기존 기록은 `session_id=NULL`로 남겨 첫 방문자에게 넘기지 않는다. `state.json`은 보존하지만 이후 기록의 정본이 아니다. 재기동 시 queued/running은 기존 정책대로 unknown으로 바꾸며 재실행하지 않는다.
+DB의 `user_version=0`일 때 기존 `state.json`을 한 번 가져오고 트랜잭션에서 version 1을 기록한다. 기존 기록은 `session_id=NULL`로 남겨 첫 방문자에게 넘기지 않는다. `state.json`은 보존하지만 이후 기록의 정본이 아니다. 재기동 시 running과 구형 queued는 unknown으로 바꾸며 재실행하지 않는다. 영속 queue.sequence/enqueued_at이 있고 started_at이 없는 새 배포 queued는 저장한 소스 그대로 FIFO 실행을 재개한다. unknown 기록은 보존하며 worker 종료 후 60초가 지나면 전역 슬롯만 반납한다. 같은 앱의 변경은 결과 확인 전까지 차단한다.
 
 배포 전 API에 활성 실행이 없는지 확인하고 기존 상태 디렉터리를 백업한다. 실행 중인 DB를 파일 복사할 때 WAL을 누락하면 안 된다. SQLite backup API 또는 API 정상 종료·checkpoint 후 디렉터리 snapshot을 사용한다. 복구 가능한 백업에는 DB, 소스 snapshot, 실행에 참조되는 비공개 환경 상태가 필요하고 `connections.key`도 별도 보호 백업으로 보관한다. DB만 공개 저장소나 CI artifact에 업로드하지 않는다.
 

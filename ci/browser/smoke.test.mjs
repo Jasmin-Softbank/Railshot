@@ -72,11 +72,19 @@ test('application detail keeps update and lifecycle controls while active deploy
   const deployment = { id: 'active-deployment', application_id: building.id, app: building.app,
     target_id: building.target_id, status: 'running', stage: 'ci', steps: [] };
   const writes = [];
+  const previews = [];
   const operation = { id: 'manage-stable', application_id: stable.id, action: 'stop', status: 'running', steps: [], residuals: [] };
   const json = (route, data, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(data) });
   await page.route('**/api/v1/applications?*', (route) => json(route, new URL(route.request().url()).searchParams.has('marker')
     ? { items: [building], next_marker: null } : { items: [stable], next_marker: 'next-page' }));
   await page.route('**/api/v1/applications/stable-application', (route) => json(route, stable));
+  await page.route('**/api/v1/applications/stable-application/updates', (route) => {
+    previews.push(route.request().headers()['idempotency-key']);
+    return json(route, { id: 'stable-preview', application_id: stable.id, app: stable.app, target_id: stable.target_id,
+      status: 'preview', base_deployment_id: baseline.id, expires_at: '2099-01-01T00:00:00Z', baseline_kind: 'deployed',
+      changes: { added: [], modified: ['app.js'], deleted: [], unchanged: 0 }, no_changes: false },
+    200, { location: '/api/v1/deployments/stable-preview' });
+  });
   await page.route('**/api/v1/deployments?*', (route) => json(route, { items: [deployment], next_marker: null }));
   await page.route('**/api/v1/deployments/active-deployment', (route) => json(route, deployment));
   await page.route('**/api/v1/applications/*/plans', (route) => {
@@ -110,6 +118,11 @@ test('application detail keeps update and lifecycle controls while active deploy
   await page.locator('#application-update').click();
   assert.equal(await page.locator('#update-context').isVisible(), true);
   assert.equal(await page.locator('#target-section').isVisible(), false);
+  await page.locator('#repository-url').fill('https://github.com/example/stable-update');
+  await page.locator('#deploy-form button[type="submit"]').click();
+  await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
+  assert.equal(previews.length, 1, 'another app running must not block this app update preview');
+  assert.equal(await page.locator('#review-app').innerText(), 'stable-app');
   await page.locator('[data-view="history"]').click();
   await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
   await page.locator('#detail-application-actions').getByRole('button', { name: 'stable-app 중지', exact: true }).click();
@@ -343,6 +356,155 @@ test('browser update crosses real preview/start/source HTTP routes and reuses th
   const files = await inspectArchive(await readFile(await download.path()));
   assert.equal(files.find((file) => file.path === 'app.js').content.toString(), 'version 2');
   assert.deepEqual(errors, []);
+});
+
+async function queuedBrowser(t, { unknownFirst = false } = {}) {
+  const submissions = [], deliveries = [], publications = new Map();
+  let release, active = 0, maximumActive = 0;
+  const held = new Promise((resolve) => { release = resolve; });
+  // Release before start() closes its product worker, including on assertion failure.
+  t.after(() => release());
+  const service = { targetId: 'runtime-aws', targetIds: [], allowTarget() {},
+    async deploy(input) {
+      submissions.push(input);
+      const run = String(submissions.length), sha = String(submissions.length).repeat(40);
+      publications.set(run, { run_id: run, app: input.app, tenant: 'demo', target_id: input.target_id,
+        source_commit: sha, artifact_id: 900 + submissions.length, producer_attempt: 1 });
+      return { run_id: run, source_commit: sha };
+    },
+    status: async (id) => ({ state: 'published', publication: publications.get(id) }),
+    sourceFiles: async (publication) => submissions[Number(publication.run_id) - 1].files };
+  const applicationAdapter = { targets: { 'runtime-aws': { provider: 'aws', automaticDelivery: true } },
+    describe: (environment, app) => ({ id: `app-${app}`, app, target_id: `app-${app}`, environment_target_id: environment, provider: 'aws' }),
+    register: async () => ({ status: 'ready' }),
+    async deployPublished(_application, args) {
+      maximumActive = Math.max(maximumActive, ++active);
+      deliveries.push(args.app);
+      try {
+        if (args.app === 'alpha-queue') {
+          await held;
+          if (unknownFirst) return { cd: { state: 'unknown', deployed: false }, public_http: { state: 'not_run' },
+            error: { code: 'LOCAL_FIXTURE_UNCERTAIN', outcome_unknown: true } };
+        }
+        return { cd: { state: 'deployed', deployed: true, revision: args.sourceCommit },
+          public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: `https://${args.app}.example.test/` } };
+      } finally { active--; }
+    } };
+  const fixture = await start(t, { service, applicationAdapter, target: { id: 'runtime-aws', provider: 'aws' },
+    sourceLoader: async (repository) => ({ source: { type: 'github', repository, sha: 'a'.repeat(40) },
+      files: [{ path: 'app.js', content: Buffer.from(repository) }] }) });
+  const { page, origin } = fixture;
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('URL 확인'));
+  async function submit() {
+    await page.locator('#deploy-form button[type="submit"]').click();
+    await page.waitForFunction(() => !document.querySelector('#review-panel').hidden && !document.querySelector('#deploy-button').disabled);
+    const response = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/deployments'
+      && response.request().method() === 'POST');
+    await page.locator('#deploy-button').click();
+    const accepted = await response;
+    assert.equal(accepted.status(), 202, 'an active deployment must not reject another app upload');
+    const data = await accepted.json(), id = data.resource_id || data.id;
+    assert.equal(accepted.headers().location, `/api/v1/deployments/${id}`);
+    return id;
+  }
+  async function read(id) {
+    const response = await page.request.get(`${origin}/api/v1/deployments/${id}`);
+    assert.equal(response.status(), 200);
+    return response.json();
+  }
+  async function until(id, predicate, timeout = 10000) {
+    const deadline = performance.now() + timeout;
+    do {
+      const value = await read(id);
+      if (predicate(value)) return value;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } while (performance.now() < deadline);
+    assert.fail(`Deployment ${id} did not reach the expected queue state`);
+  }
+  return { ...fixture, submissions, deliveries, release, submit, read, until, maximumActive: () => maximumActive };
+}
+
+test('browser accepts overlapping GitHub ZIP and folder uploads and the real HTTP queue dispatches FIFO once', { timeout: 45000 }, async (t) => {
+  const f = await queuedBrowser(t), { page, stateDirectory } = f;
+  await page.locator('#repository-url').fill('https://github.com/example/alpha-queue');
+  const alpha = await f.submit();
+  await f.until(alpha, (row) => row.stage === 'cd');
+  assert.equal(f.submissions.length, 1);
+
+  const zipDirectory = join(stateDirectory, 'zip-source'); await mkdir(zipDirectory);
+  await writeFile(join(zipDirectory, 'app.js'), 'source from queued ZIP');
+  const zip = await archiveFromPath(zipDirectory);
+  await page.locator('#archive').setInputFiles({ name: 'beta-queue.zip', mimeType: 'application/zip', buffer: zip.bytes });
+  const beta = await f.submit();
+  await page.waitForFunction(() => document.querySelector('#run-message').textContent.includes('대기열에 접수'));
+  assert.equal(await page.locator('#run-state').innerText(), '실행 대기 중');
+  assert.match(await page.locator('#run-message').innerText(), /앞선 작업이 끝나면 자동으로 실행/);
+
+  const folder = join(stateDirectory, 'gamma-queue'); await mkdir(folder);
+  await writeFile(join(folder, 'app.js'), 'source from queued folder');
+  await page.locator('#folder').setInputFiles(folder);
+  const gamma = await f.submit();
+  await page.waitForFunction(() => document.querySelector('#run-message').textContent.includes('대기열에 접수'));
+  const accepted = await Promise.all([alpha, beta, gamma].map(f.read));
+  assert.deepEqual(accepted.map((row) => row.queue.sequence), [1, 2, 3]);
+  assert.ok(accepted.every((row) => Number.isFinite(Date.parse(row.queue.enqueued_at))));
+  assert.deepEqual(accepted.map((row) => row.status), ['running', 'queued', 'queued']);
+  assert.deepEqual(f.submissions.map((row) => row.app), ['alpha-queue']);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#run-message').textContent.includes('대기열에 접수'));
+  assert.deepEqual(f.submissions.map((row) => row.app), ['alpha-queue'], 'reload does not dispatch waiting sources');
+
+  f.release();
+  for (const id of [alpha, beta, gamma]) await f.until(id, (row) => row.status === 'succeeded');
+  assert.deepEqual(f.submissions.map((row) => row.app), ['alpha-queue', 'beta-queue', 'gamma-queue']);
+  assert.deepEqual(f.deliveries, ['alpha-queue', 'beta-queue', 'gamma-queue']);
+  assert.equal(f.maximumActive(), 1);
+  assert.equal(f.submissions[1].files[0].content.toString(), 'source from queued ZIP');
+  assert.equal(f.submissions[2].files[0].content.toString(), 'source from queued folder');
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+  assert.equal(f.requests.filter((request) => request.method === 'POST' && request.path === '/api/v1/deployments').length, 3);
+  assert.deepEqual(f.errors, []);
+});
+
+test('browser shows unknown slot release after the real default 60 seconds without replay or false success', { timeout: 100000 }, async (t) => {
+  const f = await queuedBrowser(t, { unknownFirst: true }), { page } = f;
+  await page.locator('#repository-url').fill('https://github.com/example/alpha-queue');
+  const alpha = await f.submit();
+  await f.until(alpha, (row) => row.stage === 'cd');
+  f.release();
+  const unknown = await f.until(alpha, (row) => row.status === 'unknown');
+  assert.equal(unknown.queue.released_at, undefined);
+  await page.reload();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '실행 결과 확인 필요');
+  assert.doesNotMatch(await page.locator('#run-message').innerText(), /다른 앱의 실행을 허용/);
+
+  await page.locator('#repository-url').fill('https://github.com/example/beta-queue');
+  const beta = await f.submit();
+  await page.waitForFunction(() => document.querySelector('#run-message').textContent.includes('대기열에 접수'));
+  assert.equal((await f.read(beta)).status, 'queued');
+  assert.deepEqual(f.submissions.map((row) => row.app), ['alpha-queue']);
+  // Keep the real API's default clock and grace period; do not synthesize released_at in a browser route.
+  const completed = await f.until(beta, (row) => row.status === 'succeeded', 75000);
+  const released = await f.read(alpha);
+  assert.equal(released.status, 'unknown');
+  assert.equal(released.error.outcome_unknown, true);
+  assert.equal(released.queue.release_reason, 'unknown_timeout');
+  assert.ok(Date.parse(released.queue.released_at) - Date.parse(released.unknown_since) >= 60000);
+  assert.ok(Date.parse(completed.queue.started_at) >= Date.parse(released.queue.released_at));
+  assert.equal(released.ci.run_id, unknown.ci.run_id);
+  assert.deepEqual(f.submissions.map((row) => row.app), ['alpha-queue', 'beta-queue']);
+
+  await page.locator('[data-view="history"]').click();
+  await page.locator('#history-refresh').click();
+  await page.getByRole('button', { name: 'alpha-queue 실행 상세·작업 로그', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#monitor-message').textContent.includes('다른 앱의 실행을 허용'));
+  assert.equal(await page.locator('#monitor-state').innerText(), '실행 결과 확인 필요');
+  assert.match(await page.locator('#monitor-message').innerText(), /자동으로 재실행하지 않습니다/);
+  assert.equal(await page.locator('#application-link').isVisible(), false);
+  assert.equal(f.requests.filter((request) => request.method === 'POST' && request.path === '/api/v1/deployments').length, 2);
+  assert.deepEqual(f.errors, []);
 });
 
 test('original dashboard cards submit three source types through backend selection and restore the saved record', { timeout: 90000 }, async (t) => {

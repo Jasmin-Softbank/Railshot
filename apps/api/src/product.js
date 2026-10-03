@@ -17,6 +17,7 @@ export class ProductError extends Error {
 const invalid = (message) => new ProductError(422, 'INVALID_INPUT', message);
 const unavailable = () => new ProductError(409, 'CAPABILITY_UNAVAILABLE', '이 서버에 해당 실행 기능이 설정되지 않았습니다.');
 const active = (record) => ['queued', 'running', 'unknown'].includes(record.status);
+const occupiesSlot = (record) => active(record) && !(record.status === 'unknown' && record.queue?.released_at);
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const operationError = (code = 'UPSTREAM_FAILURE', unknown = true) => ({ code, request_id: randomUUID(), message: unknown ? '외부 실행 결과를 확인할 수 없습니다. 자동으로 재실행하지 않습니다.' : '실행이 완료되지 않았습니다.', retryable: false, outcome_unknown: unknown });
 function ciObservation(build, previous = {}) {
@@ -41,7 +42,7 @@ function publicRecord(record) {
   return structuredClone(visible);
 }
 function checkFree(state, sessionId = null, except = null) {
-  const blocker = Object.values(state.operations).find((record) => record.id !== except && active(record));
+  const blocker = Object.values(state.operations).find((record) => record.id !== except && occupiesSlot(record));
   if (!blocker) return;
   // ponytail: one shared Git branch and runtime writer; per-app admission needs isolated writers first.
   const owned = Boolean(sessionId && blocker.session_id === sessionId);
@@ -55,7 +56,7 @@ function checkFree(state, sessionId = null, except = null) {
     { retryable: blocker.status !== 'unknown', admission });
 }
 
-export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, unknownGraceMs = 60_000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const targetId = target?.id || service?.targetId;
   if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
   const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
@@ -68,6 +69,7 @@ export async function createProductService({ service, directory, target, provide
       selections.set(provider, id);
     }
   }
+  if (!Number.isSafeInteger(unknownGraceMs) || unknownGraceMs < 1) throw invalid('unknown 대기 시간은 양의 정수여야 합니다.');
   const store = await createProductStore(directory);
   const abort = new AbortController();
   function checkCapacity(state, sourceBytes = 0) {
@@ -85,7 +87,8 @@ export async function createProductService({ service, directory, target, provide
       throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
     return application;
   }
-  function lifecycleAvailable(application, action, cancelling = null) {
+  function lifecycleAvailable(state, application, action, cancelling = null) {
+    checkUncertainResource(state, application, cancelling);
     if (!['planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle'].every((name) => typeof applicationAdapter?.[name] === 'function')) throw unavailable();
     // The normal native plan must prove no registration intent/binding exists before a local tombstone.
     if (action === 'delete' && !cancelling && application.status === 'queued') return;
@@ -101,7 +104,7 @@ export async function createProductService({ service, directory, target, provide
       deployment: latest ? { id: latest.id, ...(deferred ? {} : { source_commit: latest.source_commit || null }) } : null });
   }
   function deletionCandidate(state, applicationId, action) {
-    const pending = Object.values(state.operations).filter(active);
+    const pending = Object.values(state.operations).filter(occupiesSlot);
     return action === 'delete' && pending.length === 1 && pending[0].kind === 'deployments'
       && pending[0].application_id === applicationId && ['queued', 'running'].includes(pending[0].status) ? pending[0].id : null;
   }
@@ -158,7 +161,12 @@ export async function createProductService({ service, directory, target, provide
     return { ...input, app, target_id: id };
   }
   async function update(id, patch) {
-    await store.transaction((state) => { Object.assign(state.operations[id], patch, { updated_at: new Date().toISOString() }); });
+    await store.transaction((state) => {
+      const record = state.operations[id], now = new Date().toISOString();
+      if (patch.status === 'unknown' && record.status !== 'unknown') record.unknown_since = now;
+      if (patch.status === 'running' && record.queue) { delete record.queue.released_at; delete record.queue.release_reason; }
+      Object.assign(record, patch, { updated_at: now });
+    });
   }
   function launch(fn, deploymentId = null) {
     const worker = Promise.resolve().then(fn).catch(() => { console.error('RAILSHOT worker could not persist its final state; inspect private workspace state.'); }).finally(() => {
@@ -167,6 +175,64 @@ export async function createProductService({ service, directory, target, provide
     });
     workers.add(worker);
     if (deploymentId) deploymentWorkers.set(deploymentId, worker);
+    return worker;
+  }
+  function checkUncertainResource(state, candidate, except = null) {
+    const target = candidate.environment_target_id || candidate.target_id;
+    const blocker = Object.values(state.operations).find((row) => row.id !== except && row.status === 'unknown'
+      && (row.app && row.app === candidate.app
+        || (row.kind === 'environments' || row.stage === 'environment')
+          && (!target || (row.environment_target_id || row.target_id || state.plans[row.plan_id]?.private?.profile?.target?.target_id) === target)));
+    if (blocker) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 또는 환경의 이전 실행 결과를 먼저 확인해야 합니다. 다른 앱은 대기열에 접수할 수 있습니다.');
+  }
+  function enqueue(state, record) {
+    record.queue = { sequence: 1 + Math.max(0, ...Object.values(state.operations).map((row) => row.queue?.sequence || 0)),
+      enqueued_at: new Date().toISOString() };
+    record.status = 'queued';
+  }
+  let pumping;
+  function pump() {
+    if (pumping || abort.signal.aborted || workers.size) return pumping;
+    const rows = Object.values(store.read().operations);
+    const due = (row) => row.status === 'unknown' && !row.queue?.released_at
+      && (!Number.isFinite(Date.parse(row.unknown_since || row.updated_at || row.created_at))
+        || Date.now() - Date.parse(row.unknown_since || row.updated_at || row.created_at) >= unknownGraceMs);
+    const waiting = (row) => row.kind === 'deployments' && row.status === 'queued' && row.queue?.enqueued_at && !row.queue.started_at;
+    if (!rows.some(due) && (!rows.some(waiting) || rows.some((row) => occupiesSlot(row) && !waiting(row)))) return;
+    // ponytail: existing SQLite operations are a bounded FIFO for one API replica;
+    // use a broker with fenced workers only when the runtime gains multiple writers.
+    pumping = (async () => {
+      while (!abort.signal.aborted) {
+        if (workers.size) break; // Never detach a live writer merely because its clock expired.
+        const record = await store.transaction((state) => {
+          if (abort.signal.aborted) return null;
+          const now = Date.now(), iso = new Date(now).toISOString();
+          for (const row of Object.values(state.operations)) {
+            if (row.status !== 'unknown' || row.queue?.released_at) continue;
+            if (!Number.isFinite(Date.parse(row.unknown_since))) row.unknown_since =
+              Number.isFinite(Date.parse(row.updated_at || row.created_at)) ? row.updated_at || row.created_at : iso;
+            if (now - Date.parse(row.unknown_since) >= unknownGraceMs)
+              row.queue = { ...row.queue, released_at: iso, release_reason: 'unknown_timeout' };
+          }
+          if (Object.values(state.operations).some((row) => occupiesSlot(row) && !(row.status === 'queued' && row.queue?.enqueued_at))) return null;
+          const next = Object.values(state.operations).filter((row) => row.kind === 'deployments' && row.status === 'queued' && row.queue?.enqueued_at && !row.queue.started_at)
+            .sort((a, b) => a.queue.sequence - b.queue.sequence)[0];
+          if (!next) return null;
+          try { checkUncertainResource(state, next, next.id); }
+          catch (error) {
+            Object.assign(next, { status: 'blocked', error: operationError(error.code, false), updated_at: iso });
+            return { skipped: true };
+          }
+          Object.assign(next, { status: 'running', updated_at: iso });
+          next.queue.started_at = iso;
+          return structuredClone(next);
+        });
+        if (!record || abort.signal.aborted) break;
+        if (!record.skipped) await launch(() => runDeployment(record), record.id);
+      }
+    })().catch(() => { console.error('RAILSHOT deployment queue could not persist state; inspect private workspace state.'); })
+      .finally(() => { pumping = null; });
+    return pumping;
   }
   function find(kind, id, sessionId = null) {
     const operation = store.read().operations[id];
@@ -226,7 +292,7 @@ export async function createProductService({ service, directory, target, provide
       if (application && applicationAdapter.targets[application.environment_target_id]?.automaticDelivery === false) throw unavailable();
       if (previousApplication && previousApplication.session_id !== sessionId) throw new ProductError(409, 'APPLICATION_OWNERSHIP_CONFLICT', '같은 환경의 이 앱 이름은 다른 세션에 등록되어 있습니다. 다른 이름을 사용하세요.');
       if (previousApplication && ['stopped', 'deleted'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_STATE_CONFLICT', '중지한 앱은 명시적으로 시작해야 하며 삭제한 앱은 다시 배포할 수 없습니다.');
-      if (previousApplication && !['queued', 'ready'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 등록 결과를 운영자가 확인해야 합니다. 자동 재등록하지 않습니다.');
+      if (previousApplication && !['queued', 'registering', 'ready'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 등록 결과를 운영자가 확인해야 합니다. 자동 재등록하지 않습니다.');
       const selectedCdAvailable = Boolean(deployPublished && (!deployPublished.targets || selectedCdTarget));
       const savedEnvironment = registeredEnvironment(state, input.target_id, sessionId);
       const registered = !selectedCdAvailable && !input.plan_id && kind === 'deployments' ? savedEnvironment : null;
@@ -243,7 +309,8 @@ export async function createProductService({ service, directory, target, provide
       }
       if (!admittedTarget && !plan && !savedEnvironment) throw invalid('등록된 배포 대상만 사용할 수 있습니다.');
       if (kind === 'deployments' && !input.plan_id && !selectedCdAvailable && !registered && !application) throw unavailable();
-      checkFree(state, sessionId);
+      if (kind === 'builds') checkFree(state, sessionId);
+      checkUncertainResource(state, input);
       checkCapacity(state);
       const applicationName = selectedCdTarget?.applicationName || savedEnvironment?.applicationName;
       if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid(`등록된 배포 앱 이름과 일치하지 않습니다. 이 대상은 ${applicationName} 전용입니다. ${input.app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
@@ -263,6 +330,7 @@ export async function createProductService({ service, directory, target, provide
         actions_url: null, error: null, created_at: now, updated_at: now, fingerprint, key,
         source: source.source || null, source_bytes: sourceBytes, source_digest: digest(files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort()),
       };
+      if (kind === 'deployments') enqueue(state, record);
       state.operations[id] = record;
       if (plan) plan.environment_id = record.environment_id;
       if (key) state.keys[scopeKey(kind, key, sessionId)] = id;
@@ -432,6 +500,7 @@ export async function createProductService({ service, directory, target, provide
         if (existing.fingerprint !== fingerprint) throw new ProductError(409, 'IDEMPOTENCY_CONFLICT', '같은 키로 다른 입력을 보낼 수 없습니다.');
         return publicRecord(existing);
       }
+      checkUncertainResource(state, application);
       readyApplication(state, applicationId, sessionId);
       const baseline = applicationVersions(state, application).current;
       if (!baseline) throw new ProductError(409, 'BASE_DEPLOYMENT_REQUIRED', '업데이트 기준으로 사용할 성공한 배포가 없습니다.');
@@ -490,20 +559,71 @@ export async function createProductService({ service, directory, target, provide
       const current = applicationVersions(state, application).current;
       if (current?.id !== record.base_deployment_id || current.cd.revision !== record.base_revision)
         throw new ProductError(409, 'UPDATE_BASE_CHANGED', '기준 배포가 변경되었습니다. 미리보기를 다시 만드세요.');
-      checkFree(state, sessionId);
+      checkUncertainResource(state, record, id);
       const files = await submittedFiles(record);
       Object.assign(record, { status: record.no_changes && !options.rebuild ? 'unchanged' : 'queued',
         stage: record.no_changes && !options.rebuild ? 'complete' : 'ci', rebuild: options.rebuild === true, updated_at: new Date().toISOString() });
+      if (record.status === 'queued') enqueue(state, record);
       return { record, replay: record.status === 'unchanged', input: { app: record.app, target_id: record.target_id, files, source: record.source } };
     });
-    if (!accepted.replay) launch(async () => {
-      let result;
-      try { result = await submit(accepted.record, accepted.input); }
-      catch (error) { if (error instanceof ProductError && error.outcomeUnknown) return; throw error; }
-      if (result && !deletionRequested(accepted.record.id)) await observe(accepted.record, String(result.run_id));
-    }, accepted.record.id);
+    if (!accepted.replay) void pump();
     return publicRecord(accepted.record);
   }
+  async function runDeployment(record) {
+    if (abort.signal.aborted) return;
+    try {
+      if (deletionRequested(record.id)) return;
+      const state = store.read(), plan = record.plan_id ? state.plans[record.plan_id] : null;
+      const input = { app: record.app, target_id: record.target_id, files: await submittedFiles(record), source: record.source };
+      if (record.base_deployment_id) {
+        const application = readyApplication(state, record.application_id, record.session_id);
+        const current = applicationVersions(state, application).current;
+        if (current?.id !== record.base_deployment_id || current.cd.revision !== record.base_revision)
+          throw new ProductError(409, 'UPDATE_BASE_CHANGED', '기준 배포가 변경되었습니다. 미리보기를 다시 만드세요.');
+      }
+      if (plan) await environmentAdapter.verifyPlan(plan);
+      if (record.application_id && store.read().applications[record.application_id]?.status !== 'ready') {
+        const appId = record.application_id;
+        const application = store.read().applications[appId];
+        if (application?.status !== 'queued') throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '앱 상태가 변경되어 대기 중인 배포를 실행하지 않았습니다.');
+        await update(record.id, { status: 'running', stage: 'registration' });
+        await store.transaction((state) => { if (!state.operations[record.id].deletion_requested) state.applications[appId].status = 'registering'; });
+        try {
+          if (deletionRequested(record.id)) return;
+          const registered = await applicationAdapter.register(application);
+          await store.transaction((state) => { Object.assign(state.applications[appId], registered,
+            state.operations[record.id].deletion_requested ? { status: 'deleting' } : {}); });
+        } catch (error) {
+          const unknown = error.outcomeUnknown !== false;
+          // This read-only preflight precedes the native registration intent; only a new explicit request may retry it.
+          const unstarted = error.code === 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED' && error.outcomeUnknown === false;
+          await store.transaction((state) => { state.applications[appId].status = unstarted ? 'queued' : unknown ? 'unknown' : 'blocked'; });
+          await update(record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(error.code || 'APPLICATION_REGISTRATION_FAILED', unknown) });
+          return;
+        }
+        if (deletionRequested(record.id)) return;
+      }
+      if (plan) {
+        await update(record.id, { status: 'running', stage: 'environment' });
+        const environment = await environmentAdapter.execute(plan, { id: record.environment_id,
+          onProgress: (value) => update(record.id, { environment: value }) });
+        await update(record.id, { environment });
+        if (environment.status !== 'succeeded' || environment.deployment_supported !== true || environment.runtime_target_id !== record.target_id) {
+          await update(record.id, { status: environment.status === 'succeeded' ? 'blocked' : environment.status,
+            error: environment.error || operationError('DEPLOYMENT_TARGET_NOT_REGISTERED', false) }); return;
+        }
+      }
+      const result = await submit(record, input);
+      if (result && !deletionRequested(record.id)) await observe(record, String(result.run_id));
+    } catch (error) {
+      if (store.read().operations[record.id]?.error) return; // Keep precise CI submission diagnostics.
+      const known = error instanceof ProductError && !error.outcomeUnknown || error.outcomeUnknown === false;
+      await update(record.id, { status: known ? 'blocked' : 'unknown', error: operationError(known ? error.code || 'DEPLOYMENT_PRECHECK_FAILED' : 'STACK_OUTCOME_UNKNOWN', !known) });
+    }
+  }
+  const queueTimer = setInterval(pump, Math.min(pollInterval, 1000));
+  queueTimer.unref();
+  void pump();
   return {
     dashboard: store.dashboard,
     createUpdate, startUpdate,
@@ -522,7 +642,7 @@ export async function createProductService({ service, directory, target, provide
       return store.transaction(async (state) => {
         const application = applicationFor(state, applicationId, sessionId, true);
         const cancelling = deletionCandidate(state, applicationId, input.action);
-        checkFree(state, sessionId, cancelling); lifecycleAvailable(application, input.action, cancelling);
+        checkFree(state, sessionId, cancelling); lifecycleAvailable(state, application, input.action, cancelling);
         if (Object.keys(state.plans).length >= maxOperations) throw new ProductError(409, 'CAPACITY_EXCEEDED', '계획 보관 한도에 도달했습니다.');
         const id = randomUUID(), pending = Boolean(cancelling);
         if (pending && typeof applicationAdapter.planPendingDeletion !== 'function') throw unavailable();
@@ -566,7 +686,7 @@ export async function createProductService({ service, directory, target, provide
             || plan.application_snapshot !== applicationSnapshot(state, application, Boolean(plan.private?.deferred))) throw new ProductError(409, 'APPLICATION_PLAN_STALE', '계획이 만료되었거나 앱 상태가 바뀌었습니다. 새 계획을 확인하세요.');
         const cancelling = deletionCandidate(state, applicationId, input.action);
         if (cancelling && plan.cancelling_deployment_id !== cancelling) throw new ProductError(409, 'APPLICATION_PLAN_STALE', '배포 상태가 바뀌어 새 삭제 계획을 확인해야 합니다.');
-        checkFree(state, sessionId, cancelling); checkCapacity(state); lifecycleAvailable(application, input.action, cancelling);
+        checkFree(state, sessionId, cancelling); checkCapacity(state); lifecycleAvailable(state, application, input.action, cancelling);
         await applicationAdapter.verifyLifecyclePlan(application, plan);
         const quiescing = cancelling || (plan.private?.deferred ? plan.cancelling_deployment_id : null);
         if (quiescing && (state.operations[quiescing]?.kind !== 'deployments' || state.operations[quiescing].application_id !== applicationId))
@@ -680,47 +800,7 @@ export async function createProductService({ service, directory, target, provide
         input = { ...input, environment_target_id: input.target_id, target_id: application.target_id };
       }
       const reserved = await reserve('deployments', input, idempotencyKey(key), materialize, sessionId);
-      if (!reserved.replay) launch(async () => {
-        try {
-          if (deletionRequested(reserved.record.id)) return;
-          if (reserved.record.application_id && store.read().applications[reserved.record.application_id]?.status !== 'ready') {
-            const appId = reserved.record.application_id;
-            const application = store.read().applications[appId];
-            await update(reserved.record.id, { status: 'running', stage: 'registration' });
-            await store.transaction((state) => { if (!state.operations[reserved.record.id].deletion_requested) state.applications[appId].status = 'registering'; });
-            try {
-              if (deletionRequested(reserved.record.id)) return;
-              const registered = await applicationAdapter.register(application);
-              await store.transaction((state) => { Object.assign(state.applications[appId], registered,
-                state.operations[reserved.record.id].deletion_requested ? { status: 'deleting' } : {}); });
-            } catch (error) {
-              const unknown = error.outcomeUnknown !== false;
-              // This read-only preflight precedes the native registration intent; only a new explicit request may retry it.
-              const unstarted = error.code === 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED' && error.outcomeUnknown === false;
-              await store.transaction((state) => { state.applications[appId].status = unstarted ? 'queued' : unknown ? 'unknown' : 'blocked'; });
-              await update(reserved.record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(error.code || 'APPLICATION_REGISTRATION_FAILED', unknown) });
-              return;
-            }
-            if (deletionRequested(reserved.record.id)) return;
-          }
-          if (reserved.plan) {
-            await update(reserved.record.id, { status: 'running', stage: 'environment' });
-            const environment = await environmentAdapter.execute(reserved.plan, { id: reserved.record.environment_id,
-              onProgress: (value) => update(reserved.record.id, { environment: value }) });
-            await update(reserved.record.id, { environment });
-            if (environment.status !== 'succeeded' || environment.deployment_supported !== true || environment.runtime_target_id !== reserved.record.target_id) {
-              await update(reserved.record.id, { status: environment.status === 'succeeded' ? 'blocked' : environment.status,
-                error: environment.error || operationError('DEPLOYMENT_TARGET_NOT_REGISTERED', false) }); return;
-            }
-          }
-          const result = await submit(reserved.record, reserved.input);
-          if (result && !deletionRequested(reserved.record.id)) await observe(reserved.record, String(result.run_id));
-        } catch (error) {
-          // submit already persisted the precise failure; do not erase its diagnosis.
-          if (!store.read().operations[reserved.record.id]?.error)
-            await update(reserved.record.id, { status: 'unknown', error: operationError('STACK_OUTCOME_UNKNOWN', true) });
-        }
-      }, reserved.record.id);
+      if (!reserved.replay) void pump();
       return publicRecord(reserved.record);
     },
     async resumeDeployment(id, sessionId = null) {
@@ -761,6 +841,8 @@ export async function createProductService({ service, directory, target, provide
           throw new ProductError(409, 'RESUME_BINDING_MISMATCH', '원래 앱·환경·CI 실행과 연결이 일치하지 않습니다.');
         }
         checkFree(state, sessionId, id);
+        checkUncertainResource(state, operation, id);
+        if (operation.queue) { delete operation.queue.released_at; delete operation.queue.release_reason; }
         Object.assign(operation, { status: 'running', error: null, resumed_at: new Date().toISOString(),
           resume_count: (operation.resume_count || 0) + 1, updated_at: new Date().toISOString() });
         return operation;
@@ -850,6 +932,7 @@ export async function createProductService({ service, directory, target, provide
         if (!owns(plan, sessionId) || plan.kind === 'application-lifecycle') throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.');
         if (plan.environment_id) throw new ProductError(409, 'CONFLICT', '이미 실행에 사용된 계획입니다.');
         checkFree(state, sessionId);
+        checkUncertainResource(state, { target_id: plan.private?.profile?.target?.target_id });
         checkCapacity(state);
         await environmentAdapter.verifyPlan(plan);
         const id = randomUUID();
@@ -867,6 +950,6 @@ export async function createProductService({ service, directory, target, provide
       return publicRecord(accepted.record);
     },
     getEnvironment(id, sessionId = null) { return publicRecord(find('environments', id, sessionId)); },
-    async close() { abort.abort(); await Promise.allSettled(workers); await store.close(); },
+    async close() { abort.abort(); clearInterval(queueTimer); await pumping; await Promise.allSettled(workers); await store.close(); },
   };
 }
