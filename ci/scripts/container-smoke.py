@@ -199,6 +199,29 @@ def web_smoke(component, image, token_file, token, upstream=None):
         remove_container(name)
 
 
+def mcp_http_smoke(image):
+    name = 'railshot-mcp-http-smoke-' + secrets.token_hex(6)
+    try:
+        container = docker('run', '-d', '--name', name, '--read-only', '--cap-drop', 'ALL',
+                           '--security-opt', 'no-new-privileges', '-p', '127.0.0.1::4185',
+                           '-e', 'RAILSHOT_MCP_PORT=tcp://10.52.0.1:4185',
+                           image, 'node', 'src/remote-mcp.js')
+        endpoint = 'http://' + docker('port', container, '4185').splitlines()[0]
+        for attempt in range(50):
+            try:
+                status, _, body = http(endpoint + '/healthz')
+                assert status == 200 and body == b'ok\n'
+                break
+            except (URLError, ConnectionError, TimeoutError, AssertionError):
+                if attempt == 49:
+                    raise AssertionError('Remote MCP did not start with Kubernetes Service environment')
+                time.sleep(0.2)
+        status, _, body = http(endpoint + '/.well-known/oauth-protected-resource/mcp')
+        assert status == 200 and json.loads(body)['resource'] == 'https://railshot.io/mcp'
+    finally:
+        remove_container(name)
+
+
 def smoke(component, image):
     if component == 'ci-runner':
         # Registration and host firewall integration need the dedicated CI VM.
@@ -231,6 +254,7 @@ def smoke(component, image):
         finally:
             remove_container(name)
             process.communicate(timeout=15)
+        mcp_http_smoke(image)
         return
     if component == 'api':
         native_api_smoke(image)
