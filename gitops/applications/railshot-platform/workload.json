@@ -46,7 +46,7 @@
             "containers": [
               {
                 "name": "dashboard",
-                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:5817ba336ca559ebd8bf08f397daca95982d56967018fe6bfc559a45036cb06e",
+                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:120a2372e5c3ee3aee942bf70f490ad764625ab785f219b57394ea6c1262fde9",
                 "ports": [
                   {
                     "name": "http",
@@ -188,7 +188,7 @@
             "initContainers": [
               {
                 "name": "private-config",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:f62bb270eaf98553724eaff234a7430deab9ca34b682b8871c260f1fd9875d70",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:dca7f41dc09f0ed710110720da12a89a4c68819914c76e4b2c90d0d3b7ce1c8f",
                 "command": [
                   "node",
                   "/app/apps/api/prepare-state.js"
@@ -258,7 +258,7 @@
             "containers": [
               {
                 "name": "api",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:f62bb270eaf98553724eaff234a7430deab9ca34b682b8871c260f1fd9875d70",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:dca7f41dc09f0ed710110720da12a89a4c68819914c76e4b2c90d0d3b7ce1c8f",
                 "ports": [
                   {
                     "name": "http",
