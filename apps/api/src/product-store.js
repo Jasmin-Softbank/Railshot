@@ -98,13 +98,6 @@ export async function createProductStore(directory) {
     }
     if (state.version !== 1 || !state.operations || !state.keys || !state.bindings || !state.plans) throw new Error('Invalid workspace state');
     state.applications ||= {};
-    for (const plan of Object.values(state.plans)) {
-      if (plan.kind === 'application-lifecycle' && plan.public?.status === 'planning') {
-        Object.assign(plan.public, { status: 'failed', updated_at: new Date().toISOString(),
-          error: { code: 'APPLICATION_PLAN_INTERRUPTED', outcome_unknown: false,
-            message: '서버가 재시작되어 계획 확인이 중단됐습니다. 앱 변경은 실행되지 않았습니다. 새 계획을 확인하세요.' } });
-      }
-    }
     for (const app of Object.values(state.applications)) if (['registering', 'stopping', 'starting', 'deleting'].includes(app.status)) app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
       const unclaimed = operation.kind === 'deployments' && operation.status === 'queued'
