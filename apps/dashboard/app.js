@@ -806,7 +806,9 @@ function applicationVersion(label, deployment, uncertain = false) {
 function renderApplications() {
   document.querySelector('#applications-list').replaceChildren(...applications.slice(0, applicationPageEnds[applicationPage] || 0).map((application) => {
     const item = document.createElement('li'), header = element('div', '', 'history-row'), content = document.createElement('div');
-    content.append(element('strong', application.app), element('span', applicationLabel(application), 'state-badge'),
+    const title = element('div', '', 'application-title');
+    title.append(element('strong', application.app), element('span', applicationLabel(application), 'state-badge'));
+    content.append(title,
       element('small', `${environmentLabel(application)} · 앱 ID ${application.id}`, 'history-meta'),
       element('small', `${application.current_deployment_state === 'unverified' ? '마지막 검증 성공 (현재 상태 확인 필요)' : '현재 서비스'}: ${application.current_deployment ? application.current_deployment.id : '검증된 배포 없음'}`, 'history-meta'),
       element('small', `최근 시도: ${application.latest_deployment ? `${executionLabel(application.latest_deployment)} · ${application.latest_deployment.id}` : '없음'}`, 'history-meta'));
