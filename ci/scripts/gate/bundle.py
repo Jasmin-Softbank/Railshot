@@ -20,7 +20,7 @@ import tarfile
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from execution import GATE_ORDER, quality_advisory
+from execution import GATE_ORDER, RELEASE_ORDERS, quality_advisory
 from observability import OperationError, event_record
 from process import run_bounded
 from storage import durable_write
@@ -129,7 +129,7 @@ def contract(spec_bytes, verdict_bytes):
     require(isinstance(verdict, dict) and verdict.get("release_eligible") is True and
             verdict.get("ok") is True and verdict.get("status") == "PASS", "full release verdict required")
     layers = verdict.get("layers", [])
-    require([row.get("layer") for row in layers] == LAYERS and
+    require(tuple(row.get("layer") for row in layers) in RELEASE_ORDERS and
             all(quality_advisory(row) or row.get("ok") is True and not row.get("blocked") and not row.get("errors") for row in layers),
             "all required release layers must pass")
     require(isinstance(verdict.get("source_sha256"), str) and re.fullmatch(HEX, verdict["source_sha256"]), "source digest required")

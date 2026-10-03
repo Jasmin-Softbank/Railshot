@@ -39,7 +39,7 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, code)
 
     def cli(self, resume=False, *extra):
-        args = ['loop', str(self.upload), str(self.run), *extra]
+        args = ['loop', str(self.upload), str(self.run), '--max-attempts', '3', *extra]
         if resume:
             args.append('--resume')
         with patch.object(sys, 'argv', args):
@@ -148,6 +148,22 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual((self.run / 'evidence.json').read_bytes(), original)
         (self.upload / 'app.py').write_text('source changed')
         self.assertEqual(self.cli(True), 1)
+
+    def test_calculator_is_packaged_before_baseline_without_ai_or_lock_rewrite(self):
+        (self.upload / 'package.json').write_text(json.dumps({
+            'scripts': {'build': 'tsc && vite build'}, 'devDependencies': {'vite': '^4.4.5'}}))
+        (self.upload / 'index.html').write_text('<div id="root"></div>')
+        (self.upload / 'yarn.lock').write_text('# yarn lockfile v1\n')
+        with self.gate_result({'ok': True, 'release_eligible': True, 'status': 'PASS'}) as gate, \
+                patch.object(loop, 'agent') as agent, patch('repair.prepare_locks') as locks:
+            self.assertEqual(self.cli(False, '--app-id', 'calculator', '--repair-scope', 'source'), 0)
+            agent.assert_not_called()
+            locks.assert_not_called()
+            self.assertEqual(gate.call_count, 1)
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(evidence['intake']['packaging']['status'], 'prepared')
+        self.assertEqual(evidence['sdk_invocations'], 0)
+        self.assertTrue((self.run / 'work/Dockerfile').is_file())
 
     def test_resume_after_agent_checkpoint_skips_agent_and_baseline(self):
         fail = {'ok': False, 'status': 'FAIL', 'failure': {'class': 'F1', 'layer': 'L1', 'signature': 'missing'}}

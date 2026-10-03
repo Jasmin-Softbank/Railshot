@@ -2,7 +2,7 @@
 """Intake → deterministic baseline → optional adapter/packaging fixer → evidence.
 
 usage:
-  loop.py UPLOAD_DIR RUN_DIR [--provider claude|codex] [--max-attempts 3] [--layers L0,...] [--request FILE]
+  loop.py UPLOAD_DIR RUN_DIR [--provider claude|codex] [--max-attempts 1] [--layers L0,...] [--request FILE]
   loop.py --self-test
 
 Stops on: gate pass, give_up, class F7/F8/INJ, the same failure signature twice, or N attempts.
@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_state import RunState, StateError, atomic_json, digest, tree_digest
 from process import OutputLimitError, run_bounded
 from observability import event_record
-from execution import GATE_ORDER, quality_advisory
+from execution import GATE_ORDER, RELEASE_ORDERS, quality_advisory
 from runner.runtime_boundary import effective_auth_route
 from checks_progress import OUTCOMES as PROGRESS_OUTCOMES, from_environment as progress_from_environment
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gate'))
@@ -133,7 +133,7 @@ def task_text(role, attempt, n, run, request, repair_scope="packaging", app_id=N
                 "Return only the files you change, in full, in the files array.\n")
     return head + body + (
         "Before proposing files, return gate_plan for the entire order L0 (patch policy), L1 (service spec), "
-        "Q (advisory lint/type/unit tests), L2 (image build), L4 (vulnerability scan), L3 (real app runtime/health). "
+        "L2 (image build), L4 (vulnerability scan), L3 (real app runtime/health). "
         "Make the smallest packaging proposal first; fix application source only after an observed build/start/health failure. "
         "Q failures or missing tests do not require repair. Do not add tests, checker setup, features or unrelated refactors for deployment. "
         "Unexecuted gates are not passes. Existing tests and checker rules remain protected. "
@@ -281,6 +281,8 @@ def execute(a, run, state, progress_sink=None):
         rc, result, err = run_json(PY + [str(PLATFORM / 'poc/intake.py'), a.upload, str(ws), str(run)], phase='intake')
         if rc == 0 and result.get('ok'):
             (run / 'lessons.md').write_text('')
+            from native_packaging import prepare_packaging
+            result['packaging'] = prepare_packaging(ws, app_id)
             result['has_spec'] = any((ws / name).exists() for name in SOURCE_SPECS)
             return result
         if rc == 2 and result.get('ok') is False:
@@ -364,7 +366,7 @@ def execute(a, run, state, progress_sink=None):
                 ev['error'] = rec.get('error')
                 ev['status'] = (rec.get('error') or {}).get('outcome', 'FAIL')
                 return finish(run, ev, state.data['started'], state)
-        if a.repair_scope == 'source':
+        if attempt and attempt_scope == 'source':
             from repair import prepare_locks
             def preparation_step():
                 try:
@@ -387,7 +389,7 @@ def execute(a, run, state, progress_sink=None):
             'verdict_ok': verdict.get('ok'), 'verdict_status': verdict.get('status'),
             'failure': f and {k: f.get(k) for k in ('layer', 'class', 'signature', 'source_repair_eligible')}})
         reason = decide(verdict, report, seen, a.repair_scope)
-        if reason == 'passed' and a.layers != ','.join(GATE_ORDER):
+        if reason == 'passed' and tuple(a.layers.split(',')) not in RELEASE_ORDERS:
             reason = 'incomplete: partial gates are diagnostic only'
             ev['status'] = 'INCOMPLETE'
         if reason:
@@ -422,7 +424,7 @@ def main():
     ap.add_argument("upload", nargs="?")
     ap.add_argument("run", nargs="?")
     ap.add_argument("--provider", choices=["codex", "claude"], default="codex")
-    ap.add_argument("--max-attempts", type=int, choices=range(0, 4), default=3)
+    ap.add_argument("--max-attempts", type=int, choices=range(0, 4), default=1)
     ap.add_argument("--layers", default=','.join(GATE_ORDER))
     ap.add_argument("--quality-network")
     ap.add_argument("--selected-root", help="Trusted relative build root for repository discovery")

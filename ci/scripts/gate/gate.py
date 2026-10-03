@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Deterministic release gate: L0 patch, L1 spec, Q quality, L2 build, L4 scan, L3 runtime.
+"""Deterministic release gate: L0 patch, L1 spec, L2 build, L4 scan, L3 runtime.
 
 usage:
-  gate.py WORKSPACE RUN [--layers L0,L1,Q,L2,L4,L3]
+  gate.py WORKSPACE RUN [--layers L0,L1,L2,L4,L3]
   gate.py --self-test
 
 Writes RUN/verdict.json and, on failure, RUN/failure.txt (input for the fixer).
@@ -36,7 +36,7 @@ from run_agent import path_ok, writable_rules, source_change_allowed  # noqa: E4
 from quality import run_quality  # noqa: E402
 from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
-from execution import APP_UID, GATE_ORDER, docker_security, docker_command, quality_advisory  # noqa: E402
+from execution import APP_UID, GATE_ORDER, FULL_GATE_ORDER, RELEASE_ORDERS, docker_security, docker_command, quality_advisory  # noqa: E402
 from progress import Progress  # noqa: E402
 
 ORDER = GATE_ORDER
@@ -639,9 +639,9 @@ def excerpt(text, limit=4000):
 
 
 def validate_layers(layers):
-    if not layers or any(layer not in ORDER for layer in layers) or len(set(layers)) != len(layers):
+    if not layers or any(layer not in FULL_GATE_ORDER for layer in layers) or len(set(layers)) != len(layers):
         return "INVALID_LAYERS: require nonempty unique known layers"
-    if list(layers) != sorted(layers, key=ORDER.index):
+    if list(layers) != sorted(layers, key=FULL_GATE_ORDER.index):
         return "INVALID_LAYERS: required order is " + ",".join(ORDER)
     if any(layer in layers for layer in ("L2", "L4", "L3")) and "L1" not in layers:
         return "INVALID_LAYERS: Docker stages require L1 spec validation"
@@ -847,7 +847,7 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
         results.append(observe_layer({"layer": "EVIDENCE", "ok": False, "blocked": error.code}, observation_id, attempt_id, error))
     required = [r for r in results if not quality_advisory(r)]
     checks_ok = failure is None and all(r["ok"] for r in required) and len(results) == len(layers)
-    ok = checks_ok and tuple(layers) == ORDER
+    ok = checks_ok and tuple(layers) in RELEASE_ORDERS
     status = ("PASS" if ok else "INCOMPLETE" if checks_ok else "UNKNOWN" if any(r["outcome"] == "UNKNOWN" for r in required)
               else "BLOCKED" if any(r["outcome"] == "BLOCKED" for r in required) else "FAIL")
     verdict = {"ok": ok, "release_eligible": ok, "checks_ok": checks_ok, "status": status, "layers": results, "failure": failure,
