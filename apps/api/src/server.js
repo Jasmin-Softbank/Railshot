@@ -151,9 +151,9 @@ function requestKey(request) {
   if (count !== 1) throw new ServiceError('Idempotency-Key 하나만 입력하세요.', 422);
   return idempotencyKey(request.headers['idempotency-key']);
 }
-function accepted(response, kind, record, requestId) {
+function accepted(response, kind, record, requestId, action = 'create') {
   const terminal = !['queued', 'running'].includes(record.status);
-  json(response, terminal ? 200 : 202, terminal ? record : { resource_id: record.id, action: 'create', status: 'accepted', request_id: requestId },
+  json(response, terminal ? 200 : 202, terminal ? record : { resource_id: record.id, action, status: 'accepted', request_id: requestId },
     { Location: `/api/v1/${kind}/${record.id}`, 'X-Request-ID': requestId, ...(!terminal ? { 'Retry-After': '2' } : {}) });
 }
 
@@ -315,6 +315,16 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
             if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
             json(response, 200, await products.getDeploymentLogs(logRoute[1], sessionId)); return;
+          }
+          const actionRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/actions$/.exec(url.pathname);
+          if (actionRoute) {
+            if (request.method !== 'POST') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'POST'; throw error; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
+            const input = await jsonInput(request);
+            if (!input || Array.isArray(input) || typeof input !== 'object'
+                || Object.keys(input).length !== 1 || input.action !== 'resume') throw new ServiceError('action=resume만 입력하세요.', 422);
+            accepted(response, 'deployments', await products.resumeDeployment(actionRoute[1], sessionId), requestId, 'resume'); return;
           }
           const routes = /^(?:\/api\/v1\/(targets|applications|builds|deployments|profiles|plans|environments))(?:\/([A-Za-z0-9._-]+))?$/.exec(url.pathname);
           if (!routes) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);

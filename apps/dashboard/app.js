@@ -55,6 +55,7 @@ let reviewing = false;
 let reviewGeneration = 0;
 let connectionError = null;
 let submitting = false;
+let resuming = null;
 let current = null;
 let sessionReady = false, preferenceTimer;
 let history = [], connections = [], editingConnection = null;
@@ -457,6 +458,10 @@ function taskList(tasks = []) {
 }
 function renderRun() {
   document.querySelector('#run-panel').hidden = false;
+  const resume = document.querySelector('#resume-run');
+  resume.hidden = !(current.kind === 'deployments' && current.application_id && current.status === 'unknown'
+    && ['cd', 'http'].includes(current.stage) && current.ci?.state === 'published');
+  resume.disabled = Boolean(resuming) || observationError;
   const label = executionLabel(current);
   document.querySelector('#run-freshness').textContent = lastReadAt ? `마지막 상태 조회: ${new Date(lastReadAt).toLocaleString()}${observationError ? ' · 조회 실패, 마지막 기록입니다.' : ''}` : '서버 상태 조회 전';
   document.querySelector('#run-meta').textContent = `${current.app || '앱'} · ${current.id} · ${current.target_id || ''}`;
@@ -579,6 +584,30 @@ async function refreshRun() {
 }
 document.querySelector('#stop-polling').addEventListener('click', () => { stopPolling(); renderMetrics(); document.querySelector('#run-message').textContent = '상태 조회를 중지했습니다. 서버의 실행은 계속됩니다.'; });
 document.querySelector('#refresh-run').addEventListener('click', refreshRun);
+document.querySelector('#resume-run').addEventListener('click', async () => {
+  if (resuming || document.querySelector('#resume-run').disabled || document.querySelector('#resume-run').hidden) return;
+  const id = current.id;
+  resuming = id;
+  const message = document.querySelector('#resume-error');
+  message.hidden = true;
+  stopPolling(); renderRun();
+  try {
+    const { data, location } = await request(`/api/v1/deployments/${encodeURIComponent(id)}/actions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'resume' }),
+    });
+    if (data.resource_id !== id || location !== `/api/v1/deployments/${encodeURIComponent(id)}`) throw new Error('실행 조회 주소를 확인하지 못했습니다.');
+    if (current?.id === id) await refreshRun();
+  } catch (cause) {
+    if (current?.id === id) {
+      await refreshRun();
+      message.textContent = `${cause.name === 'AbortError' ? '요청 시간이 초과되었습니다.' : cause.message} ${observationError ? '상태 조회도 실패했습니다. 마지막 기록을 표시합니다.' : '실행 상태를 다시 확인했습니다.'}`;
+      message.hidden = false;
+    }
+  } finally {
+    resuming = null;
+    if (current) renderRun();
+  }
+});
 window.addEventListener('pagehide', () => { stopPolling(); stopEnvironmentPolling(); for (const controller of requests) controller.abort(); });
 let consoleTab = 'work';
 const logLabels = { loading: '앱 로그를 조회하고 있습니다.', not_deployed: '앱 적용 전입니다. 작업 로그에서 CI 진행과 실패 원인을 확인하세요.',
