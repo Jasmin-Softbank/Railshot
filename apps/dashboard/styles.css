@@ -213,7 +213,7 @@ button:disabled { cursor: default; opacity: .5; }
 /* App lifecycle uses the existing session panels and a native confirmation dialog. */
 .applications-panel { margin-bottom: 24px; }
 .application-site:empty { display: none; }
-.application-site { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 16px; margin: 16px 0; border-radius: 10px; background: var(--mint, #f0f9f6); }
+.application-site { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 16px; margin: 16px 0; border-radius: 10px; background: var(--color-accent-soft); }
 .application-site strong { font-size: 13px; }
 .application-site-url { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
 .application-site a { text-decoration: none; }

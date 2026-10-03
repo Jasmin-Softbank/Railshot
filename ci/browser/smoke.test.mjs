@@ -84,6 +84,12 @@ test('verified app URL is visible in inventory and detail, survives a failed upd
   await page.getByRole('button', { name: 'calculator 앱 상세·업데이트' }).click();
   await page.locator('#detail-application-site a').waitFor();
   assert.equal(await page.locator('#detail-application-site a').getAttribute('href'), 'https://calculator.example/');
+  if (process.env.CI_OUTPUT_DIR) {
+    await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'deployed-app-links-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'deployed-app-links-mobile.png'), fullPage: true });
+  }
   for (const patch of [{ status: 'stopped' }, { status: 'deleted' }, { status: 'ready', current_deployment_state: 'unverified' },
     { current_deployment_state: 'not_deployed' }, { current_deployment_state: 'verified', current_deployment: { ...deployed, public_http: { ...deployed.public_http, site_url: 'javascript:alert(1)' } } }]) {
     Object.assign(app, patch);

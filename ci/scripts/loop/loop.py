@@ -416,6 +416,7 @@ def execute(a, run, state, progress_sink=None):
     ev['result'] = ('baseline failed: ' + str(f.get('excerpt') or f.get('signature') or 'see gate verdict')
                     if not a.max_attempts else 'stop: attempt limit reached')
     ev['error'] = verdict.get('error')
+    ev['status'] = verdict.get('status', 'FAIL')
     return finish(run, ev, state.data['started'], state)
 
 
