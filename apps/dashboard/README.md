@@ -15,9 +15,9 @@
   localStorage에 저장하지 않는다. 내역은 종류별 최신 접수 순으로 10건씩 서버에서 읽고
   next_marker로 이동한다. 페이지 위치는 현재 탭의 history.state에 유지하며, 최신 내역·
   실행 종류 변경·새 배포 접수는 첫 페이지로 돌아간다. 목록 실패를 빈 이력으로 표시하지 않는다.
-- OpenStack 선택 시 프로젝트·사용자 ID와 임의의 연계 키를 등록 API로 보낸다. 키 원문은
-  UI 저장소에 남기지 않고 백엔드가 salted scrypt 해시만 보관한다. 발급 토큰은 한 번만 표시한다.
-  기존 `install.sh`의 파일 다운로드, 코드 복사, 동반 파일 ZIP 다운로드를 함께 제공한다.
+- OpenStack 선택 시 사용자 키나 Keystone 인증정보를 받지 않는다. 등록 API가 일회성 토큰을 발급하며
+  같은 브라우저 세션의 미완료 등록은 만료 후 재발급할 수 있다. 화면에는 토큰이 포함된
+  `curl` 다운로드 명령과 기존 `install.sh`의 파일 다운로드·코드 복사·동반 파일 ZIP 다운로드를 제공한다.
   현재 스크립트는 연계 토큰 입력과 WireGuard 신규 연결을 지원하지 않는다.
 - 환경 모니터링은 `/targets`의 접근 가능한 공용·세션 환경과
   `/targets/{id}/observations`를 조회한다. AWS/GCP/OpenStack 필터, 노드 수집 정상·수집/응답 실패·미수집·
@@ -39,8 +39,9 @@
   내부 실행 종류나 target ID 선택을 추가하지 않는다. 콘솔은 확인된 작업·환경 상태를
   표시하며 앱 로그 수집이 미연결이면 그 상태를 표시한다.
 
-UI 개발은 `npm run dev`(Vite 4181), 정적 빌드는 `npm run build`다. Vite 개발 서버는
-기본 API와 같은 origin이 아니므로 전체 연결은 API가 제공하는 4173 또는 운영 프록시를 사용한다.
+UI 단독 개발은 `npm run dev`(Vite 4181), 정적 빌드는 `npm run build`다. API 등록 기능까지
+확인하려면 `deployment/compose.yaml`의 Dashboard Nginx와 API를 함께 실행한다. Dashboard
+Nginx가 `/api/`와 `/onpremise/install.sh`를 프록시하며 운영자 Bearer는 서버에서만 붙인다.
 브라우저 검사는 [ci/browser](../../ci/browser/README.md)를 따른다.
 
 앱+DB 브라우저 검사는 같은 카드에서 DB 계획 식별자, 필수 DB, DB 없는 사양, 비용 표시,
@@ -53,6 +54,8 @@ The new-deployment form resolves the source-derived or explicit app name through
 Another session's matching name remains an ownership conflict. Different names/environments are separate apps; repository URL alone does not select an app because one repository may have multiple deployments. Stopped/deleted/pending apps are not silently recreated. A ready registration with no successful baseline can retry normal deployment. The explicit app-detail update flow still supports source files whose archive/repository name changes.
 
 An uncertain published CD/HTTP result fences its registered environment, so a GCP route reconciliation does not block a same-named AWS application. Uncertain CI/registration or missing environment bindings keep the conservative name-level fence because CI source paths are shared. The affected environment still requires reconciliation; this does not retry it or alter its resources.
+
+짧은 API 교체 중에는 읽기/비동기 계획 요청과 동일 Idempotency-Key를 가진 앱 작업 요청의 전송을 제한된 횟수로 재시도한다. 서버가 접수 전에 반환한 `PLATFORM_UPDATING`도 같은 요청으로 이어간다. 키 없는 변경 요청이나 앱 상태 충돌은 자동 재전송하지 않는다. 중단 버튼/창 닫기는 재시도 대기도 취소한다.
 
 ## Update UI design system
 

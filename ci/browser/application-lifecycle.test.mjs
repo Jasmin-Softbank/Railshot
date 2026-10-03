@@ -35,7 +35,7 @@ async function fixture(t) {
       state.plans.push({ id: plan[1], input });
       const result = { id: '11111111-1111-4111-8111-111111111111', application_id: state.planMode === 'foreign' ? 'foreign-app' : plan[1],
         action: input.action, plan_hash: 'a'.repeat(64), expires_at: new Date(Date.now() + (state.planMode === 'expired' ? -1000 : 600000)).toISOString(),
-        resources: [{ kind: 'Deployment', namespace: 'app-private', name: 'workload' }, { kind: 'PersistentVolumeClaim', namespace: 'app-private', name: 'database' }],
+        resources: state.resources || [{ kind: 'Deployment', namespace: 'app-private', name: 'workload' }, { kind: 'PersistentVolumeClaim', namespace: 'app-private', name: 'database' }],
         retained: [{ kind: 'Node', name: 'shared-node' }, { kind: 'LoadBalancer', name: 'shared-lb' }] };
       if (state.planMode === 'async') {
         state.planDocument = result;
@@ -301,7 +301,7 @@ test('cancel during inventory refresh never sends a hidden plan request', { time
 });
 
 test('proxy HTML failure is readable and retryable without treating an uncertain delete as rejected', { timeout: 45000 }, async (t) => {
-  const { state, page } = await fixture(t); let unavailable = true;
+  const { state, page } = await fixture(t); page.setDefaultTimeout(20000); let unavailable = true;
   await page.route('**/api/v1/applications/app-ready/plans', (route) => unavailable
     ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }) : route.fallback());
   await appAction(page, 'my-app', '삭제').click();
@@ -318,4 +318,57 @@ test('proxy HTML failure is readable and retryable without treating an uncertain
   assert.match(await page.locator('#lifecycle-operation-message').innerText(), /HTTP 502/);
   assert.equal(await appAction(page, 'my-app', '삭제').isDisabled(), true);
   assert.equal(state.writes.length, 0);
+});
+
+ test('brief API replacement is transparent to plan creation and keyed deletion', { timeout: 30000 }, async (t) => {
+  const { state, page } = await fixture(t); let plans = 0; const attempts = [];
+  await page.route('**/api/v1/applications/app-ready/plans', (route) => ++plans === 1
+    ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }) : route.fallback());
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  assert.equal(plans, 2); assert.equal(await page.locator('#lifecycle-retry').isHidden(), true);
+  await page.route('**/api/v1/applications/app-ready/operations', (route) => {
+    attempts.push({ body: route.request().postData(), key: route.request().headers()['idempotency-key'] });
+    return attempts.length === 1
+      ? route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: {
+        code: 'PLATFORM_UPDATING', outcome_unknown: false, retryable: true,
+      } }) }) : route.fallback();
+  });
+  await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-dialog').open);
+  assert.equal(attempts.length, 2); assert.ok(attempts[0].key);
+  assert.deepEqual(attempts[0], attempts[1]); assert.equal(state.writes.length, 1);
+});
+
+ test('long native inventories keep confirmation and cancel visible on desktop and mobile', async (t) => {
+  const { state, page } = await fixture(t);
+  state.resources = Array.from({ length: 40 }, (_, i) => ({ kind: 'Service', namespace: 'app-private', name: `owned-resource-${i}` }));
+  for (const viewport of [{ width: 1280, height: 960 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
+    await page.setViewportSize(viewport);
+    await appAction(page, 'my-app', '삭제').click();
+    await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+    const layout = await page.evaluate(() => {
+      const button = document.querySelector('#lifecycle-confirm').getBoundingClientRect();
+      const content = document.querySelector('.lifecycle-plan-content');
+      return { buttonTop: button.top, buttonBottom: button.bottom, viewportHeight: innerHeight,
+        contentHeight: content.clientHeight, scrollHeight: content.scrollHeight };
+    });
+    assert.ok(layout.buttonTop >= 0 && layout.buttonBottom <= layout.viewportHeight, JSON.stringify(layout));
+    assert.ok(layout.contentHeight > 0 && layout.scrollHeight > layout.contentHeight);
+    await page.getByRole('button', { name: '취소', exact: true }).click();
+    assert.equal(state.writes.length, 0);
+  }
+});
+
+ test('measured handover delay stays within the plan request deadline without surfacing an error', { timeout: 30000 }, async (t) => {
+  const { page } = await fixture(t); page.setDefaultTimeout(20000); let attempts = 0;
+  await page.route('**/api/v1/applications/app-ready/plans', async (route) => {
+    if (++attempts > 4) return route.fallback();
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    return route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' });
+  });
+  await appAction(page, 'my-app', '삭제').click();
+  await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  assert.equal(attempts, 5); assert.equal(await page.locator('#lifecycle-retry').isHidden(), true);
+  await page.getByRole('button', { name: '취소', exact: true }).click();
 });

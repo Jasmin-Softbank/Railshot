@@ -17,6 +17,23 @@ export function createOpenStackRoutes() {
   let installerReady;
 
   return {
+    async serveTokenizedInstaller(request, response, url, products) {
+      if (request.method !== 'GET') {
+        const error = new ServiceError('지원하지 않는 메서드입니다.', 405);
+        error.allow = 'GET';
+        throw error;
+      }
+      if (url.searchParams.size !== 1 || url.searchParams.getAll('token').length !== 1
+          || !products.registrations?.activeToken(url.searchParams.get('token'))) {
+        throw new ServiceError('유효하지 않거나 만료된 연계 토큰입니다.', 401);
+      }
+      const packageData = await (installerReady ??= buildOpenStackInstaller());
+      response.writeHead(200, { 'content-type': 'text/x-shellscript; charset=utf-8',
+        'content-disposition': 'attachment; filename="install.sh"', 'cache-control': 'no-store',
+        'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff' });
+      response.end(packageData.script);
+    },
+
     async serveInstaller(request, response, url) {
       if (!installerPaths.has(url.pathname)) return false;
       if (request.method !== 'GET') {
@@ -83,10 +100,8 @@ export function createOpenStackRoutes() {
       }
       if (child) {
         const input = await jsonInput(request);
-        if (Object.keys(input).length !== 1 || typeof input.enrollment_key !== 'string') {
-          throw new ServiceError('연계 키가 필요합니다.', 422);
-        }
-        json(response, 201, products.registrations.issue(sessionId, id, input.enrollment_key));
+        if (Object.keys(input).length !== 0) throw new ServiceError('재발급 요청에는 빈 JSON 객체만 입력하세요.', 422);
+        json(response, 201, products.registrations.issue(sessionId, id));
       } else if (id) {
         json(response, 200, products.registrations.get(sessionId, id));
       } else if (request.method === 'GET') {

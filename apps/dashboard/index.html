@@ -111,12 +111,19 @@
               </div>
               <div class="provider-field" id="openstack-install-field" hidden>
                 <strong>OpenStack 인프라 등록</strong>
-                <p class="field-note">연계 키로 등록 요청을 만들고 일회성 토큰을 발급합니다. OpenStack 프로젝트·인증 정보는 고객 노드에서 직접 설정합니다.</p>
-                <label class="field-label" for="openstack-enrollment-key">임의의 연계 키 (16~256자)</label>
-                <input id="openstack-enrollment-key" type="password" autocomplete="new-password" spellcheck="false" minlength="16" maxlength="256" />
-                <button class="secondary-button" id="prepare-openstack-install" type="button">등록하고 설치 파일 받기</button>
+                <p class="field-note">등록 요청을 만들고 10분 동안 유효한 일회성 토큰을 발급합니다. OpenStack 프로젝트·인증 정보는 고객 노드에서 직접 설정합니다.</p>
+                <button class="secondary-button" id="prepare-openstack-install" type="button">등록하고 설치 명령 받기</button>
+                <div id="openstack-pending-registration" hidden>
+                  <label class="field-label" for="openstack-registration-select">기존 미완료 등록</label>
+                  <select id="openstack-registration-select"></select>
+                  <button class="secondary-button" id="reissue-openstack-token" type="button">만료된 토큰 재발급</button>
+                </div>
                 <p class="field-note" id="openstack-install-status" role="status"></p>
                 <div class="installer-result" id="openstack-installer-result" hidden>
+                  <label class="field-label" for="openstack-install-command">설치 파일 다운로드 명령</label>
+                  <textarea id="openstack-install-command" class="installer-code" readonly spellcheck="false" rows="2"></textarea>
+                  <button class="secondary-button" id="copy-openstack-command" type="button">명령 복사</button>
+                  <p class="field-note">고객 노드에서 실행하면 install.sh 파일을 내려받습니다. 설치 실행에는 아래 필수 파일 묶음과 설정 JSON이 별도로 필요합니다.</p>
                   <label class="field-label" for="openstack-linkage-token">일회성 연계 토큰</label>
                   <textarea id="openstack-linkage-token" class="installer-code" readonly spellcheck="false" rows="2"></textarea>
                   <button class="secondary-button" id="copy-openstack-token" type="button">토큰 복사</button>
@@ -276,11 +283,14 @@
     </div>
     <dialog id="lifecycle-dialog" aria-labelledby="lifecycle-title" aria-describedby="lifecycle-description">
       <form id="lifecycle-form">
-        <h2 id="lifecycle-title">앱 관리 계획</h2><p id="lifecycle-description"></p>
+        <h2 id="lifecycle-title">앱 관리 계획</h2>
+        <div class="lifecycle-plan-content" tabindex="0" aria-label="계획 상세">
+        <p id="lifecycle-description"></p>
         <p id="lifecycle-progress" class="field-note" role="status" aria-live="polite" hidden></p>
         <p id="lifecycle-expiry" class="field-note"></p>
         <div class="lifecycle-preview"><section><h3>변경할 리소스</h3><ul id="lifecycle-resources"></ul></section><section><h3>보존할 리소스</h3><ul id="lifecycle-retained"></ul></section></div>
         <p id="lifecycle-error" class="form-error" role="alert" hidden></p>
+        </div>
         <div class="lifecycle-dialog-actions"><button id="lifecycle-retry" class="secondary-button" type="button" hidden>계획 다시 확인</button><button id="lifecycle-cancel" class="secondary-button" type="button" autofocus>취소</button><button id="lifecycle-confirm" class="primary-button" type="submit" disabled>계획 확인 중</button></div>
       </form>
     </dialog>

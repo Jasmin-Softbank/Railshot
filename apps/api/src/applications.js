@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { lstat } from 'node:fs/promises';
@@ -68,6 +68,7 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
     await current(application);
     if (plan.private?.configuration_sha256 !== fingerprint || plan.public?.application_id !== application.id
         || !lifecycleId.test(plan.public?.id || '') || !lifecycleHash.test(plan.public?.plan_hash || '')
+        || plan.private.native_plan_id !== undefined && !lifecycleId.test(plan.private.native_plan_id)
         || !lifecycleActions.includes(plan.public?.action) || Date.parse(plan.public.expires_at) <= Date.now()
         || !Number.isFinite(Date.parse(plan.public.expires_at))) throw fail('APPLICATION_PLAN_STALE');
     if (plan.private.deferred && (plan.public.action !== 'delete' || !lifecycleId.test(plan.private.deployment_id || '')
@@ -90,20 +91,23 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       private: { configuration_sha256: fingerprint, deferred: true, deployment_id: deploymentId } };
     },
     async planLifecycle(application, { id, action }) {
-      const result = await lifecycleRequest(application, { phase: 'plan', action, operation_id: id }, false);
+      // Each read-only calculation gets a fresh native identity, including restart recovery.
+      const nativeId = randomUUID();
+      const result = await lifecycleRequest(application, { phase: 'plan', action, operation_id: nativeId }, false);
       const expires = Date.parse(result.expires_at);
       if (result.status !== 'planned') throw fail(/^[A-Z][A-Z0-9_]{1,95}$/.test(result.error?.code) ? result.error.code : 'APPLICATION_PLAN_BLOCKED');
-      if (result.plan_id !== id || !lifecycleHash.test(result.plan_hash || '') || !Number.isFinite(expires)
+      if (result.plan_id !== nativeId || !lifecycleHash.test(result.plan_hash || '') || !Number.isFinite(expires)
           || expires <= Date.now() || expires > Date.now() + 600_000) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
       return { public: { id, application_id: application.id, action, plan_hash: result.plan_hash,
         resources: lifecycleResources(result.resources), retained: lifecycleResources(result.retained), expires_at: result.expires_at },
-      private: { configuration_sha256: fingerprint } };
+      private: { configuration_sha256: fingerprint, native_plan_id: nativeId } };
     },
     verifyLifecyclePlan,
     async applyLifecycle(application, plan, { id, deleteData }) {
       await verifyLifecyclePlan(application, plan);
       if (plan.private.deferred) throw fail('APPLICATION_PLAN_STALE');
-      const { action, plan_hash: planHash, id: planId } = plan.public;
+      const { action, plan_hash: planHash } = plan.public;
+      const planId = plan.private.native_plan_id || plan.public.id;
       if (action === 'delete' && deleteData !== true || action !== 'delete' && deleteData !== false) throw fail('APPLICATION_INPUT_INVALID', 422);
       const result = await lifecycleRequest(application, { phase: 'apply', action, operation_id: id,
         plan_id: planId, plan_hash: planHash, delete_data: deleteData }, true);
