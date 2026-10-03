@@ -17,7 +17,9 @@ def write_packaging(ws, app_id, profile, dockerfile=None, port=8080):
         written.insert(0, 'Dockerfile')
     ignore = ws / '.dockerignore'
     original = ignore.read_text() if ignore.exists() else ''
-    ignore.write_text(original + '\n.git\n.env*\nnode_modules\n' + ('dist\n' if profile == 'vite-static' else ''))
+    ignore.write_text(original + '\n.git\n.env*\nnode_modules\n'
+                      + ('dist\n' if profile == 'vite-static' else '')
+                      + ('**/.*\nDockerfile\n' if profile == 'static-html' else ''))
     return {'status': 'prepared', 'profile': profile, 'written': written}
 
 
