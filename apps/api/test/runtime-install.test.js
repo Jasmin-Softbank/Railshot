@@ -16,7 +16,7 @@ test('API runtime pins reuse CI dependencies and the K3s version policy', () => 
   const rows = execFileSync('python3', [smoke, '--downloads'], { encoding: 'utf8' }).trim().split('\n');
   assert.equal(rows.length, 5); // Real manifest parser rejects nonofficial URLs, mutable versions and malformed checksums.
   const manifest = JSON.parse(readFileSync(join(root, 'apps/api/runtime-tools.json')));
-  const workflow = readFileSync(join(root, '.github/workflows/railshot-ci.yml'), 'utf8');
+  const workflow = readFileSync(join(root, '.github/workflows/platform-checks.yml'), 'utf8');
   assert.ok(workflow.includes(`terraform_version: ${manifest.tools.terraform.version}`));
   execFileSync('bash', ['-n', join(root, 'apps/api/runtime-install.sh')]);
   assert.throws(() => execFileSync('bash', [join(root, 'apps/api/runtime-install.sh')], {
