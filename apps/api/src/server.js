@@ -148,7 +148,9 @@ function apiError(response, error, requestId, versioned) {
   const message = knownError ? error.message : '요청을 처리하지 못했습니다.';
   const headers = { 'X-Request-ID': requestId, ...(error.allow ? { Allow: error.allow } : {}), ...(error.retryable ? { 'Retry-After': '2' } : {}) };
   const code = environmentInputError ? 'INVALID_INPUT'
-    : (error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError) && error.code || codes[status] || 'INTERNAL_ERROR';
+    : (error instanceof ServiceError || error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError) && error.code || codes[status] || 'INTERNAL_ERROR';
+  // Correlate the safe error envelope without persisting source URLs, credentials or request bodies.
+  console.error(JSON.stringify({ event: 'api.request_failed', request_id: requestId, status, code }));
   json(response, status, versioned ? { error: { code, message,
     request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown),
     ...(error instanceof ProductError && error.admission ? { admission: error.admission } : {}) } } : { error: message }, headers);
