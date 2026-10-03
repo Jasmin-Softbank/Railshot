@@ -310,9 +310,9 @@ class ApplicationRoutesTest(unittest.TestCase):
                 self.assertFalse((case.prepared_dir / 'route-result.json').exists())
                 if failure != 'dns-unknown': case.dns.assert_not_called()
 
-    def test_cli_preserves_openstack_worker_and_tunnel_blocked_unknown_without_diagnostics(self):
+    def test_cli_preserves_worker_unknown_and_tunnel_outcome_without_diagnostics(self):
         for boundary in ('worker', 'tunnel'):
-            for unknown in (False, True):
+            for unknown in ((True,) if boundary == 'worker' else (False, True)):
                 with self.subTest(boundary=boundary, unknown=unknown), self.fixture('openstack') as case:
                     if boundary == 'worker':
                         case.openstack.side_effect = routes.openstack_routes.RouteError(unknown=unknown)

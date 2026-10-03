@@ -45,6 +45,7 @@ class FakeChecks(progress.ChecksProgress):
             return {'total_count': len(checks), 'check_runs': checks}
         if method == 'POST':
             self.remote = {**body, 'id': 55, 'app': {'id': 15368, 'slug': 'github-actions'}}
+            self.remote['details_url'] = f'https://github.com/{self.repository}/runs/55'
             if self.lose_create:
                 raise OSError('sentinel-private-network-error')
         else:
@@ -103,7 +104,11 @@ class ChecksProgressTest(unittest.TestCase):
         sink.emit(event('loop.started'))
         self.assertEqual([call[0] for call in sink.calls], ['GET', 'PATCH'])
         self.assertEqual(len(json.loads(sink.remote['output']['text'])['items']), 1)
+        original.remote['details_url'] = original.details_url
+        self.assertTrue(original.matches(original.remote), 'the requested workflow link remains valid')
         for field, value in [('head_sha', 'b' * 40), ('details_url', 'https://untrusted.example'),
+                             ('details_url', f'https://github.com/{original.repository}/runs/56'),
+                             ('details_url', 'https://github.com/other/repo/runs/55'),
                              ('app', {'id': 123, 'slug': 'github-actions'})]:
             sink = FakeChecks(); sink.remote = deepcopy(original.remote); sink.remote[field] = value
             with patch.object(sys, 'stderr', io.StringIO()):
