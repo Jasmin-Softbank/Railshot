@@ -626,6 +626,7 @@ export async function createProductService({ service, directory, target, provide
   void pump();
   return {
     dashboard: store.dashboard,
+    registrations: store.registrations,
     createUpdate, startUpdate,
     async sourceFiles(id, variant, sessionId = null) {
       const record = find('deployments', id, sessionId);

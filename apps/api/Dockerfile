@@ -56,6 +56,13 @@ COPY deployment/cloudflared/register.py deployment/cloudflared/render.py /app/de
 COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh deployment/bootstrap/runtime-healthz.py /app/deployment/bootstrap/
 COPY deployment/cilium/install.sh deployment/cilium/preflight.py deployment/cilium/health.sh /app/deployment/cilium/
 COPY deployment/airgap/versions.json /app/deployment/airgap/
+# The installer endpoints serve the existing customer script and its companion files.
+COPY deployment/bootstrap/install.sh deployment/bootstrap/uninstall.sh deployment/bootstrap/install_payload.py deployment/bootstrap/requirements.lock /app/deployment/bootstrap/
+COPY deployment/bootstrap/client_setup/*.py /app/deployment/bootstrap/client_setup/
+COPY deployment/bootstrap/templates/agent-authorized-keys.README /app/deployment/bootstrap/templates/
+COPY infrastructure/providers/openstack/*.py /app/infrastructure/providers/openstack/
+COPY infrastructure/providers/openstack/templates/cloud-init.yaml.tmpl /app/infrastructure/providers/openstack/templates/
+COPY apps/agent/*.py /app/apps/agent/
 RUN RAILSHOT_CONTAINER_BUILD=1 bash runtime-install.sh
 COPY --chmod=0555 apps/api/git-askpass.sh /usr/local/bin/railshot-git-askpass
 ENV GIT_ASKPASS=/usr/local/bin/railshot-git-askpass GIT_TERMINAL_PROMPT=0 PYTHONDONTWRITEBYTECODE=1 CHECKPOINT_DISABLE=1

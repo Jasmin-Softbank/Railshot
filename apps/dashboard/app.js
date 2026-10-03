@@ -42,6 +42,10 @@ const error = document.querySelector('#form-error');
 const provider = document.querySelector('#provider');
 const providerField = document.querySelector('#provider-field');
 const cloudProvider = document.querySelector('#cloud-provider');
+const openstackInstallField = document.querySelector('#openstack-install-field');
+const openstackInstallResult = document.querySelector('#openstack-installer-result');
+const openstackInstallStatus = document.querySelector('#openstack-install-status');
+const openstackEnrollmentKey = document.querySelector('#openstack-enrollment-key');
 const deploymentDatabase = document.querySelector('#deployment-database');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
@@ -183,6 +187,7 @@ function databaseChoice(select, profile, reset = false) {
 function updateSelection() {
   const selected = deploymentSelection();
   providerField.hidden = selected.environment !== 'onprem';
+  openstackInstallField.hidden = selected.environment !== 'onprem' || selected.provider !== 'openstack';
   document.querySelector('#cloud-provider-field').hidden = selected.environment !== 'cloud';
   const profile = selectedProfile();
   document.querySelector('#deployment-database-field').hidden = !profile?.database;
@@ -215,6 +220,56 @@ async function request(path, options = {}, controller = new AbortController()) {
     }
     return { data, location: response.headers.get('location'), status: response.status };
   } finally { clearTimeout(timeout); requests.delete(controller); }
+}
+
+async function prepareOpenStackInstaller() {
+  const button = document.querySelector('#prepare-openstack-install');
+  const project_id = document.querySelector('#openstack-project-id').value.trim();
+  const user_id = document.querySelector('#openstack-user-id').value.trim();
+  const auth_type = document.querySelector('#openstack-auth-type').value;
+  const enrollment_key = openstackEnrollmentKey.value;
+  openstackInstallResult.hidden = true;
+  document.querySelector('#openstack-linkage-token').value = '';
+  openstackInstallStatus.textContent = '';
+  if (![project_id, user_id].every((value) => /^[A-Za-z0-9._-]{1,255}$/.test(value))
+      || enrollment_key.length < 16 || enrollment_key.length > 256 || enrollment_key.trim() !== enrollment_key
+      || /[\x00-\x1f\x7f]/.test(enrollment_key)) {
+    openstackInstallStatus.textContent = '프로젝트·사용자 ID와 16~256자의 연계 키를 확인하세요.';
+    return;
+  }
+  button.disabled = true;
+  try {
+    const { data: installer } = await request('/api/v1/installers/openstack');
+    if (typeof installer.install_sh !== 'string' || !installer.install_sh.startsWith('#!/usr/bin/env bash')
+        || installer.script_url !== '/api/v1/installers/openstack/scripts'
+        || installer.bundle_url !== '/api/v1/installers/openstack/bundles'
+        || !/^[a-f0-9]{64}$/.test(installer.bundle_sha256)) throw new Error('설치 파일 응답을 확인하지 못했습니다.');
+    const { data: registration } = await request('/api/v1/registrations', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'openstack', project_id, user_id, auth_type, enrollment_key }) });
+    if (!/^[a-f0-9-]{36}$/.test(registration.id || '')
+        || !/^rsl_[A-Za-z0-9_-]{43}$/.test(registration.linkage_token || '')
+        || !Number.isFinite(Date.parse(registration.token_expires_at))) throw new Error('등록 결과를 확인하지 못했습니다.');
+    document.querySelector('#openstack-linkage-token').value = registration.linkage_token;
+    document.querySelector('#openstack-token-expires').textContent = `토큰 만료: ${new Date(registration.token_expires_at).toLocaleString()}. 원문은 이 화면에서만 볼 수 있습니다.`;
+    document.querySelector('#openstack-install-script').value = installer.install_sh;
+    document.querySelector('#openstack-script-download').href = installer.script_url;
+    document.querySelector('#openstack-bundle-download').href = installer.bundle_url;
+    openstackEnrollmentKey.value = '';
+    openstackInstallResult.hidden = false;
+    openstackInstallStatus.textContent = '등록 요청을 저장하고 일회성 연계 토큰을 발급했습니다.';
+  } catch (cause) {
+    openstackInstallStatus.textContent = cause.name === 'AbortError' ? '요청 시간이 초과되었습니다. 등록 상태를 확인하세요.' : cause.message;
+  } finally { button.disabled = false; }
+}
+document.querySelector('#prepare-openstack-install').addEventListener('click', prepareOpenStackInstaller);
+for (const [button, source] of [['#copy-openstack-token', '#openstack-linkage-token'],
+  ['#copy-openstack-script', '#openstack-install-script']]) {
+  document.querySelector(button).addEventListener('click', async () => {
+    const field = document.querySelector(source);
+    try { await navigator.clipboard.writeText(field.value); openstackInstallStatus.textContent = '복사했습니다.'; }
+    catch { field.focus(); field.select(); openstackInstallStatus.textContent = '내용을 선택했습니다. 직접 복사하세요.'; }
+  });
 }
 
 async function checkConnection() {
