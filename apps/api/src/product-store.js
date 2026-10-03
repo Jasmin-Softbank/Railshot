@@ -94,8 +94,12 @@ export async function createProductStore(directory) {
     state.applications ||= {};
     for (const app of Object.values(state.applications)) if (['registering', 'stopping', 'starting', 'deleting'].includes(app.status)) app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
-      if (['queued', 'running'].includes(operation.status)) {
+      const unclaimed = operation.kind === 'deployments' && operation.status === 'queued'
+        && Number.isSafeInteger(operation.queue?.sequence) && operation.queue.sequence > 0
+        && operation.queue.enqueued_at && !operation.queue.started_at;
+      if (['queued', 'running'].includes(operation.status) && !unclaimed) {
         operation.status = 'unknown';
+        operation.unknown_since = new Date().toISOString();
         operation.error = { code: 'INTERRUPTED', request_id: randomUUID(), message: '실행이 중단되어 결과를 다시 확인해야 합니다.', retryable: false, outcome_unknown: true };
         if (operation.kind === 'application-lifecycle') {
           operation.residuals = state.plans[operation.plan_id]?.public?.resources || [];

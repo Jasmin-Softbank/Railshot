@@ -97,21 +97,25 @@ test('snapshot and intent are durable before one dispatch; replay returns the sa
   assert.equal(f.reads(), before);
 });
 
-test('concurrent identical keys dispatch once; another intent is refused while active', async (t) => {
+test('concurrent identical keys dispatch once; another deployment waits in the FIFO', async (t) => {
   let release;
   const wait = new Promise((resolve) => { release = resolve; });
   let calls = 0;
-  const f = await fixture(t, { service: { deploy: async () => { calls++; await wait; return { run_id: 123, source_commit: publication.source_commit }; } } });
+  const f = await fixture(t, { service: {
+    deploy: async () => { const run_id = String(123 + calls++); await wait; return { run_id, source_commit: publication.source_commit }; },
+    status: async (id) => ({ run_id: id, state: 'published', publication: { ...publication, run_id: id } }),
+  } });
   const [first, second] = await Promise.all([f.product.createDeployment(input, 'same'), f.product.createDeployment(input, 'same')]);
   assert.equal(first.id, second.id);
-  await assert.rejects(f.product.createDeployment(input, 'other'), (error) => {
-    assert.equal(error.code, 'EXECUTOR_BUSY'); assert.equal(error.retryable, true);
-    assert.deepEqual(error.admission, { scope: 'workspace', accepted: false, reason: 'execution_in_progress' });
-    return true;
-  });
-  release();
-  await settle(() => f.product.getDeployment(first.id));
-  assert.equal(calls, 1);
+  let next;
+  try {
+    next = await f.product.createDeployment(input, 'other');
+    assert.equal(next.status, 'queued'); assert.ok(next.queue.sequence > first.queue.sequence);
+    assert.equal(next.queue.started_at, undefined);
+  } finally { release(); }
+  assert.equal((await settle(() => f.product.getDeployment(first.id))).status, 'succeeded');
+  assert.equal((await settle(() => f.product.getDeployment(next.id))).status, 'succeeded');
+  assert.equal(calls, 2);
 });
 
 test('CD progress persists revision and HTTP stage before completion while observer failure stays separate', async (t) => {
@@ -149,7 +153,7 @@ test('GitHub URL replay keeps the first pinned source without fetching current H
   assert.equal(loads, 1);
 });
 
-test('lost dispatch response stays unknown, survives restart, occupies admission and never replays', async (t) => {
+test('lost dispatch response survives restart and fences the same app without replay', async (t) => {
   let dispatches = 0;
   const f = await fixture(t, { service: { deploy: async () => { dispatches++; throw new Error('private upstream secret'); } } });
   const first = await f.product.createDeployment(input, 'uncertain');
@@ -162,7 +166,7 @@ test('lost dispatch response stays unknown, survives restart, occupies admission
   const restarted = await createProductService({ service: f.service, directory: f.directory, deployPublished: async () => { assert.fail('No CD replay'); } });
   try {
     assert.equal((await restarted.createDeployment(input, 'uncertain')).id, first.id);
-    await assert.rejects(restarted.createDeployment(input, 'new-key'), { code: 'EXECUTOR_BUSY' });
+    await assert.rejects(restarted.createDeployment(input, 'new-key'), { code: 'APPLICATION_RECONCILE_REQUIRED' });
     assert.equal(dispatches, 1);
   } finally { await restarted.close(); }
 });
@@ -465,9 +469,9 @@ test('one deployment consumes its app-bound plan before CI, and replay never rep
   const created = await f.product.createDeployment(request, 'combined');
   const result = await settle(() => f.product.getDeployment(created.id));
   assert.equal(result.status, 'succeeded'); assert.equal(result.environment.database.status, 'succeeded');
-  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  assert.deepEqual(sequence, ['verify', 'verify', 'environment', 'ci', 'cd']);
   await f.product.createDeployment(request, 'combined');
-  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  assert.deepEqual(sequence, ['verify', 'verify', 'environment', 'ci', 'cd']);
   await assert.rejects(f.product.createDeployment(request, 'different'), { code: 'CONFLICT' });
 });
 
@@ -547,7 +551,7 @@ for (const origin of ['environments', 'deployments']) {
     const reusedComplete = await settle(() => f.product.getDeployment(reused.id));
     assert.equal(reusedComplete.status, 'succeeded');
     assert.equal((await f.product.createDeployment(request, 'reuse')).id, reused.id);
-    assert.equal(executions, 1); assert.equal(verifications, 1); assert.equal(registrations, 1);
+    assert.equal(executions, 1); assert.equal(verifications, origin === 'deployments' ? 2 : 1); assert.equal(registrations, 1);
     await f.product.close();
 
     const restartedService = ciService();
@@ -565,14 +569,14 @@ for (const origin of ['environments', 'deployments']) {
       const afterRestart = await restarted.createDeployment(request, 'after-restart');
       assert.equal(afterRestart.environment_id, environmentId);
       assert.equal((await settle(() => restarted.getDeployment(afterRestart.id))).status, 'succeeded');
-      assert.equal(executions, 1); assert.equal(verifications, 1);
+      assert.equal(executions, 1); assert.equal(verifications, origin === 'deployments' ? 2 : 1);
       assert.ok(cdEnvironments.length >= 2 && cdEnvironments.every((id) => id === environmentId));
       unknownCd = true;
       const uncertain = await restarted.createDeployment(request, 'uncertain');
       assert.equal((await settle(() => restarted.getDeployment(uncertain.id))).status, 'unknown');
       const dispatchesBeforeRetry = dispatches;
       assert.equal((await restarted.createDeployment(request, 'uncertain')).id, uncertain.id);
-      await assert.rejects(restarted.createDeployment(request, 'new-after-unknown'), { code: 'EXECUTOR_BUSY' });
+      await assert.rejects(restarted.createDeployment(request, 'new-after-unknown'), { code: 'APPLICATION_RECONCILE_REQUIRED' });
       assert.equal(dispatches, dispatchesBeforeRetry); assert.equal(executions, 1);
     } finally { await restarted.close(); }
   });
@@ -774,9 +778,9 @@ test('HTTP deployment accepts a dynamic app-bound plan alongside existing enviro
   const complete = await settle(async () => (await fetch(`${base}${accepted.headers.get('location')}`)).json());
   assert.equal(complete.status, 'succeeded'); assert.equal(complete.app, app); assert.equal(complete.target_id, targetId);
   assert.equal(complete.plan_id, plan.id); assert.equal(complete.environment.database.status, 'succeeded');
-  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  assert.deepEqual(sequence, ['verify', 'verify', 'environment', 'ci', 'cd']);
   const replay = await post(); assert.equal(replay.status, 200); assert.equal((await replay.json()).id, complete.id);
-  assert.deepEqual(sequence, ['verify', 'environment', 'ci', 'cd']);
+  assert.deepEqual(sequence, ['verify', 'verify', 'environment', 'ci', 'cd']);
 });
 
 test('CI diagnostics preserve blocked and unknown outcomes without replaying execution', async (t) => {
@@ -794,7 +798,7 @@ test('CI diagnostics preserve blocked and unknown outcomes without replaying exe
     assert.equal(f.dispatches(), 1); assert.equal(f.cdCalls(), 0);
     await f.product.getDeployment(accepted.id);
     assert.equal(f.dispatches(), 1);
-    if (outcome === 'UNKNOWN') await assert.rejects(f.product.createDeployment(input, 'another'), { code: 'EXECUTOR_BUSY' });
+    if (outcome === 'UNKNOWN') await assert.rejects(f.product.createDeployment(input, 'another'), { code: 'APPLICATION_RECONCILE_REQUIRED' });
   }
 });
 
@@ -1285,19 +1289,15 @@ test('HTTP deployment actions accepts exact resume input and returns the same re
   assert.equal(history.items[0].application_id, original.application_id);
   assert.equal(history.items[0].environment_target_id, original.environment_target_id);
   assert.notEqual(original.environment_target_id, original.target_id);
-  source.set('source_name', 'todomvc');
+  source.set('source_name', 'calculator');
   for (const sameOwner of [true, false]) {
     const blocked = await fetch(`${base}/api/v1/deployments`, { method: 'POST',
       headers: { ...(sameOwner ? { cookie } : {}), 'Idempotency-Key': 'blocked-new-app' }, body: source });
     assert.equal(blocked.status, 409); assert.equal(blocked.headers.get('retry-after'), null);
     const { error } = await blocked.json();
-    assert.equal(error.code, 'EXECUTOR_BUSY'); assert.equal(error.outcome_unknown, false);
-    assert.equal(error.admission.accepted, false); assert.equal(error.admission.reason, 'reconciliation_required');
-    if (sameOwner) assert.equal(error.admission.blocking_operation.id, id);
-    else {
-      assert.equal(Object.hasOwn(error.admission, 'blocking_operation'), false);
-      assert.doesNotMatch(JSON.stringify(error), new RegExp(`${id}|calculator|session_id`));
-    }
+    assert.equal(error.code, sameOwner ? 'APPLICATION_RECONCILE_REQUIRED' : 'APPLICATION_OWNERSHIP_CONFLICT');
+    assert.equal(error.outcome_unknown, false);
+    assert.doesNotMatch(JSON.stringify(error), new RegExp(`${id}|session_id`));
   }
   assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1);
   const url = `${base}/api/v1/deployments/${id}/actions`;
