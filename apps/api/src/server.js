@@ -13,6 +13,7 @@ import { createProductService, ProductError, idempotencyKey } from './product.js
 import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
 import { createEnvironmentAdapter, EnvironmentError } from './environments.js';
 import { DashboardError, cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
+import { buildOpenStackInstaller } from './installer.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
 const assets = new Map([
@@ -73,7 +74,9 @@ async function uploadedSource(request, strict = false, allowSelection = false, s
     const source_name = form.has('source_name') ? form.get('source_name') : undefined;
     if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
     selected = { deployment_selection: { environment, provider }, source_name };
-  } else if (form.has('source_name')) fail('소스 이름은 환경 선택과 함께 입력하세요.');
+  } else if (form.has('source_name')) {
+    fail('소스 이름은 환경 선택과 함께 입력하세요.');
+  }
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
   if (supplied.length !== 1) fail('배포 소스 하나만 입력하세요.');
@@ -137,11 +140,14 @@ function page(items, parameters) {
   return { items: visible, next_marker: start + visible.length < items.length ? visible.at(-1).id : null };
 }
 function apiError(response, error, requestId, versioned) {
-  const status = error instanceof EnvironmentError && error.status === 400 ? 422 : Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
+  const environmentInputError = error instanceof EnvironmentError && error.status === 400;
+  const status = environmentInputError ? 422
+    : Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
   const codes = { 400: 'INVALID_INPUT', 401: 'UNAUTHENTICATED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 405: 'METHOD_NOT_ALLOWED', 409: 'CONFLICT', 413: 'PAYLOAD_TOO_LARGE', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'INVALID_INPUT', 502: 'UPSTREAM_FAILURE', 503: 'UPSTREAM_UNAVAILABLE' };
-  const message = error instanceof ServiceError || error instanceof ProductError || error instanceof DashboardError ? error.message : '요청을 처리하지 못했습니다.';
+  const knownError = error instanceof ServiceError || error instanceof ProductError || error instanceof DashboardError;
+  const message = knownError ? error.message : '요청을 처리하지 못했습니다.';
   const headers = { 'X-Request-ID': requestId, ...(error.allow ? { Allow: error.allow } : {}), ...(error.retryable ? { 'Retry-After': '2' } : {}) };
-  const code = error instanceof EnvironmentError && error.status === 400 ? 'INVALID_INPUT'
+  const code = environmentInputError ? 'INVALID_INPUT'
     : (error instanceof ServiceError || error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError) && error.code || codes[status] || 'INTERNAL_ERROR';
   // Correlate the safe error envelope without persisting source URLs, credentials or request bodies.
   console.error(JSON.stringify({ event: 'api.request_failed', request_id: requestId, status, code }));
@@ -181,6 +187,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
   deployPublished, environmentAdapter, applicationAdapter, observeMetrics, observeLogs, product, pollInterval,
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
 } = {}) {
+  let installerReady;
+  const installer = () => installerReady ??= buildOpenStackInstaller();
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
     if (product) return product;
@@ -223,6 +231,19 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         if (!access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);
+        }
+        if (versioned && ['/api/v1/installers/openstack', '/api/v1/installers/openstack/bundle'].includes(url.pathname)) {
+          if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+          if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+          const packageData = await installer();
+          if (url.pathname.endsWith('/bundle')) {
+            response.writeHead(200, { 'content-type': 'application/zip', 'content-length': packageData.archive.length,
+              'content-disposition': 'attachment; filename="railshot-openstack-installer.zip"',
+              'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+            response.end(packageData.archive); return;
+          }
+          json(response, 200, { install_sh: packageData.script, bundle_sha256: packageData.sha256,
+            bundle_url: '/api/v1/installers/openstack/bundle' }); return;
         }
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
@@ -372,7 +393,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           }
           if (kind === 'deployments') {
             const key = requestKey(request);
-            accepted(response, kind, await products.createDeployment(await uploadedSource(request, true, true), key, sourceLoader, sessionId), requestId); return;
+            const input = await uploadedSource(request, true, true);
+            accepted(response, kind, await products.createDeployment(input, key, sourceLoader, sessionId), requestId); return;
           }
           if (kind === 'plans') {
             const plan = await products.createPlan(await jsonInput(request), sessionId);
@@ -399,7 +421,9 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       response.writeHead(200, { 'content-type': asset[1], 'content-length': content.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }).end(content);
     } catch (error) { apiError(response, error, requestId, versioned); }
   });
-  server.on('close', () => { productReady.then((value) => value?.close?.()).catch(() => {}); });
+  server.on('close', () => {
+    productReady.then((value) => value?.close?.()).catch(() => {});
+  });
   server.productReady = productReady;
   return server;
 }

@@ -6,53 +6,23 @@
 
 Ubuntu 24.04, root, Python 3.12를 초기 지원 대상으로 합니다. OpenStack 명령 실행은 고객 노드에서만 수행하며 상시 작업 수신 에이전트와 서버 구현은 포함하지 않습니다. 기존 PostgreSQL 구축 기능은 별개입니다. 실제 고객 환경 연결은 아직 검증하지 않았습니다.
 
-설치 진입점과 Python 파일을 같은 HTTPS 배포 루트에 저장소 상대 경로 그대로 배포합니다. 필요한 경로는 `deployment/bootstrap/`, `infrastructure/providers/openstack/`, `apps/agent/`이며, 정확한 23개 파일 목록은 `install.sh`의 `required_files` 배열에 고정되어 있습니다. 단독으로 다운로드한 `install.sh`는 `--download-base-url` 또는 `JASMIN_DOWNLOAD_BASE_URL`을 받아 나머지 파일을 내려받습니다. 두 가지를 모두 지정하면 명령행 옵션을 우선합니다. 배포 주소는 실제 운영 주소가 아직 제공되지 않았으므로 기본값이 없습니다.
-
-아래는 **root 셸**에서 실행하는 한 줄 예시입니다. `https://downloads.example.org/jasmin/releases/RELEASE`를 실제 승인된 버전별 배포 루트로 바꾸십시오. 다운로드에 `curl`이 필요하며 설정 파일은 미리 준비해야 합니다.
+대시보드에서 설치 ZIP을 다운로드하여 고객 노드로 옮깁니다. ZIP에는 `deployment/bootstrap/install.sh`와 OpenStack 클라이언트, K3s·Cilium·앱 배포 스크립트가 같은 상대 경로로 포함됩니다. UI는 `install.sh` 내용과 복사 가능한 명령을 보여 줍니다. 번들 SHA-256을 확인하고 압축을 푼 뒤 다음 명령으로 실행합니다.
 
 ```sh
-(set -eu; base='https://downloads.example.org/jasmin/releases/RELEASE'; entry=$(mktemp); trap 'rm -f -- "$entry"' EXIT; test "$(curl --disable --fail --show-error --silent --proto '=https' --connect-timeout 15 --max-time 120 --max-redirs 0 --output "$entry" --write-out '%{http_code}' "$base/deployment/bootstrap/install.sh")" = 200; bash "$entry" --download-base-url "$base" --install-dependencies init --config /etc/jasmin-install/config.json)
+sudo bash deployment/bootstrap/install.sh --install-dependencies init
 ```
 
-이미 받은 단독 진입점에는 `sudo bash ./install.sh --download-base-url https://downloads.example.org/jasmin/releases/RELEASE init --config /etc/jasmin-install/config.json` 형태로 주소를 지정할 수 있습니다. URL을 지정하면 로컬 파일과 섞지 않고 같은 배포 루트에서 모든 필수 파일을 받습니다. HTTPS 인증서 검증을 유지하고 리다이렉트는 거부하며 HTTP 200 응답만 받습니다. 전체 다운로드가 성공하기 전에는 Python이나 패키지 설치 명령을 실행하지 않습니다. 실패·종료 시 임시 다운로드 디렉터리를 제거하며 개발용 `--source-run`도 동일하게 정리합니다.
+UI에서 입력한 프로젝트·사용자 ID와 인증 형식은 복사 명령의 `--project-id`, `--user-id`, `--auth-type`으로 전달됩니다. 명령에 이 옵션이 없으면 고객 노드에서 입력합니다. Keystone HTTPS v3 URL, 관리 네트워크 ID와 SSH 접근 범위도 고객 노드에서 입력합니다. 이어 프로젝트 범위 토큰 또는 Application Credential ID/secret을 입력합니다. 비밀값은 명령에 넣지 않고 터미널에서 숨겨 받아 로컬 전용 저장소에만 저장합니다. 백엔드 API는 Keystone에 접속하거나 사용자 인증정보를 받지 않습니다. 기존 설정은 `--config /etc/jasmin-install/config.json`으로 재사용할 수 있습니다. 사용자 입력 설정 파일에는 비밀값을 넣지 않습니다.
 
-공급하는 파일은 변경 불가능한 버전별 경로로 묶어 배포하십시오. 현재 다운로드는 HTTPS 서버 신뢰에 의존하며, 별도 서명이나 사전에 신뢰한 해시로 배포본을 검증하는 기능은 없습니다. 기존 설치의 파일 해시 검사는 설치 이후 변조·버전 차이 확인용입니다. 다운로드 설치는 위 23개 실행 필수 파일만 포함합니다. 전체 저장소에서 설치한 배포본은 다른 구성요소까지 포함할 수 있으므로, 두 설치 방식 간 파일 목록이 다르면 기존 보호 정책에 따라 재설치를 중단합니다. 설치 방식이나 버전을 바꿀 때 기존 디렉터리를 자동으로 덮어쓰지 않습니다.
+앱 배포 입력 JSON을 준비했다면 설치 명령 끝에 `--runtime-input /절대경로/입력.json`을 추가합니다. 설치기는 로컬 OpenStack 사전 점검·조회·접근 준비 후 동봉한 `deployment/scripts/deploy.sh --input`을 실행합니다. 이 배포 엔진이 필요한 K3s·Cilium·워크로드 스크립트를 호출합니다. JSON 규격은 `deployment/scripts/schemas/`를 따릅니다. 이 실행은 같은 고객 노드에서 수행되며 다른 서버의 스크립트를 임의로 다운로드하거나 원격 실행하지 않습니다.
 
-완전한 로컬 배포 패키지는 URL 없이 기존 방식으로 실행합니다. 파일이 빠져 있고 다운로드 주소도 없으면 누락 경로와 주소 지정 안내를 출력하고 중단합니다.
+명령과 기존 설정 검증은 패키지·배포본·가상환경 설치보다 먼저 수행합니다. 의존성 설치 옵션은 패키지 관리자와 Python 패키지 저장소에 접근하며 운영체제 패키지를 설치합니다. 이미 준비된 노드는 해당 옵션을 생략할 수 있습니다. 기본 설치는 필요한 소스와 전용 Python 환경을 `/opt/jasmin/bootstrap/`에 배치하며 기존 설치의 파일 해시가 다르면 자동 덮어쓰지 않습니다. 개발용 `--source-run`은 소스 디렉터리에서 직접 실행합니다.
 
-```sh
-sudo bash deployment/bootstrap/install.sh --install-dependencies init --config /etc/jasmin-install/config.json
-```
-
-명령과 초기화 설정 검증은 패키지·배포본·가상환경 설치보다 먼저 수행합니다. 폐기한 등록 설정이나 CLI 옵션은 이 단계에서 거절합니다. 의존성 설치 옵션은 패키지 관리자와 Python 패키지 저장소에 접근하며 운영체제 패키지를 설치합니다. 이미 준비된 노드는 해당 옵션을 생략합니다. 외부 패키지 저장소 접근과 신뢰 검증은 고객 정책에 맞게 구성하십시오.
-
-설정 디렉터리는 root 소유 0700, JSON 파일은 root 소유 0600으로 준비하십시오. 비밀번호를 JSON에 넣지 마십시오. 입력은 터미널에서 숨겨 받습니다. 아래는 형식 예제이며 주소와 식별자를 실제 환경 값으로 바꿔야 합니다.
-
-```json
-{
-  "openstack": {
-    "auth_url": "https://keystone.example.org/v3",
-    "user_domain_name": "Default",
-    "project_id": "PROJECT_UUID",
-    "role_id": "ROLE_UUID",
-    "interface": "internal"
-  },
-  "vm_access": {
-    "network_id": "NETWORK_UUID",
-    "ssh_source_cidr": "192.0.2.10/32",
-    "ssh_username": "ubuntu",
-    "resource_prefix": "jasmin"
-  }
-}
-```
-
-기본 설치는 필요한 소스와 전용 Python 환경을 `/opt/jasmin/bootstrap/`에 배치합니다. 이후 진입점은 `/opt/jasmin/bootstrap/deployment/bootstrap/install.sh`입니다. 기존 설치의 파일 해시가 다르면 자동 덮어쓰지 않습니다. 개발용 `--source-run`은 소스 디렉터리에서 직접 실행합니다.
-
-관리자 ID와 전용 계정 이름은 설정에서 생략하면 입력받습니다. 관리자 암호는 별도 입력받습니다. 서비스 등록 키와 `--enrollment-token-file`은 지원하지 않으며, 기존 `RAILSHOT_ENROLLMENT_TOKEN`·`JASMIN_ENROLLMENT_TOKEN` 환경변수는 하위 프로세스 실행 전에 버립니다. `service_url` 또는 `wireguard*` 설정이 있으면 실행을 거절합니다. 기존 설치의 상태·자격증명은 보존하고 `diagnose` 또는 해제 절차로 관리하십시오. 새로운 로컬 설치는 별도 설정·상태 경로를 사용합니다.
+서비스 등록 키와 `--enrollment-token-file`은 지원하지 않습니다. `service_url` 또는 `wireguard*` 설정이 있으면 실행을 거절합니다. 기존 설치의 상태·자격증명은 보존하며 `diagnose` 또는 해제 절차로 관리합니다.
 
 ## 실행 흐름
 
-`main.initialize` → 사전 점검 → OpenStack 인증/자격증명 저장 → 실제 조회 → 서비스 분석 → 가상 머신 접근 설정 → 보고서입니다. 각 모듈은 import만으로 시스템을 변경하지 않습니다.
+`main.initialize` → 사전 점검 → 고객 노드에서 OpenStack 인증 → 로컬 자격증명 저장 → 조회 → 가상 머신 접근 설정 → 보고서 → 선택적 앱 배포입니다. 각 모듈은 import만으로 시스템을 변경하지 않습니다.
 
 프로젝트 등 전체 설정의 해시를 상태에 고정합니다. 재실행 시 다른 설정으로 기존 자격증명을 재사용하지 않습니다. 변경이 필요하면 기존 등록과 자원을 확인하고 별도 설치/이관 절차를 수행하십시오. 이 프로그램은 관리망 경로를 만들거나 실제 VM 접속을 자동으로 증명하지 않습니다.
 
@@ -71,11 +41,11 @@ sudo bash deployment/bootstrap/install.sh --install-dependencies init --config /
 |---|---|
 | configuration | 설정 소유권·0700/0600 권한·JSON 형식과 기존 설정 일치 여부 확인 |
 | preflight | Ubuntu 버전, root 권한, 필요한 명령과 외부 통신 확인 |
-| identity | 관리자 권한, 도메인/프로젝트/역할 확인. 부분 생성 자원 식별자를 점검하고 기존 계정 자동 인수 금지 |
+| identity | 프로젝트 범위 토큰 또는 Application Credential, 프로젝트·사용자 ID 일치 여부 확인 |
 | discovery | OpenStack 서비스 주소·접근 권한·할당량 확인 |
 | vm_access_preparation | 관리망 경로, 접속 키, 보안그룹 생성 권한 확인 |
 
-임의로 상태를 삭제하면 기존 자원 소유권을 잃을 수 있습니다. 인증 실패 후 관리자 암호를 재입력해야 할 수 있으며, 자격증명이 안전하게 저장되기 전 발생한 중단을 완전 자동 복구한다고 보장하지 않습니다.
+임의로 상태를 삭제하면 기존 자원 소유권을 잃을 수 있습니다. 인증 실패 후 고객 노드에서 토큰 또는 Application Credential을 재입력해야 할 수 있으며, 자격증명이 안전하게 저장되기 전 발생한 중단을 완전 자동 복구한다고 보장하지 않습니다.
 
 가상 머신은 자동 생성하지 않습니다. 생성 시 `vm-access.json`의 설정을 적용한 후, 접근 프로필과 신뢰할 수 있는 경로로 확보한 SSH 호스트 키 파일을 준비해 `verify-vm --profile PATH --known-hosts PATH`로 확인합니다. 프로필 규격은 OpenStack access 모듈을 참조하십시오. 기반 준비는 실제 접속 성공을 의미하지 않습니다.
 
@@ -104,7 +74,7 @@ sudo chmod 600 /etc/jasmin/vm-test.json /etc/jasmin/known_hosts
 sudo bash deployment/bootstrap/install.sh --source-run verify-vm --profile /etc/jasmin/vm-test.json --known-hosts /etc/jasmin/known_hosts
 ```
 
-부분 인증 실패 시 상태에 기록된 계정 ID·이름·도메인을 대조한 뒤 관리자가 이번 설치의 자격증명을 폐기하고 필요하면 신규 전용 계정 및 역할 부여를 정리해야 합니다. 기록 없이 기존 계정의 암호를 재설정하거나 자동 인수하지 않습니다.
+부분 인증 실패 시 고객 노드에서 프로젝트·사용자 ID와 인증 범위를 확인한 뒤 새 토큰 또는 Application Credential을 입력하십시오. 설치기는 Keystone 계정이나 역할을 생성하지 않습니다.
 
 ## 작업 요청 에이전트 확장
 

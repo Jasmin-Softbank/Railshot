@@ -3,7 +3,7 @@
   "info": {
     "title": "RAILSHOT session-scoped product API",
     "version": "1.1.0",
-    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Every remote API request is session-scoped, including requests with the existing internal operator bearer. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. Optional OpenStack connection metadata is stored separately, with encrypted write-only passwords; it is not execution configuration. One API process and one persistent SQLite database on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
+    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Console connection metadata is session-scoped and not execution configuration. The API serves an OpenStack installer package; Keystone credentials are entered on the customer node and never sent to this endpoint. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. One API process on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
   },
   "servers": [
     {
@@ -301,7 +301,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/builds/{id}": {
@@ -541,7 +541,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/deployments/{id}": {
@@ -1011,7 +1011,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/environments/{id}": {
@@ -2862,6 +2862,63 @@
                 }
               }
             },
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack": {
+      "get": {
+        "operationId": "getOpenStackInstallerMetadata",
+        "summary": "Download the customer-side OpenStack installer metadata",
+        "description": "No Keystone authentication is performed by this API. The bundle contains install.sh and companion deployment scripts.",
+        "responses": {
+          "200": {
+            "description": "Installer metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "install_sh",
+                    "bundle_sha256",
+                    "bundle_url"
+                  ],
+                  "properties": {
+                    "install_sh": {
+                      "type": "string"
+                    },
+                    "bundle_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "bundle_url": {
+                      "type": "string",
+                      "const": "/api/v1/installers/openstack/bundle"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/bundle": {
+      "get": {
+        "operationId": "getOpenStackInstallerBundle",
+        "summary": "Download the customer-side OpenStack installer package",
+        "description": "No Keystone authentication is performed by this API. The bundle contains install.sh and companion deployment scripts.",
+        "responses": {
+          "200": {
+            "description": "Installer file",
             "content": {
               "application/zip": {
                 "schema": {

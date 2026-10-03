@@ -6,9 +6,17 @@
 
 - UI 기준은 `006ad34`의 소스 → 클라우드/온프레미스 → 선택 내용 확인 → 배포 시작이다.
   기존 카드·OpenStack/Proxmox 선택·콘솔 탭을 유지한다. 화면은
-  `/api/v1/options`에서 준비 상태를 읽고 소스와 environment/provider만
-  deployments API에 보낸다. 등록 대상의 ID·앱 이름 결정과 실행 가능 여부 검사는 서버가 수행한다.
+  `/api/v1/options`에서 준비 상태를 읽고 소스와 environment/provider를
+  deployments API에 보낸다. OpenStack 인증 정보나 연결 토큰은 배포 요청에 넣지 않는다.
+  등록 대상의 ID·앱 이름 결정과 실행 가능 여부 검사는 서버가 수행한다.
   미연결 provider는 명확히 차단하며 다른 대상에 배포하지 않는다.
+- OpenStack 설치 패널은 프로젝트·사용자 ID와 프로젝트 범위 토큰 또는 Application Credential의
+  입력 형식을 브라우저에서 확인한다. 비밀값은 서버에 보내거나 저장하지 않는다. UI는 설치 묶음,
+  복사 가능한 실행 명령과 `install.sh` 내용을 제공한다. 실제 Keystone 인증정보는 고객 노드에서 입력한다.
+- 사용자 노드의 OpenStack 초기 설치 진입점은 [install.sh](../../deployment/bootstrap/install.sh)다.
+  설치 절차와 필요한 배포 패키지는 [고객 OpenStack 설치 프로그램](../../docs/architecture/client-bootstrap.md)을 따른다.
+  설치기는 로컬 인증·조회·VM 접근 준비를 수행한다. `--runtime-input`을 지정하면 동봉한
+  배포 스크립트가 앱 배포 JSON을 받아 후속 설치 단계를 실행한다.
 - 202의 `Location`과 자원 ID를 확인한 뒤 15초마다 상태를 조회한다. 이미지 게시와
   앱 배포 성공을 구분한다. 배포 성공 및 HTTP 검증 시각이 있을 때만 앱 링크를 표시한다.
 - HttpOnly 익명 세션 쿠키로 배포·빌드 이력을 분리한다. 실행 토큰·소스·자격증명은

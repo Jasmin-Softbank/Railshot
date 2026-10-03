@@ -103,7 +103,7 @@ if values.get('ID', '').strip('"') != 'ubuntu' or values.get('VERSION_ID', '').s
     raise SystemExit('Ubuntu 24.04만 지원합니다.')
 PY
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 openssh-client python3-venv python3-openstackclient
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl iproute2 openssh-client python3-venv python3-openstackclient
 fi
 if [[ "$SOURCE_RUN" == false ]]; then
     python3 "$SCRIPT_DIR/install_payload.py"

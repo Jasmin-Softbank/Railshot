@@ -42,6 +42,18 @@ const error = document.querySelector('#form-error');
 const provider = document.querySelector('#provider');
 const providerField = document.querySelector('#provider-field');
 const cloudProvider = document.querySelector('#cloud-provider');
+const connectionFields = {
+  root: document.querySelector('#openstack-connection-field'),
+  result: document.querySelector('#openstack-installer-result'),
+  status: document.querySelector('#openstack-install-status'),
+  prepareButton: document.querySelector('#prepare-openstack-install'),
+};
+const openstackProjectId = document.querySelector('#openstack-project-id');
+const openstackUserId = document.querySelector('#openstack-user-id');
+const openstackAuthType = document.querySelector('#openstack-auth-type');
+const openstackToken = document.querySelector('#openstack-token');
+const openstackCredentialId = document.querySelector('#openstack-credential-id');
+const openstackCredentialSecret = document.querySelector('#openstack-credential-secret');
 const deploymentDatabase = document.querySelector('#deployment-database');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
@@ -154,6 +166,9 @@ function deploymentSelection() {
   const environment = document.querySelector('[name="environment"]:checked').value;
   return { environment, provider: environment === 'cloud' ? cloudProvider.value : provider.value };
 }
+function isOpenStack(selection) {
+  return selection.environment === 'onprem' && selection.provider === 'openstack';
+}
 function selectedOption() {
   const selected = deploymentSelection();
   return deploymentOptions.find((item) => item.environment === selected.environment && item.provider === selected.provider);
@@ -184,6 +199,7 @@ function updateSelection() {
   const selected = deploymentSelection();
   providerField.hidden = selected.environment !== 'onprem';
   document.querySelector('#cloud-provider-field').hidden = selected.environment !== 'cloud';
+  connectionFields.root.hidden = !isOpenStack(selected);
   const profile = selectedProfile();
   document.querySelector('#deployment-database-field').hidden = !profile?.database;
   databaseChoice(deploymentDatabase, profile);
@@ -200,6 +216,16 @@ document.querySelectorAll('[name="environment"]').forEach((input) => input.addEv
 provider.addEventListener('change', updateSelection);
 cloudProvider.addEventListener('change', updateSelection);
 deploymentDatabase.addEventListener('change', updateSelection);
+openstackAuthType.addEventListener('change', () => {
+  document.querySelector('#openstack-token-field').hidden = openstackAuthType.value !== 'token';
+  document.querySelector('#openstack-credential-field').hidden = openstackAuthType.value !== 'application_credential';
+  if (openstackAuthType.value === 'token') openstackCredentialSecret.value = '';
+  else openstackToken.value = '';
+  invalidateReview();
+});
+for (const field of [openstackProjectId, openstackUserId, openstackToken, openstackCredentialId, openstackCredentialSecret]) {
+  field.addEventListener('input', invalidateReview);
+}
 
 async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
@@ -215,6 +241,60 @@ async function request(path, options = {}, controller = new AbortController()) {
     }
     return { data, location: response.headers.get('location'), status: response.status };
   } finally { clearTimeout(timeout); requests.delete(controller); }
+}
+
+async function prepareOpenStackInstaller() {
+  const { status, prepareButton } = connectionFields;
+  status.textContent = '';
+  connectionFields.result.hidden = true;
+  const project_id = openstackProjectId.value.trim();
+  const user_id = openstackUserId.value.trim();
+  const auth_type = openstackAuthType.value;
+  const credentialValues = auth_type === 'token'
+    ? [openstackToken.value.trim()]
+    : [openstackCredentialId.value.trim(), openstackCredentialSecret.value];
+  if (![project_id, user_id].every((value) => /^[A-Za-z0-9._-]{1,255}$/.test(value))
+    || credentialValues.some((value) => !value || /[\r\n]/.test(value))) {
+    status.textContent = '프로젝트·사용자 ID와 선택한 인증 정보를 입력하세요.';
+    return;
+  }
+  prepareButton.disabled = true;
+  try {
+    const { data } = await request('/api/v1/installers/openstack');
+    if (typeof data.install_sh !== 'string' || !data.install_sh.startsWith('#!/usr/bin/env bash')
+      || !/^[a-f0-9]{64}$/.test(data.bundle_sha256) || data.bundle_url !== '/api/v1/installers/openstack/bundle') {
+      throw new Error('설치 파일 응답을 확인하지 못했습니다.');
+    }
+    document.querySelector('#openstack-install-script').value = data.install_sh;
+    document.querySelector('#openstack-bundle-download').href = data.bundle_url;
+    document.querySelector('#openstack-install-command').value = [
+      '# 다운로드한 railshot-openstack-installer.zip을 고객 노드로 옮긴 뒤 실행',
+      `printf '%s  %s\\n' '${data.bundle_sha256}' railshot-openstack-installer.zip | sha256sum --check -`,
+      'mkdir -p railshot-openstack',
+      'python3 -m zipfile -e railshot-openstack-installer.zip railshot-openstack',
+      'cd railshot-openstack',
+      `sudo bash deployment/bootstrap/install.sh --install-dependencies init --project-id '${project_id}' --user-id '${user_id}' --auth-type '${auth_type}'`,
+    ].join('\n');
+    openstackToken.value = '';
+    openstackCredentialSecret.value = '';
+    connectionFields.result.hidden = false;
+    status.textContent = '설치 파일을 준비했습니다. Keystone 인증은 고객 노드에서 install.sh를 실행할 때 진행합니다.';
+  } catch (cause) {
+    status.textContent = cause.name === 'AbortError'
+      ? '설치 파일 요청 시간이 초과되었습니다. 다시 시도하세요.'
+      : cause.message;
+  } finally {
+    prepareButton.disabled = false;
+  }
+}
+connectionFields.prepareButton.addEventListener('click', prepareOpenStackInstaller);
+for (const [button, source] of [['#copy-openstack-command', '#openstack-install-command'],
+  ['#copy-openstack-script', '#openstack-install-script']]) {
+  document.querySelector(button).addEventListener('click', async () => {
+    const field = document.querySelector(source);
+    try { await navigator.clipboard.writeText(field.value); connectionFields.status.textContent = '복사했습니다.'; }
+    catch { field.focus(); field.select(); connectionFields.status.textContent = '내용을 선택했습니다. 직접 복사하세요.'; }
+  });
 }
 
 async function checkConnection() {
@@ -536,6 +616,7 @@ deployButton.addEventListener('click', async () => {
     if (draft.plan) {
       payload.set('app', draft.plan.name); payload.set('target_id', draft.targetId); payload.set('plan_id', draft.plan.id);
     } else { payload.set('environment', draft.environment); payload.set('provider', draft.provider); }
+    if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (draft.source.files[0].webkitRelativePath || draft.source.files[0].name).split('/')[0]);
     if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (draft.source.files[0].webkitRelativePath || draft.source.files[0].name).split('/')[0]);
     appendSource(payload, draft.source);
     draft.attempted = true;

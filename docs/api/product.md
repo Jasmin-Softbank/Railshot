@@ -2,11 +2,12 @@
 
 이 문서는 `apps/api/src/server.js`, `product.js`, `environments.js`, `product-store.js`에 구현한 제품 API를 설명한다. 기계 판독 계약은 [product.openapi.json](product.openapi.json)이다. 이 계약의 문서·로컬 검증은 `not_deployed`이며 실제 클라우드 E2E 결과와 별도로 기록한다.
 
-사용자 계정·로그인·팀원 allowlist는 없다. 익명 브라우저 세션별로 접수 기록·계획·화면 설정·연결 정보를 분리한다. 운영자 지정 공용 대상과 실행기의 동시 실행 한도는 공유한다. 세션·스키마·이관 계약은 [dashboard-sessions.md](dashboard-sessions.md)를 따른다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. 실행용 GitHub·Provider·SSH 자격은 서버 설정에만 둔다. 별도 OpenStack 연결 정보 저장은 실행용 자격을 바꾸지 않는다.
+사용자 계정·로그인·팀원 allowlist는 없다. 익명 브라우저 세션별로 접수 기록·계획·화면 설정·콘솔 연결 정보를 분리한다. 운영자 지정 공용 대상과 실행기의 동시 실행 한도는 공유한다. 세션·스키마·이관 계약은 [dashboard-sessions.md](dashboard-sessions.md)를 따른다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. 실행용 GitHub·Provider·SSH 자격은 서버 설정에만 둔다. 콘솔 연결 정보는 실행용 자격을 바꾸지 않는다. OpenStack 설치 묶음을 제공하지만 API는 사용자 Keystone 인증정보를 받거나 검증하지 않는다.
 
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
 | 화면 선택 | `GET /api/v1/options` | 기존 환경의 클라우드(AWS/GCP)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. provider에 배정된 대상이 CI 허용 목록과 CD 등록에 모두 있을 때만 available이다. |
+| OpenStack 설치 묶음 | `GET /api/v1/installers/openstack`, `GET /api/v1/installers/openstack/bundle` | 설치 스크립트 내용·묶음 해시와 ZIP을 제공한다. 사용자 인증정보는 요청하지 않는다. |
 | 환경 관측 | `GET /api/v1/targets/{id}/observations` | 접근 가능한 등록 대상의 실제 노드·앱 지표와 수집 시각. 배포 이력 없이 조회하며 결측·실패는 null과 상태로 표시한다. |
 | 대상 | `GET /api/v1/targets` | CI 서비스에 등록한 대상 목록. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
 | 빌드 | `POST /api/v1/builds`, `GET /api/v1/builds/{id}` | ZIP·폴더·공개 GitHub를 기존 CI로 제출한다. ID는 GitHub run ID 문자열이며 등록한 run만 조회한다. `published`는 검증한 이미지 게시다. |
@@ -107,6 +108,10 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 플랫폼 릴리스는 같은 이름의 선택 Actions 변수를 `--provider-targets`로 전달하고, 매핑과 기본 AWS를 포함한 CI 목록을 이미지 선언에 함께 보존한다. 기본값은 빈 매핑이다. 먼저 [런타임 등록](runtime-registration.md), CI 대상·앱 바인딩과 API의 CD 등록을 완료한 뒤 이 변수를 설정한다. OpenStack은 기존 서버·K3s의 등록과 재배포 경로이며, AWS/GCP의 Terraform 기반 신규 환경 생성 범위를 확장하지 않는다.
 
 `GET /api/v1/builds`, `/api/v1/deployments`, `/api/v1/environments`는 현재 세션의 실행 요약 목록을, `GET /api/v1/plans`는 현재 세션의 계획 목록을 반환한다. 배포 내역은 서버 목록으로 복원하며 localStorage의 기존 마지막 실행 ID를 사용하지 않는다. 세션·설정·OpenStack 연결 API는 [별도 명세](dashboard-sessions.md)에 정리했다.
+
+OpenStack 설치 UI는 프로젝트·사용자 ID와 토큰 또는 Application Credential의 입력 형식을 브라우저에서 확인한 뒤 설치 ZIP과 복사 가능한 `install.sh` 명령을 보여 준다. API는 설치 파일만 제공하며 Keystone 요청이나 신원 검증을 수행하지 않는다. 실제 인증정보는 고객 노드의 설치기에서 입력한다. 세션별 콘솔 연결 기록은 [별도 명세](dashboard-sessions.md)를 따른다.
+
+고객 노드의 초기 설치 진입점은 [deployment/bootstrap/install.sh](../../deployment/bootstrap/install.sh)다. 필요한 스크립트를 ZIP에 함께 넣는다. `--runtime-input`이 주어지면 로컬 인증·조회·VM 접근 준비 뒤 동봉한 `deployment/scripts/deploy.sh`가 앱 배포를 실행한다. 실행 명령과 입력 파일 규격은 [고객 OpenStack 설치 프로그램](../architecture/client-bootstrap.md)을 따른다.
 
 각 대상의 CD 설정은 별도 Kubernetes API, AppProject, namespace, GitOps 경로, pull Secret 참조 및 공개 health URL을 등록한다. CI 게시 결과의 target ID와 요청의 target ID가 다르면 Git push나 Argo sync 전에 거부한다. 같은 빌드·게시 코드를 사용해도 배포 선언과 클러스터 자격은 해당 대상에 묶인다. GCP의 네이티브 LB나 OpenStack의 공개 경로 준비 여부는 별도 운영 검증이며 옵션 표시만으로 완료를 뜻하지 않는다.
 

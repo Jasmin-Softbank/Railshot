@@ -91,7 +91,42 @@
                   <option value="openstack">OpenStack</option>
                   <option value="proxmox">Proxmox</option>
                 </select>
-                <p class="field-note">등록된 인프라 연결 상태를 확인한 뒤 배포합니다.</p>
+                <p class="field-note">OpenStack 설치는 아래에서 스크립트를 받아 고객 노드에서 실행합니다.</p>
+              </div>
+              <div class="provider-field" id="openstack-connection-field" hidden>
+                <span class="field-label">OpenStack 설치 파일 받기</span>
+                <p class="field-note">아래 값은 이 브라우저에서 입력 형식만 확인합니다. 서버에 인증정보를 보내지 않습니다. 설치 중 고객 노드의 터미널에서 Keystone URL과 인증정보를 다시 입력합니다.</p>
+                  <label class="field-label" for="openstack-project-id">프로젝트 ID</label>
+                  <input id="openstack-project-id" type="text" autocomplete="off" spellcheck="false" />
+                  <label class="field-label" for="openstack-user-id">사용자 ID</label>
+                  <input id="openstack-user-id" type="text" autocomplete="off" spellcheck="false" />
+                  <label class="field-label" for="openstack-auth-type">인증 형식</label>
+                  <select id="openstack-auth-type">
+                    <option value="token">프로젝트 범위 토큰</option>
+                    <option value="application_credential">Application Credential (Access Key 형식)</option>
+                  </select>
+                  <div id="openstack-token-field">
+                    <label class="field-label" for="openstack-token">프로젝트 범위 토큰</label>
+                    <input id="openstack-token" type="password" autocomplete="off" spellcheck="false" />
+                  </div>
+                  <div id="openstack-credential-field" hidden>
+                    <label class="field-label" for="openstack-credential-id">Application Credential ID</label>
+                    <input id="openstack-credential-id" type="text" autocomplete="off" spellcheck="false" />
+                    <label class="field-label" for="openstack-credential-secret">Application Credential secret</label>
+                    <input id="openstack-credential-secret" type="password" autocomplete="off" spellcheck="false" />
+                  </div>
+                  <button class="secondary-button" id="prepare-openstack-install" type="button">설치 파일 준비</button>
+                <p class="field-note" id="openstack-install-status" role="status"></p>
+                <div id="openstack-installer-result" hidden>
+                  <a class="secondary-button" id="openstack-bundle-download" download="railshot-openstack-installer.zip">설치 묶음 다운로드</a>
+                  <p class="field-note">설치 묶음을 다운로드해 고객 노드로 옮긴 다음 아래 명령을 실행하세요. 묶음에는 install.sh와 서버 배포에 필요한 스크립트가 포함됩니다. 앱 배포 입력 JSON이 있다면 마지막에 <code>--runtime-input /경로/입력.json</code>을 추가하세요.</p>
+                  <label class="field-label" for="openstack-install-command">복사해서 실행할 명령</label>
+                  <textarea id="openstack-install-command" class="installer-code" readonly spellcheck="false" rows="7"></textarea>
+                  <button class="secondary-button" id="copy-openstack-command" type="button">명령 복사</button>
+                  <label class="field-label" for="openstack-install-script">install.sh 내용</label>
+                  <textarea id="openstack-install-script" class="installer-code" readonly spellcheck="false" rows="12"></textarea>
+                  <button class="secondary-button" id="copy-openstack-script" type="button">스크립트 복사</button>
+                </div>
               </div>
               <div id="deployment-database-field" class="provider-field" hidden>
                 <label class="field-label" for="deployment-database">데이터베이스</label>
