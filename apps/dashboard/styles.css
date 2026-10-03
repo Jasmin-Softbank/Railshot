@@ -147,9 +147,7 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
   .console-heading { align-items: start; flex-direction: column; }
 }
 /* Session data uses the existing panels and controls. */
-.connection-form { display: grid; gap: 12px; margin-bottom: 24px; }
-#connections-view .panel, #history-view .panel { padding: 24px; }
-.connection-form input:not([type="checkbox"]) { width: 100%; padding: 12px; border: 1px solid #d7dedc; border-radius: 8px; font: inherit; }
+#history-view .panel { padding: 24px; }
 .saved-list { list-style: none; padding: 0; margin: 16px 0 0; }
 .saved-list li { padding: 16px 0; border-top: 1px solid #e5e9e7; overflow-wrap: anywhere; }
 .saved-list .text-button { margin-right: 16px; text-align: left; }

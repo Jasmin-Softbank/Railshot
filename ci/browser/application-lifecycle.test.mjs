@@ -59,7 +59,7 @@ async function fixture(t) {
     }
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'],
       '/src/api.js': ['src/api.js', 'text/javascript'], '/src/openstack-installer.js': ['src/openstack-installer.js', 'text/javascript'],
-      '/src/lifecycle.js': ['src/lifecycle.js', 'text/javascript'], '/src/connections.js': ['src/connections.js', 'text/javascript'],
+      '/src/lifecycle.js': ['src/lifecycle.js', 'text/javascript'],
       '/contracts/application.mjs': ['../../contracts/application.mjs', 'text/javascript'] };
     if (!files[path]) return send(response, 404, { error: 'Fixture path unavailable' });
     response.writeHead(200, { 'content-type': files[path][1] });

@@ -78,7 +78,7 @@ test('original cloud card binds a DB plan, blocks invalid plans, permits indepen
       status: 'succeeded', runtime_target_id: 'ha-runtime', deployment_supported: true });
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'],
       '/src/api.js': ['src/api.js', 'text/javascript'], '/src/openstack-installer.js': ['src/openstack-installer.js', 'text/javascript'],
-      '/src/lifecycle.js': ['src/lifecycle.js', 'text/javascript'], '/src/connections.js': ['src/connections.js', 'text/javascript'],
+      '/src/lifecycle.js': ['src/lifecycle.js', 'text/javascript'],
       '/contracts/application.mjs': ['../../contracts/application.mjs', 'text/javascript'] };
     if (!files[path]) return respond(response, 404, { error: 'fixture path unavailable' });
     response.writeHead(200, { 'content-type': files[path][1] });
