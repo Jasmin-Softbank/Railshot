@@ -415,6 +415,65 @@ test('ready application with successful stop and start history can resume its or
   assert.deepEqual([registrations, submissions, deliveries, f.calls.apply], [1, 1, 2, 2]);
 });
 
+test('known registration preflight failure deletes a queued app only through a verified native no-registration plan', async (t) => {
+  for (const mode of ['unstarted', 'partial_registration', 'unknown_registration']) await t.test(mode, async (t) => {
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'railshot-unstarted-delete-')));
+    const configPath = join(directory, 'environments.json');
+    await writeFile(configPath, JSON.stringify({ version: 1, state_dir: join(directory, 'registrations'), environments: {
+      'runtime-aws': { provider: 'aws', tenant: 'team', source_repository: 'owner/apps',
+        ingress: { edge_config_file: '/private/aws-edge.json', dns_config_file: '/private/dns.json' } },
+    } }), { mode: 0o600 });
+    const phases = []; let submissions = 0;
+    const adapter = await createApplicationAdapter({ configPath, ciIdentity: { tenant: 'team', sourceRepository: 'owner/apps' },
+      loadPublished: async () => assert.fail('No publication is needed for an unstarted app'),
+      runner: async (_python, args, options) => {
+        const request = JSON.parse(await readFile(args.at(-1)));
+        if (args[0].endsWith('/applications.py')) {
+          phases.push('registration');
+          return { ...request, target_id: request.application_id, status: mode === 'unknown_registration' ? 'unknown' : 'blocked',
+            error: { code: 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED' } };
+        }
+        assert.ok(args[0].endsWith('/application_lifecycle.py'));
+        assert.equal(request.application_id, adapter.describe('runtime-aws', app.app).id);
+        assert.equal(request.action, 'delete'); phases.push(request.phase);
+        if (request.phase === 'plan') {
+          assert.equal(options.mutation, false);
+          if (mode === 'partial_registration') return { status: 'blocked', error: { code: 'APPLICATION_REGISTRATION_INCOMPLETE' } };
+          return { status: 'planned', plan_id: request.operation_id, plan_hash: 'f'.repeat(64), resources: [],
+            retained: [{ kind: 'SharedRuntime', name: 'runtime-aws' }], expires_at: new Date(Date.now() + 600000).toISOString() };
+        }
+        assert.equal(mode, 'unstarted'); assert.equal(options.mutation, true); assert.equal(request.delete_data, true);
+        assert.equal(disk(directory, 'operations', request.operation_id).status, 'running');
+        return { status: 'succeeded', application_id: request.application_id, action: 'delete',
+          steps: [{ name: 'unstarted-registration-removed', status: 'succeeded' }], residuals: [] };
+      } });
+    const product = await createProductService({ directory, applicationAdapter: adapter,
+      service: { targetId: 'runtime-aws', deploy: async () => { submissions++; assert.fail('Preflight failure must not submit CI'); } } });
+    t.after(async () => { await product.close(); await rm(directory, { recursive: true, force: true }); });
+    const owner = product.dashboard.session().id;
+    const deployment = await product.createDeployment(source, 'preflight-failed', undefined, owner);
+    const failed = await settledDeployment(product, deployment.id, owner);
+    assert.equal(failed.status, mode === 'unknown_registration' ? 'unknown' : 'blocked');
+    assert.equal(product.getApplication(deployment.application_id, owner).status, mode === 'unknown_registration' ? 'unknown' : 'queued');
+    assert.equal(submissions, 0);
+    if (mode !== 'unstarted') {
+      await assert.rejects(product.createApplicationPlan(deployment.application_id, { action: 'delete' }, owner),
+        { code: mode === 'unknown_registration' ? 'EXECUTOR_BUSY' : 'APPLICATION_PLAN_BLOCKED' });
+      assert.deepEqual(phases, mode === 'unknown_registration' ? ['registration'] : ['registration', 'plan']);
+      assert.notEqual(product.getApplication(deployment.application_id, owner).status, 'deleted');
+      return;
+    }
+    const plan = await product.createApplicationPlan(deployment.application_id, { action: 'delete' }, owner);
+    assert.deepEqual(plan.resources, []); assert.equal(disk(directory, 'plans', plan.id).private.deferred, undefined);
+    const operation = await product.createApplicationOperation(deployment.application_id,
+      { action: 'delete', plan_id: plan.id, plan_hash: plan.plan_hash, confirmation: app.app, delete_data: true }, 'delete-unstarted', owner);
+    const result = await settled(product, operation.id, owner);
+    assert.equal(result.status, 'succeeded'); assert.deepEqual(result.residuals, []);
+    assert.equal(product.getApplication(deployment.application_id, owner).status, 'deleted');
+    assert.deepEqual(phases, ['registration', 'plan', 'apply']); assert.equal(submissions, 0);
+  });
+});
+
 test('GitHub cancellation binds workflow/source/repository and sends a single cancel request before verified completion', async () => {
   const binding = { target_id: 'runtime-aws', source_commit: 'a'.repeat(40) };
   const base = { id: 123, path: '.github/workflows/railshot-deploy.yml', head_sha: binding.source_commit,

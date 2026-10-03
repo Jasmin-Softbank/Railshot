@@ -73,6 +73,8 @@ export async function createProductService({ service, directory, target, provide
   }
   function lifecycleAvailable(application, action, cancelling = null) {
     if (!['planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle'].every((name) => typeof applicationAdapter?.[name] === 'function')) throw unavailable();
+    // The normal native plan must prove no registration intent/binding exists before a local tombstone.
+    if (action === 'delete' && !cancelling && application.status === 'queued') return;
     if (action === 'delete' && cancelling && ['queued', 'registering'].includes(application.status)
         && typeof applicationAdapter.planPendingDeletion === 'function') return;
     if (!(action === 'start' ? application.status === 'stopped' : ['ready', 'stopped'].includes(application.status))
