@@ -5,8 +5,8 @@ The root-owned config fixes one project/LB/listener/runtime/subnet/domain, the
 runtime and amphora network identities, and a private state_dir. Keep that
 directory across deployments: an intent without an
 ID permits discovery only, never another create. JSON stdout contains no CLI
-output. The existing cloud-cli.py owns authentication. An application's full
-request is immutable, including health_path; changing it needs operator action.
+output. The existing cloud-cli.py owns authentication. Application identity is
+immutable; a changed health_path recreates only the verified app-owned route.
 """
 
 import fcntl
@@ -302,6 +302,8 @@ def configure_locked(config, request, directory, call, observe_only=False):
     if path.exists():
         record = read_private(path)
         require(record.get("status") not in ("stopped", "deleted"), "application_lifecycle_action_required")
+        if not observe_only and record.get("request") != request:
+            return replace_health(config, request, record, fingerprint, directory, call)
         require(record.get("fingerprint") == fingerprint and record.get("request") == request,
                 "application_intent_conflict")
     else:
@@ -544,6 +546,70 @@ def lifecycle_observe(config, request, directory, call):
             "network_rule_id": result["network_rule_id"], "observations": observations}
 
 
+def lifecycle_apply(config, request, directory, snapshot, action, call):
+    """Caller holds the LB lock and has saved an intent for this verified snapshot."""
+    record = snapshot["record"]
+    app_path = directory / (request["application_id"] + ".json")
+    if action == "start":
+        # Reset creation intents only after verified absence, never after an
+        # uncertain creation. Both lifecycle and health replacement use this path.
+        save(app_path, {k: v for k, v in record.items() if k in ("fingerprint", "request")} | {"steps": {}})
+        configure_locked(config, record["request"], directory, call)
+        result = lifecycle_observe(config, request, directory, call)
+        require(len(result["resources"]) == 5 and is_uuid(result.get("network_rule_id")), "application_restore_unverified")
+    elif snapshot["resources"]:
+        ids = snapshot["resources"]
+        for kind in ("rule", "policy", "monitor", "member", "pool"):
+            command = {"monitor": "healthmonitor", "policy": "l7policy", "rule": "l7rule"}.get(kind, kind)
+            parent = [ids["policy"]] if kind == "rule" else [ids["pool"]] if kind == "member" else []
+            call([command, "delete", *parent, ids[kind], "--wait"])
+            scope = parent or (["--listener", config["listener_id"]] if kind == "policy" else
+                               ["--loadbalancer", config["loadbalancer_id"]] if kind == "pool" else [])
+            rows = call([command, "list", *scope, "-f", "json"])
+            require(isinstance(rows, list) and not any(row.get("id") == ids[kind] for row in rows), "application_delete_unverified")
+        rule_id = snapshot["network_rule_id"]
+        call(["security", "group", "rule", "delete", rule_id], service=())
+        rows = call(["security", "group", "rule", "list", config["network"]["runtime_security_group_id"],
+                     "-c", "ID", "-f", "json"], service=())
+        require(isinstance(rows, list) and not any(row.get("ID") == rule_id for row in rows), "network_delete_unverified")
+        save(app_path, {**record, "status": "stopped" if action == "stop" else "deleted"})
+        result = lifecycle_observe(config, request, directory, call)
+    else:
+        if record and action == "delete":
+            save(app_path, {**record, "status": "deleted"})
+        result = lifecycle_observe(config, request, directory, call)
+    return result
+
+
+def replace_health(config, request, record, fingerprint, directory, call):
+    """One health-only stop/start, with the old ownership and new request journaled."""
+    # ponytail: recreation interrupts this app's route; use journaled monitor updates if continuity is required.
+    require(record.get("status") == "configured" and
+            {**record["request"], "health_path": request["health_path"]} == request, "application_intent_conflict")
+    snapshot = lifecycle_observe(config, record["request"], directory, call)
+    plan = {"action": "health-update", "request": request, "snapshot": snapshot}
+    plan_id = str(uuid.uuid4())
+    path = directory / ("lifecycle-" + plan_id + ".json")
+    journal = {"phase": "applying", "plan_id": plan_id, "plan_sha256": lifecycle_hash(plan), "plan": plan}
+    save(path, journal)
+    try:
+        stopped = lifecycle_apply(config, record["request"], directory, snapshot, "stop", call)
+        # The old resources are now verified absent. The journal retains the old
+        # request; only the replacement gets a new fingerprint and creation intents.
+        stopped["record"] = {**stopped["record"], "request": request, "fingerprint": fingerprint}
+        save(directory / (request["application_id"] + ".json"), stopped["record"])
+        result = lifecycle_apply(config, request, directory, stopped, "start", call)
+        receipt = {**request, "status": "configured", "https_verified": False,
+                   "resources": result["resources"], "network_rule_id": result["network_rule_id"]}
+        save(path, {**journal, "phase": "succeeded", "receipt": receipt})
+        return receipt
+    except BaseException:
+        try:
+            save(path, {**journal, "phase": "unknown"})
+        finally:
+            raise RouteError("health_update_outcome_unknown", "unknown") from None
+
+
 def lifecycle(config, envelope, call=run_cli):
     config = checked_config(config)
     require(isinstance(envelope, dict) and set(envelope) <= {"operation", "action", "request", "expected"}
@@ -594,36 +660,7 @@ def lifecycle(config, envelope, call=run_cli):
             return {"status": "succeeded", "https_verified": False}
         save(path, {**journal, "phase": "applying"})
         try:
-            record = snapshot["record"]
-            app_path = directory / (request["application_id"] + ".json")
-            if action == "start":
-                # Reset creation intents only after an explicitly reviewed stopped
-                # snapshot verified absence; never reset an uncertain creation.
-                save(app_path, {k: v for k, v in record.items() if k in ("fingerprint", "request")} | {"steps": {}})
-                configure_locked(config, record["request"], directory, call)
-                result = lifecycle_observe(config, request, directory, call)
-                require(len(result["resources"]) == 5 and is_uuid(result.get("network_rule_id")), "application_restore_unverified")
-            elif snapshot["resources"]:
-                ids = snapshot["resources"]
-                for kind in ("rule", "policy", "monitor", "member", "pool"):
-                    command = {"monitor": "healthmonitor", "policy": "l7policy", "rule": "l7rule"}.get(kind, kind)
-                    parent = [ids["policy"]] if kind == "rule" else [ids["pool"]] if kind == "member" else []
-                    call([command, "delete", *parent, ids[kind], "--wait"])
-                    scope = parent or (["--listener", config["listener_id"]] if kind == "policy" else
-                                       ["--loadbalancer", config["loadbalancer_id"]] if kind == "pool" else [])
-                    rows = call([command, "list", *scope, "-f", "json"])
-                    require(isinstance(rows, list) and not any(row.get("id") == ids[kind] for row in rows), "application_delete_unverified")
-                rule_id = snapshot["network_rule_id"]
-                call(["security", "group", "rule", "delete", rule_id], service=())
-                rows = call(["security", "group", "rule", "list", config["network"]["runtime_security_group_id"],
-                             "-c", "ID", "-f", "json"], service=())
-                require(isinstance(rows, list) and not any(row.get("ID") == rule_id for row in rows), "network_delete_unverified")
-                save(app_path, {**record, "status": "stopped" if action == "stop" else "deleted"})
-                result = lifecycle_observe(config, request, directory, call)
-            else:
-                if record and action == "delete":
-                    save(app_path, {**record, "status": "deleted"})
-                result = lifecycle_observe(config, request, directory, call)
+            result = lifecycle_apply(config, request, directory, snapshot, action, call)
             receipt = {"status": "succeeded", "https_verified": False, "action": action,
                        "application_id": request["application_id"], "resources": result["resources"]}
             save(path, {**journal, "phase": "succeeded", "receipt": receipt})

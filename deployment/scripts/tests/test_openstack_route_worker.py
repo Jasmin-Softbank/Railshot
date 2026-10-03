@@ -172,7 +172,8 @@ class OctaviaCLI:
         return copy.deepcopy(rule)
 
     def network_mutations(self):
-        return [args for args in self.network_calls if args[:4] == ["security", "group", "rule", "create"]]
+        return [args for args in self.network_calls if args[:3] == ["security", "group", "rule"]
+                and args[3] in ("create", "delete")]
 
 
 class RouteWorkerTests(unittest.TestCase):
@@ -375,6 +376,156 @@ class RouteWorkerTests(unittest.TestCase):
         self.assertEqual(len(self.cli.objects["pool"]), 2)
         self.assertEqual(self.cli.network_rules[first["network_rule_id"]], old_network[first["network_rule_id"]])
         self.assertEqual(len(self.cli.network_mutations()), 2)
+
+    def test_health_change_recreates_only_owned_route_and_replay_is_readonly(self):
+        first = self.configure()
+        other = self.configure({**self.request, "application_id": "app-" + "b" * 24,
+                                "hostname": "other.railshot.io", "node_port": 30124})
+        preserved = copy.deepcopy(({kind: self.cli.objects[kind][other["resources"][kind]] for kind in worker.KINDS},
+                                   self.cli.network_rules[other["network_rule_id"]],
+                                   self.cli.lb, self.cli.listener, self.cli.ports, self.cli.group))
+        updated = {**self.request, "health_path": "/ready"}
+        directory = Path(self.config["state_dir"])
+        def checked_intent(arguments, service=("loadbalancer",)):
+            journals = list(directory.glob("lifecycle-*.json"))
+            if arguments[1] == "delete" or arguments[:4] == ["security", "group", "rule", "delete"]:
+                self.assertEqual(len(journals), 1)
+                journal = worker.read_private(journals[0])
+                self.assertEqual(journal["phase"], "applying")
+                self.assertEqual(journal["plan"]["request"], updated)
+                self.assertEqual(journal["plan"]["snapshot"]["record"]["request"], self.request)
+                self.assertEqual(journal["plan"]["snapshot"]["resources"], first["resources"])
+                self.assertEqual(journal["plan_sha256"], worker.lifecycle_hash(journal["plan"]))
+            return self.cli(arguments, service=service)
+        result = worker.configure(self.config, updated, checked_intent)
+        self.assertEqual(result["status"], "configured")
+        self.assertIs(result["https_verified"], False)
+        self.assertEqual(result["health_path"], "/ready")
+        for kind in worker.KINDS:
+            self.assertNotEqual(first["resources"][kind], result["resources"][kind])
+            self.assertEqual(set(self.cli.objects[kind]), {result["resources"][kind], other["resources"][kind]})
+        self.assertEqual(set(self.cli.network_rules), {result["network_rule_id"], other["network_rule_id"]})
+        self.assertEqual(self.cli.objects["monitor"][result["resources"]["monitor"]]["url_path"], "/ready")
+        self.assertEqual(({kind: self.cli.objects[kind][other["resources"][kind]] for kind in worker.KINDS},
+                          self.cli.network_rules[other["network_rule_id"]],
+                          self.cli.lb, self.cli.listener, self.cli.ports, self.cli.group), preserved)
+        journal = worker.read_private(next(directory.glob("lifecycle-*.json")))
+        self.assertEqual((journal["phase"], journal["receipt"]), ("succeeded", result))
+        mutations = self.cli.mutations() + self.cli.network_mutations()
+        self.assertEqual(self.configure(updated), result)
+        self.assertEqual(self.cli.mutations() + self.cli.network_mutations(), mutations)
+        self.assertEqual(len(list(directory.glob("lifecycle-*.json"))), 1)
+        # Common lifecycle must still operate on the replacement's new ownership.
+        for action in ("stop", "start", "delete"):
+            plan = self.lifecycle(action)
+            self.assertEqual(plan["health_path"], "/ready")
+            self.assertEqual(self.lifecycle(action, "lifecycle-execute", plan["expected"])["status"], "succeeded")
+
+    def test_health_change_verifies_old_owner_network_and_identity_before_mutation(self):
+        first = self.configure()
+        updated = {**self.request, "health_path": "/ready"}
+        directory = Path(self.config["state_dir"])
+        for target, key, value in (
+                (self.cli.objects["monitor"][first["resources"]["monitor"]], "tags", "foreign-owner"),
+                (self.cli.objects["member"][first["resources"]["member"]], "protocol_port", 30125),
+                (self.cli.network_rules[first["network_rule_id"]], "remote_ip_prefix", "0.0.0.0/0"),
+                (self.cli.listener, "default_pool_id", str(uuid.uuid4()))):
+            with self.subTest(field=key):
+                original = target[key]
+                target[key] = value
+                before = {p.name: p.read_bytes() for p in directory.glob("*.json")}
+                mutations = self.cli.mutations() + self.cli.network_mutations()
+                with self.assertRaises(worker.RouteError):
+                    self.configure(updated)
+                self.assertEqual(self.cli.mutations() + self.cli.network_mutations(), mutations)
+                self.assertEqual({p.name: p.read_bytes() for p in directory.glob("*.json")}, before)
+                target[key] = original
+        for key, value in (("hostname", "changed.railshot.io"), ("node_port", 30125)):
+            with self.subTest(identity=key), self.assertRaisesRegex(worker.RouteError, "application_intent_conflict"):
+                self.configure({**updated, key: value})
+        with patch.object(worker, "verify_certificate", side_effect=worker.RouteError("hostname_certificate_not_ready")):
+            with self.assertRaisesRegex(worker.RouteError, "hostname_certificate_not_ready"):
+                self.configure(updated)
+        self.assertEqual(self.cli.mutations() + self.cli.network_mutations(), mutations)
+        self.assertFalse(list(directory.glob("lifecycle-*.json")))
+
+    def test_health_change_lost_create_response_discovers_without_duplicate(self):
+        self.configure()
+        self.cli.fail_create = "monitor"
+        updated = {**self.request, "health_path": "/ready"}
+        result = self.configure(updated)
+        mutations = self.cli.mutations() + self.cli.network_mutations()
+        self.assertEqual(result, self.configure(updated))
+        self.assertEqual(self.cli.mutations() + self.cli.network_mutations(), mutations)
+        self.assertEqual(len([args for args in self.cli.mutations() if args[1] == "create"]), 10)
+        self.assertTrue(all(len(objects) == 1 for objects in self.cli.objects.values()))
+        self.assertEqual(len(self.cli.network_rules), 1)
+
+    def test_health_change_partial_delete_is_unknown_and_retry_never_mutates(self):
+        self.configure()
+        updated = {**self.request, "health_path": "/ready"}
+        directory = Path(self.config["state_dir"])
+        def lost_delete(arguments, service=("loadbalancer",)):
+            result = self.cli(arguments, service=service)
+            if arguments[:2] == ["l7rule", "delete"]:
+                raise worker.RouteError("provider_response_unknown", "unknown")
+            return result
+        with self.assertRaisesRegex(worker.RouteError, "health_update_outcome_unknown") as error:
+            worker.configure(self.config, updated, lost_delete)
+        self.assertEqual(error.exception.status, "unknown")
+        journal = worker.read_private(next(directory.glob("lifecycle-*.json")))
+        self.assertEqual(journal["phase"], "unknown")
+        self.assertEqual(worker.read_private(directory / (self.request["application_id"] + ".json"))["request"], self.request)
+        before = {p.name: p.read_bytes() for p in directory.glob("*.json")}
+        calls = copy.deepcopy((self.cli.calls, self.cli.network_calls))
+        for request in (updated, self.request):
+            with self.assertRaisesRegex(worker.RouteError, "lifecycle_reconciliation_required"):
+                self.configure(request)
+        self.assertEqual((self.cli.calls, self.cli.network_calls), calls)
+        self.assertEqual({p.name: p.read_bytes() for p in directory.glob("*.json")}, before)
+
+    def test_health_change_uncertain_recreation_never_resets_creation_intent(self):
+        self.configure()
+        self.cli.fail_create, self.cli.apply_failed_create = "member", False
+        updated = {**self.request, "health_path": "/ready"}
+        with self.assertRaisesRegex(worker.RouteError, "health_update_outcome_unknown") as error:
+            self.configure(updated)
+        self.assertEqual(error.exception.status, "unknown")
+        directory = Path(self.config["state_dir"])
+        record = worker.read_private(directory / (self.request["application_id"] + ".json"))
+        self.assertEqual(record["request"], updated)
+        self.assertEqual(record["steps"]["member"], {"intent": True})
+        before = {p.name: p.read_bytes() for p in directory.glob("*.json")}
+        calls = copy.deepcopy((self.cli.calls, self.cli.network_calls))
+        with self.assertRaisesRegex(worker.RouteError, "lifecycle_reconciliation_required"):
+            self.configure(updated)
+        self.assertEqual((self.cli.calls, self.cli.network_calls), calls)
+        self.assertEqual({p.name: p.read_bytes() for p in directory.glob("*.json")}, before)
+
+    def test_health_change_never_revives_stopped_or_deleted_app(self):
+        self.configure()
+        updated = {**self.request, "health_path": "/ready"}
+        for action in ("stop", "delete"):
+            plan = self.lifecycle(action)
+            self.lifecycle(action, "lifecycle-execute", plan["expected"])
+            before = {p.name: p.read_bytes() for p in Path(self.config["state_dir"]).glob("*.json")}
+            calls = copy.deepcopy((self.cli.calls, self.cli.network_calls))
+            with self.assertRaisesRegex(worker.RouteError, "application_lifecycle_action_required"):
+                self.configure(updated)
+            self.assertEqual((self.cli.calls, self.cli.network_calls), calls)
+            self.assertEqual({p.name: p.read_bytes() for p in Path(self.config["state_dir"]).glob("*.json")}, before)
+
+    def test_health_change_does_not_reset_uncertain_initial_creation(self):
+        self.cli.fail_create, self.cli.apply_failed_create = "pool", False
+        with self.assertRaisesRegex(worker.RouteError, "creation_unresolved_pool"):
+            self.configure()
+        directory = Path(self.config["state_dir"])
+        before = {p.name: p.read_bytes() for p in directory.glob("*.json")}
+        calls = copy.deepcopy((self.cli.calls, self.cli.network_calls))
+        with self.assertRaisesRegex(worker.RouteError, "application_intent_conflict"):
+            self.configure({**self.request, "health_path": "/ready"})
+        self.assertEqual((self.cli.calls, self.cli.network_calls), calls)
+        self.assertEqual({p.name: p.read_bytes() for p in directory.glob("*.json")}, before)
 
     def test_lost_create_response_recovers_by_reading_each_resource(self):
         for kind in worker.KINDS:
