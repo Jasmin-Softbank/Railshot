@@ -159,7 +159,6 @@ spec:
             - {name: RAILSHOT_ALLOWED_HOSTS, value: "localhost,127.0.0.1,railshot.io,railshot-api,railshot-api.railshot-system.svc.cluster.local"}
             - {name: RAILSHOT_ALLOWED_ORIGINS, value: "https://railshot.io"}
             - {name: RAILSHOT_API_TOKEN_FILE, value: /run/secrets/api/token}
-            - {name: TYPESAFE_API_KEY, valueFrom: {secretKeyRef: {name: railshot-classifier, key: api-key, optional: true}}}
             - {name: RAILSHOT_STATE_DIR, value: /var/lib/railshot/state}
             - {name: RAILSHOT_CD_CONFIG, value: /var/lib/railshot/config/cd.json}
             - name: RAILSHOT_APPLICATIONS_FILE

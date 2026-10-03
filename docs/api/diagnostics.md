@@ -6,7 +6,16 @@ repository variables override it, while direct CLI defaults remain zero/packagin
 redacted diagnostic artifacts and source snapshots independently of gate verdicts.
 The API joins those facts with dispatch, publication, GitOps revision, controller,
 workload and public HTTP observations in the existing SQLite operation record.
-Jev classification is an asynchronous hypothesis; it cannot retry, modify source,
+Production does not inject `TYPESAFE_API_KEY` into the API. The Jev classifier is
+therefore disabled even if the optional `railshot-classifier` Secret still exists.
+Previously stored classifications remain historical evidence; deterministic
+diagnostics, CI events and the optional Codex repair agent continue independently.
+The production CI uses a shared maximum of two SDK attempts for initial packaging
+and failure repair (`RAILSHOT_MAX_REPAIR_ATTEMPTS=2`,
+`RAILSHOT_MAX_PACKAGING_ATTEMPTS=0`); zero repair attempts disables the agent.
+
+When explicitly configured outside this production policy, Jev classification is
+an asynchronous hypothesis; it cannot retry, modify source,
 publish an image or mark a deployment successful.
 
 ## Architecture decision
