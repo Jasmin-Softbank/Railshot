@@ -935,7 +935,7 @@ test('HTTP target observations authorize IDs before collecting and need no deplo
   assert.equal(method.status, 405); assert.equal(method.headers.get('allow'), 'GET'); assert.equal(calls.length, 3);
 });
 
-async function applicationFixture(t, { registrationStatus = 'succeeded', publicationChange = {}, openstackIngress } = {}) {
+async function applicationFixture(t, { registrationStatus = 'succeeded', publicationChange = {}, openstackIngress, unknownGraceMs = 60000 } = {}) {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'railshot-product-apps-')));
   t.after(() => rm(home, { recursive: true, force: true }));
   const configPath = join(home, 'environments.json');
@@ -979,7 +979,7 @@ async function applicationFixture(t, { registrationStatus = 'succeeded', publica
       assert.equal(submissions[Number(id) - 1001].target_id, targetId);
       return { state: 'published', publication: runs.get(id) };
     } };
-  const options = { service, target, providerTargets, applicationAdapter: adapter, deployPublished: legacy, pollInterval: 5 };
+  const options = { service, target, providerTargets, applicationAdapter: adapter, deployPublished: legacy, pollInterval: 5, unknownGraceMs };
   const f = await fixture(t, options);
   return { ...f, options: { ...options, service: f.service, directory: f.directory }, adapter,
     registrations, submissions, deliveries, allowed, runs };
@@ -987,6 +987,37 @@ async function applicationFixture(t, { registrationStatus = 'succeeded', publica
 const applicationSource = (name, provider = 'aws') => ({ source_name: name, source_type: 'folder',
   files: [{ path: 'app.js', content: Buffer.from(`user source for ${name}`) }],
   deployment_selection: { environment: provider === 'openstack' ? 'onprem' : 'cloud', provider } });
+
+test('unknown published delivery fences its environment while uncertain CI still fences the shared app source', async (t) => {
+  for (const phase of ['cd', 'ci']) await t.test(phase, async (t) => {
+    const f = await applicationFixture(t, { unknownGraceMs: 1 }), owner = f.product.dashboard.session().id;
+    const deliver = f.adapter.deployPublished, submit = f.service.deploy;
+    if (phase === 'cd') f.adapter.deployPublished = async (app, ...args) => {
+      if (app.environment_target_id === 'runtime-gcp') throw new EnvironmentError('APPLICATION_ROUTE_RECONCILE_REQUIRED', 502, true);
+      return deliver(app, ...args);
+    };
+    else f.service.deploy = async () => { throw new Error('unknown CI dispatch'); };
+    const blocked = await f.product.createDeployment(applicationSource('same-app', 'gcp'), 'gcp-unknown', undefined, owner);
+    const prior = await settle(() => f.product.getDeployment(blocked.id, owner));
+    assert.equal(prior.status, 'unknown'); assert.equal(prior.stage, phase);
+    await assert.rejects(f.product.createDeployment(applicationSource('same-app', 'gcp'), 'same-env', undefined, owner), { code: 'APPLICATION_RECONCILE_REQUIRED' });
+    f.service.deploy = submit;
+    if (phase === 'ci') {
+      await assert.rejects(f.product.createDeployment(applicationSource('same-app', 'aws'), 'aws-after-ci', undefined, owner), { code: 'APPLICATION_RECONCILE_REQUIRED' });
+    } else {
+      const accepted = await f.product.createDeployment(applicationSource('same-app', 'aws'), 'aws-after-cd', undefined, owner);
+      const result = await settle(() => f.product.getDeployment(accepted.id, owner));
+      assert.equal(result.status, 'succeeded');
+      assert.notEqual(result.application_id, prior.application_id);
+      assert.equal(f.product.resolveApplication({ environment: 'cloud', provider: 'aws', app: 'same-app' }, owner).application.id, result.application_id);
+      f.service.sourceFiles = async () => applicationSource('same-app').files;
+      const preview = await f.product.createUpdate(result.application_id, { source_type: 'folder', files: applicationSource('same-app').files }, 'aws-update', undefined, owner);
+      assert.equal(preview.no_changes, true);
+      assert.equal((await f.product.startUpdate(preview.id, {}, owner)).status, 'unchanged');
+      assert.equal((await f.product.getDeployment(blocked.id, owner)).status, 'unknown');
+    }
+  });
+});
 
 test('empty application registry accepts two user apps on one existing environment and reuses each binding after restart', async (t) => {
   const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
