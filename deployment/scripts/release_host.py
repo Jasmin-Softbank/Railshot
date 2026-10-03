@@ -30,6 +30,9 @@ def target_edge_kind(target):
 
 
 def execute(trusted_ref):
+    scope = os.environ.get('SSM_Scope', 'multicloud')
+    if scope not in {'ci-runtime', 'multicloud'}:
+        raise ValueError('RELEASE_SCOPE_INVALID')
     names = ('SourceSha', 'Revision', 'DashboardDigest', 'ApiDigest', 'RunnerDigest')
     values = {name: os.environ.get('SSM_' + name, '') for name in names}
     if trusted_ref not in ('refs/heads/main', 'refs/heads/integration/team-assembly-20261002'):
@@ -73,7 +76,12 @@ def execute(trusted_ref):
             release_admission.admit(values['SourceSha'], trusted_ref)
             publication = release_admission.publication(values['SourceSha'], trusted_ref,
                 values['PublicationRunId'], values['PublicationRunAttempt'], images)
+            if not Path('/etc/railshot/release.json').is_file():
+                raise ValueError('RELEASE_CONFIG_UNAVAILABLE')
             config = multicloud_release.private('/etc/railshot/release.json')
+            if scope == 'ci-runtime':
+                manifest = {'version': 1, 'source_sha': values['SourceSha'], 'platform_revision': values['Revision'], 'images': images}
+                return {**multicloud_release.execute(config, manifest, scope=scope), 'publication': publication}
             edge_kinds = {target['provider']: target_edge_kind(target) for target in config['targets']}
             manifest = {'version': 1, 'source_sha': values['SourceSha'], 'platform_revision': values['Revision'], 'images': images,
                         'runtime_policy': json.loads((root / 'deployment/airgap/versions.json').read_bytes()),
@@ -92,7 +100,7 @@ if __name__ == '__main__':
         result = {'status': 'blocked', 'code': str(error) if isinstance(error, ValueError) and re.fullmatch('[A-Z_]+', str(error)) else 'RELEASE_HOST_READBACK_REQUIRED'}
     # Detailed receipts remain private on the control host. SSM has a bounded output channel.
     if len(json.dumps(result)) > 20000:
-        result = {key: result[key] for key in ('status', 'source_sha', 'stage', 'code', 'publication') if key in result} | {
+        result = {key: result[key] for key in ('status', 'scope', 'source_sha', 'stage', 'code', 'publication', 'workers', 'apps') if key in result} | {
             'targets': [{k: t[k] for k in ('provider', 'target_id', 'source_sha', 'status', 'code') if k in t} for t in result.get('targets', [])]}
     print(json.dumps(result))
     sys.exit(0 if result['status'] == 'verified' else 1)

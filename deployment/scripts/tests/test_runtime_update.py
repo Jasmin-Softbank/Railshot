@@ -33,6 +33,18 @@ def observation(policy=POLICY):
 
 
 class RuntimeReleaseTests(unittest.TestCase):
+    def test_helm_tags_do_not_change_immutable_image_identity(self):
+        state = copy.deepcopy(observation())
+        state['cilium_images'] = {key: value.replace('@', ':v1.20.2@')
+                                 for key, value in state['cilium_images'].items()}
+        self.assertTrue(node.matches(state, POLICY))
+        for image in ('quay.io/cilium/cilium:v1.20.2',
+                      'quay.io/cilium/other@' + POLICY['cilium_images']['agent'].split('@')[1],
+                      'quay.io/cilium/cilium:v1.20.2@sha256:' + '0' * 64,
+                      POLICY['cilium_images']['agent'].replace('@', ':bad tag@')):
+            changed = copy.deepcopy(state); changed['cilium_images']['agent'] = image
+            self.assertFalse(node.matches(changed, POLICY))
+
     def test_inspection_requires_cilium_ready_even_without_upgrade(self):
         state = observation()
         helm = {'chart': {'metadata': {'version': state['runtime']['cilium_version']}}, 'version': 2}

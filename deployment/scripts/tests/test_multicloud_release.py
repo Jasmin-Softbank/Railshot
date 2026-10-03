@@ -23,6 +23,7 @@ def load(name):
 
 release = load('multicloud_release')
 admission = load('release_admission')
+worker_helpers = load('platform_workers')
 
 
 class ReleaseTests(unittest.TestCase):
@@ -34,13 +35,15 @@ class ReleaseTests(unittest.TestCase):
             'edge_kinds': {p: 'native' for p in release.PROVIDERS},
             'edge_modules': {provider: 'd' * 64 for provider in release.PROVIDERS},
             'provider_targets': {provider: 'k3s-' + provider for provider in release.PROVIDERS}}
-        self.config = {'version': 1, 'state_dir': str(Path(self.directory.name).resolve()), 'workers': {}, 'apps': {}, 'operator_kubeconfig': release.OPERATOR_STATE + 'control-kubeconfig',
+        self.config = {'version': 1, 'state_dir': str(Path(self.directory.name).resolve()),
+            'workers': {'runner_url': 'https://github.com/Jasmin-Softbank/railshot-apps', 'build_node': 'build-01',
+                        'object_uids': {key: key + '-uid' for key in worker_helpers.KEYS}}, 'apps': {}, 'operator_kubeconfig': release.OPERATOR_STATE + 'control-kubeconfig',
             'gcp_credentials_file': release.OPERATOR_STATE + 'gcp-wif.json', 'targets': [
             {'provider': provider, 'target_id': 'k3s-' + provider,
              **{name: release.OPERATOR_STATE + 'config/' + provider + '/' + name for name in
                 ('registry_file', 'config_file', 'registration_state', 'from_policy_file', 'edge_config_file')}} for provider in sorted(release.PROVIDERS)]}
         self.promotions = []
-        self.workers = SimpleNamespace(apply_workers=lambda *args: {'status': 'verified', 'executable_verification': True}, verify_workers=lambda *args: {'status':'verified', 'executable_verification': True}, verify_apps=lambda *args: {'status':'verified'})
+        self.workers = SimpleNamespace(scoped_config=worker_helpers.scoped_config, apply_workers=lambda *args: {'status': 'verified', 'executable_verification': True}, verify_workers=lambda *args: {'status':'verified', 'executable_verification': True}, verify_apps=lambda *args: {'status':'verified'})
 
     def run_release(self, target):
         def promote(*args):
@@ -78,6 +81,53 @@ class ReleaseTests(unittest.TestCase):
         self.assertFalse(self.promotions)
         with self.assertRaisesRegex(ValueError, 'RECONCILIATION_REQUIRED'):
             self.run_release(lambda *args: self.fail('failed mutation replayed'))
+
+    def test_ci_promotion_needs_no_provider_config_and_provider_failure_cannot_revert_it(self):
+        core = {key: self.manifest[key] for key in ('version', 'source_sha', 'platform_revision', 'images')}
+        config = {key: self.config[key] for key in ('version', 'state_dir', 'workers', 'apps')}
+        def apply(*args, scope, before_resume=None):
+            if scope == 'ci':
+                before_resume({'status': 'declarations_verified', 'source_sha': core['source_sha'],
+                               'controller_suspended': True, 'runner_jobs': 'preserved'})
+            else:
+                self.assertEqual(scope, 'credentials')
+                self.assertIsNone(before_resume)
+            return {'status': 'verified', 'source_sha': core['source_sha'], 'executable_verification': True}
+        self.workers.apply_workers = mock.Mock(side_effect=apply)
+        self.workers.promote_apps = mock.Mock(return_value={'status': 'verified'})
+        def run_ci():
+            return release.execute(config, core, scope='ci-runtime', workers=self.workers,
+                platform_verify=lambda *args: {'status': 'cluster_verified'},
+                target_runner=lambda *args: self.fail('CI rollout accessed a provider'))
+        result = run_ci()
+        self.assertEqual((result['status'], result['scope'], result['targets']), ('verified', 'ci-runtime', []))
+        self.assertEqual(self.workers.promote_apps.call_args.args[2]['status'], 'prepared')
+        self.assertEqual(run_ci()['status'], 'verified')
+        self.assertEqual(self.workers.apply_workers.call_count, 1)
+        # Credential-owner changes do not invalidate the CI proof or enter its reads.
+        self.config['workers']['object_uids']['credentials_cron'] = 'changed-by-credential-owner'
+        failed = self.run_release(lambda row, _: self.proof(row, 'failed'))
+        self.assertEqual(failed['status'], 'incomplete')
+        self.assertEqual(run_ci()['status'], 'verified')
+        self.assertEqual(self.workers.apply_workers.call_count, 2)
+        self.assertEqual(self.workers.apply_workers.call_args.kwargs, {'scope': 'credentials'})
+        self.assertEqual(self.workers.promote_apps.call_count, 1)
+        self.assertFalse(self.promotions, 'provider release must only read back the prior CI promotion')
+
+    def test_uncertain_ci_promotion_does_not_resume_or_automatically_retry_workers(self):
+        core = {key: self.manifest[key] for key in ('version', 'source_sha', 'platform_revision', 'images')}
+        def apply(*args, before_resume, scope):
+            self.assertEqual(scope, 'ci')
+            before_resume({'status': 'declarations_verified'})
+            self.fail('worker resumed after uncertain promotion')
+        self.workers.apply_workers = mock.Mock(side_effect=apply)
+        self.workers.promote_apps = mock.Mock(side_effect=ValueError('PLATFORM_REF_NOT_VERIFIED'))
+        def run():
+            return release.execute(self.config, core, scope='ci-runtime', workers=self.workers, platform_verify=lambda *args: {})
+        result = run()
+        self.assertEqual(result['code'], 'PLATFORM_REF_NOT_VERIFIED')
+        with self.assertRaisesRegex(ValueError, 'RECONCILIATION_REQUIRED'): run()
+        self.assertEqual(self.workers.apply_workers.call_count, 1)
 
     def test_misbound_receipt_cannot_satisfy_three_provider_gate(self):
         result = self.run_release(lambda target, manifest: {**self.proof(target), 'source_sha': 'f' * 40})

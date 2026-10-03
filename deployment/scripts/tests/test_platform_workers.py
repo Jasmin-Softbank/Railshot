@@ -179,6 +179,47 @@ class WorkerTests(unittest.TestCase):
         workers.rollback_workers(self.state, kube=self.cluster)
         self.assert_restored()
 
+    def test_ci_pins_workflow_while_suspended_and_preserves_running_runner_job(self):
+        self.cluster.calls.clear()  # Discovery is an operator preflight, outside this rollout.
+        self.cluster.objects['credentials_config']['data']['policy.json'] = 'provider policy not ready'
+        running = {'metadata': {'name': 'existing-runner', 'uid': 'existing-runner-uid'},
+                   'spec': {'template': {'spec': {'containers': [{'image': OLD['ci-runner']}]}}},
+                   'status': {'active': 1}}
+        self.cluster.jobs['build_cron']['existing-runner'] = copy.deepcopy(running)
+        apps = Apps()
+        template = (ROOT / 'ci/workflows/railshot-deploy.yml').read_bytes()
+        def promote(prepared):
+            self.assertIs(self.cluster.objects['build_cron']['spec']['suspend'], True)
+            self.assertEqual(workers.container(self.cluster.objects['build_cron']['spec'])['image'], IMAGES['api'])
+            self.assertEqual(json.loads(self.cluster.objects['build_config']['data']['policy.json'])['image'], IMAGES['ci-runner'])
+            proof = workers.promote_apps({'repository': 'Jasmin-Softbank/railshot-apps', 'branch': 'main'}, SHA,
+                {'scope': 'ci-runtime', 'status': 'prepared', 'source_sha': SHA, 'workers': prepared},
+                Path(self.temp.name) / 'apps.json', gh=apps)
+            self.assertEqual(proof['platform_ref'], SHA)
+        with patch.object(workers.bootstrap, 'native', side_effect=lambda command, **_: SHA.encode() if command[1] == 'rev-parse' else template):
+            result = workers.apply_workers(self.config, IMAGES, SHA, self.state, kube=self.cluster, before_resume=promote, scope='ci')
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual(self.cluster.jobs['build_cron']['existing-runner'], running)
+        self.assertEqual(apps.content.count(SHA.encode()), 5)
+        self.assertEqual(apps.variable['value'], SHA)
+        self.assertNotIn('suspend', self.cluster.objects['build_cron']['spec'])
+        self.assertFalse(any(key.startswith('credentials_') for _, key in self.cluster.calls))
+
+    def test_ci_promotion_failure_keeps_replenishment_suspended(self):
+        def fail(_): raise ValueError('PLATFORM_REF_NOT_VERIFIED')
+        with self.assertRaisesRegex(ValueError, 'PLATFORM_REF_NOT_VERIFIED'):
+            workers.apply_workers(self.config, IMAGES, SHA, self.state, kube=self.cluster, before_resume=fail, scope='ci')
+        self.assertIs(self.cluster.objects['build_cron']['spec']['suspend'], True)
+        self.assertEqual(workers.bootstrap.private(self.state)['status'], 'incomplete')
+
+    def test_provider_followup_updates_only_credentials_without_touching_ci(self):
+        self.cluster.calls.clear()
+        result = workers.apply_workers(self.config, IMAGES, SHA, self.state, kube=self.cluster, scope='credentials')
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual(set(result['executions']), {'credentials_cron'})
+        self.assertFalse(any(key.startswith('build_') for _, key in self.cluster.calls))
+        self.assertEqual(self.cluster.objects['build_cron'], self.cluster.original['build_cron'])
+
     def test_original_suspended_state_is_retained(self):
         self.cluster.objects['build_cron']['spec']['suspend'] = True
         self.cluster.objects['credentials_cron']['spec']['suspend'] = True
