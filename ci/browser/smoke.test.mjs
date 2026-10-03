@@ -755,48 +755,31 @@ test('dashboard resumes the same published deployment without another upload or 
   assert.deepEqual(errors, []);
 });
 
-test('anonymous browser sessions persist settings and write-only OpenStack connections separately', { timeout: 45000 }, async (t) => {
+test('anonymous browser sessions persist their selected view separately', { timeout: 45000 }, async (t) => {
   const { page, origin, errors } = await start(t, { service: null });
   await page.goto(origin);
   await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
   const cookie = (await page.context().cookies()).find((row) => row.name === 'railshot_session');
   assert.ok(cookie.httpOnly); assert.equal(cookie.sameSite, 'Strict');
   const savedView = page.waitForResponse((res) => res.url().endsWith('/api/v1/preferences') && res.request().method() === 'PUT');
-  await page.locator('[data-view="connections"]').click(); await savedView;
-  await page.locator('#connection-label').fill('우리 OpenStack');
-  await page.locator('#connection-url').fill('https://openstack.example/dashboard/');
-  await page.locator('#connection-username').fill('demo-user');
-  await page.locator('#connection-password').fill('browser-secret-123');
-  await page.locator('#connection-save').click();
-  await page.waitForFunction(() => document.querySelector('#connection-list').textContent.includes('비밀번호 저장됨'));
-  assert.equal(await page.locator('#connection-password').inputValue(), '');
+  await page.locator('[data-view="history"]').click(); await savedView;
   await page.reload();
-  await page.waitForFunction(() => document.querySelector('#connection-list').textContent.includes('demo-user'));
-  assert.equal(await page.locator('#connections-view').isVisible(), true);
-  assert.ok(!(await page.locator('body').textContent()).includes('browser-secret-123'));
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  assert.equal(await page.locator('#history-view').isVisible(), true);
   const other = await page.context().browser().newContext();
   try {
     const stranger = await other.newPage(); await stranger.goto(origin);
     await stranger.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
     assert.equal(await stranger.locator('#deploy-view').isVisible(), true);
-    await stranger.locator('[data-view="connections"]').click();
-    assert.equal(await stranger.locator('#connection-list li').count(), 0);
   } finally { await other.close(); }
   if (process.env.CI_OUTPUT_DIR) {
     await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
-    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'sessions-connections-desktop.png'), fullPage: true });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'sessions-history-desktop.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'sessions-connections-mobile.png'), fullPage: true });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'sessions-history-mobile.png'), fullPage: true });
   }
-  await page.locator('#connection-list').getByRole('button', { name: '수정', exact: true }).click();
-  assert.equal(await page.locator('#connection-password').inputValue(), '');
-  await page.locator('#connection-clear-password').check();
-  await page.locator('#connection-save').click();
-  await page.waitForFunction(() => document.querySelector('#connection-list').textContent.includes('비밀번호 없음'));
-  await page.locator('#connection-list').getByRole('button', { name: '삭제', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('#connection-list').children.length === 0);
   assert.deepEqual(errors, []);
 });
 
@@ -955,14 +938,21 @@ test('work log reads bound agent events over HTTP and marks stale or failed obse
   assert.deepEqual(errors, []);
 });
 
-test('saved connection failure stays local to its panel and does not disable deployment choices', { timeout: 45000 }, async (t) => {
-  const { page, origin, errors } = await start(t, { service: null });
-  await page.route('**/api/v1/connections*', (route) => route.fulfill({ status: 503, contentType: 'application/json',
-    body: JSON.stringify({ error: { message: '연결 목록을 일시적으로 조회할 수 없습니다.' } }) }));
+test('removed connections view falls back to deployment without loading saved connections', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors, requests } = await start(t, { service: null });
+  await page.route('**/api/v1/preferences', (route) => route.request().method() === 'GET'
+    ? route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ view: 'connections', environment: 'cloud', provider: 'aws' }) })
+    : route.continue());
+  const fallback = page.waitForResponse((response) => response.url().endsWith('/api/v1/preferences') && response.request().method() === 'PUT');
   await page.goto(origin);
-  await page.waitForFunction(() => document.querySelector('#connection-message').textContent.includes('일시적으로'));
+  assert.equal((await fallback).request().postDataJSON().view, 'deploy');
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  assert.equal(await page.locator('#deploy-view').isVisible(), true);
+  assert.equal(await page.locator('[data-view="connections"], #connections-view, #connection-form').count(), 0);
+  assert.equal(requests.some((request) => request.path.startsWith('/api/v1/connections')), false);
+  assert.equal((await page.request.get(`${origin}/src/connections.js`)).status(), 404);
   assert.match(await page.locator('#session-note').textContent(), /까지 유지/);
-  assert.doesNotMatch(await page.locator('#connection-status').textContent(), /일시적으로/);
   const saved = page.waitForResponse((response) => response.url().endsWith('/api/v1/preferences') && response.request().method() === 'PUT');
   await page.getByRole('radio', { name: /온프레미스/ }).check();
   assert.equal((await saved).status(), 200);

@@ -2,17 +2,16 @@ import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from '../../contracts/appli
 import { request, requests } from './src/api.js';
 import { initializeOpenStackInstaller } from './src/openstack-installer.js';
 import { applicationLabel, createLifecycleController } from './src/lifecycle.js';
-import { createConnectionsController } from './src/connections.js';
 
 const views = {
   deploy: document.querySelector('#deploy-view'),
   history: document.querySelector('#history-view'),
   monitor: document.querySelector('#monitor-view'),
-  connections: document.querySelector('#connections-view'),
 };
 
 // Navigation and source selection.
 function showView(name) {
+  if (!Object.hasOwn(views, name)) name = 'deploy';
   for (const [key, view] of Object.entries(views)) view.hidden = key !== name;
   for (const button of document.querySelectorAll('[data-view]')) {
     const active = button.dataset.view === name;
@@ -1108,7 +1107,6 @@ document.querySelector('#monitor-provider').addEventListener('change', () => { d
 document.querySelector('#monitor-target').addEventListener('change', loadEnvironments);
 document.querySelector('#monitor-refresh').addEventListener('click', loadEnvironments);
 // Session-owned controls live in focused modules and read current view state through callbacks.
-const { loadConnections } = createConnectionsController(() => sessionReady);
 const lifecycle = createLifecycleController({
   getApplications: () => applications, getCurrent: () => current, getApplicationDetail: () => applicationDetail,
   clearApplicationDetail: () => { applicationDetail = null; document.querySelector('#application-detail').hidden = true; },
@@ -1131,9 +1129,8 @@ async function initializeDashboard() {
     await checkConnection();
     document.querySelector('#session-note').textContent = `이 브라우저 세션 · ${new Date(session.expires_at).toLocaleDateString()}까지 유지`;
     sessionReady = true;
-    await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError), loadConnections().catch((cause) => {
-      document.querySelector('#connection-message').textContent = cause.message;
-    })]);
+    if (!Object.hasOwn(views, saved.view)) savePreferences({ view: 'deploy' });
+    await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError)]);
     renderLifecycleOperation();
     if (lifecycle.operation?.id) refreshLifecycleOperation();
     if (history.length) { current = history[0]; renderRun(); refreshRun(); }

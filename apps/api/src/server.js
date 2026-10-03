@@ -23,7 +23,6 @@ const assets = new Map([
   ['/src/api.js', ['src/api.js', 'text/javascript; charset=utf-8']],
   ['/src/openstack-installer.js', ['src/openstack-installer.js', 'text/javascript; charset=utf-8']],
   ['/src/lifecycle.js', ['src/lifecycle.js', 'text/javascript; charset=utf-8']],
-  ['/src/connections.js', ['src/connections.js', 'text/javascript; charset=utf-8']],
   ['/contracts/application.mjs', ['../../contracts/application.mjs', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
 ]);
