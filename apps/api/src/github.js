@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
-import { inspectArchive, validateFiles, archiveLimits } from './archive.js';
+import { inspectArchive, validateFiles, archiveLimits, documentationOnly, documentationOnlyMessage } from './archive.js';
 import { APP_NAME, APP_NAME_MESSAGE, TENANT_NAME, TARGET_ID, SOURCE_COMMIT } from './contract.js';
 import { readPublished } from './published.js';
 import { readSourceArchive, readSourceResponse, sourceSnapshotLimit } from './source-snapshot.js';
@@ -200,6 +200,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     if (typeof app !== 'string' || !APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
     permittedTarget(target_id);
     const acceptedFiles = validateFiles(files);
+    if (documentationOnly(acceptedFiles)) throw new ServiceError(documentationOnlyMessage, 422);
     const prefix = `apps/${tenant}/${app}`;
     let phase = 'source_lookup';
     try {

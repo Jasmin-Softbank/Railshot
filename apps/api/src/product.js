@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
 import { createProductStore } from './product-store.js';
 import { APP_NAME, TARGET_ID, sourceAppName } from './contract.js';
-import { validateFiles } from './archive.js';
+import { validateFiles, documentationOnly, documentationOnlyMessage } from './archive.js';
 import { createMetricsObserver } from './metrics.js';
 import { emptyAgentEvents } from './agent-events.js';
 import { EnvironmentError } from './environments.js';
@@ -316,6 +316,7 @@ export async function createProductService({ service, directory, target, provide
       if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid(`등록된 배포 앱 이름과 일치하지 않습니다. 이 대상은 ${applicationName} 전용입니다. ${input.app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
       const source = input.files ? input : { ...input, ...await materialize(input.repository_url) };
       const files = validateFiles(source.files);
+      if (documentationOnly(files)) throw invalid(documentationOnlyMessage);
       const sourceBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.path) + Math.ceil(file.content.length / 3) * 4 + 128, 0);
       checkCapacity(state, sourceBytes);
       const id = randomUUID(), now = new Date().toISOString();
@@ -513,6 +514,7 @@ export async function createProductService({ service, directory, target, provide
       }
       const source = input.source_type === 'github' ? await materialize(input.repository_url) : input;
       const files = validateFiles(source.files);
+      if (documentationOnly(files)) throw invalid(documentationOnlyMessage);
       const origin = input.source_type === 'github' ? source.source : null;
       if (origin && (origin.type !== 'github' || !/^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(origin.repository)
           || !/^[a-f0-9]{40}$/.test(origin.sha)) || input.source_type === 'github' && !origin) throw invalid('GitHub 소스의 저장소와 고정 SHA를 확인할 수 없습니다.');

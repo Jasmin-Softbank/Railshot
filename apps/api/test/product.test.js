@@ -42,6 +42,20 @@ async function settle(get, predicate = (record) => !['queued', 'running'].includ
   assert.fail(`Operation did not settle: status=${record?.status}, stage=${record?.stage}`);
 }
 
+test('documentation-only uploads fail before reserving an operation or invoking CI', async (t) => {
+  const f = await fixture(t);
+  const docs = ['readme.md', 'LICENSE.md', '.editorconfig', 'contributing.md', 'mentioned.md', 'CODE_OF_CONDUCT.md']
+    .map((path) => ({ path, content: Buffer.from('documentation') }));
+  for (const source_type of ['github', 'zip', 'folder']) {
+    const source = source_type === 'github' ? { repository_url: 'https://github.com/xxczaki/awesome-calculators' } : { files: docs };
+    await assert.rejects(f.product.createDeployment({ ...input, files: undefined, source_type, ...source }, `docs-${source_type}`,
+      async () => ({ files: docs })), (error) => error.status === 422 && /실제 웹 앱/.test(error.message));
+  }
+  assert.equal(f.dispatches(), 0);
+  const created = await f.product.createDeployment(input, 'valid-after-docs');
+  assert.ok(created.id); // rejected documentation did not occupy the executor
+});
+
 test('source lookup failure is a traceable 422, not a missing deployment API, and reserves nothing', async (t) => {
   const f = await fixture(t), logs = [];
   t.mock.method(console, 'error', (line) => logs.push(JSON.parse(line)));
