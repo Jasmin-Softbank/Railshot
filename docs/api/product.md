@@ -54,6 +54,18 @@ profile의 `target_id`는 고정 runtime 대상 또는 새 대상 이름의 기�
 
 비동기 접수는 화균 님의 `{resource_id, action:"create", status:"accepted", request_id}` 형식과 `202`, `Location`, `Retry-After: 2`, `X-Request-ID`, `Cache-Control: no-store`를 사용한다. 오류는 `{error:{code,message,request_id,retryable,outcome_unknown}}`다. 매 HTTP 요청마다 새로운 request ID를 생성한다. 작업에 저장한 오류 ID와 Ansible의 `ansible_job_id`는 별개다.
 
+`EXECUTOR_BUSY`는 요청을 접수하지 않은 HTTP 409이며 `error.admission`을 추가한다:
+
+```json
+{"scope":"workspace","accepted":false,"reason":"reconciliation_required"}
+```
+
+`reason`은 기존 작업 실행 중이면 `execution_in_progress`, 기존 결과가 불명확하면 `reconciliation_required`다. 후자는 `retryable=false`이며 시간 경과로 자동 해제하지 않는다. 차단 작업이 정확히 같은 세션 소유일 때만 `blocking_operation`에 `id`, `kind`, `app`, `status`, `stage`, `updated_at`을 제공한다. 다른 세션 및 소유자 없는 legacy 작업의 상세는 생략한다. 이 계약은 신규 실행, 업데이트 시작, 환경 생성, CD 재개, 앱 lifecycle 계획·실행에 공통 적용한다. CD 재개는 자신의 기존 작업만 검사 대상에서 제외하며, 명시적 삭제의 취소 대상 예외는 아래 lifecycle 계약을 따른다.
+
+`outcome_unknown`은 **이번 HTTP 요청**의 결과 불명 여부다. 기존 작업이 unknown이어도 접수 거절은 `outcome_unknown=false`다. 프론트엔드는 확정된 409 거절에 “이미 처리됐을 수 있음”을 덧붙이지 않는다. 응답 유실·통신 오류 또는 `outcome_unknown=true`에는 같은 요청 키를 보존한다. 거절된 요청은 자동 실행 대기열에 들어가지 않는다. legacy API 오류 형식은 유지한다.
+
+앱의 `environment_target_id`는 실행 환경, `id`/`target_id`는 앱 등록·배포 binding이다. 환경 필드가 없는 legacy 기록은 “배포 대상”으로 표시하며 앱 target을 환경 ID로 추정하지 않는다. 전체 경계와 Argo 구조는 [앱·환경·실행 관리 계층](../architecture/application-management.md)을 따른다.
+
 배포·환경 생성에는 `Idempotency-Key`가 필요하다. 같은 세션·자원 종류 안에서 같은 키와 입력은 같은 ID를 반환한다. queued/running이면 202, 완료·실패·차단·unknown이면 200 자원 객체와 Location이다. 같은 키로 입력을 바꾸면 409이며 배포의 `plan_id`와 환경·provider 선택도 입력에 포함한다. ZIP의 압축 시각·multipart boundary는 파일 의미에 포함하지 않으며 폴더 파일 순서도 정규화한다. GitHub URL의 첫 SHA·소스 snapshot은 고정하고 같은 키의 재요청에서 다시 다운로드하지 않는다. 빌드 생성에는 이 멱등 계약이 없으므로 응답 유실 시 자동 재전송하지 않는다.
 
 배포 재개는 `POST /api/v1/deployments/{id}/actions`에 `application/json` 본문 `{"action":"resume"}`를 보낸다. 기존 배포와 앱 등록 모두 현재 쿠키 세션 소유여야 하며, 앱은 `ready`, 배포는 `unknown`·`stage=cd|http`, CI는 원래 `published`여야 한다. 삭제·다른 lifecycle 작업이 시작된 앱과 다른 active 작업이 있으면 거절한다. 소스·앱·target·환경·CI 값을 요청으로 교체하거나 query로 전달할 수 없다. 쿠키 없는 유지보수 요청에도 소유권 예외를 두지 않는다.

@@ -121,10 +121,47 @@ test('application detail keeps update and lifecycle controls while active deploy
   assert.deepEqual(errors, []);
 });
 
+test('rejected admission stays unsubmitted while a lost response preserves the same deployment key', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors } = await start(t, { service: null });
+  await page.route('**/api/v1/options', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [
+    { id: 'cloud-aws', environment: 'cloud', provider: 'aws', available: true, label: '클라우드 · AWS' },
+  ] }) }));
+  let mode = 'busy'; const keys = [];
+  await page.route('**/api/v1/deployments', (route) => {
+    keys.push(route.request().headers()['idempotency-key']);
+    if (mode === 'network') return route.abort('connectionreset');
+    const error = mode === 'busy'
+      ? { code: 'EXECUTOR_BUSY', message: '이번 요청은 실행 대기열에 추가되지 않았습니다.', outcome_unknown: false,
+        admission: { scope: 'workspace', accepted: false, reason: 'reconciliation_required' } }
+      : { code: 'INVALID_INPUT', message: '요청 조건을 확인하세요.', outcome_unknown: false };
+    return route.fulfill({ status: mode === 'busy' ? 409 : 422, contentType: 'application/json', body: JSON.stringify({ error }) });
+  });
+  await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  await page.locator('#repository-url').fill('https://github.com/tastejs/todomvc');
+  await page.locator('#deploy-form button[type="submit"]').click();
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => !document.querySelector('#request-error').hidden);
+  assert.match(await page.locator('#request-error').innerText(), /운영자가 기존 작업의 결과를 확인/);
+  assert.doesNotMatch(await page.locator('#request-error').innerText(), /서버에서 이미 처리/);
+  assert.equal(await page.locator('#run-panel').isVisible(), false);
+  if (process.env.CI_OUTPUT_DIR) {
+    await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'admission-rejected.png'), fullPage: true });
+  }
+  mode = 'network'; await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#request-error').textContent.includes('서버에서 이미 처리'));
+  mode = 'invalid'; await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#request-error').textContent.includes('요청 조건을 확인'));
+  assert.doesNotMatch(await page.locator('#request-error').innerText(), /서버에서 이미 처리/);
+  assert.equal(keys.length, 3); assert.equal(new Set(keys).size, 1);
+  assert.equal(await page.locator('#run-panel').isVisible(), false); assert.deepEqual(errors, []);
+});
+
 test('application updates keep app and environment fixed across all source formats, review diffs, and start the frozen preview', { timeout: 90000 }, async (t) => {
   const { page, origin, errors, stateDirectory } = await start(t, { service: null });
   const baseline = { id: 'deployed-v1', app: 'stable-app', target_id: 'same-target', status: 'succeeded', source_commit: 'a'.repeat(40) };
-  const application = { id: 'application-1', app: 'stable-app', target_id: 'same-target', status: 'ready', current_deployment_state: 'verified',
+  const application = { id: 'application-1', app: 'stable-app', target_id: 'same-target', environment_target_id: 'aws-environment', status: 'ready', current_deployment_state: 'verified',
     current_deployment: baseline, latest_deployment: { ...baseline, id: 'failed-v2', status: 'failed' } };
   const previews = [], uploads = [], starts = []; let failPreview = true, rejectStart = true;
   const json = (route, data, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(data) });
@@ -162,8 +199,12 @@ test('application updates keep app and environment fixed across all source forma
   await page.locator('[data-view="history"]').click();
   await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
   assert.match(await page.locator('#applications-list').innerText(), /현재 서비스: deployed-v1/);
+  assert.match(await page.locator('#applications-list').innerText(), /환경 aws-environment/);
+  assert.doesNotMatch(await page.locator('#applications-list').innerText(), /환경 same-target/);
   assert.match(await page.locator('#applications-list').innerText(), /최근 시도: 실행 실패 · failed-v2/);
   await page.getByRole('button', { name: 'stable-app 앱 상세·업데이트' }).click();
+  await page.waitForFunction(() => document.querySelector('#application-detail-message').textContent.includes('앱 ID application-1'));
+  assert.match(await page.locator('#application-detail-message').innerText(), /환경 aws-environment · 앱 ID application-1/);
   await page.getByRole('button', { name: 'stable-app deployed-v1 최종 소스 다운로드' }).click();
   await page.waitForFunction(() => document.querySelector('#application-versions').textContent.includes('최종 소스가 보관되어 있지'));
   await page.locator('#application-update').click();
