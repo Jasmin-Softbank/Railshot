@@ -346,6 +346,8 @@ export async function createProductService({ service, directory, target, provide
     key = idempotencyKey(key);
     return store.transaction(async (state) => {
       const application = applicationRecord(state, applicationId, sessionId);
+      // Maintenance reads may span sessions; mutations must preserve the exact app owner.
+      if (application.session_id !== sessionId) throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
       if (!input || typeof input !== 'object' || Array.isArray(input)
           || Object.keys(input).some((name) => !['source_type', 'files', 'repository_url', 'source_name'].includes(name))
           || !['folder', 'zip', 'github'].includes(input.source_type)
@@ -407,10 +409,12 @@ export async function createProductService({ service, directory, target, provide
         || options.rebuild !== undefined && typeof options.rebuild !== 'boolean') throw invalid('rebuild는 참 또는 거짓이어야 합니다.');
     const accepted = await store.transaction(async (state) => {
       const record = state.operations[id];
-      if (!owns(record, sessionId) || record.kind !== 'deployments' || !record.base_deployment_id) throw new ProductError(404, 'NOT_FOUND', '업데이트를 찾을 수 없습니다.');
+      const application = record?.application_id && state.applications[record.application_id];
+      if (!record || record.session_id !== sessionId || record.kind !== 'deployments' || !record.base_deployment_id
+          || !application || application.session_id !== sessionId) throw new ProductError(404, 'NOT_FOUND', '업데이트를 찾을 수 없습니다.');
       if (record.status !== 'preview') return { record, replay: true };
       if (Date.parse(record.expires_at) <= Date.now()) throw new ProductError(409, 'UPDATE_EXPIRED', '미리보기가 만료되었습니다. 새 소스를 다시 확인하세요.');
-      const application = readyApplication(state, record.application_id, sessionId);
+      readyApplication(state, record.application_id, sessionId);
       const current = applicationVersions(state, application).current;
       if (current?.id !== record.base_deployment_id || current.cd.revision !== record.base_revision)
         throw new ProductError(409, 'UPDATE_BASE_CHANGED', '기준 배포가 변경되었습니다. 미리보기를 다시 만드세요.');

@@ -17,7 +17,7 @@ async function settled(product, id, owner) {
   }
   assert.fail('deployment did not settle');
 }
-async function fixture(t) {
+async function fixture(t, { legacy = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-updates-'));
   const submissions = [], publications = new Map();
   let registrations = 0, sourceReads = 0;
@@ -51,7 +51,7 @@ async function fixture(t) {
   const f = { options, service, adapter, submissions, directory, registrations: () => registrations, sourceReads: () => sourceReads };
   f.product = await createProductService(options);
   t.after(async () => { await f.product.close(); await rm(directory, { recursive: true, force: true }); });
-  f.owner = f.product.dashboard.session().id; f.other = f.product.dashboard.session().id;
+  f.owner = legacy ? null : f.product.dashboard.session().id; f.other = f.product.dashboard.session().id;
   const accepted = await f.product.createDeployment({ ...upload(original), source_name: 'demo-app', deployment_selection: { environment: 'cloud', provider: 'aws' } }, 'initial', undefined, f.owner);
   f.base = await settled(f.product, accepted.id, f.owner); f.app = f.base.application_id;
   assert.equal(f.base.status, 'succeeded');
@@ -137,6 +137,34 @@ test('ownership and fixed application identity are checked before source reads o
   assert.deepEqual(await f.product.sourceFiles(preview.id, 'submitted', f.owner), [file('app.js', 'v2')]);
   assert.deepEqual(await f.product.sourceFiles(f.base.id, 'deployed', f.owner), original);
   assert.equal(f.submissions.length, 1);
+});
+
+test('maintenance reads never authorize updates to a browser-owned application or preview', async (t) => {
+  const f = await fixture(t), before = f.sourceReads();
+  assert.equal(f.product.getApplication(f.app).id, f.app);
+  await assert.rejects(f.product.createUpdate(f.app, upload(original), 'maintenance', undefined), { status: 404 });
+  assert.equal(f.sourceReads(), before);
+  assert.equal(f.product.list('deployments', f.owner, { limit: 100, marker: null }).total, 1);
+  const preview = await f.product.createUpdate(f.app, upload([file('app.js', 'v2')]), 'own-preview', undefined, f.owner);
+  await assert.rejects(f.product.startUpdate(preview.id), { status: 404 });
+  assert.equal((await f.product.getDeployment(preview.id, f.owner)).status, 'preview');
+  assert.equal(f.submissions.length, 1);
+  await f.product.startUpdate(preview.id, {}, f.owner);
+  assert.equal((await settled(f.product, preview.id, f.owner)).status, 'succeeded');
+  await assert.rejects(f.product.startUpdate(preview.id), { status: 404 });
+  assert.equal(f.product.getApplication(f.app, f.owner).current_deployment.id, preview.id);
+  assert.equal(f.submissions.length, 2);
+});
+
+test('legacy null-owned applications retain same-owner update and version tracking', async (t) => {
+  const f = await fixture(t, { legacy: true });
+  const preview = await f.product.createUpdate(f.app, upload([file('app.js', 'v2')]), 'legacy-preview', undefined);
+  await f.product.startUpdate(preview.id);
+  assert.equal((await settled(f.product, preview.id)).status, 'succeeded');
+  const application = f.product.getApplication(f.app);
+  assert.equal(application.current_deployment.id, preview.id);
+  assert.equal(application.latest_deployment.id, preview.id);
+  assert.equal(application.current_deployment_state, 'verified');
 });
 
 test('failed latest deployment preserves last verified success; unknown dispatch blocks another start without replay', async (t) => {
