@@ -35,11 +35,16 @@ export function idempotencyKey(value) {
   return value;
 }
 function publicRecord(record) {
-  const { fingerprint, key, source, source_bytes, legacy, session_id, ...visible } = record;
+  const { fingerprint, key, source, source_bytes, legacy, session_id, publication, ...visible } = record;
   return structuredClone(visible);
 }
-function checkFree(state) {
-  if (Object.values(state.operations).some(active)) throw new ProductError(409, 'EXECUTOR_BUSY', '다른 실행 또는 결과 확인이 끝나지 않았습니다.', { retryable: true });
+function checkFree(state, sessionId = null) {
+  const blocker = Object.values(state.operations).find(active);
+  if (!blocker) return;
+  // ponytail: one shared Git branch and runtime writer; per-app admission needs isolated writers first.
+  const detail = blocker.session_id === sessionId
+    ? ` ${blocker.app || '환경'} · ${blocker.stage || '접수'} · 마지막 갱신 ${blocker.updated_at || blocker.created_at || '확인 불가'}.` : '';
+  throw new ProductError(409, 'EXECUTOR_BUSY', `다른 실행 또는 결과 확인이 끝나지 않았습니다.${detail} 이번 요청은 실행 대기열에 추가되지 않았습니다.`, { retryable: blocker.status !== 'unknown' });
 }
 
 export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
@@ -176,7 +181,7 @@ export async function createProductService({ service, directory, target, provide
       }
       if (!admittedTarget && !plan && !savedEnvironment) throw invalid('등록된 배포 대상만 사용할 수 있습니다.');
       if (kind === 'deployments' && !input.plan_id && !selectedCdAvailable && !registered && !application) throw unavailable();
-      checkFree(state);
+      checkFree(state, sessionId);
       checkCapacity(state);
       const applicationName = selectedCdTarget?.applicationName || savedEnvironment?.applicationName;
       if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid(`등록된 배포 앱 이름과 일치하지 않습니다. 이 대상은 ${applicationName} 전용입니다. ${input.app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
@@ -259,7 +264,7 @@ export async function createProductService({ service, directory, target, provide
           }
         }
         const ci = ciObservation(build);
-        await update(record.id, { ci });
+        await update(record.id, { ci, ...(build.publication ? { publication: build.publication } : {}) });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
           if (!resume || !record.cd?.deployed) await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
@@ -285,13 +290,160 @@ export async function createProductService({ service, directory, target, provide
       if (!abort.signal.aborted) await update(record.id, { status: unknown ? 'unknown' : 'blocked', error: operationError(known ? error.code : 'CD_OUTCOME_UNKNOWN', unknown) });
     }
   }
+  // Updates retain the existing deployment identity, worker and durable source snapshot.
+  const sourceDigest = (files) => digest(files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort());
+  const sourceUnavailable = () => new ProductError(409, 'SOURCE_NOT_AVAILABLE', '이 배포의 검증된 소스를 제공할 수 없습니다.');
+  function applicationRecord(state, id, sessionId) {
+    const application = Object.hasOwn(state.applications, id) && state.applications[id];
+    if (!owns(application, sessionId)) throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
+    return application;
+  }
+  function successfulDeployment(record) {
+    return record.status === 'succeeded' && record.cd?.deployed === true && record.cd?.revision
+      && record.public_http?.state === 'succeeded' && record.public_http.verified_at && /^https?:\/\//.test(record.public_http.url || '');
+  }
+  function applicationVersions(state, application) {
+    const rows = Object.values(state.operations).filter((row) => row.kind === 'deployments'
+      && row.application_id === application.id && row.app === application.app && row.target_id === application.target_id
+      && row.session_id === application.session_id).reverse();
+    const current = rows.find(successfulDeployment) || null;
+    const newer = current ? rows.slice(0, rows.indexOf(current)) : rows;
+    const uncertain = newer.some((row) => row.cd?.state === 'running' || row.cd?.state === 'unknown'
+      || row.cd?.deployed === true || row.status === 'unknown' && ['cd', 'http'].includes(row.stage));
+    return { current, latest: rows[0] || null, state: uncertain ? 'unverified' : current ? 'verified' : 'not_deployed' };
+  }
+  function publicApplication(state, application) {
+    const versions = applicationVersions(state, application);
+    return { ...publicRecord(application), current_deployment: versions.current ? publicRecord(versions.current) : null,
+      latest_deployment: versions.latest ? publicRecord(versions.latest) : null, current_deployment_state: versions.state };
+  }
+  function readyApplication(state, id, sessionId) {
+    const application = applicationRecord(state, id, sessionId);
+    if (application.status !== 'ready' || applicationVersions(state, application).state === 'unverified')
+      throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '앱 등록 또는 현재 배포 버전을 먼저 확인해야 합니다.');
+    if (!service || typeof applicationAdapter?.deployPublished !== 'function') throw unavailable();
+    return application;
+  }
+  async function submittedFiles(record) {
+    let files;
+    try { files = await store.readSnapshot(record.id); }
+    catch { throw sourceUnavailable(); }
+    if (sourceDigest(files) !== record.source_digest) throw sourceUnavailable();
+    return files;
+  }
+  async function deployedFiles(record) {
+    if (!successfulDeployment(record) || typeof service?.sourceFiles !== 'function') throw sourceUnavailable();
+    const publication = record.publication || (await readBuild(String(record.ci.run_id), record.session_id)).publication;
+    if (!publication || String(publication.run_id) !== String(record.ci.run_id) || publication.app !== record.app
+        || publication.target_id !== record.target_id || publication.source_commit !== record.source_commit)
+      throw new ProductError(502, 'SOURCE_VERIFICATION_FAILED', '배포와 소스 게시 기록의 연결을 확인할 수 없습니다.');
+    const files = await service.sourceFiles(publication);
+    if (files === null) throw sourceUnavailable();
+    try { return validateFiles(files); }
+    catch { throw new ProductError(502, 'SOURCE_INVALID', '검증된 배포 소스의 파일 목록이 잘못되었습니다.'); }
+  }
+  async function createUpdate(applicationId, input, key, materialize, sessionId = null) {
+    key = idempotencyKey(key);
+    return store.transaction(async (state) => {
+      const application = applicationRecord(state, applicationId, sessionId);
+      // Maintenance reads may span sessions; mutations must preserve the exact app owner.
+      if (application.session_id !== sessionId) throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
+      if (!input || typeof input !== 'object' || Array.isArray(input)
+          || Object.keys(input).some((name) => !['source_type', 'files', 'repository_url', 'source_name'].includes(name))
+          || !['folder', 'zip', 'github'].includes(input.source_type)
+          || (input.source_type === 'github' ? typeof input.repository_url !== 'string' || input.files !== undefined
+            : !Array.isArray(input.files) || input.repository_url !== undefined)) throw invalid('업데이트에는 새 소스만 입력하세요. 앱과 배포 대상은 변경할 수 없습니다.');
+      const fingerprint = inputFingerprint({ ...input, app: application.app, target_id: application.target_id });
+      const scopedKey = scopeKey(`updates:${applicationId}`, key, sessionId), existingId = state.keys[scopedKey];
+      if (existingId) {
+        const existing = state.operations[existingId];
+        if (existing.fingerprint !== fingerprint) throw new ProductError(409, 'IDEMPOTENCY_CONFLICT', '같은 키로 다른 입력을 보낼 수 없습니다.');
+        return publicRecord(existing);
+      }
+      readyApplication(state, applicationId, sessionId);
+      const baseline = applicationVersions(state, application).current;
+      if (!baseline) throw new ProductError(409, 'BASE_DEPLOYMENT_REQUIRED', '업데이트 기준으로 사용할 성공한 배포가 없습니다.');
+      checkCapacity(state);
+      let before, baselineKind = 'deployed';
+      try { before = await deployedFiles(baseline); }
+      catch (error) {
+        if (error.code !== 'SOURCE_NOT_AVAILABLE') throw error;
+        before = await submittedFiles(baseline); baselineKind = 'submitted';
+      }
+      const source = input.source_type === 'github' ? await materialize(input.repository_url) : input;
+      const files = validateFiles(source.files);
+      const origin = input.source_type === 'github' ? source.source : null;
+      if (origin && (origin.type !== 'github' || !/^https:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(origin.repository)
+          || !/^[a-f0-9]{40}$/.test(origin.sha)) || input.source_type === 'github' && !origin) throw invalid('GitHub 소스의 저장소와 고정 SHA를 확인할 수 없습니다.');
+      const previous = new Map(before.map((file) => [file.path, file.content]));
+      const incoming = new Set(files.map((file) => file.path));
+      const changes = { added: [], modified: [], deleted: [...previous.keys()].filter((path) => !incoming.has(path)).sort(), unchanged: 0 };
+      for (const file of files) {
+        const old = previous.get(file.path);
+        if (old === undefined) changes.added.push(file.path);
+        else if (!old.equals(file.content)) changes.modified.push(file.path);
+        else changes.unchanged++;
+      }
+      changes.added.sort(); changes.modified.sort();
+      const sourceBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.path) + Math.ceil(file.content.length / 3) * 4 + 128, 0);
+      checkCapacity(state, sourceBytes);
+      const id = randomUUID(), now = new Date().toISOString();
+      await store.snapshot(id, files);
+      const record = { id, kind: 'deployments', application_id: application.id, app: application.app, target_id: application.target_id,
+        environment_target_id: application.environment_target_id, session_id: sessionId, status: 'preview', stage: 'review',
+        base_deployment_id: baseline.id, base_revision: baseline.cd.revision, baseline_kind: baselineKind,
+        expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(), changes,
+        no_changes: baselineKind === 'deployed' && !changes.added.length && !changes.modified.length && !changes.deleted.length,
+        source_comparison_only: baselineKind === 'submitted',
+        source_origin: origin ? { type: 'github', repository: origin.repository, sha: origin.sha } : null,
+        source: origin, source_bytes: sourceBytes, source_digest: sourceDigest(files), fingerprint, key,
+        ci: { run_id: null, state: 'not_started', steps: [], publication_artifact_id: null, producer_attempt: null },
+        cd: { state: 'not_started', revision: null, deployed: false }, public_http: { state: 'not_run', verified_at: null, url: null },
+        url: null, actions_url: null, error: null, created_at: now, updated_at: now };
+      state.operations[id] = record; state.keys[scopedKey] = id;
+      return publicRecord(record);
+    });
+  }
+  async function startUpdate(id, options = {}, sessionId = null) {
+    if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some((key) => key !== 'rebuild')
+        || options.rebuild !== undefined && typeof options.rebuild !== 'boolean') throw invalid('rebuild는 참 또는 거짓이어야 합니다.');
+    const accepted = await store.transaction(async (state) => {
+      const record = state.operations[id];
+      const application = record?.application_id && state.applications[record.application_id];
+      if (!record || record.session_id !== sessionId || record.kind !== 'deployments' || !record.base_deployment_id
+          || !application || application.session_id !== sessionId) throw new ProductError(404, 'NOT_FOUND', '업데이트를 찾을 수 없습니다.');
+      if (record.status !== 'preview') return { record, replay: true };
+      if (Date.parse(record.expires_at) <= Date.now()) throw new ProductError(409, 'UPDATE_EXPIRED', '미리보기가 만료되었습니다. 새 소스를 다시 확인하세요.');
+      readyApplication(state, record.application_id, sessionId);
+      const current = applicationVersions(state, application).current;
+      if (current?.id !== record.base_deployment_id || current.cd.revision !== record.base_revision)
+        throw new ProductError(409, 'UPDATE_BASE_CHANGED', '기준 배포가 변경되었습니다. 미리보기를 다시 만드세요.');
+      checkFree(state, sessionId);
+      const files = await submittedFiles(record);
+      Object.assign(record, { status: record.no_changes && !options.rebuild ? 'unchanged' : 'queued',
+        stage: record.no_changes && !options.rebuild ? 'complete' : 'ci', rebuild: options.rebuild === true, updated_at: new Date().toISOString() });
+      return { record, replay: record.status === 'unchanged', input: { app: record.app, target_id: record.target_id, files, source: record.source } };
+    });
+    if (!accepted.replay) launch(async () => {
+      let result;
+      try { result = await submit(accepted.record, accepted.input); }
+      catch (error) { if (error instanceof ProductError && error.outcomeUnknown) return; throw error; }
+      await observe(accepted.record, String(result.run_id));
+    });
+    return publicRecord(accepted.record);
+  }
   return {
     dashboard: store.dashboard,
-    applications(sessionId = null) { return Object.values(store.read().applications).filter((row) => owns(row, sessionId)).map(publicRecord); },
+    createUpdate, startUpdate,
+    async sourceFiles(id, variant, sessionId = null) {
+      const record = find('deployments', id, sessionId);
+      if (!['submitted', 'deployed'].includes(variant)) throw invalid('지원하지 않는 소스 종류입니다.');
+      return variant === 'submitted' ? submittedFiles(record) : deployedFiles(record);
+    },
+    applications(sessionId = null) { const state = store.read(); return Object.values(state.applications).filter((row) => owns(row, sessionId)).map((row) => publicApplication(state, row)); },
     getApplication(id, sessionId = null) {
-      const application = store.read().applications[id];
-      if (!owns(application, sessionId)) throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
-      return publicRecord(application);
+      const state = store.read();
+      return publicApplication(state, applicationRecord(state, id, sessionId));
     },
     list(kind, sessionId, pagination) {
       if (kind === 'plans') return Object.values(store.read().plans).filter((row) => owns(row, sessionId)).reverse().map((row) => structuredClone(row.public));
@@ -350,7 +502,7 @@ export async function createProductService({ service, directory, target, provide
       const reserved = await reserve('deployments', input, idempotencyKey(key), materialize, sessionId);
       if (!reserved.replay) launch(async () => {
         try {
-          if (reserved.record.application_id) {
+          if (reserved.record.application_id && store.read().applications[reserved.record.application_id]?.status !== 'ready') {
             const appId = reserved.record.application_id;
             const application = store.read().applications[appId];
             await update(reserved.record.id, { status: 'running', stage: 'registration' });
@@ -480,7 +632,7 @@ export async function createProductService({ service, directory, target, provide
     async createPlan(input, sessionId = null) {
       if (!environmentAdapter) throw unavailable();
       return store.transaction(async (state) => {
-        checkFree(state);
+        checkFree(state, sessionId);
         if (Object.keys(state.plans).length >= maxOperations) throw new ProductError(409, 'CAPACITY_EXCEEDED', '계획 보관 한도에 도달했습니다.');
         const id = randomUUID(), plan = await environmentAdapter.plan(input, { id });
         plan.session_id = sessionId;
@@ -503,7 +655,7 @@ export async function createProductService({ service, directory, target, provide
         const plan = Object.hasOwn(state.plans, input.plan_id) ? state.plans[input.plan_id] : null;
         if (!owns(plan, sessionId)) throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.');
         if (plan.environment_id) throw new ProductError(409, 'CONFLICT', '이미 실행에 사용된 계획입니다.');
-        checkFree(state);
+        checkFree(state, sessionId);
         checkCapacity(state);
         await environmentAdapter.verifyPlan(plan);
         const id = randomUUID();

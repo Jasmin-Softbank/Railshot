@@ -11,6 +11,7 @@ import { createAppServer } from '../src/server.js';
 import { archiveFromPath, deploySource, inferredAppName, insideRoot } from '../src/client.js';
 import { fetchPublicGithubSource } from '../src/public-github.js';
 import { readPublished } from '../src/published.js';
+import { readSourceSnapshot, sourceSnapshotLimit } from '../src/source-snapshot.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
@@ -169,6 +170,7 @@ test('공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 
   assert.deepEqual(result.files.map((file) => file.path), ['requirements.txt', 'app.py']);
   assert.deepEqual(result.source, { type: 'github', repository: 'https://github.com/example/sample', sha });
   assert.ok(calls.every((call) => !call.options.headers.authorization));
+  assert.ok(calls.every((call) => call.options.signal instanceof AbortSignal), 'Every source read has a deadline');
 });
 
 test('GitHub 입력은 공개 저장소 기본 URL로만 제한한다', async () => {
@@ -250,9 +252,9 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
   } finally { server.close(); }
 });
 
-function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app', gateResult } = {}) {
+function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app', gateResult, sourceSha256 = 'c'.repeat(64) } = {}) {
   const hash = (value) => createHash('sha256').update(value).digest('hex');
-  const verdict = { ok: true, release_eligible: true, status: 'PASS', source_sha256: 'c'.repeat(64),
+  const verdict = { ok: true, release_eligible: true, status: 'PASS', source_sha256: sourceSha256,
     layers: ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'].map((layer) => ({ layer, ok: true, errors: [] })),
     images: { web: 'local/web:gate' }, image_ids: { web: 'sha256:' + 'd'.repeat(64) } };
   if (gateResult) Object.assign(verdict.layers.find((row) => row.layer === gateResult.layer), gateResult);
@@ -688,4 +690,117 @@ test('허용된 복수 target도 publication은 접수 target과 정확히 일�
   assert.ok((await service.publishedFiles(accepted.publication)).length);
   assert.equal((await service.status('789', 'aws-demo')).state, 'publication_unverified');
   await assert.rejects(service.status('789', 'unregistered'), /대상/);
+});
+
+function snapshotFixture() {
+  const contents = [{ path: '.railshot', type: 'd', mode: 0o755, size: 0, content: null },
+    ...Object.entries({ '.railshot/railshot.yaml': 'app: my-app\n', 'Dockerfile': 'FROM node:22\n', 'generated.js': 'console.log("final AI repair")\n' })
+      .map(([path, text]) => ({ path, type: 'f', mode: path === 'generated.js' ? 0o755 : 0o644,
+        size: Buffer.byteLength(text), content: Buffer.from(text).toString('base64') }))];
+  const digest = createHash('sha256').update('railshot-source-v1\0');
+  for (const entry of contents) {
+    const header = Buffer.from(JSON.stringify([entry.path, entry.type, entry.mode, entry.size]));
+    const size = Buffer.alloc(8); size.writeBigUInt64BE(BigInt(header.length)); digest.update(size).update(header);
+    if (entry.type === 'f') digest.update(Buffer.from(entry.content, 'base64'));
+  }
+  return { version: 1, source_commit: 'a'.repeat(40), app: 'my-app', tenant: 'demo', target_id: 'aws-demo', run_id: 789,
+    producer_attempt: 1, source_sha256: digest.digest('hex'), entries: contents };
+}
+
+async function sourceService() {
+  const snapshot = snapshotFixture(), files = publishedFiles({ sourceSha256: snapshot.source_sha256 });
+  const publicationZip = await zipOf(files), calls = [];
+  const publication = { ...JSON.parse(files['handoff.json']), images: JSON.parse(files['images.json']), artifact_id: 200, artifact_name: 'published-1' };
+  const f = { snapshot, publication, calls, missing: false, duplicate: false, artifact: {}, redirect: null, zip: null, responseSize: null };
+  const service = createDeploymentService({ token: 'private-server-token', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, async (url, options) => {
+    calls.push({ url: String(url), authorization: options?.headers?.authorization });
+    const parsed = new URL(url);
+    if (parsed.hostname === 'productionresultssa1.blob.core.windows.net') {
+      assert.equal(options.headers, undefined); assert.equal(options.redirect, 'error');
+      return new Response(await zipOf({ 'snapshot.json': JSON.stringify(f.snapshot) }));
+    }
+    assert.equal(parsed.hostname, 'api.github.com');
+    if (parsed.pathname.endsWith('/actions/artifacts/200/zip')) return new Response(publicationZip);
+    if (parsed.pathname.endsWith('/actions/artifacts/201/zip')) {
+      if (f.redirect) return new Response(null, { status: 302, headers: { location: f.redirect } });
+      return new Response(f.zip || await zipOf({ 'snapshot.json': JSON.stringify(f.snapshot) }),
+        { headers: f.responseSize === null ? {} : { 'content-length': String(f.responseSize) } });
+    }
+    assert.ok(parsed.pathname.endsWith('/runs/789/artifacts'));
+    const source = parsed.searchParams.get('name') === 'source-1';
+    assert.equal(parsed.searchParams.get('name'), source ? 'source-1' : 'published-1');
+    const artifact = { id: source ? 201 : 200, name: source ? 'source-1' : 'published-1', expired: false, size_in_bytes: 200,
+      workflow_run: { id: 789, head_sha: 'a'.repeat(40) }, archive_download_url: 'https://hostile.invalid/must-not-follow',
+      ...(source ? f.artifact : {}) };
+    const artifacts = source && f.missing ? [] : source && f.duplicate ? [artifact, { ...artifact, id: 202 }] : [artifact];
+    return Response.json({ total_count: artifacts.length, artifacts });
+  });
+  f.read = () => service.sourceFiles(publication);
+  return f;
+}
+
+test('final gate-tested source is verified through the publication and exact source artifact before returning buffers', async () => {
+  const f = await sourceService(), files = await f.read();
+  assert.deepEqual(files.map((file) => file.path), ['.railshot/railshot.yaml', 'Dockerfile', 'generated.js']);
+  assert.equal(files.at(-1).content.toString(), 'console.log("final AI repair")\n');
+  assert.ok(files.every((file) => Buffer.isBuffer(file.content) && Object.keys(file).join(',') === 'path,content'));
+  assert.match(f.calls[0].url, /name=published-1/);
+  assert.ok(f.calls.every((call) => !call.url.includes('hostile.invalid')));
+  f.redirect = 'https://productionresultssa1.blob.core.windows.net/actions-results/source.zip?sig=private-signed-query';
+  assert.equal((await f.read()).length, 3);
+  assert.equal(f.calls.at(-1).authorization, undefined, 'GitHub token must never reach object storage');
+});
+
+test('only an absent source artifact permits the explicit legacy fallback', async () => {
+  const f = await sourceService(); f.missing = true;
+  await assert.rejects(f.read(), { code: 'SOURCE_NOT_AVAILABLE', status: 404 });
+  for (const change of [
+    (f) => { f.artifact.expired = true; }, (f) => { f.duplicate = true; },
+    (f) => { f.artifact.workflow_run = { id: 790, head_sha: 'a'.repeat(40) }; },
+    (f) => { f.artifact.workflow_run = { id: 789, head_sha: 'b'.repeat(40) }; },
+    (f) => { f.artifact.name = 'source-2'; }, (f) => { f.artifact.size_in_bytes = sourceSnapshotLimit + 1; },
+    (f) => { f.responseSize = sourceSnapshotLimit + 1; },
+    (f) => { f.redirect = 'https://hostile.invalid/private-server-token'; },
+    (f) => { f.redirect = 'http://productionresultssa1.blob.core.windows.net/source.zip'; },
+    (f) => { f.snapshot.producer_attempt = 2; }, (f) => { f.snapshot.run_id = 790; },
+    (f) => { f.snapshot.source_commit = 'b'.repeat(40); }, (f) => { f.snapshot.app = 'other-app'; },
+    (f) => { f.snapshot.tenant = 'other'; }, (f) => { f.snapshot.target_id = 'other'; },
+    (f) => { f.snapshot.entries.at(-1).content = Buffer.from('tampered source').toString('base64'); },
+    (f) => { f.snapshot.entries.at(-1).mode = 0o644; },
+    (f) => { f.publication.bundle_artifact_id = 999; },
+  ]) {
+    const f = await sourceService(); change(f);
+    await assert.rejects(f.read(), (error) => error.code === 'SOURCE_VERIFICATION_FAILED' && error.status === 502
+      && !error.message.includes('private-server-token'));
+  }
+});
+
+test('snapshot rejects private paths, links, malformed trees, duplicate files and noncanonical content', async () => {
+  for (const mutate of [
+    (v) => { v.entries.at(-1).path = '../private'; }, (v) => { v.entries.at(-1).path = '.env'; },
+    (v) => { v.entries.at(-1).path = '.ssh/id_rsa'; }, (v) => { v.entries.at(-1).path = 'node_modules/index.js'; },
+    (v) => { v.entries.at(-1).type = 'l'; }, (v) => { v.entries.at(-1).mode = 0o4755; },
+    (v) => { v.entries.at(-1).path = 'missing/file.js'; }, (v) => { v.entries.push(v.entries.at(-1)); },
+    (v) => { v.entries.reverse(); }, (v) => { v.entries.at(-1).content += '\n'; },
+    (v) => { v.entries.at(-1).path = 'auth.txt'; const text = '-----BEGIN PRIVATE KEY-----'; v.entries.at(-1).content = Buffer.from(text).toString('base64'); v.entries.at(-1).size = text.length; },
+    (v) => { v.entries = Array.from({ length: 2001 }, (_, i) => ({ path: `file${i}`, type: 'f', mode: 0o644, size: 0, content: '' })); },
+  ]) {
+    const value = snapshotFixture(); mutate(value);
+    assert.throws(() => readSourceSnapshot(Buffer.from(JSON.stringify(value)), value, value.source_sha256));
+  }
+  const wrongEntry = await sourceService(); wrongEntry.zip = await zipOf({ 'foreign.json': '{}' });
+  await assert.rejects(wrongEntry.read(), { code: 'SOURCE_VERIFICATION_FAILED' });
+  const extraEntry = await sourceService(); extraEntry.zip = await zipOf({ 'snapshot.json': JSON.stringify(extraEntry.snapshot), 'secret.txt': 'private-canary' });
+  await assert.rejects(extraEntry.read(), { code: 'SOURCE_VERIFICATION_FAILED' });
+});
+
+test('snapshot digest interoperates with Python gate hashing for Unicode names, directory order and executable permissions', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'railshot-source-digest-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const script = `import base64,json,os,stat,sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nfrom gate.bundle import source_digest\np=Path(sys.argv[2]);(p/'a').mkdir();(p/'a'/'한글😀.txt').write_bytes(b'final source');(p/'a.txt').write_bytes(b'sibling');(p/'empty').mkdir();(p/'a.txt').chmod(0o755)\nentries=[]\ndef visit(d):\n for q in sorted(d.iterdir(),key=lambda p:p.name):\n  s=q.lstat();f=q.is_file();entries.append(dict(path=q.relative_to(p).as_posix(),type='f' if f else 'd',mode=stat.S_IMODE(s.st_mode),size=s.st_size if f else 0,content=base64.b64encode(q.read_bytes()).decode() if f else None))\n  if not f:visit(q)\nvisit(p)\nprint(json.dumps(dict(source_sha256=source_digest(p),entries=entries)))`;
+  const scripts = fileURLToPath(new URL('../../../ci/scripts', import.meta.url));
+  const generated = JSON.parse(execFileSync('python3', ['-c', script, scripts, root], { encoding: 'utf8' }));
+  const value = { ...snapshotFixture(), ...generated };
+  const read = readSourceSnapshot(Buffer.from(JSON.stringify(value)), value, value.source_sha256);
+  assert.deepEqual(read.map((file) => file.path), ['a/한글😀.txt', 'a.txt']);
 });
