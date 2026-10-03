@@ -6,6 +6,8 @@ import { createMetricsObserver } from './metrics.js';
 import { emptyAgentEvents } from './agent-events.js';
 import { EnvironmentError } from './environments.js';
 import { SubmissionError } from './github.js';
+import { createDeploymentDiagnostics } from './deployment-diagnostics.js';
+import { appendEvent, observeOperation, ingestCiEvents, publicTelemetry } from './telemetry.js';
 import { exact, lifecycleActions, lifecycleId, lifecycleHash, lifecycleResources, lifecycleSteps } from './application-lifecycle.js';
 
 export class ProductError extends Error {
@@ -41,8 +43,8 @@ export function idempotencyKey(value) {
   return value;
 }
 function publicRecord(record) {
-  const { fingerprint, key, source, source_bytes, legacy, session_id, publication, refreshed_plan, ...visible } = record;
-  return structuredClone(visible);
+  const { fingerprint, key, source, source_bytes, legacy, session_id, publication, refreshed_plan, diagnostic_evidence, classifications, telemetry, ...visible } = record;
+  return { ...structuredClone(visible), ...(telemetry ? { telemetry: publicTelemetry(record) } : {}) };
 }
 function checkFree(state, sessionId = null, except = null) {
   const blocker = Object.values(state.operations).find((record) => record.id !== except && occupiesSlot(record));
@@ -59,7 +61,7 @@ function checkFree(state, sessionId = null, except = null) {
     { retryable: blocker.status !== 'unknown', admission });
 }
 
-export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, unknownGraceMs = 60_000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, unknownGraceMs = 60_000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const targetId = target?.id || service?.targetId;
   if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
   const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
@@ -75,6 +77,24 @@ export async function createProductService({ service, directory, target, provide
   if (!Number.isSafeInteger(unknownGraceMs) || unknownGraceMs < 1) throw invalid('unknown 대기 시간은 양의 정수여야 합니다.');
   const store = await createProductStore(directory);
   const abort = new AbortController();
+  const diagnostics = createDeploymentDiagnostics({ store, find, service, classifier: classifyFailure, signal: abort.signal });
+  const telemetryTasks = new Map(), telemetryNext = new Map();
+  function refreshCiJournal(record) {
+    if (abort.signal.aborted || !service?.events || !record.ci?.run_id || !record.source_commit || telemetryTasks.has(record.id)) return;
+    if (Date.now() < (telemetryNext.get(record.id) || 0) && !['published', 'failed', 'publication_unverified'].includes(record.ci.state)) return;
+    telemetryNext.set(record.id, Date.now() + 15000);
+    const runId = String(record.ci.run_id);
+    const task = (async () => {
+      const envelope = await service.events(runId, { source_commit: record.source_commit, app: record.app, target_id: record.target_id });
+      await store.transaction((state) => {
+        const row = state.operations[record.id], bound = state.bindings[runId];
+        if (bound?.operation_id === record.id && row.source_commit === record.source_commit && String(row.ci?.run_id) === runId
+            && row.session_id === record.session_id && bound.app === row.app && bound.target_id === row.target_id
+            && bound.source_commit === row.source_commit) ingestCiEvents(row, envelope);
+      });
+    })().catch(() => {}).finally(() => telemetryTasks.delete(record.id));
+    telemetryTasks.set(record.id, task);
+  }
   function checkCapacity(state, sourceBytes = 0) {
     if (Object.keys(state.operations).length >= maxOperations || store.snapshotBytes() + sourceBytes > maxSourceBytes) throw new ProductError(409, 'CAPACITY_EXCEEDED', 'workspace 보관 한도에 도달했습니다. 운영자가 저장소를 확인해야 합니다.');
   }
@@ -167,12 +187,21 @@ export async function createProductService({ service, directory, target, provide
     return { ...input, app, target_id: id };
   }
   async function update(id, patch) {
+    let newFailure = false;
     await store.transaction((state) => {
       const record = state.operations[id], now = new Date().toISOString();
+      const before = structuredClone(record);
+      newFailure = ['failed', 'blocked', 'unknown'].includes(patch.status)
+        && !['failed', 'blocked', 'unknown'].includes(before.status);
       if (patch.status === 'unknown' && record.status !== 'unknown') record.unknown_since = now;
       if (patch.status === 'running' && record.queue) { delete record.queue.released_at; delete record.queue.release_reason; }
       Object.assign(record, patch, { updated_at: now });
+      try { observeOperation(record, patch, before); }
+      catch { record.telemetry = { ...record.telemetry, state: 'unavailable', reason: 'projection_failed' }; }
     });
+    const row = store.read().operations[id];
+    if (patch.ci) refreshCiJournal(row);
+    if (newFailure && row.kind === 'deployments' && row.ci?.state === 'failed') diagnostics.schedule(id);
   }
   function launch(fn, deploymentId = null) {
     const worker = Promise.resolve().then(fn).catch(() => { console.error('RAILSHOT worker could not persist its final state; inspect private workspace state.'); }).finally(() => {
@@ -400,6 +429,7 @@ export async function createProductService({ service, directory, target, provide
         source: source.source || null, source_bytes: sourceBytes, source_digest: digest(files.map(({ path, content }) => [path, createHash('sha256').update(content).digest('hex')]).sort()),
       };
       if (kind === 'deployments') enqueue(state, record);
+      appendEvent(record, 'deployment.accepted', 'dispatch', 'NOT_RUN');
       state.operations[id] = record;
       if (plan) plan.environment_id = record.environment_id;
       if (key) state.keys[scopeKey(kind, key, sessionId)] = id;
@@ -854,6 +884,7 @@ export async function createProductService({ service, directory, target, provide
     },
     async sourceFiles(id, variant, sessionId = null) {
       const record = find('deployments', id, sessionId);
+      if (variant === 'failed') return diagnostics.source(id, sessionId);
       if (!['submitted', 'deployed'].includes(variant)) throw invalid('지원하지 않는 소스 종류입니다.');
       return variant === 'submitted' ? submittedFiles(record) : deployedFiles(record);
     },
@@ -1117,11 +1148,13 @@ export async function createProductService({ service, directory, target, provide
       }
       return { ...record, observation: await observeMetrics(record) };
     },
+    getDeploymentDiagnostics: diagnostics.get,
+    classifyDeployment: diagnostics.classify,
     async getDeploymentEvents(id, sessionId = null) {
       const record = find('deployments', id, sessionId);
       const identity = { runId: record.ci?.run_id ? String(record.ci.run_id) : null,
         source_commit: record.source_commit, app: record.app, target_id: record.target_id };
-      const empty = (state, reason) => ({ deployment_id: id, ...emptyAgentEvents(identity, state, reason) });
+      const empty = (state, reason) => ({ deployment_id: id, ...emptyAgentEvents(identity, state, reason), timeline: publicTelemetry(record) });
       if (!identity.runId) return empty('not_started', 'not_dispatched');
       const bound = () => {
         const current = find('deployments', id, sessionId), state = store.read();
@@ -1134,7 +1167,9 @@ export async function createProductService({ service, directory, target, provide
       if (typeof service?.events !== 'function') return empty('unavailable', 'not_configured');
       try {
         const observed = await service.events(identity.runId, { source_commit: identity.source_commit, app: identity.app, target_id: identity.target_id });
-        return bound() ? { ...observed, deployment_id: id } : empty('unavailable', 'binding_mismatch');
+        if (!bound()) return empty('unavailable', 'binding_mismatch');
+        await store.transaction((state) => ingestCiEvents(state.operations[id], observed));
+        return bound() ? { ...observed, deployment_id: id, timeline: publicTelemetry(find('deployments', id, sessionId)) } : empty('unavailable', 'binding_mismatch');
       } catch { return empty('unavailable', 'upstream_unavailable'); }
     },
     async getDeploymentLogs(id, sessionId = null) {
@@ -1216,6 +1251,8 @@ export async function createProductService({ service, directory, target, provide
       clearInterval(queueTimer);
       await pumping;
       await Promise.allSettled(workers);
+      await diagnostics.close();
+      await Promise.allSettled(telemetryTasks.values());
       await store.close();
     },
   };

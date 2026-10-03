@@ -15,6 +15,7 @@ COPY --from=dependencies /app/node_modules /app/node_modules
 COPY apps/api/package.json ./package.json
 COPY apps/api/src/ ./src/
 COPY contracts/application.mjs /app/contracts/application.mjs
+COPY ci/scripts/contract/telemetry.json /app/ci/scripts/contract/telemetry.json
 USER 1000:1000
 
 FROM base AS api
@@ -29,6 +30,7 @@ COPY gitops/dns.py gitops/gcp_routes.py /app/gitops/
 COPY gitops/openstack_routes.py /app/gitops/
 COPY gitops/application_cleanup.py /app/gitops/
 COPY gitops/credentials.py gitops/logs.py /app/gitops/
+COPY gitops/workload_diagnostics.py /app/gitops/
 COPY observability/register.py observability/bootstrap.py observability/render.py observability/compose.yaml observability/runtime_health.py /app/observability/
 COPY ci/scripts/execution.py ci/scripts/observability.py ci/scripts/process.py ci/scripts/publication.py ci/scripts/storage.py /app/ci/scripts/
 COPY ci/scripts/gate/bundle.py /app/ci/scripts/gate/

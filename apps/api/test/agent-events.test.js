@@ -154,9 +154,11 @@ test('real events HTTP route binds ownership before GitHub reads, rejects contro
     if (state.status === 'succeeded') break;
     await pause(10);
   }
+  await pause(30); // Allow the authorized terminal background collection to settle.
+  const authorizedReads = f.calls.length;
   for (const cookie of [foreign, null]) {
     assert.equal((await fetch(origin + path, { headers: cookie ? { Cookie: cookie } : {} })).status, 404);
-    assert.equal(f.calls.length, 0);
+    assert.equal(f.calls.length, authorizedReads);
   }
   assert.equal((await fetch(origin + path + '?run_id=999', { headers: { Cookie: owner } })).status, 422);
   assert.equal((await fetch(origin + path, { method: 'POST', headers: { Cookie: owner } })).status, 405);
@@ -172,4 +174,13 @@ test('real events HTTP route binds ownership before GitHub reads, rejects contro
   const rejected = await (await fetch(origin + path, { headers: { Cookie: owner } })).json();
   assert.equal(rejected.state, 'unavailable'); assert.deepEqual(rejected.items, []);
   assert.equal(JSON.stringify(rejected).includes('raw-secret-canary'), false);
+});
+
+test('deterministic gate progress is admitted with no agent call and rejects forged counters', async () => {
+  const f = fixture(), now = f.envelope.updated_at;
+  f.envelope.items = [{ sequence: 1, occurred_at: now, event_name: 'gate.layer.completed', native_run_id: 'native:123',
+    attempt_id: 'native:123:0', phase: 'L2', outcome: 'FAIL', completed_steps: 3, total_steps: 4, duration_s: 1.25 }]; f.save();
+  const result = await f.read(); assert.equal(result.items[0].event_name, 'gate.layer.completed');
+  const bad = fixture(); bad.envelope.items = [{ ...f.envelope.items[0], completed_steps: 7 }]; bad.save();
+  assert.equal((await bad.read()).state, 'unavailable');
 });

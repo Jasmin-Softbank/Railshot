@@ -200,6 +200,11 @@ input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible
 .console-metrics strong { color: var(--color-ink); font-size: 12px; }
 .console-output { height: 420px; max-height: 55vh; min-height: 280px; overflow: auto; overscroll-behavior: contain; padding: 23px 20px; background: var(--color-console); color: var(--color-console-text); font: 12px/1.6 ui-monospace, SFMono-Regular, monospace; }
 .console-output p { margin: 0; }
+.diagnostic-excerpt { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, monospace; background: var(--color-subtle); padding: 12px; }
+.diagnostic-checks { padding-left: 20px; font-size: 12px; line-height: 1.8; }
+.diagnostic-checks [data-outcome="FAIL"], .diagnostic-checks [data-outcome="UNKNOWN"] { color: #a03c36; }
+#diagnostic-source { display: block; margin-top: 12px; }
+#diagnostic-source[hidden] { display: none; }
 .execution-binding { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.7 ui-monospace, monospace; color: var(--color-muted); }
 .console-metrics small { max-width: 180px; font-size: 10px; }
 .console-metrics strong[data-state="ready"] { color: var(--color-accent); }

@@ -17,7 +17,8 @@ NAME = 'Railshot agent events'
 APP_ID = 15368  # github-actions on github.com; this transport has no configurable host.
 MAX_BYTES, MAX_ITEMS, MAX_RESPONSE = 60000, 60, 2 * 1024 * 1024
 OUTCOMES = {'RUNNING', 'PASS', 'FAIL', 'BLOCKED', 'UNKNOWN', 'NOT_RUN', 'INCOMPLETE'}
-EVENTS = {'loop.started', 'loop.completed', 'agent.heartbeat', 'agent.observation'}
+EVENTS = {'loop.started', 'loop.completed', 'agent.heartbeat', 'agent.observation',
+          'gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat'}
 
 
 def integer(value):
@@ -46,6 +47,18 @@ def row(event):
         if event.get('phase') != 'loop' or event.get('outcome') not in OUTCOMES or not (count is None or integer(count)):
             raise ValueError('invalid loop observation')
         result.update(phase='loop', outcome=event['outcome'], sdk_invocations=count)
+    elif name.startswith('gate.layer.'):
+        if (not identifier(event.get('attempt_id')) or event.get('phase') not in {'L0', 'L1', 'Q', 'L2', 'L4', 'L3'}
+                or event.get('outcome') not in OUTCOMES
+                or any(not integer(attributes.get(key)) for key in ('completed_steps', 'total_steps'))
+                or not 1 <= attributes['total_steps'] <= 6 or attributes['completed_steps'] > attributes['total_steps']):
+            raise ValueError('invalid gate observation')
+        duration = attributes.get('duration_s', 0)
+        if type(duration) not in (int, float) or not 0 <= duration <= 86400:
+            raise ValueError('invalid gate duration')
+        result.update(attempt_id=event['attempt_id'], phase=event['phase'], outcome=event['outcome'],
+                      completed_steps=attributes['completed_steps'], total_steps=attributes['total_steps'],
+                      duration_s=duration)
     else:
         if (not identifier(event.get('attempt_id')) or attributes.get('role') not in {'adapter', 'fixer'}
                 or attributes.get('provider') not in {'codex', 'claude'}

@@ -96,13 +96,17 @@ class SourceRepairTest(unittest.TestCase):
                 self.assertIsNone(loop.decide(verdict, None, set(), "source"))
                 self.assertIn("same failure", loop.decide(verdict, None, {layer}, "source"))
                 plan = [{"gate": gate_id, "action": "Inspect requirements; this check remains unverified."} for gate_id in gate.ORDER]
-                source = Path(tmp) / "app.py"; source.write_text("original = True\n")
+                from runner.test_repair_evidence import case_fixture, bind_proposal
+                ws = Path(tmp) / "work"; ws.mkdir()
+                source = ws / "app.py"; source.write_text("original = True\n")
+                raw = case_fixture(ws, Path(tmp))
                 output = {"status": "proposed", "root_cause": layer + " evidence", "gate_plan": plan,
                           "files_changed": [{"path": "app.py", "why": "fix the observed cause"}],
                           "files": [{"path": "app.py", "content": "original = False\n"}]}
                 with self.assertRaises(ValueError):
                     record_plan(Path(tmp), "fixer", {**output, "gate_plan": plan[:1]})
-                record_plan(Path(tmp), "fixer", output)
+                output = bind_proposal(Path(tmp), output)
+                record_plan(Path(tmp), "fixer", output, workspace=ws, expected=raw)
                 receipt = json.loads((Path(tmp) / "fixer-plan.json").read_text())
                 self.assertFalse(receipt["execution_verified"])
                 self.assertEqual("original = True\n", source.read_text())

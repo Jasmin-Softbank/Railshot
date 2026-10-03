@@ -4,12 +4,15 @@ Public errors contain registered summaries and safe causal locations, never exce
 messages, locals, command arguments, source lines or SDK/tool output. See contract/observability.md.
 """
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 import re
 import traceback
 import uuid
 
-SCHEMA_VERSION = 1
-OUTCOMES = {'RUNNING', 'PASS', 'FAIL', 'BLOCKED', 'UNKNOWN', 'NOT_RUN', 'INCOMPLETE'}
+CONTRACT = json.loads((Path(__file__).parent / 'contract/telemetry.json').read_text())
+SCHEMA_VERSION = CONTRACT['version']
+OUTCOMES = set(CONTRACT['outcomes'])
 RETRY_POLICIES = {'never', 'after_reconcile', 'after_configuration', 'safe'}
 SIDE_EFFECTS = {'none', 'possible', 'completed', 'unknown'}
 # Codes are the machine contract. Summaries are safe operator-facing text, not predicates.
@@ -137,7 +140,8 @@ def event_record(name, *, component, phase, outcome, run_id=None, attempt_id=Non
     if detail and detail.get('outcome') != outcome:
         raise ValueError('event and error outcomes disagree')
     now = datetime.now(timezone.utc).isoformat()
+    severity = 'ERROR' if outcome in ('FAIL', 'UNKNOWN') else 'WARN' if outcome == 'BLOCKED' else 'INFO'
     return {'schema_version': SCHEMA_VERSION, 'event_id': str(uuid.uuid4()), 'event_name': name,
             'occurred_at': now, 'observed_at': now, 'component': component, 'phase': phase,
-            'outcome': outcome, 'severity': 'ERROR' if outcome in ('FAIL', 'UNKNOWN') else 'WARN' if outcome == 'BLOCKED' else 'INFO',
+            'outcome': outcome, 'severity': severity, 'severity_number': CONTRACT['severity_numbers'][severity],
             'run_id': run_id, 'attempt_id': attempt_id, 'error': detail, 'attributes': attributes or {}}

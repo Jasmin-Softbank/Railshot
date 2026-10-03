@@ -595,15 +595,18 @@ class RunnerTest(unittest.TestCase):
     def test_partial_atomic_patch_is_preserved_in_failure_receipt(self):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
-            return {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
-                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in ('L0','L1','L2','L4','L3')],
+            from runner.test_repair_evidence import bind_proposal
+            return bind_proposal(run, {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
+                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in run_agent.GATE_ORDER],
                     'files_changed':[{'path':name,'why':'fixture repair'} for name in ('Dockerfile','.dockerignore')], 'assumptions':[], 'confidence':'high',
-                    'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}, {}
+                    'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}), {}
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve(); workspace=base/'workspace'; workspace.mkdir()
             run, task = base/'run', base/'task.md'; task.write_text('offline task')
             for name in ('Dockerfile','.dockerignore'): (workspace/name).write_text('before')
             (workspace/'Dockerfile').chmod(0o755)
+            from runner.test_repair_evidence import case_fixture
+            case_fixture(workspace, run)
             original_replace = os.replace
             def fail_second(source, target):
                 if Path(target) == workspace/'.dockerignore':
@@ -625,13 +628,17 @@ class RunnerTest(unittest.TestCase):
     def test_validation_only_rejection_has_safe_replan_guidance_without_source_writes(self):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
-            return {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
-                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in ('L0','L1','L2','L4','L3')],
+            from runner.test_repair_evidence import bind_proposal
+            return bind_proposal(run, {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
+                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in run_agent.GATE_ORDER],
                     'files_changed':[{'path':'../private-canary.py','why':'invalid fixture'}], 'assumptions':[], 'confidence':'high',
-                    'files':[{'path':'../private-canary.py','content':'wrong'}]}, {}
+                    'files':[{'path':'../private-canary.py','content':'wrong'}]}), {}
         with tempfile.TemporaryDirectory() as directory:
             base=Path(directory); workspace=base/'work'; workspace.mkdir()
             run, task=base/'run', base/'task.md'; task.write_text('fixture')
+            from runner.test_repair_evidence import case_fixture
+            (workspace/'app.py').write_text('print(1)\n')
+            case_fixture(workspace,run)
             argv=['runner','fixer','--workspace',str(workspace),'--run',str(run),'--task',str(task)]
             with patch.object(run_agent, 'run_codex', side_effect=provider), patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(run_agent.main(), 1)

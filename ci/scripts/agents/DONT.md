@@ -12,7 +12,9 @@ These rules apply to both adapter and fixer. Keep the existing report schema and
 
 Report a proposed change and its source evidence. Only the outer executor and deterministic checks can establish execution success.
 
-## Source repair syntax checked before any write
+## Legacy additive test syntax (not requested by deployment)
+
+These validator capabilities do not grant permission to add tests or checker setup in a deployment task.
 
 These are platform validator constraints, not hints. Check them before returning a proposal.
 

@@ -84,6 +84,7 @@ let observationError = false;
 let ciSnapshot = null, ciReadError = false;
 let logSnapshot = null, logController;
 let eventSnapshot = null, eventController;
+let diagnosticSnapshot = null, diagnosticController;
 
 function invalidateReview() {
   clearTimeout(previewExpiryTimer);
@@ -876,6 +877,7 @@ async function refreshEvents() {
   if (eventController && eventsMatch(eventSnapshot)) return;
   eventController?.abort();
   if (!current || current.kind !== 'deployments') return;
+  refreshDiagnostics();
   const id = current.id, controller = new AbortController(); eventController = controller;
   if (!eventsMatch(eventSnapshot)) eventSnapshot = { deployment_id: id, app: current.app, target_id: current.target_id,
     source_commit: current.source_commit ?? null, run_id: current.ci?.run_id ?? null, state: 'loading', items: [] };
@@ -894,17 +896,18 @@ function agentEvents() {
   const events = eventsMatch(eventSnapshot) ? eventSnapshot : null;
   const age = events?.updated_at ? Date.now() - Date.parse(events.updated_at) : NaN;
   const stale = events?.stale || events?.state === 'live' && (!Number.isFinite(age) || age > 90000);
-  const messages = { loading: '에이전트 이벤트를 조회하고 있습니다.', live: '에이전트 실행 관측 중',
-    complete: '에이전트 관측이 종료되었습니다. CI와 앱 배포 결과는 위 상태에서 확인하세요.',
-    not_started: '아직 에이전트 이벤트가 기록되지 않았습니다.', no_data: '이 실행에 기록된 에이전트 이벤트가 없습니다.',
-    unavailable: '에이전트 이벤트를 확인할 수 없습니다. 다음 조회에서 다시 확인합니다.' };
+  const messages = { loading: 'CI 진행 이벤트를 조회하고 있습니다.', live: 'CI 단계 관측 중',
+    complete: 'CI 관측이 종료되었습니다. 앱 적용과 외부 응답은 별도 기록에서 확인하세요.',
+    not_started: '아직 CI 진행 이벤트가 기록되지 않았습니다.', no_data: '이 실행에 기록된 CI 진행 이벤트가 없습니다.',
+    unavailable: 'CI 진행 이벤트를 확인할 수 없습니다. 마지막 기록과 조회 시각을 확인하세요.' };
   return { message: events?.read_error ? '이벤트 조회 실패 · 마지막으로 확인한 기록입니다.'
     : stale ? '이벤트 갱신이 지연되고 있습니다. 마지막 기록만으로 실행 정지를 판단할 수 없습니다.'
-    : messages[events?.state] || '작업 로그 탭에서 현재 실행의 에이전트 이벤트를 조회합니다.',
+    : messages[events?.state] || '작업 로그 탭에서 현재 실행의 CI 진행 이벤트를 조회합니다.',
     ...(events || { items: [] }),
     ...(events?.truncated ? { history_note: '최근 이벤트만 표시합니다. 전체 기록은 CI 실행 로그에서 확인하세요.' } : {}) };
 }
 function renderConsole() {
+  renderDiagnostics();
   const logs = logSnapshot?.deployment_id === current?.id ? logSnapshot : null;
   const data = !current ? '실행을 시작하면 확인된 상태가 여기에 표시됩니다.'
     : consoleTab === 'app' ? (logs?.state === 'ready'
@@ -912,9 +915,71 @@ function renderConsole() {
       : logLabels[logs?.state] || '앱 로그 탭을 선택하면 현재 배포의 로그를 조회합니다.')
     : consoleTab === 'environment' ? { target_id: current.target_id, environment: current.environment || null, cd: current.cd || null, public_http: current.public_http || null, observation: current.observation || null }
     : { status: current.status, stage: current.stage || 'ci', diagnostics: current.ci?.diagnostics || current.diagnostics || null,
-      steps: current.steps || current.ci?.steps || [], error: current.error || null, agent_events: agentEvents() };
+      steps: current.steps || current.ci?.steps || [], error: current.error || null,
+      pipeline_timeline: eventsMatch(eventSnapshot) ? eventSnapshot.timeline : current.telemetry || null,
+      ci_events: agentEvents(), classification: current.classification || null };
   document.querySelector('#console-output').textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
+
+async function refreshDiagnostics() {
+  if (!current || current.kind !== 'deployments' || !['failed', 'blocked', 'unknown'].includes(current.status)) { renderDiagnostics(); return; }
+  if (diagnosticController) return;
+  const id = current.id, source = current.source_commit, run = current.ci?.run_id;
+  const controller = new AbortController(); diagnosticController = controller;
+  try {
+    const { data } = await request(`/api/v1/deployments/${encodeURIComponent(id)}/diagnostics`, {}, controller);
+    if (current?.id !== id || current.source_commit !== source || current.ci?.run_id !== run) return;
+    if (data.deployment_id !== id || data.binding && (data.binding.app !== current.app || data.binding.target_id !== current.target_id
+      || data.binding.source_commit !== source || String(data.binding.run_id) !== String(run))) throw new Error('진단 대상 불일치');
+    diagnosticSnapshot = { ...data, source_commit: source, run_id: run, read_at: Date.now() };
+  } catch {
+    if (current?.id === id) diagnosticSnapshot = { deployment_id: id, source_commit: source, run_id: run, state: 'unavailable', read_error: true };
+  } finally { diagnosticController = null; renderDiagnostics(); }
+}
+function renderDiagnostics() {
+  const panel = document.querySelector('#diagnostic-panel');
+  panel.hidden = !current || current.kind !== 'deployments' || !['failed', 'blocked', 'unknown'].includes(current.status);
+  if (panel.hidden) return;
+  const d = diagnosticSnapshot?.deployment_id === current.id && diagnosticSnapshot.source_commit === current.source_commit
+    && diagnosticSnapshot.run_id === current.ci?.run_id ? diagnosticSnapshot : null;
+  document.querySelector('#diagnostic-state').textContent = d?.state === 'ready' ? '실행과 소스에 연결된 진단입니다.'
+    : d?.read_error ? '진단 조회에 실패했습니다. 실행 결과와 별도로 다음 조회에서 다시 확인합니다.' : '검증 가능한 진단 자료를 확인하고 있습니다.';
+  const f = d?.failure;
+  document.querySelector('#diagnostic-failure').textContent = d?.state === 'ready'
+    ? [f?.layer || d.error?.phase, f?.code || d.error?.code || '원인 미확정'].filter(Boolean).join(' · ') : current.error?.code || '';
+  const list = document.querySelector('#diagnostic-checks'); list.replaceChildren();
+  const outcomeLabels = { PASS: '통과', FAIL: '실패', BLOCKED: '실행 차단', UNKNOWN: '확인 필요', NOT_RUN: '실행하지 않음', INCOMPLETE: '미완료', RUNNING: '진행 중' };
+  for (const check of d?.checks || []) {
+    const li = document.createElement('li'); li.dataset.outcome = check.outcome;
+    li.textContent = `${check.check_id} · ${outcomeLabels[check.outcome] || check.outcome}${check.required ? '' : ' · 선택 검사'}`; list.append(li);
+  }
+  document.querySelector('#diagnostic-excerpt').textContent = f?.excerpt || '';
+  const c = d?.classification || current.classification;
+  const categoryLabels = { source: '소스 코드', dependency: '의존성', packaging: '앱 패키징', configuration: '설정', platform: '실행 환경', resource: '자원', database: '데이터베이스', unknown: '근거 부족' };
+  document.querySelector('#diagnostic-classification').textContent = c?.state === 'succeeded'
+    ? `Jev 원인 추정: ${categoryLabels[c.category?.choice] || '근거 부족'}. 이 분류는 관측 사실을 보완하며 복구 완료를 뜻하지 않습니다.`
+    : c?.state === 'running' ? 'Jev가 진단 근거를 분류하고 있습니다.'
+    : c?.state === 'failed' ? `원인 분류를 완료하지 못했습니다 (${c.code}). 기존 검사 결과는 유지됩니다.`
+    : c?.state === 'not_configured' ? '자동 분류를 사용할 수 없습니다. 관측된 오류와 검사 근거를 확인하세요.' : '원인 분류는 아직 요청되지 않았습니다.';
+  document.querySelector('#diagnostic-action').textContent = c?.action || (d?.missing_evidence?.length ? `누락된 근거: ${d.missing_evidence.join(', ')}` : '');
+  const classify = document.querySelector('#classify-failure');
+  classify.hidden = d?.state !== 'ready' || ['running', 'succeeded', 'failed', 'not_configured'].includes(c?.state);
+  const source = document.querySelector('#diagnostic-source');
+  source.hidden = d?.state !== 'ready' || !d.source?.snapshot || d.source.tested_sha256 !== d.source.after_sha256;
+  if (!source.hidden) source.href = `/api/v1/deployments/${encodeURIComponent(current.id)}/source?variant=failed`;
+  document.querySelector('#diagnostic-freshness').textContent = d?.read_at
+    ? `마지막 조회 ${new Date(d.read_at).toLocaleTimeString()}${d.checked_at ? ` · 근거 수집 ${new Date(d.checked_at).toLocaleString()}` : ''}` : '진단 조회 대기';
+}
+document.querySelector('#classify-failure').addEventListener('click', async () => {
+  if (!current) return;
+  const id = current.id, button = document.querySelector('#classify-failure'); button.disabled = true;
+  try {
+    await request(`/api/v1/deployments/${encodeURIComponent(id)}/classifications`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (current?.id === id) await refreshDiagnostics();
+  } catch { if (current?.id === id) document.querySelector('#diagnostic-classification').textContent = '분류 요청 결과를 확인하지 못했습니다. 진단을 다시 조회하세요.'; }
+  finally { button.disabled = false; }
+});
 const metricLabels = { not_configured: '연결 전', unsupported: '대상 미지원', unavailable: '수집 연결 실패', collection_failed: '수집 실패', no_data: '데이터 없음', stale: '오래된 값' };
 function renderMetrics() {
   const observation = current?.observation;

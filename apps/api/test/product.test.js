@@ -900,11 +900,12 @@ test('agent events are not fabricated before dispatch and require the persisted 
   const store = await createProductStore(f.directory);
   await store.transaction((state) => { state.bindings['123'].source_commit = 'd'.repeat(40); });
   await store.close();
+  const authorizedReads = reads;
   const restarted = await createProductService({ service: f.service, directory: f.directory });
   try {
     const rejected = await restarted.getDeploymentEvents(created.id, owner);
     assert.equal(rejected.state, 'unavailable'); assert.equal(rejected.reason, 'binding_mismatch');
-    assert.equal(reads, 0);
+    assert.equal(reads, authorizedReads);
     await assert.rejects(restarted.getDeploymentEvents(created.id, 'foreign'), { status: 404 });
   } finally { await restarted.close(); }
 });

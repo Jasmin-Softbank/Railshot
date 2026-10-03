@@ -8,7 +8,7 @@ export const sourceSnapshotLimit = 140 * 1024 * 1024;
 const require = (ok) => { if (!ok) throw new Error('Final source snapshot verification failed'); };
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-const secret = /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16})\b/;
+const secret = /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16}|apikey_[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{16,})\b/;
 function safePath(path) {
   require(typeof path === 'string' && path.length > 0 && path.length <= 1024 && Buffer.from(path).toString('utf8') === path
     && !/[\x00-\x1f\x7f\\]/.test(path));
@@ -66,7 +66,7 @@ export function readSourceSnapshot(bytes, publication, sourceSha256) {
   return validateFiles(files);
 }
 
-export async function readSourceArchive(bytes, publication, sourceSha256) {
+export async function readSourceArchive(bytes, publication, sourceSha256, expectedSnapshotSha256 = null) {
   require(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= sourceSnapshotLimit);
   const zip = await openZip(bytes, { lazyEntries: true, decodeStrings: true, validateEntrySizes: true });
   try {
@@ -91,6 +91,7 @@ export async function readSourceArchive(bytes, publication, sourceSha256) {
       });
       zip.readEntry();
     });
+    if (expectedSnapshotSha256 !== null) require(createHash('sha256').update(snapshot).digest('hex') === expectedSnapshotSha256);
     return readSourceSnapshot(snapshot, publication, sourceSha256);
   } finally { zip.close(); }
 }

@@ -55,6 +55,12 @@ function validateItem(item) {
   if (['loop.started', 'loop.completed'].includes(item.event_name)) {
     requireValid(exact(item, [...common, 'phase', 'outcome', 'sdk_invocations']) && item.phase === 'loop'
       && outcomes.includes(item.outcome) && (item.sdk_invocations === null || integer(item.sdk_invocations)));
+  } else if (['gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat'].includes(item.event_name)) {
+    requireValid(exact(item, [...common, 'attempt_id', 'phase', 'outcome', 'completed_steps', 'total_steps', 'duration_s'])
+      && typeof item.attempt_id === 'string' && safeId.test(item.attempt_id)
+      && ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'].includes(item.phase) && outcomes.includes(item.outcome)
+      && integer(item.completed_steps) && integer(item.total_steps) && item.total_steps >= 1 && item.total_steps <= 6
+      && item.completed_steps <= item.total_steps && Number.isFinite(item.duration_s) && item.duration_s >= 0 && item.duration_s <= 86400);
   } else {
     requireValid(['agent.heartbeat', 'agent.observation'].includes(item.event_name)
       && exact(item, [...common, 'attempt_id', 'role', 'provider', 'elapsed_ms', 'process_running', 'snapshot_state',
