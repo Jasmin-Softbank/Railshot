@@ -9,6 +9,7 @@ import { createProductService } from '../src/product.js';
 import { createProductStore } from '../src/product-store.js';
 import { createAppServer } from '../src/server.js';
 import { createApplicationAdapter } from '../src/applications.js';
+import { EnvironmentError } from '../src/environments.js';
 
 function diskState(directory) {
   const db = new DatabaseSync(join(directory, 'dashboard.sqlite3'), { readOnly: true });
@@ -151,6 +152,22 @@ test('unfinished durable intent is recovered as unknown; malformed or insecure s
   const linked = `${directory}-link`;
   await symlink(directory, linked);
   try { await assert.rejects(createProductStore(linked), /private owned/); } finally { await rm(linked); }
+});
+
+test('concurrent store close callers both wait for the owner lock release before restart', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-close-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = await createProductStore(directory);
+  const session = store.dashboard.session();
+  store.dashboard.preferences(session.id, { view: 'history' });
+  const closing = store.close();
+  try {
+    await store.close();
+    await assert.rejects(stat(join(directory, 'owner.json')), { code: 'ENOENT' });
+    const restarted = await createProductStore(directory);
+    try { assert.equal(restarted.dashboard.preferences(session.id).view, 'history'); }
+    finally { await restarted.close(); }
+  } finally { await closing; }
 });
 
 test('snapshot quota bounds admission before any dispatch', async (t) => {
@@ -906,7 +923,8 @@ async function applicationFixture(t, { registrationStatus = 'succeeded', publica
       submissions.push(value);
       const runId = String(1000 + submissions.length);
       const source = String(submissions.length % 10).repeat(40);
-      runs.set(runId, { ...publication, tenant: 'team', run_id: runId, app: value.app, target_id: value.target_id, source_commit: source, ...publicationChange });
+      runs.set(runId, { ...publication, tenant: 'team', run_id: runId, app: value.app, target_id: value.target_id, source_commit: source,
+        images: { web: `ghcr.io/example/apps@sha256:${'c'.repeat(64)}` }, ...publicationChange });
       return { run_id: runId, source_commit: source };
     }, status: async (id, targetId) => {
       assert.equal(submissions[Number(id) - 1001].target_id, targetId);
@@ -915,7 +933,7 @@ async function applicationFixture(t, { registrationStatus = 'succeeded', publica
   const options = { service, target, providerTargets, applicationAdapter: adapter, deployPublished: legacy, pollInterval: 5 };
   const f = await fixture(t, options);
   return { ...f, options: { ...options, service: f.service, directory: f.directory }, adapter,
-    registrations, submissions, deliveries, allowed };
+    registrations, submissions, deliveries, allowed, runs };
 }
 const applicationSource = (name, provider = 'aws') => ({ source_name: name, source_type: 'folder',
   files: [{ path: 'app.js', content: Buffer.from(`user source for ${name}`) }],
@@ -1069,4 +1087,225 @@ test('HTTP applications are read-only, session-owned and paginated after automat
     assert.equal(response.status, 405); assert.equal(response.headers.get('allow'), 'GET');
   }
   assert.equal(f.registrations.length, 2); assert.equal(f.submissions.length, 2); assert.equal(f.deliveries.length, 2);
+});
+
+async function interruptedApplication(t, { http = false } = {}) {
+  const f = await applicationFixture(t);
+  const owner = f.product.dashboard.session().id;
+  const deliver = f.adapter.deployPublished;
+  f.adapter.deployPublished = async (...args) => {
+    await deliver(...args);
+    if (http) {
+      const progress = { cd: deployed.cd, public_http: { state: 'unverified', url: null, verified_at: null } };
+      await args[1].onProgress(progress);
+      return { ...progress, error: { code: 'HTTP_UNVERIFIED', outcome_unknown: true } };
+    }
+    throw new EnvironmentError('APPLICATION_ROUTE_RECONCILE_REQUIRED', 502, true);
+  };
+  const created = await f.product.createDeployment(applicationSource('calculator'), 'resume-source', undefined, owner);
+  const original = await settle(() => f.product.getDeployment(created.id, owner));
+  assert.equal(original.status, 'unknown'); assert.equal(original.stage, http ? 'http' : 'cd');
+  return { ...f, owner, created, original, deliver };
+}
+
+test('explicit CD resume survives restart, preserves the deployment and publishes no new CI or registration', async (t) => {
+  const f = await interruptedApplication(t, { http: true });
+  const source = await readFile(join(f.directory, `${f.created.id}.source.json`));
+  await f.product.close();
+  const product = await createProductService(f.options);
+  let finish, calls = 0;
+  const waiting = new Promise((resolve) => { finish = resolve; });
+  f.adapter.deployPublished = async (...args) => {
+    calls++;
+    const state = diskState(f.directory).operations[f.created.id];
+    assert.equal(state.status, 'running'); assert.equal(state.resume_count, 1);
+    assert.deepEqual(state.cd, f.original.cd, 'HTTP resume retains the last verified CD revision');
+    assert.equal(args[1].deploymentId, f.created.id);
+    await waiting;
+    return f.deliver(...args);
+  };
+  try {
+    const responses = await Promise.allSettled([
+      product.resumeDeployment(f.created.id, f.owner), product.resumeDeployment(f.created.id, f.owner),
+    ]);
+    assert.equal(responses.filter(({ status }) => status === 'fulfilled').length, 1);
+    assert.equal(responses.find(({ status }) => status === 'rejected').reason.code, 'DEPLOYMENT_NOT_RESUMABLE');
+    await settle(() => product.getDeployment(f.created.id, f.owner), () => calls === 1);
+    const running = await product.getDeployment(f.created.id, f.owner);
+    assert.equal(running.status, 'running'); assert.equal(running.stage, 'http');
+    finish();
+    const result = await settle(() => product.getDeployment(f.created.id, f.owner));
+    assert.equal(result.status, 'succeeded'); assert.equal(result.id, f.created.id);
+    assert.equal(result.ci.run_id, f.original.ci.run_id); assert.equal(result.source_commit, f.original.source_commit);
+    assert.equal(result.resume_count, 1); assert.ok(Date.parse(result.resumed_at));
+    assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 2);
+    assert.deepEqual(await readFile(join(f.directory, `${f.created.id}.source.json`)), source);
+    await assert.rejects(product.resumeDeployment(f.created.id, f.owner), { code: 'DEPLOYMENT_NOT_RESUMABLE' });
+  } finally { finish(); await product.close(); }
+});
+
+test('resume checks exact session ownership before any CI or CD observation', async (t) => {
+  const f = await interruptedApplication(t);
+  f.service.status = async () => assert.fail('Unauthorized resume must not read CI');
+  for (const session of [null, '', f.product.dashboard.session().id]) {
+    await assert.rejects(f.product.resumeDeployment(f.created.id, session), { status: 404, code: 'NOT_FOUND' });
+  }
+  assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 1);
+});
+
+test('resume refuses changed publication identity before overwriting original CI evidence or calling CD', async (t) => {
+  const changes = {
+    artifact: (value) => ({ ...value, artifact_id: value.artifact_id + 1 }),
+    attempt: (value) => ({ ...value, producer_attempt: value.producer_attempt + 1 }),
+    image: (value) => ({ ...value, images: { web: `ghcr.io/example/apps@sha256:${'d'.repeat(64)}` } }),
+    source: (value) => ({ ...value, source_commit: 'f'.repeat(40) }),
+    app: (value) => ({ ...value, app: 'other-app' }),
+    target: (value) => ({ ...value, target_id: 'other-target' }),
+    run: (value) => ({ ...value, run_id: '99999' }),
+    unpublished: () => null,
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async (t) => {
+    const f = await interruptedApplication(t);
+    const runId = f.original.ci.run_id;
+    f.runs.set(runId, change(f.runs.get(runId)));
+    if (name === 'unpublished') f.service.status = async () => ({ state: 'running' });
+    await f.product.resumeDeployment(f.created.id, f.owner);
+    const result = await settle(() => f.product.getDeployment(f.created.id, f.owner));
+    assert.equal(result.status, 'unknown'); assert.equal(result.error.outcome_unknown, true);
+    assert.deepEqual(result.ci, f.original.ci);
+    assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1); assert.equal(f.deliveries.length, 1);
+  });
+});
+
+test('resume honors native unknown results without clearing journals or automatically retrying', async (t) => {
+  const f = await interruptedApplication(t);
+  await f.product.resumeDeployment(f.created.id, f.owner);
+  const result = await settle(() => f.product.getDeployment(f.created.id, f.owner));
+  assert.equal(result.status, 'unknown'); assert.equal(result.error.code, 'APPLICATION_ROUTE_RECONCILE_REQUIRED');
+  assert.equal(f.deliveries.length, 2); assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1);
+  await pause(30); assert.equal(f.deliveries.length, 2);
+});
+
+test('resume cannot downgrade an earlier unknown when a later native preflight returns blocked', async (t) => {
+  const f = await interruptedApplication(t);
+  f.adapter.deployPublished = async (...args) => {
+    await f.deliver(...args);
+    return { cd: { state: 'blocked', revision: null, deployed: false }, public_http: { state: 'not_run', url: null, verified_at: null },
+      error: { code: 'CD_PREPARATION_FAILED', outcome_unknown: false } };
+  };
+  await f.product.resumeDeployment(f.created.id, f.owner);
+  const result = await settle(() => f.product.getDeployment(f.created.id, f.owner));
+  assert.equal(result.status, 'unknown'); assert.equal(result.error.outcome_unknown, true);
+  assert.equal(result.error.code, 'CD_PREPARATION_FAILED'); assert.equal(result.cd.state, 'blocked');
+  assert.equal(f.deliveries.length, 2); assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1);
+});
+
+test('resume rejects altered registration or run bindings, lifecycle actions and another active operation', async (t) => {
+  const changes = {
+    application_session: (state, record, other) => { state.applications[record.application_id].session_id = other; },
+    environment: (_state, record) => { record.environment_target_id = 'runtime-gcp'; },
+    target: (_state, record) => { record.target_id = 'different-target'; },
+    binding: (state, record) => { state.bindings[record.ci.run_id].source_commit = 'e'.repeat(40); },
+    registration: (state, record) => { state.applications[record.application_id].status = 'unknown'; },
+    deletion: (state, record) => { state.applications[record.application_id].deletion_requested = true; },
+    lifecycle: (state, record) => { state.applications[record.application_id].lifecycle_operation_id = 'pending'; },
+    ci_stage: (_state, record) => { record.stage = 'ci'; },
+    unpublished: (_state, record) => { record.ci.state = 'running'; },
+    cancelled: (_state, record) => { record.status = 'cancelled'; },
+    busy: (state) => { state.operations.other = { id: 'other', kind: 'deployments', status: 'unknown' }; },
+  };
+  for (const [name, change] of Object.entries(changes)) await t.test(name, async (t) => {
+    const f = await interruptedApplication(t);
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    const other = store.dashboard.session().id;
+    await store.transaction((state) => change(state, state.operations[f.created.id], other));
+    await store.close();
+    const product = await createProductService(f.options);
+    f.service.status = async () => assert.fail('Invalid resume must not read CI');
+    try {
+      await assert.rejects(product.resumeDeployment(f.created.id, f.owner), (error) => [404, 409].includes(error.status));
+      assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1); assert.equal(f.deliveries.length, 1);
+    } finally { await product.close(); }
+  });
+});
+
+test('HTTP deployment actions accepts exact resume input and returns the same resource with session isolation', async (t) => {
+  const f = await applicationFixture(t);
+  const { base } = await httpFixture(t, { product: f.product });
+  const response = await fetch(`${base}/api/v1/sessions`, { method: 'POST' });
+  const cookie = response.headers.get('set-cookie').split(';')[0];
+  const source = new FormData();
+  source.set('environment', 'cloud'); source.set('provider', 'aws'); source.set('source_type', 'folder'); source.set('source_name', 'calculator');
+  source.append('files', new Blob(['hello']), 'app.js'); source.set('paths', '["app.js"]');
+  const deliver = f.adapter.deployPublished;
+  f.adapter.deployPublished = async (...args) => { await deliver(...args); throw new EnvironmentError('APPLICATION_ROUTE_RECONCILE_REQUIRED', 502, true); };
+  const created = await fetch(`${base}/api/v1/deployments`, { method: 'POST', headers: { cookie, 'Idempotency-Key': 'resume-http' }, body: source });
+  assert.equal(created.status, 202);
+  const id = (await created.json()).resource_id;
+  await settle(async () => (await fetch(`${base}/api/v1/deployments/${id}`, { headers: { cookie } })).json());
+  const url = `${base}/api/v1/deployments/${id}/actions`;
+  const headers = { cookie, 'content-type': 'application/json' };
+  for (const method of ['GET', 'PUT', 'DELETE']) {
+    const res = await fetch(url, { method, headers });
+    assert.equal(res.status, 405); assert.equal(res.headers.get('allow'), 'POST');
+  }
+  for (const body of [{}, { action: 'retry' }, { action: 'resume', app: 'foreign' }, null, []]) {
+    assert.equal((await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) })).status, 422);
+  }
+  assert.equal((await fetch(url, { method: 'POST', headers, body: '{"action":"resume","action":"resume"}' })).status, 422);
+  assert.equal((await fetch(`${url}?target_id=foreign`, { method: 'POST', headers, body: '{"action":"resume"}' })).status, 422);
+  assert.equal((await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"action":"resume"}' })).status, 404);
+  assert.equal(f.deliveries.length, 1);
+  f.adapter.deployPublished = deliver;
+  const resumed = await fetch(url, { method: 'POST', headers, body: '{"action":"resume"}' });
+  assert.equal(resumed.status, 202); assert.equal(resumed.headers.get('location'), `/api/v1/deployments/${id}`);
+  assert.equal(resumed.headers.get('retry-after'), '2'); assert.equal(resumed.headers.get('cache-control'), 'no-store');
+  const accepted = await resumed.json();
+  assert.deepEqual(accepted, { resource_id: id, action: 'resume', status: 'accepted', request_id: resumed.headers.get('x-request-id') });
+  const result = await settle(async () => (await fetch(`${base}/api/v1/deployments/${id}`, { headers: { cookie } })).json());
+  assert.equal(result.status, 'succeeded'); assert.equal(result.resume_count, 1);
+  assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 2);
+});
+
+test('known AWS route preflight leaves registration unstarted and only a new explicit upload may retry it', async (t) => {
+  const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+  const register = f.adapter.register;
+  let calls = 0;
+  f.adapter.register = async (application) => {
+    calls++;
+    if (calls === 1) throw new EnvironmentError('APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED', 409, false);
+    return register(application);
+  };
+  const first = await f.product.createDeployment(applicationSource('calculator'), 'preflight-failure', undefined, owner);
+  const blocked = await settle(() => f.product.getDeployment(first.id, owner));
+  assert.equal(blocked.status, 'blocked'); assert.equal(blocked.stage, 'registration');
+  assert.equal(blocked.error.code, 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED'); assert.equal(blocked.error.outcome_unknown, false);
+  assert.equal(f.product.getApplication(first.application_id, owner).status, 'queued');
+  assert.equal(calls, 1); assert.equal(f.submissions.length, 0); assert.equal(f.deliveries.length, 0);
+  assert.equal((await f.product.createDeployment(applicationSource('calculator'), 'preflight-failure', undefined, owner)).id, first.id);
+  assert.equal(calls, 1); assert.equal(f.submissions.length, 0);
+  const second = await f.product.createDeployment(applicationSource('calculator'), 'corrected-preflight', undefined, owner);
+  assert.notEqual(second.id, first.id); assert.equal(second.application_id, first.application_id);
+  const completed = await settle(() => f.product.getDeployment(second.id, owner));
+  assert.equal(completed.status, 'succeeded'); assert.equal(f.product.getApplication(first.application_id, owner).status, 'ready');
+  assert.equal(calls, 2); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 1);
+  assert.equal((await f.product.getDeployment(first.id, owner)).status, 'blocked', 'the original failed operation remains evidence');
+});
+
+test('other blocked or uncertain registration failures never gain the preflight retry exception', async (t) => {
+  for (const [code, unknown, status] of [
+    ['APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED', true, 'unknown'],
+    ['APPLICATION_NAMESPACE_CONFLICT', false, 'blocked'],
+  ]) await t.test(`${code}:${status}`, async (t) => {
+    const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+    let calls = 0;
+    f.adapter.register = async () => { calls++; throw new EnvironmentError(code, 409, unknown); };
+    const first = await f.product.createDeployment(applicationSource('calculator'), 'registration-failure', undefined, owner);
+    assert.equal((await settle(() => f.product.getDeployment(first.id, owner))).status, status);
+    assert.equal(f.product.getApplication(first.application_id, owner).status, status);
+    await assert.rejects(f.product.createDeployment(applicationSource('calculator'), 'retry', undefined, owner),
+      { code: 'APPLICATION_RECONCILE_REQUIRED' });
+    assert.equal(calls, 1); assert.equal(f.submissions.length, 0); assert.equal(f.deliveries.length, 0);
+  });
 });

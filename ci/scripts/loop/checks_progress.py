@@ -133,7 +133,9 @@ class ChecksProgress:
     def matches(self, check):
         return (type(check.get('id')) is int and check['id'] > 0 and check.get('name') == NAME
                 and check.get('head_sha') == self.binding['source_commit'] and check.get('external_id') == self.external_id
-                and check.get('details_url') == self.details_url and check.get('app', {}).get('id') == APP_ID
+                # GitHub Actions replaces details_url with this check's native URL.
+                and check.get('details_url') in (self.details_url, f"https://github.com/{self.repository}/runs/{check['id']}")
+                and check.get('app', {}).get('id') == APP_ID
                 and check.get('app', {}).get('slug') == 'github-actions')
 
     def recover(self, check):

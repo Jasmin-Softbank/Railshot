@@ -86,6 +86,30 @@ class ApplicationsTest(unittest.TestCase):
         self.assertIsNone(self.fixture.variable)
         self.assertFalse((self.home() / 'registration.json').exists())
 
+    def test_ambiguous_runtime_group_blocks_before_registration_and_accepts_attached_selection(self):
+        self.config['environments'][self.env_id]['ingress']['edge_config_file'] = str(self.root / 'edge.json')
+        self.write_config()
+        self.native.side_effect = None
+        self.native.return_value = json.dumps({'Reservations': [{'Instances': [{
+            'InstanceId': 'i-0123456789abcdef0',
+            'PrivateIpAddress': self.fixture.descriptor['addresses']['private'],
+            'SecurityGroups': [{'GroupId': 'sg-12345678'}, {'GroupId': 'sg-87654321'}],
+        }]}]})
+        with self.assertRaisesRegex(apps.RegistrationError, 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED') as raised:
+            self.register()
+        self.assertFalse(raised.exception.unknown)
+        self.assertEqual((self.fixture.runtime.applications, self.fixture.control.applications), (0, 0))
+        self.assertIsNone(self.fixture.variable)
+        self.assertFalse((self.home() / 'registration.json').exists())
+        self.fixture.descriptor['security_group_id'] = 'sg-12345678'
+        self.fixture.write('descriptor.json', self.fixture.descriptor)
+        with patch.object(env.argo, 'native', side_effect=RuntimeError('provider observation timed out')):
+            with self.assertRaisesRegex(apps.RegistrationError, 'APPLICATION_AWS_ROUTE_PREFLIGHT_FAILED') as raised:
+                self.register()
+            self.assertFalse(raised.exception.unknown)
+            self.assertEqual((self.fixture.runtime.applications, self.fixture.control.applications), (0, 0))
+        self.assertEqual(self.register()['status'], 'succeeded')
+
     def test_twentieth_registration_succeeds_then_next_is_rejected_and_replay_is_read_only(self):
         self.fixture.fill_renewal_policy(19)
         first = self.register(); self.assertEqual(first['status'], 'succeeded', first)

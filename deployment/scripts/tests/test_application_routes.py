@@ -31,6 +31,13 @@ class ApplicationRoutesTest(unittest.TestCase):
             profile['ingress'].update(edge_config_file=str(case.root / 'edge.json'),
                 dns_config_file=str(case.root / 'dns.json'), expires_at='2099-01-01T00:00:00Z')
             profile['ingress'].update(ingress_patch or {})
+            if provider == 'aws':
+                case.native.side_effect = None
+                case.native.return_value = json.dumps({'Reservations': [{'Instances': [{
+                    'InstanceId': 'i-0123456789abcdef0',
+                    'PrivateIpAddress': case.fixture.descriptor['addresses']['private'],
+                    'SecurityGroups': [{'GroupId': 'sg-12345678'}],
+                }]}]})
             case.fixture.write('dns.json', {'version': 1, 'base_domain': 'railshot.io', 'zone_id': 'a' * 32,
                 'token_file': str(case.root / 'unused-token'), 'state_dir': str(case.root / 'dns-state')})
             if provider == 'gcp':

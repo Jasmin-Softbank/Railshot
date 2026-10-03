@@ -30,8 +30,9 @@ locals {
   entrypoint = file("${path.module}/../../../deployment/scripts/release_host.py")
   document = jsonencode({
     schemaVersion = "2.2"
-    description   = "Approved Railshot three-provider release; source SHA256 ${sha256(local.entrypoint)}"
+    description   = "Approved Railshot CI runtime or three-provider release; source SHA256 ${sha256(local.entrypoint)}"
     parameters = {
+      Scope                 = { type = "String", interpolationType = "ENV_VAR", default = "multicloud", allowedValues = ["ci-runtime", "multicloud"] }
       PublicationRunId      = { type = "String", interpolationType = "ENV_VAR", allowedPattern = "^[1-9][0-9]{0,19}$" }
       PublicationRunAttempt = { type = "String", interpolationType = "ENV_VAR", allowedPattern = "^[1-9][0-9]{0,19}$" }
       SourceSha             = { type = "String", interpolationType = "ENV_VAR", allowedPattern = "^[a-f0-9]{40}$" }
@@ -47,7 +48,6 @@ locals {
         timeoutSeconds = "4600"
         runCommand = concat([
           "set -eu",
-          "test -f /etc/railshot/release.json",
           "install -d -m 700 /var/lib/railshot-release",
           "python3 - '${var.trusted_ref}' <<'RAILSHOT_RELEASE_PY'"
         ], split("\n", local.entrypoint), ["RAILSHOT_RELEASE_PY"])
