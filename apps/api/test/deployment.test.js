@@ -5,7 +5,7 @@ import yazl from 'yazl';
 import { mkdtemp, mkdir, symlink, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspectArchive } from '../src/archive.js';
+import { inspectArchive, documentationOnly } from '../src/archive.js';
 import { createDeploymentService } from '../src/github.js';
 import { createAppServer } from '../src/server.js';
 import { archiveFromPath, deploySource, inferredAppName, insideRoot } from '../src/client.js';
@@ -15,6 +15,13 @@ import { readSourceSnapshot, sourceSnapshotLimit } from '../src/source-snapshot.
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
+
+test('documentation detection preserves executable and unknown source formats', () => {
+  for (const path of ['index.html', 'package.json', 'Dockerfile', 'main.go', 'app.py', 'web/main.rs', '.railshot/railshot.yaml']) {
+    assert.equal(documentationOnly([{ path: 'readme.md' }, { path }]), false, path);
+  }
+  assert.equal(documentationOnly([{ path: 'readme.md' }, { path: '.editorconfig' }]), true);
+});
 
 async function zipOf(files, options = {}) {
   const zip = new yazl.ZipFile();
@@ -83,9 +90,9 @@ test('재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에
   const sha = (value) => createHash('sha1').update(`blob ${Buffer.byteLength(value)}\0${value}`).digest('hex');
   const calls = [];
   const oldFiles = [
-    { path: 'same.txt', mode: '100644', type: 'blob', sha: sha('same') },
-    { path: 'changed.txt', mode: '100644', type: 'blob', sha: sha('old') },
-    { path: 'removed.txt', mode: '100644', type: 'blob', sha: sha('removed') },
+    { path: 'same.js', mode: '100644', type: 'blob', sha: sha('same') },
+    { path: 'changed.js', mode: '100644', type: 'blob', sha: sha('old') },
+    { path: 'removed.js', mode: '100644', type: 'blob', sha: sha('removed') },
   ];
   const fakeFetch = async (url, options = {}) => {
     const path = new URL(url).pathname;
@@ -108,14 +115,14 @@ test('재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에
   };
   const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fakeFetch);
   const result = await service.deploy({ app: 'my-app', files: [
-    { path: 'same.txt', content: Buffer.from('same') },
-    { path: 'changed.txt', content: Buffer.from('new') },
-    { path: 'added.txt', content: Buffer.from('added') },
+    { path: 'same.js', content: Buffer.from('same') },
+    { path: 'changed.js', content: Buffer.from('new') },
+    { path: 'added.js', content: Buffer.from('added') },
   ] });
   assert.deepEqual(result.changes, { added: 1, updated: 1, deleted: 1, unchanged: 1 });
   assert.equal(calls.filter((call) => call.path.endsWith('/git/blobs')).length, 2);
   const appTree = calls.find((call) => call.path.endsWith('/git/trees') && call.method === 'POST').body;
-  assert.deepEqual(appTree.tree.map((item) => item.path), ['same.txt', 'changed.txt', 'added.txt']);
+  assert.deepEqual(appTree.tree.map((item) => item.path), ['same.js', 'changed.js', 'added.js']);
   assert.equal(appTree.tree[0].sha, oldFiles[0].sha);
   assert.equal(calls.at(-1).path.endsWith('/dispatches'), true);
 });
@@ -133,13 +140,13 @@ test('소스가 같아도 커밋 없이 Actions를 다시 실행한다', async (
     else if (path.endsWith('/git/trees/base')) data = { tree: [{ path: 'apps', type: 'tree', sha: 'apps-tree' }] };
     else if (path.endsWith('/git/trees/apps-tree')) data = { tree: [{ path: 'demo', type: 'tree', sha: 'tenant-tree' }] };
     else if (path.endsWith('/git/trees/tenant-tree')) data = { tree: [{ path: 'my-app', type: 'tree', sha: 'app-tree' }] };
-    else if (path.endsWith('/git/trees/app-tree')) data = { tree: [{ path: 'same.txt', mode: '100644', type: 'blob', sha }], truncated: false };
+    else if (path.endsWith('/git/trees/app-tree')) data = { tree: [{ path: 'same.js', mode: '100644', type: 'blob', sha }], truncated: false };
     else if (path.endsWith('/dispatches')) data = { workflow_run_id: 789 };
     else throw new Error(`Unexpected path: ${path}`);
     return Response.json(data);
   };
   const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fakeFetch);
-  const result = await service.deploy({ app: 'my-app', files: [{ path: 'same.txt', content }] });
+  const result = await service.deploy({ app: 'my-app', files: [{ path: 'same.js', content }] });
   assert.equal(result.source_commit, 'a'.repeat(40));
   assert.deepEqual(result.changes, { added: 0, updated: 0, deleted: 0, unchanged: 1 });
   assert.deepEqual(calls.filter((call) => call.method !== 'GET').map((call) => call.path.split('/').at(-1)), ['dispatches']);
@@ -818,7 +825,7 @@ test('snapshot digest interoperates with Python gate hashing for Unicode names, 
 });
 
 test('large source trees are bounded, complete, and never dispatch after a tree failure', async () => {
-  const files = Array.from({ length: 231 }, (_, i) => ({ path: `src/group-${i % 7}/file-${i}.txt`, content: Buffer.from(`file ${i}`) }));
+  const files = Array.from({ length: 231 }, (_, i) => ({ path: `src/group-${i % 7}/file-${i}.js`, content: Buffer.from(`file ${i}`) }));
   for (const failure of [null, 'tree', 'dispatch']) {
     const trees = new Map(); let sourceWrites = 0, commits = 0, dispatches = 0, publishedTree;
     const service = createDeploymentService({ token: 'secret', targetId: 'aws-demo' }, async (url, options = {}) => {
