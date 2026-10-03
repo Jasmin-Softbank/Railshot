@@ -1,6 +1,6 @@
 # 플랫폼 배포와 인프라 유지보수
 
-일반 PR·push는 변경된 컨테이너의 빌드와 기동 확인만 수행한다. 전체 계약 검사, 브라우저 E2E, Terraform, 임시 런타임 설치 검사는 `Platform full checks` 수동 실행에서 수행한다. 자동 배포는 `RAILSHOT_AUTO_RELEASE=true`인 정확한 `RAILSHOT_PLATFORM_VERIFY_REF` push에만 적용한다.
+일반 PR·push는 변경된 컨테이너의 빌드와 기동 확인만 수행한다. 전체 계약 검사, 브라우저 E2E, Terraform, 임시 런타임 설치 검사는 `Railshot CI`를 대상 integration ref로 수동 실행하면 별도 `Platform full checks` workflow를 호출한다. 일반 push에서는 호출하지 않는다. 자동 배포는 `RAILSHOT_AUTO_RELEASE=true`인 정확한 `RAILSHOT_PLATFORM_VERIFY_REF` push에만 적용한다.
 
 1. 선택된 이미지를 빌드하고 기동 확인한 뒤 같은 runner에서 private GHCR에 게시한다. 이미지 tar 업로드·다운로드와 별도 게시 job은 없다.
 2. `Railshot CI gate`는 기존 필수 상태 이름을 유지하며 선택된 이미지 작업의 결과만 집계한다.

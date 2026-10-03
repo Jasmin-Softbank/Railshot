@@ -1,6 +1,7 @@
 name: Platform full checks
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 permissions: {contents: read}

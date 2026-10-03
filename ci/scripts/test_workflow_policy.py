@@ -173,13 +173,15 @@ class WorkflowPolicyTest(unittest.TestCase):
         import ci_scope
         workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())
         jobs = workflow['jobs']
-        self.assertEqual(set(jobs), {'changes', 'containers', 'gate', 'release'})
+        self.assertEqual(set(jobs), {'changes', 'containers', 'gate', 'release', 'full-checks'})
         self.assertEqual(set(jobs['gate']['needs']), {'changes', 'containers'})
-        self.assertEqual(jobs['gate']['if'], 'always()')
+        self.assertEqual(jobs['gate']['if'], "always() && github.event_name != 'workflow_dispatch'")
+        self.assertEqual(jobs['full-checks']['if'], "github.event_name == 'workflow_dispatch'")
+        self.assertEqual(jobs['changes']['if'], "github.event_name != 'workflow_dispatch'")
         self.assertEqual(set(jobs['changes']['outputs']),
                          {'containers', 'selected', 'container_components', 'release'})
         full = yaml.safe_load((HERE.parents[1] / '.github/workflows/platform-checks.yml').read_text())
-        self.assertEqual(set(full.get('on', full.get(True))), {'workflow_dispatch'})
+        self.assertEqual(set(full.get('on', full.get(True))), {'workflow_call', 'workflow_dispatch'})
         self.assertEqual(set(full['jobs']), set(ci_scope.JOBS))
         self.assertIs(full['jobs']['containers']['with']['publish'], False)
         events = workflow.get('on', workflow.get(True))  # PyYAML's YAML 1.1 "on" key.
