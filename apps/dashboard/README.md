@@ -44,6 +44,13 @@ UI 단독 개발은 `npm run dev`(Vite 4181), 정적 빌드는 `npm run build`�
 Nginx가 `/api/`와 `/onpremise/install.sh`를 프록시하며 운영자 Bearer는 서버에서만 붙인다.
 브라우저 검사는 [ci/browser](../../ci/browser/README.md)를 따른다.
 
+개발 서버의 실제 페이지(`/`)도 같은 프런트엔드를 사용합니다. `npm start --workspace apps/api`로
+로컬 API(기본 4173)를 먼저 실행하면 Vite가 `/api/`와 `/onpremise/install.sh` 요청을 전달합니다.
+다른 로컬 API 주소는 `RAILSHOT_DEV_API_TARGET=http://127.0.0.1:포트 npm run dev`로 지정합니다.
+세션 쿠키는 브라우저가 연 개발 서버 주소에서 유지되며, 운영자 인증정보를 프런트엔드에 추가하지 않습니다.
+API가 실행되지 않았거나 이 세션에 배포 기록이 없으면 실제 내역은 표시되지 않습니다.
+예시 기록은 `/preview/history.html`에서만 표시합니다.
+
 앱+DB 브라우저 검사는 같은 카드에서 DB 계획 식별자, 필수 DB, DB 없는 사양, 비용 표시,
 예산·만료·불일치 차단을 localhost fixture로 확인한다. 실제 클라우드는 호출하지 않는다.
 
