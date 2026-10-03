@@ -23,7 +23,7 @@ COPY --from=dependencies /app/node_modules /app/node_modules
 COPY apps/api/package.json ./package.json
 COPY apps/api/src/ ./src/
 COPY contracts/application.mjs /app/contracts/application.mjs
-COPY ci/scripts/contract/telemetry.json /app/ci/scripts/contract/telemetry.json
+COPY ci/scripts/contract/telemetry.json ci/scripts/contract/stages.json /app/ci/scripts/contract/
 USER 1000:1000
 
 FROM base AS api

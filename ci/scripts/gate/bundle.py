@@ -150,13 +150,22 @@ def contract(spec_bytes, verdict_bytes):
 def export(workspace, verdict_path, outdir):
     workspace, verdict_path, outdir = Path(workspace), Path(verdict_path), Path(outdir)
     require(not outdir.resolve().is_relative_to(workspace.resolve()), "bundle output must be outside workspace")
-    require(not outdir.exists() and not outdir.is_symlink(), "bundle output must not exist")
+    require(not outdir.is_symlink(), "bundle output must not be a symlink")
     source = source_digest(workspace)
     spec_bytes = source_spec(workspace).read_bytes()
     require(not verdict_path.is_symlink() and verdict_path.is_file(), "verdict must be a regular file")
     verdict_bytes = verdict_path.read_bytes()
     verdict = contract(spec_bytes, verdict_bytes)
     require(verdict["source_sha256"] == source, "source changed since gate")
+    if outdir.exists():
+        # Reuse only a complete export of exactly this source and verdict. A
+        # partial export is never overwritten or mistaken for success.
+        manifest = verify(outdir)
+        require(manifest['source_sha256'] == source and
+                (outdir / spec_name(set(p.name for p in outdir.iterdir()))).read_bytes() == spec_bytes and
+                (outdir / 'verdict.json').read_bytes() == verdict_bytes,
+                'existing bundle belongs to a different input')
+        return manifest
     images = {svc: {"local_ref": ref, "id": inspect(ref)["Id"]} for svc, ref in verdict["images"].items()}
     require(verdict["image_ids"] == {svc: item["id"] for svc, item in images.items()}, "image changed since gate")
     outdir.mkdir(parents=True)

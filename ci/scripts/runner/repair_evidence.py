@@ -6,6 +6,7 @@ import re
 
 from source_snapshot import capture, entries_digest
 from diagnostics import bounded
+from execution import stage_contract
 
 
 def sha(data):
@@ -98,6 +99,9 @@ def context(raw, run=None, role='fixer'):
         'context_version': CONTEXT_VERSION,
         'task': 'prepare_container' if role == 'adapter' else 'repair_failed_gate',
         'failed_gate': failure['layer'],
+        'stage': stage_contract(failure['layer'] or 'source.prepare')['id'],
+        # The model needs investigation guidance, not host replay/ownership metadata.
+        'investigation': stage_contract('package.prepare' if role == 'adapter' else failure['layer']).get('investigation', []),
         'evidence_binding': binding,
         'failure': {**failure, 'excerpt': excerpt,
                     'excerpt_omitted_bytes': failure['excerpt_omitted_bytes'] + omitted},

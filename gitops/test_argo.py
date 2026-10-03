@@ -249,6 +249,15 @@ class ArgoTest(unittest.TestCase):
             self.assertTrue(argo.deploy(self.review, 'control', sync=True, timeout=0)['deployed'])
             self.assertTrue(all(call.args[2] == 'get' for call in client.call_args_list))
 
+    def test_completed_sync_is_read_only_but_new_revision_still_syncs(self):
+        with patch('argo.kubectl', return_value=self.healthy()) as client:
+            self.assertTrue(argo.deploy(self.review, 'control', sync=True, timeout=0)['deployed'])
+            self.assertTrue(all(call.args[2] == 'get' for call in client.call_args_list))
+        old = self.healthy(); old['spec']['source']['targetRevision'] = 'f' * 40
+        with patch('argo.kubectl', side_effect=[old, self.healthy(), self.healthy(), self.healthy()]) as client:
+            self.assertTrue(argo.deploy(self.review, 'control', sync=True, timeout=0)['deployed'])
+            self.assertEqual([call.args[2] for call in client.call_args_list], ['get', 'apply', 'patch', 'get'])
+
     def test_pinned_git_tree_must_match_reviewed_workload_without_extra_resources(self):
         repository = self.root / 'config'; repository.mkdir()
         def git(*args):

@@ -282,6 +282,12 @@ def deploy(review, context, *, sync, timeout):
     if live:
         validate_live(live, app, revision=not sync)
     if sync:
+        # A repeated request for an already verified revision is read-only.
+        # This also avoids re-running migration Jobs for a completed deployment.
+        if live and live['spec']['source']['targetRevision'] == app['spec']['source']['targetRevision']:
+            observed = observe(review, live)
+            if observed['deployed']:
+                return observed
         if live and live.get('operation'):
             validate_live(live, app)
         if not live or not live.get('operation'):

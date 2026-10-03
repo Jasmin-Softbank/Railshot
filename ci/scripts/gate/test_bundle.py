@@ -67,6 +67,24 @@ class BundleTest(unittest.TestCase):
         with patch("bundle.run_bounded", side_effect=self.docker_run):
             return bundle.export(self.ws, self.verdict_path, self.out)
 
+    def test_completed_export_reuses_verified_artifact_without_docker(self):
+        original = self.export()
+        with patch('bundle.run_bounded') as command:
+            self.assertEqual(bundle.export(self.ws, self.verdict_path, self.out), original)
+            command.assert_not_called()
+        self.verdict['extra_observation'] = 'different verdict'
+        self.write_verdict()
+        with patch('bundle.run_bounded') as command, self.assertRaisesRegex(ValueError, 'different input'):
+            bundle.export(self.ws, self.verdict_path, self.out)
+        command.assert_not_called()
+
+    def test_partial_export_is_not_overwritten(self):
+        self.out.mkdir(); (self.out / 'images.tar').write_bytes(b'partial')
+        with patch('bundle.run_bounded') as command, self.assertRaises((ValueError, OSError)):
+            bundle.export(self.ws, self.verdict_path, self.out)
+        command.assert_not_called()
+        self.assertEqual((self.out / 'images.tar').read_bytes(), b'partial')
+
     def test_legacy_source_exports_canonical_filename_without_rewriting_bytes(self):
         canonical = self.ws / '.railshot/railshot.yaml'
         content = canonical.read_bytes().replace(b'railshot/v0', b'jasmin/v0')

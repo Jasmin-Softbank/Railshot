@@ -28,6 +28,46 @@ PR 검사에는 cloud·모델·private registry 자격을 제공하지 않는다
 - GHCR prefix·visibility·게시 자격은 trusted release 설정이다. 업로드와 모델 출력에서 받지 않는다. 기본 private 모드는 전용 pull 자격과 운영자가 정한 namespace·Secret 이름이 있어야 게시하며, 별도 임시 인증 설정으로 각 digest의 manifest를 조회한다. 명시적 public 모드는 이미 public인 package를 빈 인증 설정으로 조회한다. 어느 모드도 package 공개 설정을 변경하지 않는다.
 - CI worker 등록, 인증 준비와 target runtime 준비가 완료됐다는 뜻은 아니다. 현재 템플릿의 로컬 테스트는 실제 GitHub workflow 실행·registry 게시·배포 성공의 증거가 아니다.
 
+## 단계별 재실행과 AI 책임
+
+단계 이름·담당자·완료 조건·재실행 방식·조사 순서는 [stages.json](scripts/contract/stages.json)에 둔다. 기존 `execution.py`가 이 계약을 읽고 gate 결과와 AI 입력에 같은 이름을 사용한다. 오류 문구마다 새 정규식이나 실행 스크립트를 추가하지 않는다. 이 계약의 `repair`는 역할 구분이며 실제 파일 수정 권한은 기존 `repair_scope`·경로 정책·호스트의 제안 검증이 결정한다.
+
+| 단계 | 실행 위치 | 재실행과 AI 개입 |
+|---|---|---|
+| 소스 준비 | `loop.py` → 기존 `intake.py` | 소스 가져오기와 기본 패키징을 별도 checkpoint로 저장. 완료된 checkpoint는 다시 실행하지 않음 |
+| 컨테이너 구성 | 기존 `native_packaging.py`, 필요시 adapter | 지원하는 기본 구성부터 적용. AI는 관측한 구성 누락과 관련 파일부터 조사 |
+| 정책·spec 검사 | `gate.py` L0/L1 | 읽기 검사 반복. 실패한 정책·필드와 허용된 패키징 수정만 전달 |
+| 이미지 빌드 | `gate.py` L2 | 같은 run·전체 소스·spec·네트워크 설정·gate 구현에 묶인 build 결과와 실제 이미지 ID가 일치할 때만 재사용 |
+| 이미지 실행 검사 | `gate.py` L3 | 정확한 이미지 ID로 격리된 실행 검사를 다시 수행. 빌드 재사용은 실행 검사 생략을 뜻하지 않음 |
+| bundle 내보내기 | 기존 `bundle.py export` | 기존 bundle의 전체 해시·소스·spec·verdict가 같으면 재사용. 불완전하거나 다른 결과는 덮어쓰지 않음 |
+| 이미지 게시 | Actions `release` → 기존 publisher | 검증한 archive를 게시. 기존 journal과 원격 digest 확인 유지. AI가 게시 자격이나 이미지를 결정하지 않음 |
+| GitOps·Argo | API → 기존 `bridge.py` / `argo.py` | push 완료·sync 요청 완료를 각각 저장. 같은 배포의 apply 재요청은 완료 이후부터 진행. 이미 검증된 Argo revision은 다시 sync하지 않음 |
+| 외부 관측 | 기존 CD observer | Pod·HTTP 상태를 읽어 확인. 모델의 성공 보고로 배포 완료 처리하지 않음 |
+
+선택적 Q/L4도 동일한 단계 계약을 사용한다. Q는 기존대로 자동 소스 수정 대상이 아니며, L4는 패키징 범위다. 인프라·자격·결과 불확실 오류의 중단 정책도 유지한다. 처음 보는 오류 문구라도 알려진 실패 단계와 근거를 전달할 수 있다. 이를 새로운 정규식으로 먼저 분류해야 하는 것은 아니다.
+
+물리적인 Actions job은 `loop`와 `release`를 유지한다. 매 수정마다 별도 job을 띄우면 작업 소스와 이미지 archive 전송이 추가되고 로컬 캐시를 잃는다. 단계 경계는 job 개수가 아니라 **입력 식별·완료 기록·재실행 규칙**으로 구현한다. checkout, Python 준비, artifact 전달, Docker daemon 준비와 GHCR 로그인은 표준 Actions를 사용한다. 동적 수리 루프 안의 빌드·실행은 기존 CLI 실행기가 담당한다.
+
+`loop-<attempt>` artifact에는 `gate-N/L0.json` … `L3.json`(선택한 Q/L4 포함)과 `build.json`이 들어간다. 각 단계 결과는 source hash, run/attempt, outcome, 재사용 여부, 이미지 ID와 구조화된 오류를 기록한다. 이 파일들이 모두 독립적인 crash 복구 checkpoint인 것은 아니다. 기존 SQLite supervisor가 실행 중 죽어 완료가 불확실하면 여전히 reconcile을 요구한다. CD의 `pushing`·`syncing`·`routing` 역시 무조건 재전송하지 않는다. `observe` 요청은 다음 단계를 실행하지 않는다.
+
+### 모델에게 처음 주는 정보
+
+기존 `repair_evidence.py`가 실패 단계와 그 단계의 조사 순서, 실패 발췌 최대 4,000 bytes, 같은 단계의 로그 최대 2개 × 2,000 bytes, 관련 경로 후보 최대 24개, 이전 시도 최대 3개의 결과를 전달한다. 경로 후보는 내용 전체가 아니라 위치·해시·크기 등의 메타데이터다. 원본 evidence 참조와 생략량을 함께 주므로 부족하면 모델이 필요한 파일/로그 범위만 추가로 읽는다. 프로그램 출력과 과거 모델의 원인 추정은 명령이나 검증된 사실로 취급하지 않는다.
+
+AI의 책임은 제한된 근거로 수정안을 제안하는 것이다. 호스트가 수정 범위와 근거를 검사하고 적용한 뒤 공식 gate를 실행한다. 새 JEV 분류 호출·그래프 DB·언어별 오류 사전은 이 경로에 추가하지 않는다. 기존 오류 분류는 중단 정책을 위해 유지하지만 새로운 조사 순서는 그 분류의 정규식 매칭에 의존하지 않는다.
+
+### 최초 구성 예산과 실패 수정 예산
+
+Actions Variables에서 `RAILSHOT_MAX_PACKAGING_ATTEMPTS=1`, `RAILSHOT_MAX_REPAIR_ATTEMPTS=1`로 설정하면 최초 구성(adapter) 1회 이후 실패 수정(fixer) 1회를 쓸 수 있다. spec이 이미 있는 앱은 구성 예산을 수정 횟수로 전용하지 않는다. CLI에서는 `--max-packaging-attempts 1 --max-attempts 1`이다.
+
+기존 설정의 비용 한도를 갑자기 늘리지 않도록 packaging 기본값은 `0`이며, 이때는 종전처럼 adapter도 공통 수정 예산을 사용한다. 두 값이 모두 `0`이면 모델 자격과 SDK 없이 baseline만 실행한다. `evidence.json`의 `budget_used`로 실제 사용량을 확인한다. 플랫폼 코드나 예산이 바뀌면 기존 run을 덮어쓰거나 강제 resume하지 않고 새 run으로 비교한다.
+
+### 검증 범위와 측정
+
+로컬 테스트는 입력 변경 시 빌드 재사용 거부, 실행 검사 반복, bundle 재사용, 구성/수정 예산 분리, 완료된 loop 재개 시 모델 재호출 방지, Git push/sync 완료 경계 복구를 검증한다. Docker·모델·클라우드 경계는 mock이고 일부 CD 테스트는 임시 로컬 Git remote를 사용한다. 실제 Actions 실행 속도나 토큰 절감률을 증명하는 결과는 아니다.
+
+승격 후 같은 소스와 동일한 모델·실패 조건으로 기존/변경 경로를 비교한다. 확인할 값은 모델 입력 bytes·SDK 토큰·호출 수, `L2.json`의 `reused`, gate별 시간, 총 시간과 최종 성공률이다. 전체 소스가 바뀌는 수정에서는 빌드를 다시 해야 하므로 재사용 효과가 없을 수 있다. 운영 반영에는 이 템플릿의 apps 저장소 적용, 검증한 `PLATFORM_REF` 지정, CD 변경을 포함한 API 이미지 배포가 별도로 필요하다.
+
 ## CD에 전달하는 산출물
 
 | 산출물 | 식별과 내용 |

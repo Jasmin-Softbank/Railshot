@@ -36,7 +36,8 @@ from run_agent import path_ok, writable_rules, source_change_allowed, deletion_a
 from quality import run_quality  # noqa: E402
 from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
-from execution import APP_UID, GATE_ORDER, FULL_GATE_ORDER, RELEASE_ORDERS, docker_security, docker_command, quality_advisory  # noqa: E402
+from storage import durable_write
+from execution import APP_UID, GATE_ORDER, FULL_GATE_ORDER, RELEASE_ORDERS, docker_security, docker_command, quality_advisory, stage_contract  # noqa: E402
 from progress import Progress  # noqa: E402
 from diagnostics import Diagnostics, fingerprint, redact  # noqa: E402
 
@@ -735,16 +736,48 @@ def finish_verdict(verdict, run, run_id, attempt_id, *, persist=True):
     return verdict
 
 
-def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None):
+def build_binding(source, spec, network, run_id):
+    # Cache scope is one operation and the entire source, not guessed changed paths.
+    # Trusted implementation changes also invalidate reuse.
+    trusted = [Path(__file__), CI_PROFILE_PATH, *(PLATFORM / name for name in (
+        'execution.py', 'gate/bundle.py', 'process.py', 'source_snapshot.py', 'contract/stages.json'))]
+    return {'run_id': run_id, 'source_sha256': source, 'spec': spec, 'network': network,
+            'implementation': {str(p.relative_to(PLATFORM)): hashlib.sha256(p.read_bytes()).hexdigest() for p in trusted}}
+
+
+def reuse_build(path, binding):
+    if path is None:
+        return None
+    path = Path(path)
+    if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+        raise ValueError('invalid build receipt')
+    receipt = json.loads(path.read_bytes())
+    if receipt.get('binding') != binding:
+        return None
+    if receipt.get('version') != 1 or receipt.get('stage') != 'image.build' or receipt.get('outcome') != 'PASS':
+        raise ValueError('invalid build receipt')
+    images, identifiers = receipt['images'], receipt['image_ids']
+    if set(images) != {svc['name'] for svc in binding['spec']['services']} or set(images) != set(identifiers):
+        raise ValueError('invalid build image set')
+    for service, tag in images.items():
+        if not re.fullmatch(r'sha256:[0-9a-f]{64}', identifiers[service]):
+            raise ValueError('invalid build image identifier')
+        actual = sh(['docker', 'image', 'inspect', '--format', '{{.Id}}', tag], timeout=15)
+        if actual.returncode or actual.stdout.strip() != identifiers[service]:
+            return None
+    return images, identifiers
+
+
+def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None, build_receipt=None):
     global DIAGNOSTICS, PROGRESS
     try:
         return _run_gate(ws, run, layers, selected_root=selected_root, quality_network=quality_network,
-                         repair_scope=repair_scope, native_locks=native_locks, app_id=app_id)
+                         repair_scope=repair_scope, native_locks=native_locks, app_id=app_id, build_receipt=build_receipt)
     finally:
         DIAGNOSTICS = PROGRESS = None
 
 
-def _run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None):
+def _run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None, build_receipt=None):
     global DIAGNOSTICS, PROGRESS
     DIAGNOSTICS = PROGRESS = None
     observation_id = os.environ.get("RAILSHOT_RUN_ID") or str(uuid.uuid4())
@@ -755,6 +788,8 @@ def _run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repa
     if app_id is not None and (not isinstance(app_id, str) or not re.fullmatch(r'[a-z][a-z0-9-]{1,28}[a-z0-9]', app_id)):
         invalid = "INVALID_APP_ID"
     inside_source = run.resolve() == ws.resolve() or ws.resolve() in run.resolve().parents
+    if build_receipt is not None and Path(build_receipt).resolve().is_relative_to(ws.resolve()):
+        invalid = 'INVALID_BUILD_RECEIPT_PATH'
     if inside_source:
         invalid = "INVALID_RUN_PATH: gate artifacts must be outside the source workspace"
     before, config_error = None, None
@@ -790,7 +825,7 @@ def _run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repa
         DIAGNOSTICS = None
     run_id = uuid.uuid4().hex[:16]  # Docker identity is separate from the durable parent run ID.
     for layer in layers:
-        errs, error = [], None
+        errs, error, reused = [], None, False
         try:
             progress.start(layer)
             if DIAGNOSTICS is not None:
@@ -816,13 +851,24 @@ def _run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repa
                     raise OperationError("GATE_ENVIRONMENT_UNAVAILABLE", component="gate", phase=layer,
                                          retry_policy="after_configuration")
                 if layer == "L2":
-                    errs, images = l2(ws, spec, run_id, network=quality_network)
+                    binding = build_binding(before, spec, quality_network, observation_id)
+                    cached = reuse_build(build_receipt, binding)
+                    if cached:
+                        images, image_ids = cached
+                        reused = True
+                    else:
+                        errs, images = l2(ws, spec, run_id, network=quality_network)
                     for service, tag in images.items():
                         image_id = sh(["docker", "image", "inspect", "--format", "{{.Id}}", tag], timeout=15, check=True).stdout.strip()
-                        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+                        if (not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+                                or reused and image_id != image_ids[service]):
                             raise OperationError("GATE_EVIDENCE_MISMATCH", component="gate", phase=layer,
                                                  retry_policy="after_reconcile", side_effect="possible")
                         image_ids[service] = image_id
+                    if not errs and source_digest(ws) == before:
+                        receipt = {'version': 1, 'stage': 'image.build', 'outcome': 'PASS',
+                                   'binding': binding, 'images': images, 'image_ids': image_ids}
+                        durable_write(run / 'build.json', json.dumps(receipt, sort_keys=True).encode())
                 elif layer == "L3":
                     required = sorted({key for svc in spec["services"] for key in svc.get("secrets", [])
                                        if key != "DATABASE_URL" or "postgres" not in spec.get("resources", {})})
@@ -844,14 +890,24 @@ def _run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repa
                 result["errors"] = errs
             else:
                 result["blocked"] = error.code
+        result['reused'] = reused
         results.append(observe_layer(result, observation_id, attempt_id, error))
         if layer == "Q":
             results[-1]["advisory"] = True
             results[-1]["advisory"] = quality_advisory(results[-1])
             results[-1]["event"]["attributes"]["advisory"] = results[-1]["advisory"]
         try:
+            # Each gate has an independent result artifact even though the bounded
+            # repair loop runs in one job to retain its workspace/image store.
+            stage = stage_contract(layer)
+            receipt = {'version': 1, 'stage': stage['id'], 'input_sha256': before,
+                       'run_id': observation_id, 'attempt_id': attempt_id,
+                       'outcome': results[-1]['outcome'], 'reused': reused,
+                       'image_ids': image_ids if layer in ('L2', 'L3', 'L4') else {},
+                       'error': results[-1].get('error'), 'replay': stage['replay']}
+            durable_write(run / (layer + '.json'), json.dumps(receipt, sort_keys=True).encode())
             progress.complete(results[-1])
-        except (OperationError, KeyError) as exc:
+        except (OperationError, KeyError, OSError) as exc:
             observation_error = exc if isinstance(exc, OperationError) else Progress.failure(exc)
             results[-1] = observe_layer({'layer': layer, 'ok': False, 'blocked': observation_error.code},
                                         observation_id, attempt_id, observation_error)
@@ -908,6 +964,7 @@ def main():
     ap.add_argument("--layers", default=",".join(ORDER))
     ap.add_argument("--quality-network", help="trusted CI network profile for Q/L2/L3; requires locally verified railshot-quality worker, never supplied by upload")
     ap.add_argument("--selected-root", help="trusted selected project path within the uploaded workspace")
+    ap.add_argument("--reuse-build", type=Path, help="trusted prior build receipt from the same operation")
     ap.add_argument("--app-id", help="trusted operator app identity, never inferred from uploaded source")
     ap.add_argument("--repair-scope", choices=["packaging", "source"], default="packaging", help="trusted operator patch scope; uploaded specs cannot grant it")
     ap.add_argument("--native-locks", type=Path, help="trusted native-resolution receipt outside the source workspace")
@@ -920,7 +977,7 @@ def main():
         ap.error("native lock receipt must be outside the source workspace")
     v = run_gate(ws, Path(a.run).resolve(), a.layers.split(","), quality_network=a.quality_network,
                  repair_scope=a.repair_scope, selected_root=a.selected_root, app_id=a.app_id,
-                 native_locks=json.loads(a.native_locks.read_text()) if a.native_locks else None)
+                 native_locks=json.loads(a.native_locks.read_text()) if a.native_locks else None, build_receipt=a.reuse_build)
     print(json.dumps({"ok": v["ok"], "failure": v["failure"] and {k: v["failure"][k] for k in ("layer", "class", "signature")},
                       "status": v["status"], "error": v["error"], "event": v["event"],
                       "layers": [(r["layer"], r["ok"], r.get("blocked")) for r in v["layers"]]}, ensure_ascii=False))
