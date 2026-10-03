@@ -16,7 +16,7 @@ def image_ref(images, name):
     return value
 
 
-def render(images, target_id, dashboard_node_port=None, provider_targets=None):
+def render(images, target_id, dashboard_node_port=None, provider_targets=None, prepare_api_rollout=False):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", target_id):
         raise ValueError("operator-approved target_id is required")
     if dashboard_node_port is not None and not 30000 <= dashboard_node_port <= 32767:
@@ -36,7 +36,10 @@ def render(images, target_id, dashboard_node_port=None, provider_targets=None):
         image_ref(images, name)
     source = Path(__file__).resolve().parents[1] / "manifests/platform.yaml"
     documents = list(yaml.safe_load_all(source.read_text()))
+    documents = [document for document in documents if document['kind'] != 'Job' or prepare_api_rollout]
     for document in documents:
+        if document['kind'] == 'Job':
+            document['spec']['template']['spec']['containers'][0]['image'] = images['api']
         if dashboard_node_port and document["kind"] == "Service" and document["metadata"]["name"] == "railshot-dashboard":
             document["spec"]["type"] = "NodePort"
             document["spec"]["externalTrafficPolicy"] = "Local"
@@ -55,6 +58,13 @@ def render(images, target_id, dashboard_node_port=None, provider_targets=None):
                 {'name': 'RAILSHOT_PROVIDER_TARGETS', 'value': json.dumps(provider_targets, sort_keys=True, separators=(',', ':'))},
                 {'name': 'RAILSHOT_TARGET_IDS', 'value': ','.join([target_id, *sorted(set(selections.values()) - {target_id})])},
             ])
+    api = next(item for item in documents if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-api')
+    template = api['spec']['template']
+    template_id = hashlib.sha256(json.dumps(template, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    template['spec']['containers'][0]['env'].append({'name': 'RAILSHOT_POD_TEMPLATE_ID', 'value': template_id})
+    for item in documents:
+        if item['kind'] == 'Job':
+            item['spec']['template']['spec']['containers'][0]['env'].append({'name': 'RAILSHOT_DESIRED_TEMPLATE_ID', 'value': template_id})
     return {"apiVersion": "v1", "kind": "List", "items": documents}
 
 
@@ -112,6 +122,7 @@ if __name__ == "__main__":
     parser.add_argument("--build-node", help="exact approved build worker hostname label")
     parser.add_argument("--dashboard-node-port", type=int, help="optional allocated ALB backend port; API stays private")
     parser.add_argument("--provider-targets", default="{}", help="optional JSON provider-to-target map; enable only after CI and CD registration")
+    parser.add_argument('--prepare-api-rollout', action='store_true', help='prewarm the API image and prepare the existing single writer')
     args = parser.parse_args()
     try:
         images = json.loads(args.images.read_text())
@@ -126,7 +137,7 @@ if __name__ == "__main__":
         else:
             if args.runner_url or args.build_node:
                 raise ValueError("runner options require --build-runner-name or --build-controller")
-            output = render(images, args.target_id, args.dashboard_node_port, provider_targets)
+            output = render(images, args.target_id, args.dashboard_node_port, provider_targets, args.prepare_api_rollout)
         print(json.dumps(output, indent=2))
     except (ValueError, TypeError, KeyError) as error:
         parser.exit(2, f"BLOCKED: {error}\n")
