@@ -37,8 +37,8 @@ async function fixture(t) {
         action: input.action, plan_hash: 'a'.repeat(64), expires_at: new Date(Date.now() + (state.planMode === 'expired' ? -1000 : 600000)).toISOString(),
         resources: state.resources || [{ kind: 'Deployment', namespace: 'app-private', name: 'workload' }, { kind: 'PersistentVolumeClaim', namespace: 'app-private', name: 'database' }],
         retained: [{ kind: 'Node', name: 'shared-node' }, { kind: 'LoadBalancer', name: 'shared-lb' }] };
+      state.planDocument = result;
       if (state.planMode === 'async') {
-        state.planDocument = result;
         return send(response, 202, { id: result.id, application_id: result.application_id, action: result.action, status: 'planning', created_at: new Date().toISOString() }, `/api/v1/applications/${plan[1]}/plans/${result.id}`);
       }
       return send(response, 200, result);
@@ -47,7 +47,8 @@ async function fixture(t) {
       state.planReads = (state.planReads || 0) + 1;
       if (state.planReadError) return send(response, 503, { error: { message: '계획 조회 연결 실패' } });
       const doc = state.planDocument;
-      return send(response, 200, { ...doc, status: state.planStatus || 'planning', created_at: new Date().toISOString(),
+      const accepted = [...state.operations.values()].find(row => row.plan_id === doc.id && row.application_id === doc.application_id);
+      return send(response, 200, { ...doc, ...(accepted ? { operation_id: accepted.id } : {}), status: state.planStatus || (state.planMode === 'async' ? 'planning' : 'ready'), created_at: new Date().toISOString(),
         ...(state.planStatus === 'failed' ? { error: { code: 'APPLICATION_PLAN_INTERRUPTED', message: '서버 재시작으로 계획 확인이 중단됐습니다.' } } : {}) });
     }
     const mutation = /^\/api\/v1\/applications\/([^/]+)\/operations$/.exec(path);
@@ -55,7 +56,7 @@ async function fixture(t) {
       if (state.outcome === 'rejected') return send(response, 409, { error: { code: 'APPLICATION_PLAN_STALE', message: '계획 만료', outcome_unknown: false } });
       state.writes.push({ application_id: mutation[1], input, key: request.headers['idempotency-key'] });
       const id = `operation-${state.writes.length}`;
-      const operation = { id, application_id: mutation[1], action: input.action, status: 'queued', stage: 'accepted', steps: [], residuals: [] };
+      const operation = { id, application_id: mutation[1], action: input.action, plan_id: input.plan_id, status: 'queued', stage: 'accepted', steps: [], residuals: [] };
       state.operations.set(id, operation);
       if (state.outcome === 'lost') { response.writeHead(202, { 'content-type': 'application/json' }); return response.end('{'); }
       return send(response, 202, operation, `/api/v1/operations/${id}`);
@@ -67,7 +68,7 @@ async function fixture(t) {
       if (state.outcome === 'succeeded') app.status = { stop: 'stopped', start: 'ready', delete: 'deleted' }[operation.action];
       return send(response, 200, { ...operation, status: state.outcome, stage: state.outcome === 'succeeded' ? 'verified' : 'cleanup',
         steps: [{ name: '배포 중단 확인', status: 'succeeded' }],
-        residuals: state.outcome === 'unknown' ? [{ kind: 'PersistentVolumeClaim', namespace: 'app-private', name: 'database' }] : [] });
+        residuals: ['unknown', 'blocked'].includes(state.outcome) ? [{ kind: 'PersistentVolumeClaim', namespace: 'app-private', name: 'database' }] : [] });
     }
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'],
       '/src/api.js': ['src/api.js', 'text/javascript'], '/src/openstack-installer.js': ['src/openstack-installer.js', 'text/javascript'],
@@ -189,7 +190,7 @@ test('running deployment trash requires a second permanent-delete click and show
   assert.deepEqual(state.errors, []);
 });
 
-test('expired and foreign plans cannot execute; unknown and lost results never report success or replay', { timeout: 45000 }, async (t) => {
+test('expired and foreign plans cannot execute; lost replies recover from the saved plan after reload without another write', { timeout: 45000 }, async (t) => {
   const { state, page } = await fixture(t);
   for (const planMode of ['expired', 'foreign']) {
     state.planMode = planMode;
@@ -210,11 +211,12 @@ test('expired and foreign plans cannot execute; unknown and lost results never r
   state.outcome = 'lost';
   await appAction(page, 'paused-app', '삭제').click();
   await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-message').textContent.includes('중복 실행'));
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-message').textContent.includes('상태 조회 실패'));
   assert.equal(await appAction(page, 'paused-app', '삭제').isDisabled(), true);
-  assert.equal(await page.locator('#lifecycle-operation-refresh').isDisabled(), true);
-  await page.reload(); await page.waitForFunction(() => document.querySelector('#applications-message').textContent.includes('3개'));
-  assert.equal(await appAction(page, 'paused-app', '삭제').isDisabled(), true);
+  assert.equal(await page.locator('#lifecycle-operation-refresh').isEnabled(), true);
+  state.outcome = 'succeeded';
+  await page.reload(); await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('완료'));
+  assert.equal(await appAction(page, 'paused-app', '삭제').count(), 0);
   assert.equal(state.writes.length, 2);
   assert.deepEqual(state.errors, []);
 });
@@ -341,7 +343,7 @@ test('proxy HTML failure is readable and retryable without treating an uncertain
     route.fulfill({ status: 502, contentType: 'text/html', body: '<html>Bad Gateway</html>' }));
   await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
   await page.waitForFunction(() => !document.querySelector('#lifecycle-dialog').open);
-  assert.match(await page.locator('#lifecycle-operation-message').innerText(), /HTTP 502/);
+  assert.match(await page.locator('#lifecycle-operation-message').innerText(), /HTTP 502|접수된 실행/);
   assert.equal(await appAction(page, 'my-app', '삭제').isDisabled(), true);
   assert.equal(state.writes.length, 0);
 });
@@ -397,4 +399,19 @@ test('proxy HTML failure is readable and retryable without treating an uncertain
   await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
   assert.equal(attempts, 5); assert.equal(await page.locator('#lifecycle-retry').isHidden(), true);
   await page.getByRole('button', { name: '취소', exact: true }).click();
+});
+
+test('read-only lifecycle polling does not disable another app and confirmed failure can be retried', async (t) => {
+  const { state, page } = await fixture(t);
+  state.outcome = 'failed';
+  await appAction(page, 'my-app', '중지').click();
+  await page.getByRole('button', { name: '앱 중지', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('실행 실패'));
+  assert.equal(await appAction(page, 'my-app', '중지').isEnabled(), true);
+  let release; const hold = new Promise(resolve => { release = resolve; });
+  await page.route('**/api/v1/operations/*', async route => { await hold; await route.fallback(); });
+  await page.locator('#lifecycle-operation-refresh').click();
+  assert.equal(await appAction(page, 'paused-app', '재개').isEnabled(), true);
+  release();
+  assert.equal(state.writes.length, 1);
 });

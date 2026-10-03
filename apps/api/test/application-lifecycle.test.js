@@ -82,13 +82,17 @@ test('stop/start/delete consume private plans once, preserve data on stop, and r
     assert.equal(disk(f.directory, 'plans', plan.id).private.credential, 'never-public');
     assert.throws(() => f.product.getPlan(plan.id, f.owner.id), { status: 404 });
     assert.deepEqual(f.product.list('plans', f.owner.id), []);
+    assert.equal(f.product.getApplicationPlan(app.id, plan.id, f.owner.id).operation_id, undefined);
     const body = f.input(plan);
     const [first, repeat] = await Promise.all([f.product.createApplicationOperation(app.id, body, action, f.owner.id),
       f.product.createApplicationOperation(app.id, { ...body }, action, f.owner.id)]);
     assert.equal(first.id, repeat.id);
+    assert.equal(f.product.getApplicationPlan(app.id, plan.id, f.owner.id).operation_id, first.id);
+    assert.throws(() => f.product.getApplicationPlan(app.id, plan.id, f.stranger.id), { status: 404 });
     const result = await settled(f.product, first.id, f.owner.id);
     assert.equal(result.status, 'succeeded'); assert.equal(result.stage, 'complete');
     assert.equal(f.product.getApplication(app.id, f.owner.id).status, status);
+    assert.equal(f.product.getApplicationPlan(app.id, plan.id, f.owner.id).operation_id, first.id);
     assert.equal(f.product.applications(f.owner.id).length, status === 'deleted' ? 0 : 1);
     assert.equal((await f.product.createApplicationOperation(app.id, body, action, f.owner.id)).id, first.id);
     await assert.rejects(f.product.createApplicationOperation(app.id, { ...body, confirmation: 'another' }, action, f.owner.id), { code: 'IDEMPOTENCY_CONFLICT' });
@@ -740,4 +744,17 @@ test('HTTP async plan exposes a session-bound status URL and polling never appli
     assert.equal(restarted.getApplicationPlan(app.id, plan.id, f.owner.id).error.code, 'APPLICATION_PLAN_STALE');
     assert.equal(f.calls.plan, 1); assert.equal(f.calls.apply, 0);
   } finally { await restarted.close(); }
+});
+
+test('application inventory orders newest registrations first with a stable ID tie break', async t => {
+  const f = await fixture(t); await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction(state => {
+    for (const [id, created_at] of [['older', '2026-10-01T00:00:00Z'], ['new-a', '2026-10-03T00:00:00Z'], ['new-z', '2026-10-03T00:00:00Z']])
+      state.applications[id] = { ...app, id, app: id, session_id: f.owner.id, created_at };
+  });
+  await store.close();
+  const restarted = await createProductService(f.options);
+  try { assert.deepEqual(restarted.applications(f.owner.id).map(row => row.id), ['new-z', 'new-a', 'older', app.id]); }
+  finally { await restarted.close(); }
 });

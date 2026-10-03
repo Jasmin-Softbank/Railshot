@@ -25,9 +25,10 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
     try { sessionStorage.setItem('railshot.application-operation', JSON.stringify(lifecycleOperation)); } catch { /* The server remains the authority. */ }
   }
   function applicationBusy(id, ownSubmission = false) {
-    return (!ownSubmission && isSubmitting()) || Boolean(isResuming()) || lifecycleBusy || lifecycleReadBusy
+    return (!ownSubmission && isSubmitting()) || Boolean(isResuming()) || lifecycleBusy
       || ['queued', 'running'].includes(lifecycleOperation?.status)
-      || Boolean(lifecycleOperation && lifecycleOperation.application_id === id && lifecycleOperation.status !== 'succeeded');
+      || Boolean(lifecycleOperation && lifecycleOperation.application_id === id
+        && (!['succeeded', 'failed', 'blocked'].includes(lifecycleOperation.status) || lifecycleOperation.error?.outcome_unknown || lifecycleOperation.residuals?.length));
   }
   function updateBlocked(app) {
     return applicationBusy(app?.id) ? '진행 중이거나 결과를 확인해야 하는 앱 관리 작업이 있습니다.'
@@ -65,7 +66,7 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
     if (getCurrent()) document.querySelector('#resume-run').disabled = hasObservationError() || applicationBusy(getCurrent().application_id);
   }
   function lifecycleResources(selector, rows, empty) {
-    document.querySelector(selector).replaceChildren(...(rows?.length ? rows.map((row) => element('li', `${row.kind} · ${row.namespace ? row.namespace + '/' : ''}${row.name}`)) : [element('li', empty)]));
+    document.querySelector(selector).replaceChildren(...(rows?.length ? rows.map((row) => element('li', `${row.kind === 'CIBinding' ? 'CI 배포 연결' : row.kind} · ${row.namespace ? row.namespace + '/' : ''}${row.name}`)) : [element('li', empty)]));
   }
   function resourceList(rows) { return Array.isArray(rows) && rows.every((row) => row && typeof row.kind === 'string' && typeof row.name === 'string' && (row.namespace == null || typeof row.namespace === 'string')); }
   function lifecycleError(message) { const error = document.querySelector('#lifecycle-error'); error.textContent = message; error.hidden = !message; }
@@ -193,19 +194,28 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
     document.querySelector('#lifecycle-operation-steps').replaceChildren(...(Array.isArray(operation.steps) ? operation.steps : []).map((step) => element('li', `${step.name}: ${step.status}`)));
     document.querySelector('#lifecycle-residuals').hidden = !operation.residuals?.length;
     lifecycleResources('#lifecycle-residual-list', operation.residuals, '');
-    document.querySelector('#lifecycle-operation-refresh').disabled = lifecycleReadBusy || !operation.id;
+    document.querySelector('#lifecycle-operation-refresh').disabled = lifecycleReadBusy || !(operation.id || operation.plan_id);
     document.querySelector('#lifecycle-operation').setAttribute('aria-busy', String(lifecycleReadBusy || ['queued', 'running'].includes(operation.status)));
     renderApplications();
   }
   async function refreshLifecycleOperation() {
     clearTimeout(lifecycleTimer);
     const previous = lifecycleOperation;
-    if (!previous?.id || lifecycleReadBusy) return;
+    if (!(previous?.id || previous?.plan_id) || lifecycleReadBusy) return;
     lifecycleReadBusy = true; renderLifecycleOperation();
     try {
-      const { data } = await request(`/api/v1/operations/${encodeURIComponent(previous.id)}`);
+      let operationId = previous.id;
+      if (!operationId) {
+        const { data: plan } = await request(`/api/v1/applications/${encodeURIComponent(previous.application_id)}/plans/${encodeURIComponent(previous.plan_id)}`);
+        if (lifecycleOperation !== previous) return;
+        if (plan.id !== previous.plan_id || plan.application_id !== previous.application_id || plan.action !== previous.action)
+          throw new Error('접수 확인의 앱과 계획이 일치하지 않습니다.');
+        if (!/^[A-Za-z0-9._-]+$/.test(plan.operation_id || '')) throw new Error('서버에서 접수된 실행을 아직 찾지 못했습니다. 변경 요청을 다시 보내지 않고 확인합니다.');
+        operationId = plan.operation_id;
+      }
+      const { data } = await request(`/api/v1/operations/${encodeURIComponent(operationId)}`);
       if (lifecycleOperation !== previous) return;
-      if (data.id !== previous.id || data.application_id !== previous.application_id || data.action !== previous.action
+      if (data.id !== operationId || (previous.plan_id && data.plan_id !== previous.plan_id) || data.application_id !== previous.application_id || data.action !== previous.action
           || !['queued', 'running', 'succeeded', 'blocked', 'failed', 'unknown'].includes(data.status)
           || !resourceList(data.residuals || [])) throw new Error('실행 결과의 앱 정보가 일치하지 않습니다.');
       lifecycleOperation = { ...previous, ...data, readError: null }; storeLifecycleOperation();
@@ -230,13 +240,13 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
       if (!await loadApplications()) throw new Error('최신 앱 상태를 확인하지 못했습니다. 요청을 보내지 않았습니다.');
       const app = getApplications().find((row) => row.id === draft.id);
       if (!app || app.app !== draft.app.app || app.status !== draft.app.status || Date.parse(draft.plan.expires_at) <= Date.now()) throw new Error('앱 상태가 바뀌었거나 계획이 만료됐습니다. 취소 후 새 계획을 확인하세요.');
-      lifecycleOperation = { application_id: app.id, app: app.app, action: draft.action, status: 'unknown', id: null };
+      lifecycleOperation = { application_id: app.id, app: app.app, action: draft.action, status: 'unknown', id: null, plan_id: draft.plan.id };
       storeLifecycleOperation(); submitted = true;
       const { data, location, status } = await request(`/api/v1/applications/${encodeURIComponent(app.id)}/operations`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() },
         body: JSON.stringify({ action: draft.action, plan_id: draft.plan.id, plan_hash: draft.plan.plan_hash,
           confirmation: app.app, ...(draft.action === 'delete' ? { delete_data: true } : {}) }) });
-      if (status !== 202 || !/^[A-Za-z0-9._-]+$/.test(data.id || '') || location !== `/api/v1/operations/${data.id}`
+      if (![200, 202].includes(status) || !/^[A-Za-z0-9._-]+$/.test(data.id || '') || location !== `/api/v1/operations/${data.id}`
           || data.application_id !== app.id || data.action !== draft.action || !['queued', 'running', 'succeeded', 'blocked', 'failed', 'unknown'].includes(data.status)) throw new Error('접수 결과를 확인하지 못했습니다.');
       lifecycleOperation = { ...lifecycleOperation, ...data, application_id: app.id, app: app.app, action: draft.action };
       storeLifecycleOperation(); clearPlan(draft); lifecycleDialog.close(); refreshLifecycleOperation();
@@ -245,8 +255,8 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
         lifecycleOperation = previousOperation; storeLifecycleOperation();
         lifecycleError(`요청이 접수되지 않았습니다: ${cause.message} 취소 후 새 계획을 확인하세요.`);
       } else if (submitted) {
-        lifecycleOperation.readError = `요청 결과를 확인하지 못했습니다: ${cause.message} 중복 실행을 막기 위해 다시 보내지 않습니다. 운영자에게 실행 확인을 요청하세요.`;
-        storeLifecycleOperation(); lifecycleDialog.close();
+        lifecycleOperation.readError = `요청 결과를 확인하지 못했습니다: ${cause.message} 변경 요청은 다시 보내지 않고 저장된 계획으로 접수 상태를 확인합니다.`;
+        storeLifecycleOperation(); lifecycleDialog.close(); refreshLifecycleOperation();
       } else lifecycleError(cause.message);
     } finally {
       lifecycleBusy = false; document.querySelector('#lifecycle-cancel').disabled = false;

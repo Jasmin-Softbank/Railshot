@@ -6913,6 +6913,11 @@
             "type": "string",
             "format": "uuid"
           },
+          "operation_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The existing operation accepted from this plan, when present. Recover a lost acknowledgement by GET without resubmitting a mutation."
+          },
           "application_id": {
             "type": "string"
           },
