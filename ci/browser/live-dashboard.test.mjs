@@ -3,8 +3,10 @@ import { once } from 'node:events';
 import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { chromium } from 'playwright';
+import { createServer as createViteServer } from 'vite';
 import { createAppServer } from '../../apps/api/src/server.js';
 import { createProductStore } from '../../apps/api/src/product-store.js';
 
@@ -44,9 +46,21 @@ test('session history pages and live environment states remain truthful across n
   const server = createAppServer({ stateDirectory: directory, service, observeMetrics, deployPublished: cd, pollInterval: 1,
     providerTargets: { aws: 'demo-aws', gcp: 'demo-gcp', openstack: 'demo-openstack' }, target: { provider: 'aws' } });
   await server.productReady; server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const origin = `http://127.0.0.1:${server.address().port}`;
+  const apiOrigin = `http://127.0.0.1:${server.address().port}`;
+  const previousTarget = process.env.RAILSHOT_DEV_API_TARGET;
+  process.env.RAILSHOT_DEV_API_TARGET = apiOrigin;
+  let vite;
+  try {
+    vite = await createViteServer({ root: fileURLToPath(new URL('../../apps/dashboard/', import.meta.url)),
+      server: { host: '127.0.0.1', port: 0 }, logLevel: 'error' });
+    await vite.listen();
+  } finally {
+    if (previousTarget === undefined) delete process.env.RAILSHOT_DEV_API_TARGET;
+    else process.env.RAILSHOT_DEV_API_TARGET = previousTarget;
+  }
+  const origin = `http://127.0.0.1:${vite.httpServer.address().port}`;
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXECUTABLE || undefined });
-  t.after(async () => { await browser.close(); await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
+  t.after(async () => { await browser.close(); await vite.close(); await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
     await (await server.productReady).close(); await rm(directory, { recursive: true, force: true }); });
   const context = await browser.newContext({ viewport: { width: 1440, height: 1050 } });
   await context.addCookies([{ name: 'railshot_session', value: owner.token, url: origin, httpOnly: true, sameSite: 'Strict' }]);
@@ -58,6 +72,21 @@ test('session history pages and live environment states remain truthful across n
   await page.waitForFunction(() => document.querySelector('#history-list').getAttribute('aria-busy') === 'false');
   assert.equal(await rows.count(), 10); assert.match(await rows.first().innerText(), /app-deployment-23/);
   assert.match(await rows.nth(1).innerText(), /실행 실패/);
+  await rows.nth(1).getByRole('button', { name: 'app-deployment-22 실행 상세·작업 로그' }).click();
+  await page.locator('#deployment-history-detail h2').waitFor();
+  assert.equal(await page.locator('#deployment-history-detail h2').innerText(), 'app-deployment-22');
+  assert.equal(await page.locator('.dh-log-layout').count(), 0);
+  await page.locator('.dh-issue-trigger').click();
+  assert.match(await page.locator('.dh-stage-detail').innerText(), /테스트 실패/);
+  assert.equal(await page.locator('.dh-recovery').count(), 0, 'no invented recovery questions or submission capability');
+  assert.equal(await page.locator('#deployment-history-detail a').count(), 0, 'no unverified service links');
+  await page.getByRole('button', { name: '‹ 배포 내역', exact: true }).click();
+  await page.getByLabel('앱 이름 검색', { exact: true }).fill('deployment-22');
+  assert.equal(await rows.count(), 1);
+  await page.getByLabel('상태', { exact: true }).selectOption('running');
+  assert.equal(await rows.count(), 0); assert.equal(await page.locator('#history-empty').isVisible(), true);
+  await page.getByLabel('상태', { exact: true }).selectOption('');
+  await page.getByLabel('앱 이름 검색', { exact: true }).fill('');
   await page.locator('#history-next').click();
   await page.waitForFunction(() => document.querySelector('#history-page').textContent.startsWith('2페이지'));
   const secondPage = await rows.allTextContents(); assert.match(secondPage[0], /app-deployment-13/);
