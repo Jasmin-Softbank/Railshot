@@ -46,7 +46,7 @@
             "containers": [
               {
                 "name": "dashboard",
-                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:ee89ada755d96958abb002ae7223a50467ef17d215f6b678644a1e19a38e919e",
+                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:7c7a1e698353348210bfd364c7d536e3d9b0b83efc5e17609b045d720bc1ff37",
                 "ports": [
                   {
                     "name": "http",
