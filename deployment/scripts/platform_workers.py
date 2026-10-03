@@ -2,7 +2,7 @@
 """Promote existing platform worker digests; never create or replace runner Jobs.
 
 Operator-owned 0600 config/state files and the fixed control-host kubectl identity
-are required. Apps workflow promotion is a separate post-verification operation.
+are required. CI workflow promotion runs while controller replenishment is suspended.
 Worker config: runner_url, build_node, object_uids (from discover). Apps config:
 repository=Jasmin-Softbank/railshot-apps, branch. State files are private rollback
 records. Worker verification executes the renewal/controller code, not a customer
@@ -43,6 +43,14 @@ KEYS = {
     'credentials_cron': ('CronJob', 'argocd', 'railshot-credentials'),
 }
 WORKFLOW = '.github/workflows/railshot-deploy.yml'
+
+
+def scoped_config(config, scope):
+    require(scope in {'all', 'ci', 'credentials'}, 'WORKER_SCOPE_INVALID')
+    keys = set(KEYS) if scope == 'all' else {key for key in KEYS if key.startswith('build_' if scope == 'ci' else 'credentials_')}
+    require(set(config) == {'runner_url', 'build_node', 'object_uids'} and
+            keys <= set(config['object_uids']) <= set(KEYS), 'WORKER_CONFIG_REQUIRED')
+    return {**config, 'object_uids': {key: config['object_uids'][key] for key in sorted(keys)}}
 
 
 def kubectl(action, key, document=None):
@@ -247,23 +255,29 @@ def check_execution(state, path, key, cron, policy, kube, *, create):
                 return proof
         require(time.monotonic() < deadline, 'WORKER_EXECUTION_TIMEOUT')
         time.sleep(3)
-def apply_workers(config, images, source_sha, state_path, *, kube=kubectl):
+def apply_workers(config, images, source_sha, state_path, *, kube=kubectl, before_resume=None, scope='all'):
     require(re.fullmatch(r'[a-f0-9]{40}', source_sha or ''), 'SOURCE_SHA_REQUIRED')
-    require(set(config) == {'runner_url', 'build_node', 'object_uids'} and
-            set(config['object_uids']) == set(KEYS), 'WORKER_CONFIG_REQUIRED')
+    config = scoped_config(config, scope)
+    require(before_resume is None or scope == 'ci', 'CI_PROMOTION_SCOPE_REQUIRED')
     require(not Path(state_path).exists(), 'WORKER_STATE_EXISTS_OBSERVE_OR_ROLLBACK')
     for name in ('api', 'ci-runner'):
         renderer.image_ref(images, name)
-    objects = {key: kube('get', key) for key in KEYS}
+    objects = {key: kube('get', key) for key in config['object_uids']}
     require(all(obj['metadata']['uid'] == config['object_uids'][key] for key, obj in objects.items()), 'WORKER_UID_DIFFERS')
-    policy = credentials.validate_policy(json.loads(objects['credentials_config']['data']['policy.json']))
-    desired = renderer.render_build_controller(images, config['runner_url'], config['build_node'])['items']
-    desired_config = next(obj['data'] for obj in desired if obj['kind'] == 'ConfigMap')
-    old_policy = json.loads(objects['build_config']['data']['policy.json'])
-    require(old_policy['repository'] == config['runner_url'].removeprefix('https://github.com/') and
-            old_policy['node'] == config['build_node'], 'RUNNER_BINDING_DIFFERS')
-    desired_crons = {'build_cron': next(obj for obj in desired if obj['kind'] == 'CronJob'),
-                     'credentials_cron': next(obj for obj in credentials.render(policy, images['api'])['items'] if obj['kind'] == 'CronJob')}
+    if before_resume:
+        require(objects['build_cron']['spec'].get('suspend') is not True,
+                'CI_WORKER_SUSPENDED_BY_OPERATOR')
+    desired_crons = {}
+    if 'build_cron' in objects:
+        desired = renderer.render_build_controller(images, config['runner_url'], config['build_node'])['items']
+        desired_config = next(obj['data'] for obj in desired if obj['kind'] == 'ConfigMap')
+        old_policy = json.loads(objects['build_config']['data']['policy.json'])
+        require(old_policy['repository'] == config['runner_url'].removeprefix('https://github.com/') and
+                old_policy['node'] == config['build_node'], 'RUNNER_BINDING_DIFFERS')
+        desired_crons['build_cron'] = next(obj for obj in desired if obj['kind'] == 'CronJob')
+    if 'credentials_cron' in objects:
+        policy = credentials.validate_policy(json.loads(objects['credentials_config']['data']['policy.json']))
+        desired_crons['credentials_cron'] = next(obj for obj in credentials.render(policy, images['api'])['items'] if obj['kind'] == 'CronJob')
     for key, desired_cron in desired_crons.items():
         actual, expected = container(objects[key]['spec']), container(desired_cron['spec'])
         require(actual['name'] == expected['name'] and actual['command'] == expected['command'], 'WORKER_COMMAND_DIFFERS')
@@ -276,21 +290,29 @@ def apply_workers(config, images, source_sha, state_path, *, kube=kubectl):
                          for key, obj in objects.items()}}
     bootstrap.write(state_path, state)
     try:
-        original = objects['build_cron']['spec']
-        suspended = {**copy.deepcopy(original), 'suspend': True}
-        save_operation(state, state_path, 'build_cron', 'spec', original, suspended, kube)
-        drain(kube)
-        save_operation(state, state_path, 'build_config', 'data', objects['build_config']['data'], desired_config, kube)
+        if 'build_cron' in objects:
+            original = objects['build_cron']['spec']
+            suspended = {**copy.deepcopy(original), 'suspend': True}
+            save_operation(state, state_path, 'build_cron', 'spec', original, suspended, kube)
+            drain(kube)
+            save_operation(state, state_path, 'build_config', 'data', objects['build_config']['data'], desired_config, kube)
         for key in desired_crons:
             old = suspended if key == 'build_cron' else objects[key]['spec']
             new = copy.deepcopy(old)
             container(new)['image'] = images['api']
             save_operation(state, state_path, key, 'spec', old, new, kube)
-        final = copy.deepcopy(original)
-        container(final)['image'] = images['api']
-        current = copy.deepcopy(suspended)
-        container(current)['image'] = images['api']
-        save_operation(state, state_path, 'build_cron', 'spec', current, final, kube)
+        if before_resume:
+            verify_declarations(state, kube)
+            # While replenishment is suspended, pin the workflow before a new runner can start.
+            # Existing runner Jobs keep their immutable templates and already-selected workflow.
+            before_resume({'status': 'declarations_verified', 'source_sha': source_sha, 'images': images,
+                           'controller_suspended': True, 'executable_verification': False, 'runner_jobs': 'preserved'})
+        if 'build_cron' in objects:
+            final = copy.deepcopy(original)
+            container(final)['image'] = images['api']
+            current = copy.deepcopy(suspended)
+            container(current)['image'] = images['api']
+            save_operation(state, state_path, 'build_cron', 'spec', current, final, kube)
         state['status'] = 'applied'
         state['declarations_applied'] = True
         bootstrap.write(state_path, state)
@@ -302,19 +324,25 @@ def apply_workers(config, images, source_sha, state_path, *, kube=kubectl):
         raise
 
 
-def verify_workers(state_path, *, kube=kubectl, create_sample=False):
-    state = bootstrap.private(state_path)
-    require(state['kind'] == 'workers' and state.get('declarations_applied') is True and state['status'] != 'rolled_back',
-            'WORKER_APPLY_INCOMPLETE')
+def verify_declarations(state, kube):
     expected = copy.deepcopy(state['initial'])
     for op in state['operations']:
         expected[op['key']]['value'] = op['after']
     for key, item in expected.items():
         actual = kube('get', key)
         require(actual['metadata']['uid'] == item['uid'] and actual[item['field']] == item['value'], 'WORKER_READBACK_DIFFERS')
-    policy = credentials.validate_policy(json.loads(expected['credentials_config']['value']['policy.json']))
+    return expected
+
+
+def verify_workers(state_path, *, kube=kubectl, create_sample=False):
+    state = bootstrap.private(state_path)
+    require(state['kind'] == 'workers' and state.get('declarations_applied') is True and state['status'] != 'rolled_back',
+            'WORKER_APPLY_INCOMPLETE')
+    expected = verify_declarations(state, kube)
+    policy = (credentials.validate_policy(json.loads(expected['credentials_config']['value']['policy.json']))
+              if 'credentials_config' in expected else None)
     executions = {}
-    for key in ('build_cron', 'credentials_cron'):
+    for key in (key for key in ('build_cron', 'credentials_cron') if key in expected):
         cron = kube('get', key)
         require(cron['metadata']['uid'] == expected[key]['uid'] and cron['spec'] == expected[key]['value'], 'WORKER_READBACK_DIFFERS')
         executions[key] = check_execution(state, state_path, key, cron, policy, kube, create=create_sample)
@@ -358,6 +386,13 @@ def rollback_workers(state_path, *, kube=kubectl):
 
 
 def approved_receipt(receipt, source_sha):
+    if receipt.get('scope') == 'ci-runtime':
+        worker = receipt.get('workers', {})
+        require(receipt.get('status') == 'prepared' and receipt.get('source_sha') == source_sha
+                and worker.get('status') == 'declarations_verified' and worker.get('source_sha') == source_sha
+                and worker.get('controller_suspended') is True and worker.get('runner_jobs') == 'preserved',
+                'CI_WORKERS_NOT_PREPARED')
+        return
     require(receipt.get('status') == 'verified' and receipt.get('source_sha') == source_sha, 'RELEASE_NOT_VERIFIED')
     targets = receipt.get('targets', [])
     require(len(targets) == 3 and {row.get('provider') for row in targets} == {'aws', 'gcp', 'openstack'} and

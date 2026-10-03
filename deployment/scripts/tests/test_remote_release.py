@@ -21,7 +21,7 @@ class RemoteReleaseTests(unittest.TestCase):
                 'targets': [{'provider': name, 'target_id': 'k3s-' + name, 'source_sha': SHA, 'status': 'verified'}
                             for name in ('aws', 'gcp', 'openstack')]}
 
-    def run_remote(self, proof=None, pending=0, poll_error=False, send_error=False, ticks=None):
+    def run_remote(self, proof=None, pending=0, poll_error=False, send_error=False, ticks=None, scope='multicloud'):
         self.calls = []
         self.pauses = []
         pending_states = iter(['Pending', 'InProgress', 'Delayed'][:pending])
@@ -39,7 +39,21 @@ class RemoteReleaseTests(unittest.TestCase):
                     'StandardOutputContent': json.dumps(proof if proof is not None else self.proof())}
 
         return remote.release(SHA, 'b' * 40, IMAGES, '1', 'd' * 64, '12', '1', call=call,
-                              sleep=self.pauses.append, clock=(lambda: next(ticks)) if ticks else lambda: 0)
+                              scope=scope, sleep=self.pauses.append, clock=(lambda: next(ticks)) if ticks else lambda: 0)
+
+    def test_ci_scope_requires_same_source_images_execution_and_platform_ref(self):
+        proof = {'scope': 'ci-runtime', 'status': 'verified', 'source_sha': SHA,
+                 'workers': {'status': 'verified', 'source_sha': SHA, 'images': IMAGES,
+                             'executable_verification': True, 'runner_jobs': 'preserved'},
+                 'apps': {'status': 'verified', 'source_sha': SHA, 'platform_ref': SHA}}
+        self.assertEqual(self.run_remote(proof, scope='ci-runtime')['status'], 'verified')
+        parameters = json.loads(self.calls[0][-1])
+        self.assertEqual(parameters['Scope'], ['ci-runtime'])
+        for section, key, value in (('apps', 'platform_ref', 'f' * 40), ('workers', 'images', {}),
+                                    ('workers', 'executable_verification', False), ('workers', 'status', 'declarations_verified')):
+            changed = copy.deepcopy(proof); changed[section][key] = value
+            self.assertEqual(self.run_remote(changed, scope='ci-runtime')['status'], 'incomplete')
+        self.assertEqual(self.run_remote(proof)['status'], 'incomplete', 'CI proof must not satisfy provider rollout')
 
     def test_send_once_pending_then_bound_success(self):
         result = self.run_remote(pending=3)

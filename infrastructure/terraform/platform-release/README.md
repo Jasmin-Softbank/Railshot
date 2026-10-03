@@ -6,6 +6,56 @@ AWS-to-GCP federation and observer ingress for the existing machines. It does
 not create a VM, security group, load balancer, service-account key or customer
 application. Keep its local state separate from the provider edge states.
 
+## CI runtime promotion
+
+A trusted automatic platform release now runs `ci-runtime` after the platform
+image publication and live verification. This stage runs even when
+`RAILSHOT_MULTICLOUD_RELEASE` is disabled. It uses the same fixed SSM document,
+control instance and OIDC role with `Scope=ci-runtime`; no additional IAM action
+or resource is granted. Apply the reviewed document update and set its new
+`RAILSHOT_RELEASE_DOCUMENT_VERSION` / `RAILSHOT_RELEASE_DOCUMENT_SHA256` outputs
+before activating this workflow revision.
+
+The root-owned 0600 `/etc/railshot/release.json` needs only these keys for CI:
+
+```json
+{
+  "version": 1,
+  "state_dir": "/var/lib/railshot-release",
+  "workers": {
+    "runner_url": "https://github.com/Jasmin-Softbank/railshot-apps",
+    "build_node": "<existing build node>",
+    "object_uids": "<object returned by platform_workers.py discover>"
+  },
+  "apps": {"repository": "Jasmin-Softbank/railshot-apps", "branch": "main"}
+}
+```
+
+Replace `object_uids` with the discovered object, not the placeholder string.
+The full provider configuration may coexist in this file, but CI does not read
+provider credentials, target registrations, runtime policies or edge state.
+The existing GitHub token needs the already used apps-repository workflow/content
+and Actions-variable update permissions; it is never returned in a receipt.
+
+Promotion suspends replenishment and waits for the current controller tick to
+finish. It updates the controller image and future runner template, reads them
+back, pins the apps workflow and `PLATFORM_REF` to the same admitted source, then
+resumes replenishment and verifies controller execution. CI reads and updates
+only the build controller CronJob and its ConfigMap; credential renewal belongs
+to the provider rollout and cannot block CI promotion. Existing runner Jobs keep
+their original images and running workflows. Requests dispatched after promotion
+use the newly pinned workflow; previously dispatched runs retain their original
+GitHub workflow revision. A failed or uncertain promotion keeps a private receipt
+for reconciliation and is never automatically replayed.
+
+CI receipts are under `state_dir/ci-runtime/<source-sha>` and are independent of
+provider rollout receipts. The optional `multicloud` stage starts after CI and
+reads back that same CI/apps promotion rather than applying it twice, and updates
+and verifies only the credential renewal worker before its providers. A node
+or edge failure cannot roll back a completed CI promotion. Both scopes share the
+existing control-host lock. Missing release configuration now returns the fixed
+`RELEASE_CONFIG_UNAVAILABLE` code instead of exiting before a JSON receipt exists.
+
 The release executor cannot bootstrap its own authority. Its GCP service account
 receives the custom read/update role and one IAP tunnel binding; it receives no
 IAM mutation, service enable, VM mutation, resource create or delete permission.

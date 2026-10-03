@@ -34,6 +34,15 @@ run "exact_instance_and_read_update_authority" {
 
   assert {
     condition = (
+      jsondecode(aws_ssm_document.release.content).parameters.Scope.default == "multicloud" &&
+      toset(jsondecode(aws_ssm_document.release.content).parameters.Scope.allowedValues) == toset(["ci-runtime", "multicloud"]) &&
+      !contains(jsondecode(aws_ssm_document.release.content).mainSteps[0].inputs.runCommand, "test -f /etc/railshot/release.json")
+    )
+    error_message = "The fixed executor must accept only CI or full release scope and report missing configuration through its JSON receipt."
+  }
+
+  assert {
+    condition = (
       google_iam_workload_identity_pool_provider.release.aws[0].account_id == "721622471953" &&
       google_iam_workload_identity_pool_provider.release.attribute_mapping["google.subject"] == "assertion.arn" &&
       google_iam_workload_identity_pool_provider.release.attribute_condition == "assertion.account == '721622471953' && assertion.arn == 'arn:aws:sts::721622471953:assumed-role/railshot-control-poc/i-033ae2db907fde68e'" &&
