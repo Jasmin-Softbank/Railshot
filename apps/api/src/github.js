@@ -60,7 +60,7 @@ function safeDiagnostics(evidence, attempt, artifactId) {
 }
 
 export class ServiceError extends Error {
-  constructor(message, status = 500) { super(message); this.status = status; }
+  constructor(message, status = 500, code) { super(message); Object.assign(this, { status, code }); }
 }
 
 export function createDeploymentService(config, fetchImpl = fetch) {
