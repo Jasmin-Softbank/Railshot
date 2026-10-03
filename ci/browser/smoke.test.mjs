@@ -779,7 +779,7 @@ test('original dashboard cards submit three source types through backend selecti
   }
 });
 
-test('dashboard resumes the same published deployment without another upload or CI dispatch', { timeout: 60000 }, async (t) => {
+for (const interruption of ['unknown', 'blocked']) test(`dashboard resumes the same published deployment after ${interruption} without another upload or CI dispatch`, { timeout: 60000 }, async (t) => {
   let registrations = 0, submissions = 0, deliveries = 0;
   const commit = 'a'.repeat(40), image = `ghcr.io/example/calculator@sha256:${'b'.repeat(64)}`;
   const describe = (environment_target_id, app) => ({ id: 'app-calculator', target_id: 'app-calculator', environment_target_id, app, provider: 'aws' });
@@ -789,8 +789,8 @@ test('dashboard resumes the same published deployment without another upload or 
     deployPublished: async (_application, args) => {
       deliveries++;
       assert.equal(args.publication.images.web, image);
-      if (deliveries === 1) return { cd: { state: 'unknown', deployed: false }, public_http: { state: 'not_run' },
-        error: { code: 'APPLICATION_ROUTE_RECONCILE_REQUIRED', outcome_unknown: true } };
+      if (deliveries === 1) return { cd: { state: interruption, deployed: false }, public_http: { state: 'not_run' },
+        error: { code: 'APPLICATION_ROUTE_RECONCILE_REQUIRED', outcome_unknown: interruption === 'unknown' } };
       return { cd: { state: 'deployed', revision: 'c'.repeat(40), deployed: true },
         public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://calculator.example.test/' } };
     },

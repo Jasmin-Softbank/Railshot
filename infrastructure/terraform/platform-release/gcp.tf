@@ -132,6 +132,8 @@ resource "google_project_iam_custom_role" "edge_release" {
     # Existing Compute edge resources and references used by their updates.
     "compute.firewalls.get",
     "compute.firewalls.update",
+    # Firewall PATCH also checks this permission on the referenced VPC.
+    "compute.networks.updatePolicy",
     "compute.healthChecks.get",
     "compute.healthChecks.update",
     "compute.healthChecks.useReadOnly",

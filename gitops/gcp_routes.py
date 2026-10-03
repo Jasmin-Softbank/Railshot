@@ -8,6 +8,7 @@ import ipaddress
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 
 from edge import encoded, digest, read_private, locked, durable_write, native, require, http_path, lifecycle_ready
@@ -18,6 +19,12 @@ KINDS = ('google_compute_network_endpoint_group', 'google_compute_network_endpoi
          'google_certificate_manager_dns_authorization', 'google_certificate_manager_certificate',
          'google_certificate_manager_certificate_map_entry')
 UPDATES = {'google_compute_url_map.app', 'google_compute_url_map.redirect', 'google_compute_firewall.gfe'}
+
+
+class RouteError(ValueError):
+    def __init__(self, code, *, unknown=False):
+        super().__init__(code)
+        self.code, self.unknown = code, unknown
 
 
 def owned(state):
@@ -234,13 +241,74 @@ def output_route(state, request, values):
             **routes[request['application_id']], 'public_route_state': 'pending_verification'}
 
 
+def recover(config_path, config, journal):
+    """Adopt a completed interrupted apply only after a refreshed no-change plan."""
+    row = read_private(journal)
+    request = row['request']; checked_request(request)
+    root = Path(config['state_dir'])
+    matches = [work for work in root.glob('gcp-route-' + request['application_id'] + '-*')
+               if (work / 'plan').is_file() and hashlib.sha256((work / 'plan').read_bytes()).hexdigest() == row['plan_sha256']]
+    require(len(matches) == 1, 'original saved route plan required')
+    work = matches[0]
+    before = read_private(work / 'before.json') if (work / 'before.json').exists() else {
+        'config': config, 'values': read_private(config['variables_file'])}
+    old_config, values = before['config'], before['values']
+    require(digest(old_config) == row['config_sha256'] and digest(values) == row['variables_sha256'],
+            'original edge authority required')
+    require(digest({name: hashlib.sha256((work / name).read_bytes()).hexdigest()
+                    for name in ('main.tf', 'variables.tf', '.terraform.lock.hcl')}) == row['module_sha256'],
+            'original route module required')
+    candidate = read_private(work / 'candidate.json')
+    require(candidate == {**values, 'routes': {**values.get('routes', {}), request['application_id']: checked_request(request)}},
+            'original route candidate required')
+    command = lambda *args: native(['terraform', '-chdir=' + str(work), *args])
+    plan = json.loads(command('show', '-json', str(work / 'plan')))
+    creates = validate_plan(plan, request, values)
+    state = read_private(config['state_file']); identities = owned(state)
+    require(state['lineage'] == old_config['state_lineage'] and set(identities) == set(old_config['owned_resources']) | creates
+            and all(identities[k] == v for k, v in old_config['owned_resources'].items()), 'incomplete applied route')
+    updated_config = {**old_config, 'owned_resources': identities}
+    require(config in (old_config, updated_config) and read_private(config['variables_file']) in (values, candidate),
+            'edge authority changed since interrupted apply')
+    result = output_route(state, request, candidate)
+    # Terraform refresh is read-only here. A partial apply or actual cloud drift
+    # remains an operator repair; never replay the original stale apply plan.
+    command('plan', '-input=false', '-lock-timeout=5s', '-var-file=' + str(work / 'candidate.json'),
+            '-out=' + str(work / 'recovery-plan'))
+    observed = json.loads(command('show', '-json', str(work / 'recovery-plan')))
+    require(not observed.get('errored') and all(item['change']['actions'] == ['no-op']
+            or item.get('mode') == 'data' and item['change']['actions'] == ['read']
+            for item in observed.get('resource_changes', []))
+            and all(change['actions'] == ['no-op'] for change in observed.get('output_changes', {}).values()),
+            'interrupted route still requires cloud reconciliation')
+    require(read_private(config['state_file']) == state and config_at(config_path) == config,
+            'edge changed during recovery observation')
+    durable_write(config['variables_file'], encoded(candidate))
+    durable_write(config_path, encoded(updated_config))
+    durable_write(journal, encoded({**row, 'phase': 'applied', 'result': result, 'state_sha256_after': digest(state)}))
+    return updated_config
+
+
 def ensure(config_path, request):
+    try:
+        return _ensure(config_path, request)
+    except RouteError:
+        raise
+    except (ValueError, OSError, RuntimeError) as error:
+        raise RouteError('GCP_ROUTE_PREPARATION_FAILED') from error
+
+
+def _ensure(config_path, request):
     route, config = checked_request(request), config_at(config_path)
     with locked(config) as root:
         lifecycle_ready(root)
         require(config_at(config_path) == config, 'authority changed before locking')
         for existing in root.glob('gcp-route-*.json'):
-            require(read_private(existing).get('phase') == 'applied', 'unfinished edge operation requires manual reconciliation')
+            if read_private(existing).get('phase') != 'applied':
+                try:
+                    config = recover(config_path, config, existing)
+                except Exception as error:
+                    raise RouteError('GCP_ROUTE_RECONCILE_REQUIRED', unknown=True) from error
         state, values = bound_state(config), read_private(config['variables_file'])
         routes = values.get('routes', {})
         require(isinstance(routes, dict), 'route map required')
@@ -261,6 +329,7 @@ def ensure(config_path, request):
             durable_write(work / name, raw)
         durable_write(work / 'backend.tf.json', encoded({'terraform': {'backend': {'local': {'path': config['state_file']}}}}))
         durable_write(work / 'candidate.json', encoded(candidate))
+        durable_write(work / 'before.json', encoded({'config': config, 'values': values}))
         command = lambda *args: native(['terraform', '-chdir=' + str(work), *args])
         command('init', '-input=false', '-lockfile=readonly')
         command('plan', '-input=false', '-lock=true', '-var-file=' + str(work / 'candidate.json'), '-out=' + str(work / 'plan'))
@@ -276,7 +345,9 @@ def ensure(config_path, request):
             require(hashlib.sha256((work / 'plan').read_bytes()).hexdigest() == row['plan_sha256'] and
                     digest({name: hashlib.sha256((work / name).read_bytes()).hexdigest() for name in files}) == module_sha,
                     'saved plan or copied module changed before apply')
-            command('apply', '-input=false', str(work / 'plan'))
+            # Native GCP URL map/firewall operations routinely exceed 110 seconds.
+            # Keep this below the route executor's 30-minute deadline.
+            native(['terraform', '-chdir=' + str(work), 'apply', '-input=false', str(work / 'plan')], timeout=900)
             after = read_private(config['state_file']); identities = owned(after)
             require(after['lineage'] == config['state_lineage'] and set(identities) == set(config['owned_resources']) | creates and
                     all(identities[k] == v for k, v in config['owned_resources'].items()), 'applied state ownership mismatch')
@@ -287,9 +358,11 @@ def ensure(config_path, request):
             durable_write(config_path, encoded({**config, 'owned_resources': identities}))
             durable_write(journal, encoded({**row, 'phase': 'applied', 'result': result, 'state_sha256_after': digest(after)}))
             return result
-        except Exception:
-            durable_write(journal, encoded({**row, 'phase': 'unknown'}))
-            raise
+        except Exception as error:
+            timed_out = isinstance(error.__cause__, subprocess.TimeoutExpired)
+            code = 'GCP_ROUTE_APPLY_TIMEOUT' if timed_out else 'GCP_ROUTE_APPLY_INCOMPLETE'
+            durable_write(journal, encoded({**row, 'phase': 'unknown', 'error': {'code': code}}))
+            raise RouteError(code, unknown=True) from error
 
 
 execute = ensure

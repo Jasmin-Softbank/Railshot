@@ -1518,3 +1518,31 @@ test('restart reobserves published customer CD through the read-only adapter, wi
     assert.equal(applies, 1); assert.equal(observations, 1); assert.equal(f.submissions.length, 1);
   } finally { await restarted.close(); }
 });
+
+test('missing CD observation preserves the route failure and the owner can resume its published image', async t => {
+  const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+  const deliver = f.adapter.deployPublished;
+  let applies = 0;
+  f.adapter.deployPublished = async () => { applies++; throw new EnvironmentError('GCP_ROUTE_APPLY_TIMEOUT', 502, true); };
+  const accepted = await f.product.createDeployment(applicationSource('gcp-recover'), 'gcp-recover', undefined, owner);
+  const first = await settle(() => f.product.getDeployment(accepted.id, owner));
+  assert.equal(first.error.code, 'GCP_ROUTE_APPLY_TIMEOUT');
+  await f.product.close();
+  f.adapter.observePublished = async () => ({ cd: { state: 'blocked', deployed: false, revision: null },
+    public_http: { state: 'not_run', url: null, verified_at: null }, error: { code: 'DEPLOYMENT_NOT_FOUND' } });
+  const product = await createProductService(f.options);
+  try {
+    const blocked = await settle(() => product.getDeployment(accepted.id, owner), row => row.status === 'blocked');
+    assert.equal(blocked.error.code, 'GCP_ROUTE_APPLY_TIMEOUT');
+    assert.equal(blocked.error.request_id, first.error.request_id);
+    assert.match(blocked.error.message, /GCP 로드밸런서/);
+    assert.equal(blocked.cd.observation.error.code, 'DEPLOYMENT_NOT_FOUND');
+    assert.equal(applies, 1);
+    f.adapter.deployPublished = deliver;
+    await product.resumeDeployment(accepted.id, owner);
+    const done = await settle(() => product.getDeployment(accepted.id, owner), row => row.status === 'succeeded');
+    assert.equal(done.ci.run_id, first.ci.run_id);
+    assert.deepEqual(done.ci.images, first.ci.images);
+    assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1);
+  } finally { await product.close(); }
+});
