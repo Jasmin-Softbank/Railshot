@@ -46,7 +46,7 @@
             "containers": [
               {
                 "name": "dashboard",
-                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:35efe724ec5ded24387465e32684d12929c4ce98d928ce143d7b24fee3a9d034",
+                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:9fcf14ed14b936fc0548fe6b832b8705c1382c8309bb18b7fd064287283fec87",
                 "ports": [
                   {
                     "name": "http",
@@ -141,6 +141,27 @@
       }
     },
     {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "railshot-mcp",
+        "namespace": "railshot-system"
+      },
+      "spec": {
+        "type": "ClusterIP",
+        "selector": {
+          "app": "railshot-mcp"
+        },
+        "ports": [
+          {
+            "name": "http",
+            "port": 4185,
+            "targetPort": "http"
+          }
+        ]
+      }
+    },
+    {
       "apiVersion": "apps/v1",
       "kind": "Deployment",
       "metadata": {
@@ -188,7 +209,7 @@
             "initContainers": [
               {
                 "name": "private-config",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:a91d3edcfcfe25f6446ca5469be6a1a21621e5b4b164844822a472936fb2a87b",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:5c2a45faf56329bf3f2a5dadff28c2d9f7299830e01893daf353abe26e985101",
                 "command": [
                   "node",
                   "/app/apps/api/prepare-state.js"
@@ -258,7 +279,7 @@
             "containers": [
               {
                 "name": "api",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:a91d3edcfcfe25f6446ca5469be6a1a21621e5b4b164844822a472936fb2a87b",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:5c2a45faf56329bf3f2a5dadff28c2d9f7299830e01893daf353abe26e985101",
                 "ports": [
                   {
                     "name": "http",
@@ -429,7 +450,7 @@
                   },
                   {
                     "name": "RAILSHOT_POD_TEMPLATE_ID",
-                    "value": "79d5717245fec9fe2687a9cdf75dc08b0b068d69b8694b2c4442bf4d6f4df98b"
+                    "value": "927db906b5572b6db87f96633d3ac2a52605fcc52bde20d7224003b70193f255"
                   }
                 ],
                 "resources": {
@@ -714,7 +735,7 @@
             "containers": [
               {
                 "name": "prepare",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:a91d3edcfcfe25f6446ca5469be6a1a21621e5b4b164844822a472936fb2a87b",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:5c2a45faf56329bf3f2a5dadff28c2d9f7299830e01893daf353abe26e985101",
                 "command": [
                   "node",
                   "/app/apps/api/src/prepare-release.js"
@@ -726,7 +747,7 @@
                   },
                   {
                     "name": "RAILSHOT_DESIRED_TEMPLATE_ID",
-                    "value": "79d5717245fec9fe2687a9cdf75dc08b0b068d69b8694b2c4442bf4d6f4df98b"
+                    "value": "927db906b5572b6db87f96633d3ac2a52605fcc52bde20d7224003b70193f255"
                   }
                 ],
                 "resources": {
