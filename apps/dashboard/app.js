@@ -1076,7 +1076,7 @@ async function loadApplications(more = false) {
     if (applicationsController !== controller) return false;
     if (new Set(rows.map((row) => row.id)).size !== rows.length) throw new Error('앱 ID가 중복된 응답입니다.');
     applications = rows; applicationPageEnds = pageEnds;
-    message.textContent = applications.length ? `${rows.length}개 앱 · 이 세션의 현재 서비스와 최근 배포 시도를 구분해 표시합니다.` : '아직 이 세션에 등록된 앱이 없습니다.';
+    message.textContent = applications.length ? `${rows.length}개 앱 · 최근 등록순 · 이 세션의 현재 서비스와 최근 배포 시도를 구분해 표시합니다.` : '아직 이 세션에 등록된 앱이 없습니다.';
     return true;
   } catch (cause) {
     if (applicationsController === controller) message.textContent = `앱 목록 조회 실패: ${cause.message} 앱 새로고침을 눌러 다시 확인하세요.`;
@@ -1349,7 +1349,7 @@ async function initializeDashboard() {
     if (!Object.hasOwn(views, saved.view)) savePreferences({ view: 'deploy' });
     await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError)]);
     renderLifecycleOperation();
-    if (lifecycle.operation?.id) refreshLifecycleOperation();
+    if (lifecycle.operation?.id || lifecycle.operation?.plan_id) refreshLifecycleOperation();
     if (history.length) { current = history[0]; ciSnapshot = null; ciReadError = false; renderRun(); refreshRun(); }
     if (!views.monitor.hidden || !views.deploy.hidden) loadEnvironments();
   } catch (cause) {
