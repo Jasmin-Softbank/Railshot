@@ -72,6 +72,8 @@ async function fixture(t) {
     }
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'],
       '/src/api.js': ['src/api.js', 'text/javascript'], '/src/openstack-installer.js': ['src/openstack-installer.js', 'text/javascript'],
+      '/src/deployment-history.js': ['src/deployment-history.js', 'text/javascript'],
+      '/src/recovery.js': ['src/recovery.js', 'text/javascript'],
       '/src/lifecycle.js': ['src/lifecycle.js', 'text/javascript'],
       '/contracts/application.mjs': ['../../contracts/application.mjs', 'text/javascript'] };
     if (!files[path]) return send(response, 404, { error: 'Fixture path unavailable' });
@@ -159,6 +161,7 @@ test('session app controls stop and resume through fresh plans; native dialog ca
 test('running deployment trash requires a second permanent-delete click and shows shared resources retained', { timeout: 45000 }, async (t) => {
   const { state, page } = await fixture(t);
   const history = page.locator('#history-list');
+  for (const summary of await history.locator('.dh-card-extra > summary').all()) await summary.click();
   assert.match(await history.innerText(), /앱 관리 ID.*자동 삭제를 지원하지/);
   await history.getByRole('button', { name: /^building-app 삭제/ }).click();
   await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);

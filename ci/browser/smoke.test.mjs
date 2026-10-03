@@ -182,6 +182,7 @@ test('application detail keeps update and lifecycle controls while active deploy
   await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
   assert.equal(await page.locator('#applications-list > li').count(), 1);
   const trash = page.locator('#history-list').getByRole('button', { name: /^building-app 삭제/ });
+  await page.locator('#history-list .dh-card').filter({ hasText: 'building-app' }).locator('summary').click();
   await trash.click();
   await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
   assert.match(await page.locator('#lifecycle-description').innerText(), /데이터도 영구 삭제.*진행 중인 배포/);
@@ -209,6 +210,7 @@ test('application detail keeps update and lifecycle controls while active deploy
   await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('실행 중'));
   assert.equal(writes.length, 1); assert.equal(writes[0].action, 'stop');
   assert.equal(await page.locator('#application-update').isDisabled(), true);
+  await page.locator('#history-list .dh-card').filter({ hasText: 'building-app' }).locator('summary').click();
   assert.equal(await page.locator('#history-list').getByRole('button', { name: /^building-app 삭제/ }).isDisabled(), true);
   assert.deepEqual(errors, []);
 });
@@ -669,6 +671,8 @@ test('browser shows unknown slot release after the real default 60 seconds witho
   await page.locator('[data-view="history"]').click();
   await page.locator('#history-refresh').click();
   await page.getByRole('button', { name: 'alpha-queue 실행 상세·작업 로그', exact: true }).click();
+  await page.locator('.dh-issue-trigger').click();
+  await page.getByRole('button', { name: '로그 전체 보기', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#monitor-message').textContent.includes('다른 앱의 실행을 허용'));
   assert.equal(await page.locator('#monitor-state').innerText(), '실행 결과 확인 필요');
   assert.match(await page.locator('#monitor-message').innerText(), /자동으로 재실행하지 않습니다/);

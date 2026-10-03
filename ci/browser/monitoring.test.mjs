@@ -51,6 +51,8 @@ test('monitor follows the bound Actions run and keeps long console output scroll
   await page.goto(origin);
   await page.locator('[data-view="history"]').click();
   await page.getByRole('button', { name: /sample-app.*상세/ }).click();
+  assert.equal(await page.locator('.dh-log-layout').count(), 0);
+  await page.getByRole('button', { name: '작업 로그', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#monitor-ci-status')?.textContent.includes('Actions #4242 · 확인'));
   assert.match(await page.locator('#monitor-steps').innerText(), /검증 이미지 게시\s+진행 중/);
   assert.match(await page.locator('#monitor-steps').innerText(), /Verify bundle and publish tested images/);
@@ -103,6 +105,11 @@ test('failed deployment shows exact checks, escaped evidence and a persisted cla
   const page = await context.newPage(), errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin); await page.locator('[data-view="history"]').click();
   await page.getByRole('button', { name: /diagnostic-demo.*상세/ }).click();
+  await page.locator('.dh-issue-trigger').click();
+  await page.locator('.dh-stage-detail').waitFor();
+  assert.match(await page.locator('.dh-code').innerText(), /TS2322/);
+  assert.equal(await page.locator('.dh-code script').count(), 0);
+  await page.getByRole('button', { name: '로그 전체 보기', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#diagnostic-state')?.textContent.includes('연결된 진단'));
   assert.equal(calls, 0); assert.equal(await page.locator('#diagnostic-excerpt script').count(), 0);
   assert.match(await page.locator('#diagnostic-checks').innerText(), /L3 · 실행하지 않음/);

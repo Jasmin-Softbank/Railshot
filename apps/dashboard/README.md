@@ -64,3 +64,49 @@ The update workflow uses pinned [Basecoat 1.0.2](https://basecoatui.com/installa
 `node apps/dashboard/sync-design-system.mjs` bundles the official component stylesheet into `styles.css`, scoped to `.update-mode`. Global Tailwind property definitions are preserved; root tokens are rebound to the scope root. The production build checks the bundle against the pinned npm package. This serves the same CSS through the API's existing raw dashboard and Vite without adding backend routes. The MIT notices remain embedded in the distributed CSS.
 
 The app and last verified service are fixed context. Source, review and execution are exclusive stages. The review workspace separates file changes from the execution summary; destructive file removal is explicit but not a large warning banner. Full URLs, commits and expiry timestamps live in details. Expiry disables dispatch and offers re-review. An uncertain start retries the same preview and locks source editing. No-change completion and explicit rebuild retain their server semantics.
+
+## 배포 이력 화면과 선택형 응답 (프런트엔드 우선 구현)
+
+첨부 디자인 `8_mockup_deploy_history.html`을 기준으로 카드형 목록, 날짜·상태·앱 이름 필터,
+접속정보, 배포 이력 표, 단계별 로그 화면을 구성했습니다. 목록의 필터는 현재 서버 페이지에만
+적용됩니다. 상세의 이력 표도 현재 불러온 동일 앱·동일 환경 기록만 표시합니다.
+`현재` 표시는 앱 API의 검증된 `current_deployment`와 일치할 때만 나타납니다.
+기존 앱 관리·소스 다운로드는 카드의 `배포 관리`와 기존 앱 목록에 유지합니다.
+오류 없는 배포는 파이프라인을 표시하지 않습니다. 오류가 있는 이력 행은 상태 옆에 오른쪽 화살표를 표시하며, 행을 선택하면 해당 실행의 파이프라인·오류 사유로 수평 전환합니다. 돌아가기는 원래 행으로 초점을 복원합니다. 전환은 240ms이며 키보드로 열 때는 즉시, 동작 줄이기 설정에서는 위치 이동 없이 표시합니다.
+수집되지 않은 상태·이미지·주소·단계 로그는 추정하여 채우지 않습니다.
+
+화면과 백엔드의 경계는 `src/deployment-history.js`의 `createHistoryDetail`입니다.
+기존 조회 API만 사용하며, 새 응답 API의 경로는 아직 가정하지 않습니다.
+API 서버의 변경은 프런트엔드 JS 파일 2개의 정적 제공 경로 추가뿐입니다.
+`recovery.load`와 `recovery.submit`이 연결되지 않은 운영 화면에서는 해결 질문을 생성하거나
+응답을 보내지 않습니다. 파이프라인의 AI 호출·자동 수정·재시도는 변경하지 않았습니다.
+
+백엔드 확정 후 다음 두 함수를 주입하면 됩니다. 아래는 **프런트엔드 내부 규격 제안**이며
+구현된 서버 명세가 아닙니다. 실제 서버 응답의 변환은 이 연결 부분에서 수행합니다.
+
+- `load(deployment, { signal })`: 질문 또는 `null`을 반환합니다. 질문에는 `id`,
+  `deployment_id`, `revision`, `expires_at`, `stage` (`build/environment/deploy`),
+  `summary` (원인 한 줄 요약), `prompt`, `evidence: [{ label, text }]`, `options`가 필요합니다.
+- 각 선택지는 `{ id, label, description?, fields: [...] }`입니다. 후속동작은 하나만 선택합니다.
+  각 추가 입력은 `{ id, label, type, required, sensitive?, choices? }`입니다.
+  `type`은 `single_select`, `multi_select`, `text`, `text_list`를 지원합니다.
+  선택 항목은 `choices: [{ id, label }]`로 제공합니다. 민감한 문장은 `sensitive: true`로 가립니다.
+- `submit(answer)`: `{ deployment_id, question_id, revision, option_id, values }`를 받습니다.
+  해당 선택지의 값만 전달하며, 접수 응답은 `{ status: 'accepted', question_id, revision }`입니다.
+  접수 성공은 배포 재개 성공을 의미하지 않습니다. 같은 질문·버전의 중복 전송은 화면에서 막습니다.
+  전송 결과가 불명확하면 자동 재전송하지 않고 상태 재조회를 안내합니다.
+
+필수값·허용 선택지·만료·질문 버전·배포 식별자를 화면에서 확인합니다.
+서버에서도 동일한 검증과 권한 검사·중복 방지를 반드시 구현해야 합니다.
+응답 입력값은 브라우저 저장소에 저장하지 않으며 화면 이동 시 폐기합니다.
+새로고침 이후의 질문 복원·기접수 여부 확인은 서버의 조회 계약이 확정된 뒤 연결해야 합니다.
+
+### 디자인 및 입력 동작 미리보기
+
+`npm run dev` 후 `http://127.0.0.1:4181/preview/history.html`을 여세요.
+`auth-service` 카드에서 네 가지 추가 입력과 선택지 전환을 확인할 수 있습니다.
+미리보기는 예시 데이터로만 동작하며 실제 배포·응답 전송을 하지 않습니다.
+미리보기 파일은 운영 진입점에서 가져오지 않으며 기본 Vite 빌드에 포함되지 않습니다.
+
+검증: `npm run build` 및 기존 `ci/browser` 패키지의 `deployment-history.test.mjs`.
+`RAILSHOT_HISTORY_SCREENSHOTS`에 경로를 지정하면 목록·실패 상세의 데스크톱/모바일 이미지를 저장합니다.
