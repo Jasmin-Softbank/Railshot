@@ -10,6 +10,7 @@ import { createProductStore } from '../src/product-store.js';
 import { createAppServer } from '../src/server.js';
 import { createApplicationAdapter } from '../src/applications.js';
 import { EnvironmentError } from '../src/environments.js';
+import { SubmissionError } from '../src/github.js';
 import { fetchPublicGithubSource } from '../src/public-github.js';
 
 function diskState(directory) {
@@ -1363,4 +1364,33 @@ test('other blocked or uncertain registration failures never gain the preflight 
       { code: 'APPLICATION_RECONCILE_REQUIRED' });
     assert.equal(calls, 1); assert.equal(f.submissions.length, 0); assert.equal(f.deliveries.length, 0);
   });
+});
+
+test('application submission preserves safe phase diagnostics and only blocks admission for uncertain dispatch', async (t) => {
+  const logs = [];
+  t.mock.method(console, 'error', (line) => logs.push(JSON.parse(line)));
+  for (const phase of ['source_tree', 'ci_dispatch']) {
+    const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+    let calls = 0;
+    f.service.deploy = async () => { calls++; throw new SubmissionError(phase, Object.assign(new Error('private upstream secret'), { upstreamStatus: 504 })); };
+    const request = applicationSource('Memos');
+    const first = await f.product.createDeployment(request, 'submission-diagnostic', null, owner);
+    const result = await settle(() => f.product.getDeployment(first.id, owner));
+    const unknown = phase === 'ci_dispatch';
+    assert.equal(result.status, unknown ? 'unknown' : 'failed');
+    assert.equal(result.error.code, unknown ? 'CI_DISPATCH_UNCONFIRMED' : 'SOURCE_REGISTRATION_FAILED');
+    assert.equal(result.error.phase, phase);
+    assert.equal(result.error.upstream_status, 504);
+    assert.equal(result.error.outcome_unknown, unknown);
+    assert.match(result.error.message, /GitHub HTTP 504/);
+    assert.ok(!JSON.stringify(result).includes('private upstream secret'));
+    assert.ok(logs.some((row) => row.operation_id === first.id && row.request_id === result.error.request_id && row.phase === phase));
+    assert.equal((await f.product.createDeployment(request, 'submission-diagnostic', null, owner)).id, first.id);
+    assert.equal(calls, 1);
+    if (unknown) await assert.rejects(f.product.createDeployment(applicationSource('Other'), 'another-request', null, owner), { code: 'EXECUTOR_BUSY' });
+    else {
+      const next = await f.product.createDeployment(applicationSource('Other'), 'another-request', null, owner);
+      assert.equal((await settle(() => f.product.getDeployment(next.id, owner))).status, 'failed');
+    }
+  }
 });

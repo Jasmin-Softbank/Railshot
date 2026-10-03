@@ -63,6 +63,20 @@ export class ServiceError extends Error {
   constructor(message, status = 500, code) { super(message); Object.assign(this, { status, code }); }
 }
 
+export class SubmissionError extends ServiceError {
+  constructor(phase, cause) {
+    const labels = { source_lookup: '소스 저장소 조회', source_upload: '소스 파일 업로드',
+      source_tree: '소스 파일 목록 등록', source_commit: '소스 커밋 생성', source_ref: '소스 브랜치 반영', ci_dispatch: 'CI 실행 접수' };
+    const upstreamStatus = Number.isInteger(cause?.upstreamStatus) ? cause.upstreamStatus : null;
+    const reason = cause?.name === 'TimeoutError' ? 'timeout' : 'upstream_failure';
+    const detail = upstreamStatus ? `GitHub HTTP ${upstreamStatus}` : reason === 'timeout' ? 'GitHub 응답 시간 초과' : 'GitHub 통신 오류';
+    const unknown = phase === 'ci_dispatch';
+    super(`${labels[phase]} 중 ${detail}가 발생했습니다. ${unknown ? 'CI가 실행됐을 수 있어 결과 확인 전 재요청하지 마세요.' : 'CI 실행은 아직 요청하지 않았습니다.'}`,
+      502, unknown ? 'CI_DISPATCH_UNCONFIRMED' : 'SOURCE_REGISTRATION_FAILED');
+    Object.assign(this, { phase, upstream_status: upstreamStatus, reason, outcomeUnknown: unknown });
+  }
+}
+
 export function createDeploymentService(config, fetchImpl = fetch) {
   const { token, owner = 'Jasmin-Softbank', repo = 'railshot-apps', ref = 'main', tenant = 'demo', workflow = 'railshot-deploy.yml', targetId } = config;
   if (!token) throw new Error('GITHUB_TOKEN을 설정하세요.');
@@ -92,7 +106,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       },
     });
     if (!response.ok) {
-      throw new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502);
+      throw Object.assign(new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502), { upstreamStatus: response.status });
     }
     if (response.status === 204) return {};
     if (maxBytes === 0) {
@@ -187,62 +201,74 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     permittedTarget(target_id);
     const acceptedFiles = validateFiles(files);
     const prefix = `apps/${tenant}/${app}`;
-    const branch = await request(`${repoPath}/git/ref/heads/${encodeURIComponent(ref)}`);
-    const parent = branch.object.sha;
-    if (!SOURCE_COMMIT.test(parent)) throw new ServiceError('소스 commit SHA를 확인하지 못했습니다.', 502);
-    let sourceCommit = parent;
-    const base = await request(`${repoPath}/git/commits/${parent}`);
-    const existing = await findAppTree(base.tree.sha, app);
-    const previous = new Map(existing?.map((item) => [item.path, item]) || []);
-    const changes = { added: 0, updated: 0, deleted: 0, unchanged: 0 };
-    const treeEntries = [];
-    for (const file of acceptedFiles) {
-      const before = previous.get(file.path);
-      let sha = blobSha(file.content);
-      if (!before) changes.added++;
-      else if (before.sha !== sha || before.mode !== '100644' || before.type !== 'blob') changes.updated++;
-      else changes.unchanged++;
-      if (before?.sha !== sha || before.type !== 'blob') {
-        const blob = await request(`${repoPath}/git/blobs`, {
-          method: 'POST',
-          body: JSON.stringify({ content: file.content.toString('base64'), encoding: 'base64' }),
-        });
-        sha = blob.sha;
+    let phase = 'source_lookup';
+    try {
+      const branch = await request(`${repoPath}/git/ref/heads/${encodeURIComponent(ref)}`);
+      const parent = branch.object.sha;
+      if (!SOURCE_COMMIT.test(parent)) throw new ServiceError('소스 commit SHA를 확인하지 못했습니다.', 502);
+      let sourceCommit = parent;
+      const base = await request(`${repoPath}/git/commits/${parent}`);
+      const existing = await findAppTree(base.tree.sha, app);
+      const previous = new Map(existing?.map((item) => [item.path, item]) || []);
+      const changes = { added: 0, updated: 0, deleted: 0, unchanged: 0 };
+      const treeEntries = [];
+      phase = 'source_upload';
+      for (const file of acceptedFiles) {
+        const before = previous.get(file.path);
+        let sha = blobSha(file.content);
+        if (!before) changes.added++;
+        else if (before.sha !== sha || before.mode !== '100644' || before.type !== 'blob') changes.updated++;
+        else changes.unchanged++;
+        if (before?.sha !== sha || before.type !== 'blob') {
+          const blob = await request(`${repoPath}/git/blobs`, {
+            method: 'POST',
+            body: JSON.stringify({ content: file.content.toString('base64'), encoding: 'base64' }),
+          });
+          sha = blob.sha;
+        }
+        treeEntries.push({ path: file.path, mode: '100644', type: 'blob', sha });
       }
-      treeEntries.push({ path: file.path, mode: '100644', type: 'blob', sha });
-    }
-    const incomingPaths = new Set(acceptedFiles.map((file) => file.path));
-    changes.deleted = [...previous.keys()].filter((path) => !incomingPaths.has(path)).length;
-    if (changes.added || changes.updated || changes.deleted) {
-      // Replace only this app's tree; absent paths disappear, while other apps stay on base_tree.
-      const appTree = await request(`${repoPath}/git/trees`, {
-        method: 'POST', body: JSON.stringify({ tree: treeEntries }),
+      const incomingPaths = new Set(acceptedFiles.map((file) => file.path));
+      changes.deleted = [...previous.keys()].filter((path) => !incomingPaths.has(path)).length;
+      if (changes.added || changes.updated || changes.deleted) {
+        phase = 'source_tree';
+        // Replace only this app's tree; absent paths disappear, while other apps stay on base_tree.
+        // ponytail: cap each GitHub tree write at 100 entries; large flat trees can return 504.
+        let appTree;
+        for (let offset = 0; offset < treeEntries.length; offset += 100) {
+          appTree = await request(`${repoPath}/git/trees`, {
+            method: 'POST', body: JSON.stringify({ ...(appTree ? { base_tree: appTree.sha } : {}), tree: treeEntries.slice(offset, offset + 100) }),
+          });
+        }
+        const tree = await request(`${repoPath}/git/trees`, {
+          method: 'POST', body: JSON.stringify({ base_tree: base.tree.sha, tree: [
+            { path: prefix, mode: '040000', type: 'tree', sha: appTree.sha },
+          ] }),
+        });
+        phase = 'source_commit';
+        const commit = await request(`${repoPath}/git/commits`, {
+          method: 'POST',
+          body: JSON.stringify({ message: `${existing ? 'fix: update' : 'feat: add'} ${tenant}/${app} via entrypoints PoC${source?.type === 'github' ? `\n\nSource: ${source.repository}@${source.sha}` : ''}`, tree: tree.sha, parents: [parent] }),
+        });
+        if (!SOURCE_COMMIT.test(commit.sha)) throw new ServiceError('등록된 commit SHA를 확인하지 못했습니다.', 502);
+        sourceCommit = commit.sha;
+        phase = 'source_ref';
+        await request(`${repoPath}/git/refs/heads/${encodeURIComponent(ref)}`, {
+          method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
+        });
+      }
+      phase = 'ci_dispatch';
+      const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
+        method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id } }),
       });
-      const tree = await request(`${repoPath}/git/trees`, {
-        method: 'POST', body: JSON.stringify({ base_tree: base.tree.sha, tree: [
-          { path: prefix, mode: '040000', type: 'tree', sha: appTree.sha },
-        ] }),
-      });
-      const commit = await request(`${repoPath}/git/commits`, {
-        method: 'POST',
-        body: JSON.stringify({ message: `${existing ? 'fix: update' : 'feat: add'} ${tenant}/${app} via entrypoints PoC${source?.type === 'github' ? `\n\nSource: ${source.repository}@${source.sha}` : ''}`, tree: tree.sha, parents: [parent] }),
-      });
-      if (!SOURCE_COMMIT.test(commit.sha)) throw new ServiceError('등록된 commit SHA를 확인하지 못했습니다.', 502);
-      sourceCommit = commit.sha;
-      await request(`${repoPath}/git/refs/heads/${encodeURIComponent(ref)}`, {
-        method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
-      });
-    }
-    const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
-      method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id } }),
-    });
-    if (!dispatched.workflow_run_id) {
-      throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
-    }
-    return {
-      run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id, state: 'queued', changes, ...(source ? { source } : {}),
-      actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
-    };
+      if (!dispatched.workflow_run_id) {
+        throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
+      }
+      return {
+        run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id, state: 'queued', changes, ...(source ? { source } : {}),
+        actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
+      };
+    } catch (error) { throw new SubmissionError(phase, error); }
   }
 
   async function status(runId, expectedTargetId = targetId) {
