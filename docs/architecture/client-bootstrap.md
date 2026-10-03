@@ -6,7 +6,19 @@
 
 Ubuntu 24.04, root, Python 3.12를 초기 지원 대상으로 합니다. OpenStack 명령 실행은 고객 노드에서만 수행하며 상시 작업 수신 에이전트와 서버 구현은 포함하지 않습니다. 기존 PostgreSQL 구축 기능은 별개입니다. 실제 고객 환경 연결은 아직 검증하지 않았습니다.
 
-배포 패키지에는 저장소의 `deployment/bootstrap/`와 `infrastructure/providers/openstack/`를 같은 상대 위치로 포함해야 합니다. 단일 install.sh만 다운로드하면 실행되지 않습니다. 운영 배포 URL과 서명 배포 체계는 제공되지 않았으므로 `curl | bash` 형태의 공개 설치 명령은 아직 제공하지 않습니다. 관리자는 검증한 배포 패키지를 고객 노드에 풀어 다음처럼 한 줄로 실행할 수 있습니다.
+설치 진입점과 Python 파일을 같은 HTTPS 배포 루트에 저장소 상대 경로 그대로 배포합니다. 필요한 경로는 `deployment/bootstrap/`, `infrastructure/providers/openstack/`, `apps/agent/`이며, 정확한 23개 파일 목록은 `install.sh`의 `required_files` 배열에 고정되어 있습니다. 단독으로 다운로드한 `install.sh`는 `--download-base-url` 또는 `JASMIN_DOWNLOAD_BASE_URL`을 받아 나머지 파일을 내려받습니다. 두 가지를 모두 지정하면 명령행 옵션을 우선합니다. 배포 주소는 실제 운영 주소가 아직 제공되지 않았으므로 기본값이 없습니다.
+
+아래는 **root 셸**에서 실행하는 한 줄 예시입니다. `https://downloads.example.org/jasmin/releases/RELEASE`를 실제 승인된 버전별 배포 루트로 바꾸십시오. 다운로드에 `curl`이 필요하며 설정 파일은 미리 준비해야 합니다.
+
+```sh
+(set -eu; base='https://downloads.example.org/jasmin/releases/RELEASE'; entry=$(mktemp); trap 'rm -f -- "$entry"' EXIT; test "$(curl --disable --fail --show-error --silent --proto '=https' --connect-timeout 15 --max-time 120 --max-redirs 0 --output "$entry" --write-out '%{http_code}' "$base/deployment/bootstrap/install.sh")" = 200; bash "$entry" --download-base-url "$base" --install-dependencies init --config /etc/jasmin-install/config.json)
+```
+
+이미 받은 단독 진입점에는 `sudo bash ./install.sh --download-base-url https://downloads.example.org/jasmin/releases/RELEASE init --config /etc/jasmin-install/config.json` 형태로 주소를 지정할 수 있습니다. URL을 지정하면 로컬 파일과 섞지 않고 같은 배포 루트에서 모든 필수 파일을 받습니다. HTTPS 인증서 검증을 유지하고 리다이렉트는 거부하며 HTTP 200 응답만 받습니다. 전체 다운로드가 성공하기 전에는 Python이나 패키지 설치 명령을 실행하지 않습니다. 실패·종료 시 임시 다운로드 디렉터리를 제거하며 개발용 `--source-run`도 동일하게 정리합니다.
+
+공급하는 파일은 변경 불가능한 버전별 경로로 묶어 배포하십시오. 현재 다운로드는 HTTPS 서버 신뢰에 의존하며, 별도 서명이나 사전에 신뢰한 해시로 배포본을 검증하는 기능은 없습니다. 기존 설치의 파일 해시 검사는 설치 이후 변조·버전 차이 확인용입니다. 다운로드 설치는 위 23개 실행 필수 파일만 포함합니다. 전체 저장소에서 설치한 배포본은 다른 구성요소까지 포함할 수 있으므로, 두 설치 방식 간 파일 목록이 다르면 기존 보호 정책에 따라 재설치를 중단합니다. 설치 방식이나 버전을 바꿀 때 기존 디렉터리를 자동으로 덮어쓰지 않습니다.
+
+완전한 로컬 배포 패키지는 URL 없이 기존 방식으로 실행합니다. 파일이 빠져 있고 다운로드 주소도 없으면 누락 경로와 주소 지정 안내를 출력하고 중단합니다.
 
 ```sh
 sudo bash deployment/bootstrap/install.sh --install-dependencies init --config /etc/jasmin-install/config.json
