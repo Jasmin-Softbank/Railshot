@@ -50,6 +50,15 @@ jobs:
           RAILSHOT_RUNNER_NAME: config-check-only
           RAILSHOT_RUNNER_TOKEN_FILE: /tmp/railshot-registration-token-not-installed
         run: docker compose -f ci/runner-compose.yml config --quiet
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.component == 'mcp'
+        with:
+          node-version: '22'
+      - name: Verify MCP deployment submission and status lookup
+        if: matrix.component == 'mcp'
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --workspace=apps/agent --include-workspace-root=false
+          npm test --workspace @railshot/agent
       - name: Build without credentials
         env:
           COMPONENT: ${{ matrix.component }}

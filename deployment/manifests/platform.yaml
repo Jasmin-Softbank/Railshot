@@ -49,6 +49,67 @@ spec:
 ---
 apiVersion: apps/v1
 kind: Deployment
+metadata: {name: railshot-mcp, namespace: railshot-system}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: railshot-mcp}}
+  template:
+    metadata: {labels: {app: railshot-mcp, railshot.io/api-client: 'true'}}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {kubernetes.io/arch: amd64, railshot.io/node-role: platform}
+      imagePullSecrets: [{name: ghcr-pull}]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mcp
+          image: BUILD_REQUIRED/mcp
+          command: [node, src/remote-mcp.js]
+          ports: [{name: http, containerPort: 4185}]
+          env:
+            - {name: RAILSHOT_API_URL, value: 'http://railshot-api:4173'}
+            - {name: RAILSHOT_PUBLIC_ORIGIN, value: 'https://railshot.io'}
+            - {name: RAILSHOT_API_TOKEN_FILE, value: /run/secrets/api/token}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: api-token, mountPath: /run/secrets/api, readOnly: true}
+          readinessProbe: {httpGet: {path: /healthz, port: http}}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, initialDelaySeconds: 10}
+      volumes:
+        - name: api-token
+          secret: {secretName: railshot-api, defaultMode: 288}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: railshot-mcp, namespace: railshot-system}
+spec:
+  type: ClusterIP
+  selector: {app: railshot-mcp}
+  ports: [{name: http, port: 4185, targetPort: http}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: railshot-mcp-private, namespace: railshot-system}
+spec:
+  podSelector: {matchLabels: {app: railshot-mcp}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: railshot-dashboard}}
+      ports: [{port: 4185, protocol: TCP}]
+---
+apiVersion: apps/v1
+kind: Deployment
 metadata: {name: railshot-api, namespace: railshot-system}
 spec:
   replicas: 1
