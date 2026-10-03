@@ -1,4 +1,4 @@
-import { sourceAppName } from '../../contracts/application.mjs';
+import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from '../../contracts/application.mjs';
 
 const views = {
   deploy: document.querySelector('#deploy-view'),
@@ -36,6 +36,7 @@ document.querySelector('.brand').addEventListener('click', (event) => {
 const archive = document.querySelector('#archive');
 const folder = document.querySelector('#folder');
 const repositoryUrl = document.querySelector('#repository-url');
+const applicationName = document.querySelector('#application-name');
 const selection = document.querySelector('#source-selection');
 const sourceBox = document.querySelector('#source-box');
 const error = document.querySelector('#form-error');
@@ -98,6 +99,7 @@ function setSource(source) {
 
 document.querySelector('#choose-file').addEventListener('click', () => archive.click());
 document.querySelector('#choose-folder').addEventListener('click', () => folder.click());
+applicationName.addEventListener('input', invalidateReview);
 archive.addEventListener('change', () => {
   const file = archive.files[0];
   if (!file) return;
@@ -268,6 +270,8 @@ function appendSource(payload, source) {
 const resourceId = (value) => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value);
 function setUpdateMode(application) {
   updateApplication = application; updatePreviewRequest = null;
+  applicationName.value = '';
+  document.querySelector('#application-name-field').hidden = Boolean(application);
   archive.value = ''; folder.value = ''; repositoryUrl.value = ''; setSource(null);
   document.querySelector('#update-context').hidden = !application;
   document.querySelector('#target-section').hidden = Boolean(application);
@@ -411,7 +415,8 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
     const reviewButton = document.querySelector('#deploy-form button[type="submit"]');
     reviewButton.disabled = true;
     try {
-      app = sourceApplication(source);
+      app = applicationName.value.trim() || sourceApplication(source);
+      if (!APP_NAME.test(app)) throw new Error(APP_NAME_MESSAGE);
       if (profile) {
         if (!profile.create_per_request && profile.application_name && profile.application_name !== app) {
           throw new Error(`선택한 환경은 ${profile.application_name} 앱 전용입니다. ${app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
@@ -425,7 +430,7 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
       if (generation === reviewGeneration) { error.textContent = cause.message; error.hidden = false; }
       return;
     } finally { reviewing = false; reviewButton.disabled = false; }
-    reviewed = { ...selected, source, kind: 'deployments', key: crypto.randomUUID(), plan,
+    reviewed = { ...selected, source, app, kind: 'deployments', key: crypto.randomUUID(), plan,
       targetId: plan?.runtime_target_id || profile?.target_id };
     document.querySelector('#review-source').textContent = source.label;
     document.querySelector('#review-app').textContent = app;
@@ -537,7 +542,7 @@ deployButton.addEventListener('click', async () => {
     if (draft.plan) {
       payload.set('app', draft.plan.name); payload.set('target_id', draft.targetId); payload.set('plan_id', draft.plan.id);
     } else { payload.set('environment', draft.environment); payload.set('provider', draft.provider); }
-    if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (draft.source.files[0].webkitRelativePath || draft.source.files[0].name).split('/')[0]);
+    if (!draft.plan) payload.set('source_name', draft.app);
     appendSource(payload, draft.source);
     draft.attempted = true;
     const { data, location } = await request(`/api/v1/${draft.kind}`, {

@@ -55,6 +55,11 @@
                 <input id="repository-url" type="url" inputmode="url" autocomplete="url" placeholder="https://github.com/owner/repo" />
                 <p class="selection" id="source-selection" role="status" hidden></p>
               </div>
+              <div class="provider-field" id="application-name-field">
+                <label class="field-label" for="application-name">앱 이름 (선택)</label>
+                <input id="application-name" type="text" maxlength="30" autocomplete="off" placeholder="비워두면 저장소·파일 이름으로 자동 지정" aria-describedby="application-name-note" />
+                <p class="field-note" id="application-name-note">같은 이름의 앱이 있으면 다른 이름을 입력하세요. 영문 소문자로 시작하는 3~30자이며 숫자와 하이픈을 사용할 수 있습니다.</p>
+              </div>
             </section>
 
             <section class="form-section" id="target-section" aria-labelledby="target-title">
