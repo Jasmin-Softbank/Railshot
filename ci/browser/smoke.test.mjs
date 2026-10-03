@@ -96,6 +96,7 @@ test('verified app URL is visible in inventory and detail, survives a failed upd
     await page.locator('#applications-refresh').click();
     await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
     assert.equal(await page.locator('#applications-list a, #detail-application-site a').count(), 0);
+    if (app.status === 'deleted') assert.equal(await page.locator('#application-detail').isVisible(), false);
   }
   assert.deepEqual(errors, []);
 });

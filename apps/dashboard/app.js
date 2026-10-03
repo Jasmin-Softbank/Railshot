@@ -1209,6 +1209,10 @@ function renderApplicationActions() {
     else if (current?.kind === 'deployments') holder.append(element('span', '이 배포의 앱 관리 ID를 최신 목록에서 확인하지 못했습니다. 자동 삭제를 지원하지 않습니다.', 'field-note'));
   }
   const detail = applications.find((row) => row.id === applicationDetail?.id);
+  if (!applicationsController && applicationDetail && !detail) {
+    applicationDetail = null;
+    document.querySelector('#application-detail').hidden = true;
+  }
   document.querySelector('#detail-application-site').replaceChildren(...(detail ? [applicationSite(detail)] : []));
   document.querySelector('#detail-application-actions').replaceChildren(...(detail ? [applicationButtons(detail)] : []));
   document.querySelector('#application-update').disabled = !detail || Boolean(updateBlocked({ ...applicationDetail, ...detail }));
