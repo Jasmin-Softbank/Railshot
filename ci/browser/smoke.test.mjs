@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import { chromium } from 'playwright';
 import { createAppServer } from '../../apps/api/src/server.js';
 import { apiAccessConfig } from '../../apps/api/src/access.js';
 import { archiveFromPath } from '../../apps/api/src/client.js';
+import { inspectArchive } from '../../apps/api/src/archive.js';
 
 async function start(t, options) {
   const stateDirectory = await realpath(await mkdtemp(join(tmpdir(), 'railshot-browser-')));
@@ -59,6 +60,188 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   await page.locator('[data-console="app"]').click();
   assert.match(await page.locator('#console-output').innerText(), /실행을 시작/);
   assert.equal(requests.some((request) => request.method === 'POST' && request.path !== '/api/v1/sessions'), false);
+  assert.deepEqual(errors, []);
+});
+
+test('application updates keep app and environment fixed across all source formats, review diffs, and start the frozen preview', { timeout: 90000 }, async (t) => {
+  const { page, origin, errors, stateDirectory } = await start(t, { service: null });
+  const baseline = { id: 'deployed-v1', app: 'stable-app', target_id: 'same-target', status: 'succeeded', source_commit: 'a'.repeat(40) };
+  const application = { id: 'application-1', app: 'stable-app', target_id: 'same-target', status: 'ready', current_deployment_state: 'verified',
+    current_deployment: baseline, latest_deployment: { ...baseline, id: 'failed-v2', status: 'failed' } };
+  const previews = [], uploads = [], starts = []; let failPreview = true, rejectStart = true;
+  const json = (route, data, status = 200, headers = {}) => route.fulfill({ status, contentType: 'application/json', headers, body: JSON.stringify(data) });
+  await page.route('**/api/v1/applications?*', (route) => json(route, { items: [application], next_marker: null }));
+  await page.route('**/api/v1/applications/application-1', (route) => json(route, application));
+  await page.route('**/api/v1/applications/application-1/updates', async (route) => {
+    const request = route.request();
+    const form = await new Request('http://fixture', { method: 'POST', headers: { 'content-type': request.headers()['content-type'] }, body: request.postDataBuffer() }).formData();
+    uploads.push({ key: request.headers()['idempotency-key'], keys: [...form.keys()], repository: form.get('repository_url'), paths: form.get('paths') });
+    if (failPreview) { failPreview = false; return json(route, { error: { message: '미리보기 응답을 확인하지 못했습니다.' } }, 503); }
+    const preview = { id: `preview-${previews.length + 1}`, application_id: application.id, app: application.app, target_id: application.target_id,
+      status: 'preview', base_deployment_id: baseline.id, expires_at: '2099-01-01T00:00:00Z', baseline_kind: previews.length ? 'deployed' : 'submitted',
+      changes: { added: previews.length ? [] : ['<img src=x onerror=alert(1)>.js'], modified: previews.length ? [] : ['index.js'], deleted: previews.length ? [] : ['old.js'], unchanged: 2 },
+      no_changes: previews.length > 0, source_origin: form.has('repository_url') ? { repository: form.get('repository_url'), sha: 'b'.repeat(40) } : null };
+    previews.push(preview); return json(route, preview, 200, { location: `/api/v1/deployments/${preview.id}` });
+  });
+  await page.route('**/api/v1/deployments/preview-*/start', async (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-2), body = route.request().postDataJSON();
+    starts.push({ id, body });
+    if (rejectStart) { rejectStart = false; return json(route, { error: { message: '다른 실행을 확인한 뒤 다시 시작하세요.' } }, 409); }
+    const preview = previews.find((row) => row.id === id);
+    preview.status = preview.no_changes && !body.rebuild ? 'unchanged' : 'succeeded';
+    return json(route, preview.status === 'unchanged' ? preview : { resource_id: id, status: 'accepted' }, preview.status === 'unchanged' ? 200 : 202,
+      { location: `/api/v1/deployments/${id}` });
+  });
+  await page.route('**/api/v1/deployments/preview-*', (route) => json(route, previews.find((row) => row.id === new URL(route.request().url()).pathname.split('/').at(-1))));
+  await page.route('**/api/v1/deployments/deployed-v1/source?variant=deployed', (route) => json(route, { error: { message: '이전 배포의 최종 소스가 보관되어 있지 않습니다.' } }, 404));
+  await page.goto(origin); await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  const open = async () => {
+    await page.locator('[data-view="history"]').click();
+    await page.getByRole('button', { name: 'stable-app 앱 상세·업데이트' }).click();
+    await page.locator('#application-update').click();
+    assert.equal(await page.locator('#target-section').isVisible(), false);
+  };
+  await page.locator('[data-view="history"]').click();
+  assert.match(await page.locator('#applications-list').innerText(), /현재 서비스: deployed-v1/);
+  assert.match(await page.locator('#applications-list').innerText(), /최근 시도: 실행 실패 · failed-v2/);
+  await page.getByRole('button', { name: 'stable-app 앱 상세·업데이트' }).click();
+  await page.getByRole('button', { name: 'stable-app deployed-v1 최종 소스 다운로드' }).click();
+  await page.waitForFunction(() => document.querySelector('#application-versions').textContent.includes('최종 소스가 보관되어 있지'));
+  await page.locator('#application-update').click();
+  await page.locator('#repository-url').fill('https://github.com/example/different-repository');
+  const review = () => page.locator('#deploy-form button[type="submit"]').click();
+  await review(); await page.waitForFunction(() => !document.querySelector('#form-error').hidden);
+  await review(); await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
+  assert.equal(uploads[0].key, uploads[1].key, 'preview failure retries the same request key');
+  assert.equal(await page.locator('#review-app').innerText(), 'stable-app');
+  assert.match(await page.locator('#update-baseline').innerText(), /AI 수정 후 최종 소스는 보관되어 있지/);
+  assert.match(await page.locator('#update-diff-summary').innerText(), /추가 1 · 수정 1 · 삭제 1/);
+  assert.match(await page.locator('#update-origin').innerText(), /bbbbbbbb/);
+  assert.equal(await page.locator('#update-changes img').count(), 0, 'file paths render as text');
+  if (process.env.CI_OUTPUT_DIR) {
+    await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'application-update-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'application-update-mobile.png'), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  }
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => !document.querySelector('#request-error').hidden);
+  assert.equal(await page.locator('#review-panel').isVisible(), true, 'rejected start stays in review');
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+  assert.equal(starts[0].id, starts[1].id);
+  assert.equal(uploads.length, 2, 'start retry never reuploads or creates another preview');
+  const files = join(stateDirectory, 'renamed-folder'); await mkdir(files); await writeFile(join(files, 'index.js'), 'frozen source');
+  const zip = await archiveFromPath(files);
+  await open(); await page.locator('#archive').setInputFiles({ name: 'renamed-archive.zip', mimeType: 'application/zip', buffer: zip.bytes });
+  await review(); await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
+  assert.equal(await page.locator('#review-app').innerText(), 'stable-app');
+  assert.equal(await page.locator('#update-rebuild').isChecked(), false);
+  assert.equal(await page.locator('#deploy-button').innerText(), '변경 없음으로 완료');
+  await page.locator('#deploy-button').click(); await page.waitForFunction(() => document.querySelector('#run-state').textContent.includes('실행 생략'));
+  assert.deepEqual(starts.at(-1).body, { rebuild: false });
+  await open(); await page.locator('#folder').setInputFiles(files);
+  await review(); await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
+  assert.equal(await page.locator('#review-app').innerText(), 'stable-app');
+  await page.locator('#update-rebuild').check(); await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+  assert.deepEqual(starts.at(-1).body, { rebuild: true });
+  assert.ok(uploads.every((upload) => upload.keys.every((key) => ['repository_url', 'archive', 'files', 'paths'].includes(key))));
+  assert.equal(uploads.at(-1).paths, '["index.js"]');
+  assert.equal(previews.length, 3);
+  await open(); await page.locator('#repository-url').fill('https://github.com/example/expiry-retry');
+  await review(); await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
+  const expiredKey = uploads.at(-1).key, startCount = starts.length;
+  await page.evaluate(() => { window.originalNow = Date.now; Date.now = () => 4102444800000; });
+  await page.locator('#deploy-button').click();
+  assert.match(await page.locator('#request-error').innerText(), /만료/);
+  assert.equal(starts.length, startCount, 'locally expired preview never dispatches');
+  await page.evaluate(() => { Date.now = window.originalNow; delete window.originalNow; });
+  await review(); await page.waitForFunction(() => !document.querySelector('#deploy-button').disabled);
+  assert.notEqual(uploads.at(-1).key, expiredKey, 'same-source re-review after expiry creates a fresh preview key');
+  assert.deepEqual(errors, []);
+});
+
+test('update review ignores stale source responses and uncertain service state blocks a new update', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors } = await start(t, { service: null });
+  const application = { id: 'app-guard', app: 'guard-app', target_id: 'guard-target', status: 'ready', current_deployment_state: 'verified',
+    current_deployment: { id: 'old', app: 'guard-app', target_id: 'guard-target', status: 'succeeded' } };
+  const json = (route, data) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(data) });
+  await page.route('**/api/v1/applications?*', (route) => json(route, new URL(route.request().url()).searchParams.has('marker')
+    ? { items: [{ ...application, id: 'app-next', app: 'next-app' }], next_marker: null }
+    : { items: [application], next_marker: 'app-guard' }));
+  await page.route('**/api/v1/applications/app-guard', (route) => json(route, application));
+  let delayed;
+  await page.route('**/api/v1/applications/app-guard/updates', (route) => { delayed = route; });
+  await page.goto(origin); await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  await page.locator('[data-view="history"]').click(); await page.locator('#applications-more').click();
+  await page.getByRole('button', { name: 'next-app 앱 상세·업데이트' }).waitFor();
+  assert.equal(await page.locator('#applications-list > li').count(), 2);
+  await page.getByRole('button', { name: 'guard-app 앱 상세·업데이트' }).click();
+  await page.locator('#application-update').click(); await page.locator('#repository-url').fill('https://github.com/example/first');
+  const pending = page.waitForRequest('**/api/v1/applications/app-guard/updates');
+  await page.locator('#deploy-form button[type="submit"]').click(); await pending;
+  await page.locator('#repository-url').fill('https://github.com/example/second');
+  await delayed.fulfill({ contentType: 'application/json', headers: { location: '/api/v1/deployments/stale-preview' }, body: JSON.stringify({
+    id: 'stale-preview', app: application.app, target_id: application.target_id, status: 'preview', base_deployment_id: 'old',
+    expires_at: '2099-01-01T00:00:00Z', baseline_kind: 'deployed', no_changes: true, changes: { added: [], modified: [], deleted: [], unchanged: 1 } }) });
+  await page.waitForFunction(() => !document.querySelector('#deploy-form button[type="submit"]').disabled);
+  assert.equal(await page.locator('#review-panel').isVisible(), false);
+  await page.locator('#cancel-update').click();
+  application.current_deployment_state = 'unverified';
+  await page.locator('[data-view="history"]').click(); await page.getByRole('button', { name: 'guard-app 앱 상세·업데이트' }).click();
+  await page.waitForFunction(() => document.querySelector('#application-detail-message').textContent.includes('운영자 확인'));
+  assert.equal(await page.locator('#application-update').isDisabled(), true);
+  assert.deepEqual(errors, []);
+});
+
+test('browser update crosses real preview/start/source HTTP routes and reuses the registered application', { timeout: 60000 }, async (t) => {
+  const submissions = [], publications = new Map(); let registrations = 0, version = 1;
+  const service = { targetId: 'runtime-aws', targetIds: [], allowTarget() {},
+    async deploy(input) {
+      submissions.push(input); const run = String(submissions.length), sha = String(submissions.length).repeat(40);
+      publications.set(run, { run_id: run, app: input.app, tenant: 'demo', target_id: input.target_id,
+        source_commit: sha, artifact_id: 900 + submissions.length, producer_attempt: 1 });
+      return { run_id: run, source_commit: sha };
+    },
+    status: async (id) => ({ state: 'published', publication: publications.get(id) }),
+    sourceFiles: async (publication) => submissions[Number(publication.run_id) - 1].files };
+  const applicationAdapter = { targets: { 'runtime-aws': { provider: 'aws', automaticDelivery: true } },
+    describe: (environment, app) => ({ id: `app-${app}`, app, target_id: `app-${app}`, environment_target_id: environment, provider: 'aws' }),
+    register: async () => { registrations++; return { status: 'ready' }; },
+    deployPublished: async (_application, args) => ({ cd: { state: 'deployed', deployed: true, revision: args.sourceCommit },
+      public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://example.test' } }) };
+  const { page, origin, errors } = await start(t, { service, applicationAdapter, target: { id: 'runtime-aws', provider: 'aws' },
+    sourceLoader: async (repository) => ({ source: { type: 'github', repository, sha: 'b'.repeat(40) },
+      files: [{ path: 'app.js', content: Buffer.from(`version ${version}`) }] }) });
+  await page.goto(origin); await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('URL 확인'));
+  await page.locator('#repository-url').fill('https://github.com/example/stable-repo');
+  await page.locator('#deploy-form button[type="submit"]').click(); await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+  version = 2;
+  await page.locator('[data-view="history"]').click(); await page.getByRole('button', { name: 'stable-repo 앱 상세·업데이트' }).click();
+  await page.locator('#application-update').click(); await page.locator('#repository-url').fill('https://github.com/example/renamed-repo');
+  await page.locator('#deploy-form button[type="submit"]').click();
+  await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
+  assert.equal(await page.locator('#review-app').innerText(), 'stable-repo');
+  assert.match(await page.locator('#update-diff-summary').innerText(), /수정 1/);
+  assert.match(await page.locator('#update-baseline').innerText(), /검증된 최종 소스/);
+  assert.equal(submissions.length, 1, 'preview does not dispatch');
+  version = 3;
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료' && document.querySelector('#run-binding').textContent.includes('CI run: 2'));
+  assert.equal(submissions.length, 2); assert.equal(registrations, 1);
+  assert.equal(submissions[1].app, submissions[0].app); assert.equal(submissions[1].target_id, submissions[0].target_id);
+  assert.equal(submissions[1].files[0].content.toString(), 'version 2', 'start uses server-frozen source without refetching GitHub');
+  await page.locator('[data-view="history"]').click(); await page.getByRole('button', { name: 'stable-repo 앱 상세·업데이트' }).click();
+  const downloadEvent = page.waitForEvent('download');
+  await page.locator('#application-versions .application-version').first().getByRole('button', { name: /최종 소스 다운로드/ }).click();
+  const download = await downloadEvent;
+  assert.equal(await download.failure(), null);
+  const files = await inspectArchive(await readFile(await download.path()));
+  assert.equal(files.find((file) => file.path === 'app.js').content.toString(), 'version 2');
   assert.deepEqual(errors, []);
 });
 

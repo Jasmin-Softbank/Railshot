@@ -301,7 +301,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/builds/{id}": {
@@ -541,7 +541,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/deployments/{id}": {
@@ -1011,7 +1011,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/environments/{id}": {
@@ -2218,6 +2218,295 @@
         }
       }
     },
+    "/api/v1/applications/{id}/updates": {
+      "post": {
+        "operationId": "createApplicationUpdate",
+        "summary": "Preview an update to an existing application",
+        "description": "Authorize ownership, verify the current application version, freeze the submitted source and compare it with the last verified serving deployment. Retain a 30-minute preview as a deployment record. Same Idempotency-Key keeps the original snapshot, including the originally resolved GitHub SHA. No registration, source-repository write or CI dispatch.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSource"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Persisted preview or idempotent replay, with Location pointing to the deployment record. No CI/CD dispatch occurs during preview.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}/start": {
+      "post": {
+        "operationId": "startApplicationUpdate",
+        "summary": "Start the frozen update preview",
+        "description": "Atomically check ownership, expiry, the still-current baseline and worker availability, then start the existing CI/CD flow from the persisted snapshot. No second source upload or GitHub HEAD lookup. Exact final-source matches skip CI unless rebuild is true. An unknown execution keeps admission occupied until reconciliation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "rebuild": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "$ref": "#/components/responses/Accepted"
+          },
+          "200": {
+            "description": "Unchanged source or replay of an already started update. Repeated starts never dispatch twice.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deployment"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}/source": {
+      "get": {
+        "operationId": "downloadDeploymentSource",
+        "summary": "Download submitted or gate-verified deployed source",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "variant",
+            "in": "query",
+            "schema": {
+              "enum": [
+                "submitted",
+                "deployed"
+              ],
+              "default": "submitted"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Session-owned source ZIP. Deployed source must match the exact published producer attempt and gate source digest; legacy or expired artifacts return SOURCE_NOT_AVAILABLE without replacing them with submitted source.",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/deployments/{id}/actions": {
       "post": {
         "operationId": "resumeDeployment",
@@ -2680,7 +2969,9 @@
               "succeeded",
               "failed",
               "blocked",
-              "unknown"
+              "unknown",
+              "preview",
+              "unchanged"
             ]
           },
           "stage": {
@@ -2691,7 +2982,8 @@
               "ci",
               "cd",
               "complete",
-              "http"
+              "http",
+              "review"
             ]
           },
           "ci": {
@@ -2981,6 +3273,99 @@
           "environment_target_id": {
             "type": "string",
             "description": "Existing runtime environment ID; node observations use this ID."
+          },
+          "base_deployment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "base_revision": {
+            "type": "string"
+          },
+          "baseline_kind": {
+            "enum": [
+              "deployed",
+              "submitted"
+            ],
+            "description": "deployed uses the gate-verified final source. submitted is an explicitly labelled legacy fallback and never permits automatic unchanged skipping."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "no_changes": {
+            "type": "boolean"
+          },
+          "source_comparison_only": {
+            "type": "boolean"
+          },
+          "rebuild": {
+            "type": "boolean"
+          },
+          "changes": {
+            "type": "object",
+            "properties": {
+              "added": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 2000
+              },
+              "modified": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 2000
+              },
+              "deleted": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 2000
+              },
+              "unchanged": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "added",
+              "modified",
+              "deleted",
+              "unchanged"
+            ],
+            "additionalProperties": false
+          },
+          "source_origin": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "const": "github"
+                  },
+                  "repository": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "sha": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  }
+                },
+                "required": [
+                  "type",
+                  "repository",
+                  "sha"
+                ],
+                "additionalProperties": false
+              }
+            ]
           },
           "resume_count": {
             "type": "integer",
@@ -4393,7 +4778,9 @@
               "blocked",
               "unknown",
               "published",
-              "publication_unverified"
+              "publication_unverified",
+              "preview",
+              "unchanged"
             ]
           },
           "app": {
@@ -5300,6 +5687,34 @@
               "blocked",
               "unknown"
             ]
+          },
+          "current_deployment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Deployment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_deployment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Deployment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_deployment_state": {
+            "enum": [
+              "verified",
+              "unverified",
+              "not_deployed"
+            ],
+            "description": "A later unresolved CD operation marks the current version unverified; the last successful deployment remains historical evidence."
           }
         },
         "required": [
@@ -5334,6 +5749,70 @@
           "next_marker"
         ],
         "additionalProperties": false
+      },
+      "UpdateSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "github"
+              },
+              "repository_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "Public HTTPS GitHub owner/repository URL. Default branch SHA is pinned once."
+              }
+            },
+            "required": [
+              "repository_url"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "zip"
+              },
+              "archive": {
+                "type": "string",
+                "format": "binary",
+                "description": "ZIP; at most 100 MiB expanded and 2,000 files."
+              }
+            },
+            "required": [
+              "archive"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "source_type": {
+                "const": "folder"
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "maxItems": 2000
+              },
+              "paths": {
+                "type": "string",
+                "description": "JSON string array, one safe relative path per files entry."
+              }
+            },
+            "required": [
+              "files",
+              "paths"
+            ],
+            "additionalProperties": false
+          }
+        ],
+        "description": "One complete source snapshot. Identity comes only from the owning application route. App, target, environment and plan fields are rejected; missing old paths are deleted. ZIP/folder input limits stay 2,000 files and 100 MiB. Public GitHub default branch is resolved once at preview creation."
       },
       "DeploymentAction": {
         "type": "object",

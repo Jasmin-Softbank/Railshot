@@ -299,7 +299,7 @@ def deploy(review, context, *, sync, timeout):
         time.sleep(min(5, max(0, deadline - time.monotonic())))
 
 
-def register_cluster(reviews, context, config):
+def register_cluster(reviews, context, config, *, application_credential=False):
     app = reviews[0]['application']; target = reviews[0]['receipt']['target_id']
     namespace, project, server = app['metadata']['namespace'], app['spec']['project'], app['spec']['destination']['server']
     require(all(r['receipt']['target_id'] == target and r['application']['metadata']['namespace'] == namespace and
@@ -311,23 +311,56 @@ def register_cluster(reviews, context, config):
     require(set(tls) <= {'caData', 'insecure', 'serverName'} and tls.get('insecure') is False and
             b'-----BEGIN CERTIFICATE-----' in base64.b64decode(tls['caData'], validate=True), 'verified cluster CA required')
     namespaces = sorted({r['application']['spec']['destination']['namespace'] for r in reviews})
+    require(type(application_credential) is bool, 'explicit application credential mode required')
+    if application_credential:
+        require(re.fullmatch(r'app-[a-f0-9]{24}', target) and project == target and namespaces == [target],
+                'application credential must retain its exact project and namespace')
     strings = {'name': target, 'server': server, 'namespaces': ','.join(namespaces), 'clusterResources': 'false',
                'project': project, 'config': json.dumps(config, separators=(',', ':'))}
     secret = {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque', 'metadata': {
         'name': 'railshot-' + target, 'namespace': namespace, 'labels': {
-            'argocd.argoproj.io/secret-type': 'cluster', 'app.kubernetes.io/managed-by': 'railshot'}},
+            'argocd.argoproj.io/secret-type': 'railshot-application' if application_credential else 'cluster',
+            'app.kubernetes.io/managed-by': 'railshot'}},
         'data': {key: base64.b64encode(value.encode()).decode() for key, value in strings.items()}}
     existing = kubectl(context, namespace, 'get', 'secret', secret['metadata']['name'], '--ignore-not-found', '-o', 'json')
     if existing:
-        require(all(existing['metadata'].get('labels', {}).get(k) == v for k, v in secret['metadata']['labels'].items()) and
+        labels = existing['metadata'].get('labels', {})
+        allowed_type = ('cluster', 'railshot-application') if application_credential else ('cluster',)
+        require(labels.get('app.kubernetes.io/managed-by') == 'railshot'
+                and labels.get('argocd.argoproj.io/secret-type') in allowed_type and
                 all(existing['data'].get(k) == secret['data'][k] for k in ('server', 'project', 'name')),
                 'existing registration belongs to another owner or target')
         require(set(base64.b64decode(existing['data']['namespaces']).decode().split(',')) <= set(namespaces),
                 'include all existing registered namespaces; do not detach active apps')
-    kubectl(context, namespace, 'apply', '--server-side', '--field-manager=railshot-argocd', '-f', '-', '-o', 'json', document=secret)
+        if application_credential:
+            require(existing['kind'] == 'Secret' and existing['metadata']['name'] == secret['metadata']['name']
+                    and existing['metadata']['namespace'] == namespace and not existing['metadata'].get('ownerReferences')
+                    and existing['data']['namespaces'] == secret['data']['namespaces']
+                    and existing['data']['clusterResources'] == secret['data']['clusterResources'],
+                    'existing application credential scope differs')
+            previous = json.loads(base64.b64decode(existing['data']['config'], validate=True))
+            require(set(previous) == {'bearerToken', 'tlsClientConfig'} and previous['tlsClientConfig'] == tls
+                    and isinstance(previous['bearerToken'], str) and 0 < len(previous['bearerToken']) < 32768
+                    and not re.search(r'\s', previous['bearerToken']), 'existing application credential TLS or token differs')
+            # Relabeling leaves the existing SA credential and renewal binding intact.
+            secret['data'] = copy.deepcopy(existing['data'])
+    if application_credential and existing:
+        if labels['argocd.argoproj.io/secret-type'] == 'cluster':
+            patch = [{'op': 'test', 'path': '/metadata/uid', 'value': existing['metadata']['uid']},
+                     {'op': 'test', 'path': '/metadata/resourceVersion', 'value': existing['metadata']['resourceVersion']},
+                     {'op': 'replace', 'path': '/metadata/labels/argocd.argoproj.io~1secret-type', 'value': 'railshot-application'}]
+            kubectl(context, namespace, 'patch', 'secret', secret['metadata']['name'], '--type=json',
+                    '--patch-file=/dev/stdin', '-o', 'json', document=patch)
+    else:
+        kubectl(context, namespace, 'apply', '--server-side', '--field-manager=railshot-argocd', '-f', '-', '-o', 'json', document=secret)
     observed = kubectl(context, namespace, 'get', 'secret', secret['metadata']['name'], '-o', 'json')
-    require(observed.get('data') == secret['data'], 'cluster registration readback differs')
-    return {'status': 'cluster_registered', 'target_id': target, 'namespaces': namespaces, 'deployed': False}
+    require(observed.get('data') == secret['data'] and all(
+        observed.get('metadata', {}).get('labels', {}).get(k) == v for k, v in secret['metadata']['labels'].items()),
+        'cluster registration readback differs')
+    if application_credential and existing:
+        require(observed['metadata'].get('uid') == existing['metadata'].get('uid'), 'application credential was replaced')
+    return {'status': 'application_credential_registered' if application_credential else 'cluster_registered',
+            'target_id': target, 'namespaces': namespaces, 'deployed': False}
 
 
 def main():

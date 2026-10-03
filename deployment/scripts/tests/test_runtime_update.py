@@ -1,5 +1,5 @@
 """No-cloud checks for explicit promotion, ownership, backups, and non-replay."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import base64
 import copy
 import gzip
@@ -306,6 +306,153 @@ class RuntimeReleaseTests(unittest.TestCase):
                 with self.subTest(partial=key), self.assertRaises(ValueError):
                     update.collection_health(settings, registration, None, identity, wait_seconds=0)
                 del row[key]
+
+
+class ReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name).resolve()
+        self.state = self.home / 'failed'; self.state.mkdir(mode=0o700)
+        self.registration_home = self.home / 'registration'; self.registration_home.mkdir(mode=0o700)
+        (self.registration_home / 'runtime-release.lock').touch(mode=0o600)
+        self.args = SimpleNamespace(state_dir=self.state, registration_dir=self.registration_home,
+                                    target_id='gcp', registry='/private/registry')
+        self.plan = release()
+        self.registration = {'version': 2, 'scope': 'node-only', 'node_uid': 'node-uid',
+                             'target_id': 'gcp', 'environment_id': 'registered-node',
+                             'baseline_policy_sha256': self.plan['from_policy_sha256']}
+        self.identity = {'descriptor': {'resource_id': 'registered-vm', 'addresses': {'private': '10.66.0.2'}}}
+        observer_config = self.home / 'observer.json'; update.env.save(observer_config, {})
+        self.loaded = (self.plan, self.registration, {'target': {'provider': 'gcp'}}, None,
+                       {'observability_config_file': str(observer_config)}, None, None, self.identity)
+        self.path = self.state / 'receipt.json'
+        self.marker = self.registration_home / 'runtime-release.json'
+        self.ack = self.state / 'reconciliation.json'
+        self.failed = {'version': 1, 'status': 'recovery_required', 'scope': 'node-only', 'stage': 'observability',
+                       'source_sha': self.plan['source_sha'], 'target_id': 'gcp', 'provider': 'gcp',
+                       'input_sha256': node.digest({'release': self.plan, 'registration': self.registration, 'identity': self.identity}),
+                       'from_policy_sha256': self.plan['from_policy_sha256'], 'to_policy_sha256': self.plan['to_policy_sha256'],
+                       'runtime': {'status': 'verified', 'changed': False, 'before': observation(), 'after': observation()}}
+        update.env.save(self.path, self.failed)
+        # Preserve byte formatting as well as the parsed failure, including its missing final after field.
+        self.path.write_text(json.dumps(self.failed, indent=2) + '\n')
+        update.env.save(self.marker, {'status': 'running', 'source_sha': self.plan['source_sha'], 'receipt': str(self.path)})
+        self.stack = ExitStack(); self.addCleanup(self.stack.close)
+        self.load = self.stack.enter_context(patch.object(update, 'load', return_value=self.loaded))
+        @contextmanager
+        def connection(_): yield []
+        @contextmanager
+        def kube(_): yield Mock(side_effect=AssertionError('unexpected native write'))
+        self.stack.enter_context(patch.object(update, 'connection', connection))
+        self.stack.enter_context(patch.object(update.env, 'runtime_kubectl', kube))
+        def node_call(prefix, payload):
+            self.assertEqual(payload, {'action': 'inspect', 'include_ca': True})
+            return observation()
+        self.node_call = self.stack.enter_context(patch.object(update, 'node_call', side_effect=node_call))
+        self.stack.enter_context(patch.object(update, 'node_management_health', return_value={'tls_verified': True}))
+        self.stack.enter_context(patch.object(update, 'observer_health', return_value={'exporters_ready': True}))
+        self.collection = self.stack.enter_context(patch.object(update, 'collection_health', return_value={'collection_state': 'ready'}))
+        self.stage = self.stack.enter_context(patch.object(update, 'stage_source', side_effect=AssertionError('reconciliation staged source')))
+        self.apply = self.stack.enter_context(patch.object(update.env, 'owned_apply', side_effect=AssertionError('reconciliation applied resources')))
+        self.observer = SimpleNamespace(product=Mock(return_value={}), register=Mock(side_effect=AssertionError('reconciliation registered observer')))
+        self.stack.enter_context(patch.object(update.importlib.util, 'module_from_spec', return_value=self.observer))
+        self.stack.enter_context(patch.object(update.importlib.util, 'spec_from_file_location',
+            return_value=SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _: None))))
+
+    def snapshot(self):
+        return {str(path): path.read_bytes() for path in self.home.rglob('*') if path.is_file()}
+
+    def test_preserves_failure_and_repeated_acknowledgement_is_live_but_write_free(self):
+        original = self.path.read_bytes()
+        proof = update.reconcile(self.args)
+        self.assertEqual(proof['status'], 'reconciled')
+        self.assertEqual(proof['failed_receipt_sha256'], update.hashlib.sha256(original).hexdigest())
+        self.assertEqual(proof['input_sha256'], self.failed['input_sha256'])
+        self.assertEqual(proof['to_policy'], POLICY)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(json.loads(self.marker.read_bytes()), {'status': 'reconciled', 'source_sha': self.plan['source_sha'],
+                                                              'receipt': str(self.path), 'reconciliation': str(self.ack)})
+        snapshot = self.snapshot(); inspections = self.node_call.call_count
+        with patch.object(update.env, 'save', side_effect=AssertionError('replay wrote evidence')):
+            self.assertEqual(update.reconcile(self.args)['status'], 'reconciled')
+        self.assertGreater(self.node_call.call_count, inspections)
+        self.assertEqual(self.snapshot(), snapshot)
+        self.stage.assert_not_called(); self.apply.assert_not_called(); self.observer.register.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'automatic retry forbidden'): update.execute(self.args)
+        with self.assertRaisesRegex(ValueError, 'verified release/target binding'): update.verify(self.args)
+        self.assertEqual(self.snapshot(), snapshot)
+
+    def test_foreign_uid_policy_registration_and_stale_collection_cannot_acknowledge(self):
+        original = copy.deepcopy(self.loaded)
+        for drift in ('uid', 'policy', 'registration', 'collector'):
+            with self.subTest(drift=drift):
+                self.load.return_value = copy.deepcopy(original)
+                self.node_call.side_effect = None; self.node_call.return_value = observation()
+                self.collection.side_effect = None
+                if drift == 'uid': self.node_call.return_value['node_uid'] = 'replacement-node'
+                elif drift == 'policy': self.node_call.return_value['runtime'] = {**POLICY['runtime'], 'k3s_version': 'v1.34.0+k3s1'}
+                elif drift == 'registration': self.load.return_value[1]['environment_id'] = 'another-registration'
+                else: self.collection.side_effect = ValueError('observer samples missing, stale, or unhealthy')
+                snapshot = self.snapshot()
+                with self.assertRaises(ValueError): update.reconcile(self.args)
+                self.assertEqual(self.snapshot(), snapshot)
+        self.stage.assert_not_called(); self.observer.register.assert_not_called()
+
+    def test_changed_runtime_or_early_failure_is_never_reconciled(self):
+        for field, value in (('stage', 'runtime_apply'), ('status', 'blocked'), ('scope', 'application'),
+                             ('runtime', {**self.failed['runtime'], 'changed': True}),
+                             ('runtime', {**self.failed['runtime'], 'after': {**observation(), 'node_uid': 'foreign'}})):
+            with self.subTest(field=field, value=value):
+                update.env.save(self.path, {**self.failed, field: value})
+                snapshot = self.snapshot()
+                with self.assertRaisesRegex(ValueError, 'no-op observation failure'): update.reconcile(self.args)
+                self.assertEqual(self.snapshot(), snapshot)
+        self.node_call.assert_not_called()
+
+    def test_receipt_or_marker_change_during_health_readback_prevents_ack(self):
+        for path in (self.path, self.marker):
+            with self.subTest(path=path):
+                original = path.read_bytes()
+                def race(*_args, **_kwargs):
+                    path.write_bytes(original + b' ')
+                    return {'collection_state': 'ready'}
+                self.collection.side_effect = race
+                with self.assertRaisesRegex(ValueError, 'inputs changed during readback'): update.reconcile(self.args)
+                self.assertFalse(self.ack.exists())
+                path.write_bytes(original)
+
+    def test_ack_write_then_marker_failure_resumes_without_rewriting_ack(self):
+        save = update.env.save
+        def interrupted(path, value):
+            if Path(path) == self.marker: raise OSError('lost marker write')
+            save(path, value)
+        with patch.object(update.env, 'save', side_effect=interrupted):
+            with self.assertRaises(OSError): update.reconcile(self.args)
+        ack = self.ack.read_bytes(); original = self.path.read_bytes()
+        with patch.object(update.env, 'save', wraps=save) as writes:
+            self.assertEqual(update.reconcile(self.args)['status'], 'reconciled')
+        self.assertEqual([Path(call.args[0]) for call in writes.call_args_list], [self.marker])
+        self.assertEqual(self.ack.read_bytes(), ack); self.assertEqual(self.path.read_bytes(), original)
+
+    def test_new_source_uses_reconciled_baseline_and_rejects_tampered_history(self):
+        update.reconcile(self.args)
+        original = self.path.read_bytes()
+        future = copy.deepcopy(self.loaded); future[0]['source_sha'] = 'b' * 40
+        self.load.return_value = future
+        future_args = SimpleNamespace(**{**vars(self.args), 'state_dir': self.home / 'next'})
+        self.path.write_bytes(original + b' ')
+        with self.assertRaisesRegex(ValueError, 'evidence binding differs'): update.execute(future_args)
+        self.path.write_bytes(original)
+        self.stage.side_effect = None; self.stage.return_value = '/private/staged-source'
+        self.observer.register.side_effect = None
+        self.observer.register.return_value = {'registered': True, 'status': 'succeeded'}
+        self.node_call.side_effect = lambda _, payload: ({'status': 'verified', 'changed': False} if payload['action'] == 'apply' else observation())
+        result = update.execute(future_args)
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual(result['source_sha'], 'b' * 40)
+        self.assertEqual(json.loads(self.marker.read_bytes())['source_sha'], 'b' * 40)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.observer.register.assert_called_once()
 
 
 if __name__ == '__main__':

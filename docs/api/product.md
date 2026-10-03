@@ -16,7 +16,19 @@
 | 계획 | `POST /api/v1/plans`, `GET /api/v1/plans/{id}` | 검증·저장한 계획을 201로 반환한다. 계획은 VM 생성 결과가 아니다. |
 | 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | 저장된 계획을 한 번 실행한다. 자원·guest·runtime, 선택적 Patroni DB와 배포 대상 등록을 각각 기록한다. 앱 소스의 CI·배포·공개 HTTP 검증은 이 요청에 포함하지 않는다. |
 
-실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`만 받는다. 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
+실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`만 받는다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
+
+### 기존 앱 업데이트
+
+배포 내역의 등록된 앱에서 업데이트를 시작한다. `POST /api/v1/applications/{id}/updates`는 소스 multipart와 `Idempotency-Key`만 받고 앱·대상·환경 지정은 거부한다. ZIP·폴더·공개 GitHub 저장소가 바뀌어도 앱 ID, 환경, 기존 등록을 유지한다. 정상 등록된 `ready` 앱의 등록 절차를 반복하지 않는다.
+
+미리보기는 CI를 시작하지 않고 `status=preview`, `stage=review`인 배포 기록과 30분 유효 스냅샷을 저장한다. `changes`에는 추가·수정·삭제 경로와 동일 파일 수를 반환한다. 새 입력은 전체 소스이며 생략한 기존 파일은 삭제 대상이다. 비교 기준은 마지막 검증 성공 배포의 최종 소스다. 과거 실행에 최종 소스가 없으면 `baseline_kind=submitted`, `source_comparison_only=true`로 제출 원본 비교임을 표시한다. 전송 실패나 무결성 검증 실패를 원본 비교로 대체하지 않는다.
+
+`POST /api/v1/deployments/{id}/start`는 JSON `{ "rebuild": false }`로 저장된 스냅샷을 실행한다. 미리보기 이후 GitHub 기본 브랜치가 바뀌어도 다시 읽지 않는다. 기준 배포가 달라지거나 미리보기가 만료되면 새 검토를 요구한다. 검증된 최종 소스와 같으면 `unchanged`로 CI를 생략하며 `rebuild=true`로 명시적인 재빌드가 가능하다. 제출 원본만 비교한 경우에는 같아도 CI를 실행한다. 같은 미리보기의 시작 재요청은 최초 결과를 반환하고 중복 실행하지 않는다. 실행 결과가 불확실한 경우 자동 재전송하지 않는다.
+
+앱 응답은 `current_deployment`, `latest_deployment`, `current_deployment_state`를 분리한다. 최신 CI 실패가 마지막 성공 배포를 덮지 않는다. 이후 CD 적용 결과가 불확실하면 현재 버전도 `unverified`로 표시하고 새 업데이트를 차단한다. 공용 실행기가 사용 중이면 409로 접수를 거부하며 대기열에 추가했다고 표시하지 않는다. 같은 세션에는 차단 중인 앱·단계·마지막 갱신 시각을 안내하지만 다른 세션의 실행 정보는 공개하지 않는다.
+
+`GET /api/v1/deployments/{id}/source?variant=submitted`는 서버에 고정한 원본, `variant=deployed`는 검사에 사용된 최종 소스를 ZIP으로 제공한다. 최종 소스는 같은 CI 실행과 게시 attempt의 `source-{attempt}` artifact에서 읽으며, 게시물의 gate source digest와 경로·유형·권한·파일 내용을 다시 검증한다. release 단계만 재시도하면 이전 loop의 정확한 source artifact를 확인하여 새 게시 attempt에 연결한다. 원본 소스와 배포 소스를 서로 대체하지 않으며, 최종 소스가 보관되지 않은 실행이나 만료된 artifact는 다운로드할 수 없다. 이 소스 교체·다운로드는 DB·볼륨·운영 자격 변경을 포함하지 않는다.
 
 소스 접수는 multipart의 `app`, `target_id`와 공개 GitHub URL(`repository_url`), ZIP(`archive`), 폴더(`files`와 JSON 문자열 배열 `paths`) 중 하나를 받는다. `source_type`은 생략할 수 있으며 지정하면 실제 소스 형식과 일치해야 한다. `plan_id`는 `POST /api/v1/deployments`에서만 선택적으로 받는다. 빌드·legacy deploy에는 허용하지 않는다. 계획을 포함한 배포의 `app`·`target_id`는 계획의 이름·`runtime_target_id`와 일치해야 하고, 해당 profile에 배포 등록 설정이 있어야 한다. 계획이 없는 배포는 서버 CD 설정 또는 성공한 환경 등록 기록의 대상·앱을 사용한다. 성공한 환경의 재배포는 저장한 CD 설정을 재사용하며 VM·DB 생성은 반복하지 않는다. 대상·앱·계획·환경 ID가 일치한 성공 기록만 재시작 후 CI 허용 대상으로 복원한다.
 

@@ -141,8 +141,12 @@ def capture(refs, loaded):
     rows = [r for r in renewals['targets'] if r['target_id'] == target_id]
     env.argo.require(len(rows) == 1, 'one existing renewal registration required')
     renewal = rows[0]
-    env.argo.require(renewal['server'] == target['cluster_server'] and renewal['project'] == target['project']
-                     and renewal['namespaces'] == [target['namespace']], 'existing management scope differs')
+    env.argo.require('previous_scope' not in renewal, 'environment cluster transition requires reconciliation')
+    exact_scope = renewal['project'] == target['project'] and renewal['namespaces'] == [target['namespace']]
+    shared_scope = (not target_id.startswith('app-') and renewal['project'] == ''
+                    and target['namespace'] in renewal['namespaces'])
+    env.argo.require(renewal['server'] == target['cluster_server'] and (exact_scope or shared_scope),
+                     'existing management scope differs')
     expected_name = identity['descriptor']['addresses']['private'] if identity['descriptor'].get('management_endpoint') else None
     env.argo.require(renewal.get('tls_server_name') == expected_name, 'registered management TLS name differs')
     secret = take(control, 'control', 'Secret', 'argocd', renewal['secret'], env.credentials.LABELS)

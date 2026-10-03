@@ -328,6 +328,39 @@ def collection_health(settings, registration, registered, identity, *, wait_seco
             time.sleep(3)
 
 
+def health_proof(args, loaded, node_uid):
+    release, registration, request, cd, settings, pull, binding, identity = loaded
+    fingerprint = upgrade.digest({'release': release, 'identity': identity, 'registration': registration})
+    with connection(request) as prefix:
+        observed = runtime_readback(prefix, registration)
+    env.argo.require(observed['node_uid'] == node_uid
+                     and observed['node_ip'] == identity['descriptor']['addresses']['private']
+                     and observed['architecture'] == 'amd64' and upgrade.matches(observed, release['to_policy']),
+                     'live runtime drifted from the verified to-policy')
+    empty = node_only(registration)
+    registered = None if empty else cd['targets'][args.target_id]
+    application = probe = {'status': 'not_applicable', 'reason': 'node-only'}
+    with env.runtime_kubectl(request) as kube:
+        if not empty:
+            namespace = kube('default', 'get', 'namespace', registered['target']['namespace'], '-o', 'json')
+            env.argo.require(namespace['metadata'].get('labels', {}).get('railshot.io/registration') == registration['input_sha256'][:32],
+                             'registered namespace ownership drifted')
+            application = app_health(kube, registered, args.target_id)
+        observer = observer_health(kube)
+    observer.update(collection_health(settings, registration, registered, identity, wait_seconds=0))
+    management = node_management_health(registration, observed) if empty else management_health(cd, args.target_id)
+    if not empty:
+        public = registered['public_http']
+        probe = env.bridge.public_probe(public, urlsplit(public['url']).path)
+        env.argo.require(probe['state'] == 'succeeded', 'public HTTPS health drifted')
+    return {'version': 1, 'status': 'verified', 'verify_only': True, 'source_sha': release['source_sha'],
+            **({'scope': 'node-only'} if empty else {}),
+            'provider': request['target']['provider'], 'target_id': args.target_id,
+            'input_sha256': fingerprint, 'to_policy_sha256': release['to_policy_sha256'],
+            'after': public_runtime(observed), 'application': application, 'observability': observer,
+            'management': management, 'public_http': probe, 'checked_at': datetime.now(timezone.utc).isoformat()}
+
+
 def verify(args):
     release, registration, request, cd, settings, pull, binding, identity = load(args)
     path = Path(args.state_dir) / 'receipt.json'
@@ -344,34 +377,81 @@ def verify(args):
                          and previous.get('provider') == request['target']['provider']
                          and previous.get('input_sha256') == fingerprint
                          and marker.get('receipt') == str(path), 'verified release/target binding differs')
-        with connection(request) as prefix:
-            observed = runtime_readback(prefix, registration)
-        env.argo.require(observed['node_uid'] == previous['after']['node_uid']
-                         and observed['node_ip'] == identity['descriptor']['addresses']['private']
-                         and observed['architecture'] == 'amd64' and upgrade.matches(observed, release['to_policy']),
-                         'live runtime drifted from the verified to-policy')
-        empty = node_only(registration)
-        registered = None if empty else cd['targets'][args.target_id]
-        application = probe = {'status': 'not_applicable', 'reason': 'node-only'}
-        with env.runtime_kubectl(request) as kube:
-            if not empty:
-                namespace = kube('default', 'get', 'namespace', registered['target']['namespace'], '-o', 'json')
-                env.argo.require(namespace['metadata'].get('labels', {}).get('railshot.io/registration') == registration['input_sha256'][:32],
-                                 'registered namespace ownership drifted')
-                application = app_health(kube, registered, args.target_id)
-            observer = observer_health(kube)
-        observer.update(collection_health(settings, registration, registered, identity, wait_seconds=0))
-        management = node_management_health(registration, observed) if empty else management_health(cd, args.target_id)
-        if not empty:
-            public = registered['public_http']
-            probe = env.bridge.public_probe(public, urlsplit(public['url']).path)
-            env.argo.require(probe['state'] == 'succeeded', 'public HTTPS health drifted')
-        return {'version': 1, 'status': 'verified', 'verify_only': True, 'source_sha': release['source_sha'],
-                **({'scope': 'node-only'} if empty else {}),
-                'provider': request['target']['provider'], 'target_id': args.target_id,
-                'input_sha256': fingerprint, 'to_policy_sha256': release['to_policy_sha256'],
-                'after': public_runtime(observed), 'application': application, 'observability': observer,
-                'management': management, 'public_http': probe, 'checked_at': datetime.now(timezone.utc).isoformat()}
+        return health_proof(args, (release, registration, request, cd, settings, pull, binding, identity), previous['after']['node_uid'])
+
+
+def check_noop_failure(previous, target_id, provider, node_uid, policy):
+    runtime = previous.get('runtime', {})
+    env.argo.require(previous.get('version') == 1 and previous.get('status') == 'recovery_required' and previous.get('scope') == 'node-only'
+                     and previous.get('stage') in {'observability', 'health'}
+                     and previous.get('target_id') == target_id and previous.get('provider') == provider
+                     and runtime.get('status') == 'verified' and runtime.get('changed') is False
+                     and previous.get('from_policy_sha256') == previous.get('to_policy_sha256') == upgrade.digest(policy)
+                     and all(runtime.get(side, {}).get('node_uid') == node_uid
+                             and upgrade.matches(runtime[side], policy) for side in ('before', 'after')),
+                     'only a bound node-only no-op observation failure can be reconciled')
+
+
+def reconciled_baseline(marker, registration, identity, target_id, provider):
+    """Validate a separate acknowledgement without rewriting the failed release."""
+    path = Path(marker['receipt'])
+    env.argo.require(node_only(registration) and marker.get('status') == 'reconciled'
+                     and marker.get('reconciliation') == str(path.with_name('reconciliation.json')),
+                     'reconciled target binding differs')
+    failed = env.read_private(path, raw=True)
+    previous = json.loads(failed)
+    proof = env.read_private(marker['reconciliation'])
+    expected = {'version': 1, 'status': 'reconciled', 'scope': 'node-only', 'source_sha': marker['source_sha'],
+                'target_id': target_id, 'provider': provider, 'failed_receipt': str(path),
+                'failed_receipt_sha256': hashlib.sha256(failed).hexdigest(),
+                'input_sha256': previous['input_sha256'], 'identity_sha256': upgrade.digest(identity),
+                'registration_sha256': upgrade.digest(registration)}
+    env.argo.require(all(proof.get(key) == value for key, value in expected.items())
+                     and previous['source_sha'] == marker['source_sha']
+                     and proof['to_policy_sha256'] == upgrade.digest(proof['to_policy'])
+                     and proof['after']['node_uid'] == registration['node_uid'], 'reconciliation evidence binding differs')
+    check_noop_failure(previous, target_id, provider, registration['node_uid'], proof['to_policy'])
+    return proof
+
+
+def reconcile(args):
+    loaded = load(args)
+    release, registration, request, cd, settings, pull, binding, identity = loaded
+    env.argo.require(node_only(registration) and release['from_policy'] == release['to_policy'],
+                     'only an unchanged node-only runtime can be reconciled')
+    path = Path(args.state_dir) / 'receipt.json'
+    acknowledgement = path.with_name('reconciliation.json')
+    target_marker = Path(args.registration_dir) / 'runtime-release.json'
+    fingerprint = upgrade.digest({'release': release, 'identity': identity, 'registration': registration})
+    # Existing lock only: reconciliation never creates or repairs registration state.
+    with os.fdopen(os.open(target_marker.with_name('runtime-release.lock'), os.O_RDWR | os.O_NOFOLLOW), 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        failed = env.read_private(path, raw=True); previous = json.loads(failed)
+        marker_bytes = env.read_private(target_marker, raw=True); marker = json.loads(marker_bytes)
+        expected_marker = {'status': 'running', 'source_sha': release['source_sha'], 'receipt': str(path)}
+        recovered_marker = {**expected_marker, 'status': 'reconciled', 'reconciliation': str(acknowledgement)}
+        env.argo.require(marker in (expected_marker, recovered_marker)
+                         and previous.get('source_sha') == release['source_sha']
+                         and previous.get('input_sha256') == fingerprint, 'failed release/target binding differs')
+        check_noop_failure(previous, args.target_id, request['target']['provider'], registration['node_uid'], release['to_policy'])
+        saved = (reconciled_baseline(recovered_marker, registration, identity, args.target_id, request['target']['provider'])
+                 if acknowledgement.exists() else None)
+        env.argo.require(marker != recovered_marker or saved is not None, 'reconciliation acknowledgement missing')
+        current = health_proof(args, loaded, registration['node_uid'])
+        fresh = load(args)
+        env.argo.require(upgrade.digest({'release': fresh[0], 'identity': fresh[7], 'registration': fresh[1]}) == fingerprint
+                         and env.read_private(target_marker, raw=True) == marker_bytes
+                         and env.read_private(path, raw=True) == failed, 'reconciliation inputs changed during readback')
+        proof = {**current, 'status': 'reconciled', 'failed_receipt': str(path),
+                 'failed_receipt_sha256': hashlib.sha256(failed).hexdigest(),
+                 'identity_sha256': upgrade.digest(identity), 'registration_sha256': upgrade.digest(registration),
+                 'to_policy': release['to_policy']}
+        proof.pop('verify_only')
+        if saved is None:
+            env.save(acknowledgement, proof)
+        if marker != recovered_marker:
+            env.save(target_marker, recovered_marker)
+        return proof  # Repeated calls recheck live health without rewriting any evidence.
 
 
 def execute(args):
@@ -394,8 +474,14 @@ def execute(args):
                                  'a different release owns the target; stale success cannot be replayed')
             env.save(target_marker, {'status': 'verified', 'source_sha': release['source_sha'], 'receipt': str(path)})
             return {**previous, 'replayed': True}
+        baseline = None
         if target_marker.exists():
-            env.argo.require(env.read_private(target_marker)['status'] == 'verified', 'previous target release requires operator reconciliation')
+            marker = env.read_private(target_marker)
+            if marker.get('status') == 'reconciled':
+                baseline = reconciled_baseline(marker, registration, identity, args.target_id, request['target']['provider'])
+                env.argo.require(marker['source_sha'] != release['source_sha'], 'reconciled failure cannot be replayed')
+            else:
+                env.argo.require(marker['status'] == 'verified', 'previous target release requires operator reconciliation')
         receipt = {'version': 1, 'source_sha': release['source_sha'], 'target_id': args.target_id,
                    **({'scope': 'node-only'} if empty else {}),
                    'provider': request['target']['provider'], 'input_sha256': fingerprint, 'status': 'checking',
@@ -421,7 +507,9 @@ def execute(args):
             stage('runtime_readback')
             if empty:
                 previous_policy = registration['baseline_policy_sha256']
-                if target_marker.exists():
+                if baseline is not None:
+                    previous_policy = baseline['to_policy_sha256']
+                elif target_marker.exists():
                     marker = env.read_private(target_marker)
                     previous = env.read_private(marker['receipt'])
                     env.argo.require(previous['status'] == 'verified' and previous['target_id'] == args.target_id
@@ -496,14 +584,16 @@ def main():
     for name in ('registry', 'target-id', 'config', 'registration-dir', 'state-dir', 'release'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--binding')
-    parser.add_argument('--verify-only', action='store_true', help='read current health without applying or writing release state')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--verify-only', action='store_true', help='read current health without applying or writing release state')
+    mode.add_argument('--reconcile', action='store_true', help='acknowledge a no-op node observation failure after fresh health readback')
     args = parser.parse_args(); os.umask(0o077)
     try:
-        receipt = verify(args) if args.verify_only else execute(args)
+        receipt = reconcile(args) if args.reconcile else verify(args) if args.verify_only else execute(args)
     except Exception as error:
         receipt = {'status': 'blocked', 'error_type': type(error).__name__}
     print(json.dumps(receipt))
-    return 0 if receipt['status'] == 'verified' else 1
+    return 0 if receipt['status'] in {'verified', 'reconciled'} else 1
 
 
 if __name__ == '__main__':
