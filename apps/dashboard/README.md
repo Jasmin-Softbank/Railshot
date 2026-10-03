@@ -56,3 +56,11 @@ Another session's matching name remains an ownership conflict. Different names/e
 An uncertain published CD/HTTP result fences its registered environment, so a GCP route reconciliation does not block a same-named AWS application. Uncertain CI/registration or missing environment bindings keep the conservative name-level fence because CI source paths are shared. The affected environment still requires reconciliation; this does not retry it or alter its resources.
 
 짧은 API 교체 중에는 읽기/비동기 계획 요청과 동일 Idempotency-Key를 가진 앱 작업 요청의 전송을 제한된 횟수로 재시도한다. 서버가 접수 전에 반환한 `PLATFORM_UPDATING`도 같은 요청으로 이어간다. 키 없는 변경 요청이나 앱 상태 충돌은 자동 재전송하지 않는다. 중단 버튼/창 닫기는 재시도 대기도 취소한다.
+
+## Update UI design system
+
+The update workflow uses pinned [Basecoat 1.0.2](https://basecoatui.com/installation/) Vega Button, Field/Input and Badge components with native disclosure and a bounded review workspace. Basecoat is a framework-independent shadcn-style library; no React migration, remote CDN, font request or extra runtime JS is required.
+
+`node apps/dashboard/sync-design-system.mjs` bundles the official component stylesheet into `styles.css`, scoped to `.update-mode`. Global Tailwind property definitions are preserved; root tokens are rebound to the scope root. The production build checks the bundle against the pinned npm package. This serves the same CSS through the API's existing raw dashboard and Vite without adding backend routes. The MIT notices remain embedded in the distributed CSS.
+
+The app and last verified service are fixed context. Source, review and execution are exclusive stages. The review workspace separates file changes from the execution summary; destructive file removal is explicit but not a large warning banner. Full URLs, commits and expiry timestamps live in details. Expiry disables dispatch and offers re-review. An uncertain start retries the same preview and locks source editing. No-change completion and explicit rebuild retain their server semantics.

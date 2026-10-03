@@ -53,6 +53,7 @@ const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
 let selectedSource = null;
 let updateApplication = null, updatePreviewRequest = null, applicationDetail = null;
+let updateStage = 'source', updateRunId = null, previewExpiryTimer;
 let applications = [], applicationPageEnds = [], applicationPage = 0, applicationsController, applicationController;
 let reviewed = null;
 let deploymentOptions = [];
@@ -85,6 +86,7 @@ let logSnapshot = null, logController;
 let eventSnapshot = null, eventController;
 
 function invalidateReview() {
+  clearTimeout(previewExpiryTimer);
   reviewGeneration += 1;
   reviewed = null;
   document.querySelector('#review-panel').hidden = true;
@@ -92,6 +94,8 @@ function invalidateReview() {
   document.querySelector('#update-review').hidden = true;
   deployButton.textContent = updateApplication ? '업데이트 시작' : '배포 시작';
   error.hidden = true;
+  document.querySelector('#renew-update').hidden = true;
+  if (updateApplication) setUpdateStage('source');
 }
 
 function setSource(source) {
@@ -261,8 +265,68 @@ function appendSource(payload, source) {
 }
 
 const resourceId = (value) => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value);
+function renderUpdateContext() {
+  if (!updateApplication) return;
+  const application = applications.find((row) => row.id === updateApplication.id) || updateApplication;
+  const url = applicationSiteUrl(application);
+  document.querySelector('#update-identity').textContent = application.app;
+  document.querySelector('#update-environment').textContent = `${({ aws: 'AWS', gcp: 'Google Cloud', openstack: 'OpenStack', proxmox: 'Proxmox' })[application.provider] || '배포 환경'} / ${application.environment_target_id}`;
+  document.querySelector('#update-service-state').textContent = url ? '현재 서비스 · 마지막 접속 확인 ' + formatTime(application.current_deployment.public_http.verified_at)
+    : application.current_deployment_state === 'unverified' ? '현재 서비스 상태 확인 필요' : '마지막 성공 배포 기준으로 업데이트합니다.';
+  safeLink('#update-site', url, Boolean(url));
+  const latest = application.latest_deployment;
+  const note = document.querySelector('#update-latest-note');
+  note.hidden = !latest || !['failed', 'blocked', 'unknown'].includes(latest.status);
+  note.textContent = latest?.status === 'unknown' ? '최근 시도의 적용 결과를 확인해야 합니다.'
+    : '최근 배포 시도가 완료되지 않았습니다. 위 서비스 정보는 마지막으로 검증된 배포의 기록입니다.';
+}
+function setUpdateStage(stage) {
+  updateStage = stage;
+  const active = Boolean(updateApplication);
+  document.querySelector('#deploy-form').hidden = active && stage !== 'source';
+  document.querySelector('#review-panel').hidden = active ? stage !== 'review' : !reviewed;
+  document.querySelector('#run-panel').hidden = active ? stage !== 'run' || current?.id !== updateRunId : !current;
+  const steps = ['source', 'review', 'run'];
+  document.querySelectorAll('[data-update-step]').forEach((item) => {
+    const selected = item.dataset.updateStep === stage;
+    if (selected) item.setAttribute('aria-current', 'step'); else item.removeAttribute('aria-current');
+    item.dataset.complete = String(steps.indexOf(item.dataset.updateStep) < steps.indexOf(stage));
+  });
+}
+function expireUpdateReview() {
+  if (!reviewed?.update || reviewed.attempted) return;
+  const remaining = Date.parse(reviewed.preview.expires_at) - Date.now();
+  clearTimeout(previewExpiryTimer);
+  if (remaining > 0) { previewExpiryTimer = setTimeout(expireUpdateReview, Math.min(remaining, 2147483647)); return; }
+  deployButton.disabled = true;
+  document.querySelector('#update-ready-badge').textContent = '검토 만료';
+  document.querySelector('#update-ready-badge').dataset.tone = 'attention';
+  document.querySelector('#update-rebuild').disabled = true;
+  document.querySelector('#review-note').textContent = '검토가 만료됐습니다. 최신 상태로 변경 내용을 다시 확인하세요.';
+  document.querySelector('#review-note').dataset.tone = 'attention';
+  document.querySelector('#renew-update').hidden = false;
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) expireUpdateReview(); });
+document.querySelector('#renew-update').addEventListener('click', () => {
+  if (submitting) return;
+  updatePreviewRequest = null; invalidateReview();
+  if (selectedSource) reviewUpdate(); else document.querySelector('#repository-url').focus();
+});
+document.querySelector('#update-again').addEventListener('click', () => beginUpdate(updateApplication));
 function setUpdateMode(application, preserveSource = false) {
-  updateApplication = application; updatePreviewRequest = null;
+  updateApplication = application; updatePreviewRequest = null; updateRunId = null;
+  invalidateReview();
+  document.querySelector('#deploy-view').classList.toggle('update-mode', Boolean(application));
+  for (const button of document.querySelectorAll('#deploy-view .primary-button, #deploy-view .secondary-button, #deploy-view .text-button, #deploy-view [data-update-button]')) {
+    const original = button.dataset.updateButton || ['primary-button', 'secondary-button', 'text-button'].find(name => button.classList.contains(name));
+    if (application) {
+      button.dataset.updateButton = original; button.classList.remove(original); button.classList.add('btn');
+      button.dataset.variant = original === 'primary-button' ? 'primary' : original === 'secondary-button' ? 'outline' : 'ghost';
+    } else {
+      button.classList.remove('btn'); button.classList.add(original); delete button.dataset.variant; delete button.dataset.updateButton;
+    }
+  }
+  document.querySelector('.update-delivery-summary').hidden = !application;
   applicationName.value = '';
   document.querySelector('#application-name-field').hidden = Boolean(application);
   if (!preserveSource) { archive.value = ''; folder.value = ''; repositoryUrl.value = ''; setSource(null); }
@@ -271,18 +335,25 @@ function setUpdateMode(application, preserveSource = false) {
   document.querySelector('#deploy-title').textContent = application ? '앱 업데이트하기' : '앱 배포하기';
   document.querySelector('#deploy-view .page-header .eyebrow').textContent = application ? 'APPLICATION UPDATE' : 'NEW DEPLOYMENT';
   document.querySelector('#review-title').textContent = application ? '변경 내용' : '선택 내용';
-  document.querySelector('#update-identity').textContent = application ? `앱 ${application.app} · ${environmentLabel(application)}` : '';
-  document.querySelector('#deploy-form button[type="submit"]').textContent = application ? '변경 내용 확인 →' : '선택 내용 확인 →';
+  document.querySelector('#source-title').textContent = application ? '새 버전의 소스' : '소스 선택';
+  document.querySelector('#edit-selection').textContent = application ? '소스 수정' : '수정';
+  document.querySelector('#deploy-form button[type="submit"]').textContent = application ? '변경 내용 확인' : '선택 내용 확인 →';
+  document.querySelector('#run-details').open = !application;
+  renderUpdateContext(); setUpdateStage('source');
   requestError.hidden = true;
 }
-document.querySelector('#cancel-update').addEventListener('click', () => { if (!submitting) { setUpdateMode(null); showView('deploy'); } });
+document.querySelector('#cancel-update').addEventListener('click', () => {
+  if (submitting) return;
+  const id = updateApplication?.id;
+  setUpdateMode(null); showView('history'); if (id) loadApplication(id);
+});
 function beginUpdate(application) {
   if (!resourceId(application?.id)) return false;
   application = { ...application, ...applications.find((row) => row.id === application.id) };
   if (updateBlocked(application)) return false;
   setUpdateMode(application); showView('deploy');
   document.querySelector('#update-context').scrollIntoView({ block: 'start' });
-  document.querySelector('#choose-file').focus({ preventScroll: true });
+  document.querySelector('#repository-url').focus({ preventScroll: true });
   return true;
 }
 
@@ -298,29 +369,50 @@ function validatePreview(data, application) {
   }
 }
 function renderUpdatePreview(data, application, sourceLabel) {
-  document.querySelector('#review-source').textContent = sourceLabel || '서버에 보관된 소스';
+  let sourceName = sourceLabel || '보관된 소스';
+  try { const url = new URL(sourceName); if (url.hostname === 'github.com') sourceName = url.pathname.replace(/^\//, '').replace(/\/$/, ''); } catch { /* Upload labels are plain text. */ }
+  document.querySelector('#review-source').textContent = sourceName;
   document.querySelector('#review-app').textContent = application.app;
   document.querySelector('#review-target').textContent = environmentLabel(application);
-  document.querySelector('#review-note').textContent = `소스가 서버에 고정되었습니다. 아래 변경을 확인한 뒤 업데이트를 시작하세요. 유효 시각: ${formatTime(data.expires_at)}`;
+  document.querySelector('#review-note').textContent = '확인한 소스로 기존 앱을 업데이트합니다.';
+  document.querySelector('#review-note').dataset.tone = '';
   document.querySelector('#update-baseline').textContent = `비교 기준 배포: ${data.base_deployment_id} · ${data.baseline_kind === 'deployed'
     ? '검증된 최종 소스와 비교합니다.' : '제출 원본과 비교합니다. 이 배포의 AI 수정 후 최종 소스는 보관되어 있지 않습니다. 실제 배포 소스와 동일한지는 확인할 수 없어 검사·빌드를 생략하지 않습니다.'}`;
   document.querySelector('#update-origin').textContent = data.source_origin?.repository
     ? `가져온 저장소: ${data.source_origin.repository} · 고정 commit: ${data.source_origin.sha || '미제공'}` : '업로드한 소스를 서버에 보관했습니다.';
+  document.querySelector('#update-expiry').textContent = `검토 유효 시각: ${formatTime(data.expires_at)}`;
+  document.querySelector('#update-target-summary').textContent = environmentLabel(application);
   const changes = data.changes;
-  document.querySelector('#update-diff-summary').textContent = `${data.no_changes ? '변경된 파일이 없습니다. ' : ''}추가 ${changes.added.length} · 수정 ${changes.modified.length} · 삭제 ${changes.deleted.length} · 동일 ${changes.unchanged}`;
-  document.querySelector('#update-changes').replaceChildren(...[['added', '추가'], ['modified', '수정'], ['deleted', '삭제']].map(([key, label]) => {
-    const group = document.createElement('details'); group.open = changes[key].length > 0;
+  const total = changes.added.length + changes.modified.length + changes.deleted.length;
+  document.querySelector('#review-title').textContent = data.no_changes ? '변경된 파일이 없습니다' : total ? `${total}개 파일이 변경됩니다` : '변경 내용 확인';
+  const summary = document.querySelector('#update-diff-summary'); summary.replaceChildren();
+  for (const [key, label] of [['added', '추가'], ['modified', '수정'], ['deleted', '삭제']]) if (changes[key].length) {
+    const badge = element('span', `${label} ${changes[key].length}`, 'badge'); badge.dataset.variant = 'secondary'; badge.dataset.change = key; summary.append(badge);
+  }
+  summary.append(element('span', `${data.no_changes ? '변경된 파일이 없습니다. ' : ''}동일 ${changes.unchanged}개`, 'diff-unchanged'));
+  const impact = document.querySelector('#update-impact');
+  impact.dataset.tone = changes.deleted.length ? 'attention' : 'neutral';
+  impact.textContent = data.no_changes ? '현재 배포된 소스와 같습니다. 빌드와 배포를 생략하고 완료할 수 있습니다.'
+    : changes.deleted.length ? `삭제 목록의 파일 ${changes.deleted.length}개는 새 버전에서 제외됩니다.`
+    : data.baseline_kind === 'submitted' ? '이전 제출 원본과 비교한 결과입니다. 실제 배포된 최종 소스와 동일한지 확인할 수 없어 검사와 빌드를 진행합니다.'
+    : '변경된 파일을 확인하고 업데이트를 시작하세요.';
+  document.querySelector('#update-changes').replaceChildren(...[['added', '추가'], ['modified', '수정'], ['deleted', '삭제']].filter(([key]) => changes[key].length).map(([key, label]) => {
+    const group = document.createElement('details'); group.dataset.change = key;
     const files = document.createElement('ul'); files.append(...changes[key].map((path) => element('li', path)));
     group.append(element('summary', `${label} ${changes[key].length}개`), files); return group;
   }));
   document.querySelector('#update-review').hidden = false;
+  document.querySelector('#update-source-details').open = false;
+  document.querySelector('#update-ready-badge').textContent = data.no_changes ? '변경 없음' : '검토 준비됨';
+  document.querySelector('#update-ready-badge').dataset.tone = '';
   document.querySelector('#rebuild-field').hidden = !data.no_changes;
   const rebuild = document.querySelector('#update-rebuild'); rebuild.checked = false; rebuild.disabled = false;
   deployButton.textContent = data.no_changes ? '변경 없음으로 완료' : '업데이트 시작';
   deployButton.disabled = Date.parse(data.expires_at) <= Date.now();
   requestError.hidden = true; error.hidden = true;
-  document.querySelector('#review-panel').hidden = false;
-  document.querySelector('#review-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  setUpdateStage('review'); expireUpdateReview();
+  document.querySelector('#review-title').focus({ preventScroll: true });
+  document.querySelector('#update-context').scrollIntoView({ block: 'start' });
 }
 document.querySelector('#update-rebuild').addEventListener('change', (event) => {
   if (reviewed?.update && !reviewed.attempted) deployButton.textContent = event.target.checked ? '다시 빌드·배포' : '변경 없음으로 완료';
@@ -335,7 +427,7 @@ async function reviewUpdate() {
     const generation = reviewGeneration, application = updateApplication;
     const draft = updatePreviewRequest ||= { key: crypto.randomUUID(), source: selectedSource };
     const button = document.querySelector('#deploy-form button[type="submit"]');
-    reviewing = true; button.disabled = true;
+    reviewing = true; button.disabled = true; button.textContent = '변경 내용 확인 중…';
     try {
       const { data, location } = await request(`/api/v1/applications/${encodeURIComponent(application.id)}/updates`, {
         method: 'POST', headers: { 'Idempotency-Key': draft.key }, body: appendSource(new FormData(), draft.source),
@@ -350,10 +442,10 @@ async function reviewUpdate() {
       renderUpdatePreview(data, application, draft.source.label);
     } catch (cause) {
       if (generation === reviewGeneration && updateApplication?.id === application.id) {
-        error.textContent = `${cause.name === 'AbortError' ? '변경 검토 요청 시간이 초과되었습니다.' : cause.message}${updatePreviewRequest === draft ? ' 다시 확인하면 같은 요청 키를 사용합니다.' : ''}`;
+        error.textContent = `${cause.name === 'AbortError' ? '변경 검토 요청 시간이 초과되었습니다.' : cause.message} 변경 내용 확인을 눌러 다시 시도하세요.`;
         error.hidden = false;
       }
-    } finally { reviewing = false; button.disabled = false; }
+    } finally { reviewing = false; button.disabled = false; button.textContent = updateApplication ? '변경 내용 확인' : '선택 내용 확인 →'; }
     return;
   }
   error.hidden = false;
@@ -361,7 +453,7 @@ async function reviewUpdate() {
 async function startUpdate(draft) {
   if (applicationBusy(draft.application.id, true)) throw new Error('진행 중인 앱 관리 작업을 먼저 확인하세요.');
   if (!draft.attempted && Date.parse(draft.preview.expires_at) <= Date.now()) {
-    reviewed = null; updatePreviewRequest = null; throw new Error('변경 검토가 만료됐습니다. 소스 선택에서 다시 확인하세요.');
+    expireUpdateReview(); throw new Error('변경 검토가 만료됐습니다. 변경 내용을 다시 확인하세요.');
   }
   draft.startRebuild ??= document.querySelector('#update-rebuild').checked;
   draft.attempted = true;
@@ -372,7 +464,10 @@ async function startUpdate(draft) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rebuild: draft.startRebuild }),
     });
   } catch (cause) {
-    if (['UPDATE_EXPIRED', 'UPDATE_BASE_CHANGED'].includes(cause.code)) { reviewed = null; updatePreviewRequest = null; }
+    if (['UPDATE_EXPIRED', 'UPDATE_BASE_CHANGED'].includes(cause.code)) {
+      reviewed = null; updatePreviewRequest = null;
+      document.querySelector('#renew-update').hidden = false;
+    }
     throw cause;
   }
   const { data, location } = response;
@@ -380,13 +475,15 @@ async function startUpdate(draft) {
   if (id !== draft.preview.id || location !== `/api/v1/deployments/${encodeURIComponent(id)}`
       || !['accepted', 'queued', 'running', ...terminal].includes(data.status) || data.status === 'preview') throw new Error('업데이트 실행 응답을 확인하지 못했습니다.');
   current = { ...draft.preview, ...data, id, kind: 'deployments', status: data.status === 'accepted' ? 'queued' : data.status };
+  updateRunId = id; clearTimeout(previewExpiryTimer); setUpdateStage('run');
   ciSnapshot = null; ciReadError = false;
   lastReadAt = null; observationError = false; remember(); renderRun();
   reviewed = null; updatePreviewRequest = null; deployButton.disabled = true;
   document.querySelector('#review-panel').hidden = true;
   historyKind = 'deployments'; document.querySelector('#history-kind').value = historyKind;
   loadHistory([null]); loadApplications(); refreshRun();
-  document.querySelector('#run-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  document.querySelector('#run-title').focus({ preventScroll: true });
+  document.querySelector('#update-context').scrollIntoView({ block: 'start' });
 }
 
 document.querySelector('#deploy-form').addEventListener('submit', async (event) => {
@@ -461,7 +558,11 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   }
   error.hidden = false;
 });
-document.querySelector('#edit-selection').addEventListener('click', () => { if (!submitting) invalidateReview(); });
+document.querySelector('#edit-selection').addEventListener('click', () => {
+  if (submitting) return;
+  invalidateReview(); requestError.hidden = true;
+  if (updateApplication) document.querySelector('#repository-url').focus();
+});
 
 // Current execution and live observations.
 function remember() {
@@ -529,7 +630,7 @@ function renderMonitorSteps() {
 }
 function renderRun() {
   renderApplicationActions();
-  document.querySelector('#run-panel').hidden = false;
+  document.querySelector('#run-panel').hidden = Boolean(updateApplication && (updateStage !== 'run' || current.id !== updateRunId));
   const resume = document.querySelector('#resume-run');
   resume.hidden = !(current.kind === 'deployments' && current.application_id && current.status === 'unknown'
     && ['cd', 'http'].includes(current.stage) && current.ci?.state === 'published');
@@ -560,6 +661,25 @@ function renderRun() {
   if (current.status === 'running' && cdObservation?.error) {
     document.querySelector('#run-state').textContent = '마지막 배포 상태 유지 · 클러스터 재조회 중';
     document.querySelector('#run-message').textContent = `${cdObservation.error.message} 기존 배포 revision을 조회하며 CI나 앱 적용을 다시 실행하지 않습니다.`;
+  }
+  const isUpdateRun = Boolean(updateApplication && current.id === updateRunId);
+  document.querySelector('#run-title').textContent = isUpdateRun ? '이번 업데이트' : '실행 상태';
+  document.querySelector('#run-state').dataset.tone = ['succeeded', 'unchanged'].includes(current.status) ? 'success'
+    : ['failed', 'blocked'].includes(current.status) ? 'danger' : current.status === 'unknown' ? 'attention' : 'neutral';
+  document.querySelector('#update-again').hidden = !isUpdateRun || !['succeeded', 'unchanged', 'failed', 'blocked'].includes(current.status);
+  document.querySelector('#update-run-progress').hidden = !isUpdateRun || current.status === 'unchanged';
+  if (isUpdateRun) {
+    if (current.status === 'unchanged') document.querySelector('#run-message').textContent = '변경된 소스가 없어 빌드와 배포를 생략했습니다. 현재 서비스는 그대로 유지됩니다.';
+    if (current.status === 'unknown') document.querySelector('#run-message').textContent = '이번 업데이트의 적용 결과를 아직 확인하지 못했습니다. 새 업데이트를 만들기 전에 상태를 다시 조회하세요.';
+    document.querySelector('#update-run-progress').replaceChildren(...[
+      ['이미지 준비', current.ci?.state === 'published' ? '완료' : current.stage === 'ci' ? '진행 중' : '대기'],
+      ['앱 적용', current.cd?.deployed ? '완료' : current.stage === 'cd' ? '진행 중' : '대기'],
+      ['서비스 주소 확인', current.public_http?.state === 'succeeded' && current.public_http?.verified_at ? '완료' : current.stage === 'http' ? '진행 중' : '대기'],
+    ].map(([name, state]) => {
+      const item = element('li', '');
+      if (state === '진행 중' && terminal.has(current.status)) state = current.status === 'unknown' ? '확인 필요' : '중단됨';
+      item.dataset.state = state; item.append(element('span', name), element('strong', state)); return item;
+    }));
   }
   const steps = current.steps || current.ci?.steps || [];
   document.querySelector('#run-steps').replaceChildren(...steps.map((step) => {
@@ -597,7 +717,7 @@ deployButton.addEventListener('click', async () => {
   deployButton.disabled = true;
   requestError.hidden = true;
   const draft = reviewed;
-  const controls = document.querySelectorAll('#deploy-form input, #deploy-form button, #deploy-form select, #edit-selection');
+  const controls = document.querySelectorAll('#deploy-form input, #deploy-form button, #deploy-form select, #edit-selection, #cancel-update, #renew-update');
   controls.forEach((control) => { control.disabled = true; });
   try {
     if (draft.plan && !draft.attempted && Date.parse(draft.plan.expires_at) <= Date.now()) {
@@ -626,6 +746,11 @@ deployButton.addEventListener('click', async () => {
     refreshRun();
   } catch (cause) {
     const uncertain = draft.attempted && (cause.outcomeUnknown === true || !cause.status);
+    if (draft.update) {
+      draft.uncertain = uncertain;
+      if (!uncertain) { draft.attempted = false; delete draft.startRebuild; }
+      deployButton.textContent = uncertain ? '실행 상태 다시 확인' : '업데이트 다시 시도';
+    }
     const next = cause.code === 'EXECUTOR_BUSY'
       ? cause.admission?.reason === 'reconciliation_required'
         ? '운영자가 기존 작업의 결과를 확인한 뒤 다시 요청하세요. 자동으로 시작되지 않습니다.'
@@ -641,6 +766,8 @@ deployButton.addEventListener('click', async () => {
     submitting = false;
     controls.forEach((control) => { control.disabled = false; });
     document.querySelector('#update-rebuild').disabled = Boolean(draft.update && draft.attempted);
+    if (draft.update && draft.uncertain) document.querySelector('#edit-selection').disabled = true;
+    if (draft.update) expireUpdateReview();
     if (!reviewed) deployButton.disabled = true;
     renderApplications();
   }
@@ -922,7 +1049,7 @@ function renderApplications() {
   }));
   document.querySelector('#applications-more').hidden = applicationPage >= applicationPageEnds.length - 1;
   document.querySelector('#applications-more').disabled = Boolean(applicationsController);
-  renderApplicationActions(); renderHistory(); renderRunSite();
+  renderApplicationActions(); renderHistory(); renderRunSite(); renderUpdateContext();
 }
 async function loadApplications(more = false) {
   if (more) {
