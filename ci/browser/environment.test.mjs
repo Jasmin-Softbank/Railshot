@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { chromium } from 'playwright';
 
-test('original cloud card binds a DB plan, blocks invalid and unknown execution, and replays a lost response after expiry', { timeout: 60000 }, async (t) => {
+test('original cloud card binds a DB plan, blocks invalid plans, permits independent review during unknown, and replays a lost response after expiry', { timeout: 60000 }, async (t) => {
   const plans = [], deployments = [], environments = [], errors = [];
   const attempts = [], acceptedKeys = new Map(), outcomes = new Map();
   const profiles = [
@@ -176,10 +176,14 @@ test('original cloud card binds a DB plan, blocks invalid and unknown execution,
   await page.locator('#deploy-button').click();
   await page.waitForFunction(() => document.querySelector('#run-state').textContent === '실행 결과 확인 필요');
   const plansBeforeUnknownReview = plans.length;
+  await page.locator('#repository-url').fill('https://github.com/example/independent-app');
   await review();
-  assert.match(await page.locator('#form-error').innerText(), /진행 중인 실행을 먼저 확인/);
-  assert.equal(plans.length, plansBeforeUnknownReview, 'unknown execution must not start another plan');
-  assert.equal(deployments.length, 3);
+  await page.waitForFunction(() => !document.querySelector('#review-panel').hidden
+    && document.querySelector('#review-app').textContent === 'independent-app');
+  assert.equal(await page.locator('#form-error').isVisible(), false);
+  assert.equal(plans.length, plansBeforeUnknownReview + 1, 'unknown execution must not block reviewing another app');
+  assert.equal(await page.locator('#run-state').innerText(), '실행 결과 확인 필요');
+  assert.equal(deployments.length, 3, 'review is not an execution and does not replay the unknown app');
 
   // Resolve the previous execution before exercising an independent lost-response scenario.
   outcomes.set('execution-3', 'succeeded'); deploymentMode = 'lost-response';

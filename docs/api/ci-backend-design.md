@@ -47,7 +47,7 @@
 
 [product-store.js](../../apps/api/src/product-store.js)는 비공개 source snapshot과 실행 의도를 먼저 저장한다. 기록과 디렉터리 fsync·atomic rename이 성공한 뒤에만 외부 실행을 시작한다. `RAILSHOT_STATE_DIR`는 저장소 밖의 전용 영속 디렉터리이며 상태 파일과 소스는 실행 OS 사용자 소유로 보관한다.
 
-한 프로세스와 한 worker가 공유 workspace의 접수를 처리한다. 빌드·배포·계획·환경의 새 실행은 같은 admission 경계를 사용하며 미완료·unknown 작업이 있으면 다른 실행을 차단한다. 배포·환경의 동일 키 재조회는 기존 기록을 먼저 반환한다. 무제한 대기열·자동 재시도·공개 reset API는 없다. 재시작 시 queued/running은 unknown으로 남기고 운영자가 실제 GitHub·CD·환경 결과를 대조한다.
+한 API 프로세스와 단일 writer가 기존 SQLite operations의 FIFO를 처리한다. 새 배포와 업데이트는 소스 snapshot을 저장하고 queued로 접수한다. 빌드·계획·환경·수명주기·resume는 기존 응답 계약과 실행 슬롯 검사를 유지한다. worker가 끝난 unknown은 60초 뒤 전역 슬롯만 반납하고 같은 앱·미확정 환경의 변경은 계속 차단한다. 배포·환경의 동일 키 재조회는 기존 기록을 먼저 반환한다. 보관 한도 100개 안에서 대기하며 자동 재시도·공개 reset API는 없다. 재시작 시 신형 큐의 미실행 queued만 자동 시작하고 running과 구형 queued는 unknown으로 남긴다. [큐 및 중복 방지 계약](conventions.md)을 따른다.
 
 | 상태 | 의미 |
 |---|---|
