@@ -626,13 +626,19 @@ export async function createProductService({ service, directory, target, provide
   void pump();
   return {
     dashboard: store.dashboard,
+    registrations: store.registrations,
     createUpdate, startUpdate,
     async sourceFiles(id, variant, sessionId = null) {
       const record = find('deployments', id, sessionId);
       if (!['submitted', 'deployed'].includes(variant)) throw invalid('지원하지 않는 소스 종류입니다.');
       return variant === 'submitted' ? submittedFiles(record) : deployedFiles(record);
     },
-    applications(sessionId = null) { const state = store.read(); return Object.values(state.applications).filter((row) => owns(row, sessionId)).map((row) => publicApplication(state, row)); },
+    applications(sessionId = null) {
+      const state = store.read();
+      return Object.values(state.applications)
+        .filter((row) => owns(row, sessionId))
+        .map((row) => publicApplication(state, row));
+    },
     getApplication(id, sessionId = null) {
       const state = store.read();
       return publicApplication(state, applicationFor(state, id, sessionId));
@@ -792,7 +798,14 @@ export async function createProductService({ service, directory, target, provide
       return result;
     },
     getBuild: readBuild,
-    async legacyStatus(id, sessionId = null) { const state = store.read(); if (!Object.hasOwn(state.bindings, id) || !owns(state.operations[state.bindings[id].operation_id], sessionId)) throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.'); return service.status(id, store.read().bindings[id].target_id); },
+    async legacyStatus(id, sessionId = null) {
+      const state = store.read();
+      const binding = Object.hasOwn(state.bindings, id) ? state.bindings[id] : null;
+      if (!binding || !owns(state.operations[binding.operation_id], sessionId)) {
+        throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.');
+      }
+      return service.status(id, binding.target_id);
+    },
     async createDeployment(input, key, materialize, sessionId = null) {
       input = resolveSelection(input);
       if (!input.plan_id && applicationAdapter?.targets?.[input.target_id]) {
@@ -916,7 +929,14 @@ export async function createProductService({ service, directory, target, provide
         return plan.public;
       });
     },
-    getPlan(id, sessionId = null) { const plans = store.read().plans, plan = Object.hasOwn(plans, id) ? plans[id] : null; if (!owns(plan, sessionId) || plan.kind === 'application-lifecycle') throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.'); return plan.public; },
+    getPlan(id, sessionId = null) {
+      const plans = store.read().plans;
+      const plan = Object.hasOwn(plans, id) ? plans[id] : null;
+      if (!owns(plan, sessionId) || plan.kind === 'application-lifecycle') {
+        throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.');
+      }
+      return plan.public;
+    },
     async createEnvironment(input, key, sessionId = null) {
       idempotencyKey(key);
       if (!input || Object.keys(input).length !== 1 || typeof input.plan_id !== 'string') throw invalid('plan_id만 입력하세요.');
@@ -949,7 +969,15 @@ export async function createProductService({ service, directory, target, provide
       });
       return publicRecord(accepted.record);
     },
-    getEnvironment(id, sessionId = null) { return publicRecord(find('environments', id, sessionId)); },
-    async close() { abort.abort(); clearInterval(queueTimer); await pumping; await Promise.allSettled(workers); await store.close(); },
+    getEnvironment(id, sessionId = null) {
+      return publicRecord(find('environments', id, sessionId));
+    },
+    async close() {
+      abort.abort();
+      clearInterval(queueTimer);
+      await pumping;
+      await Promise.allSettled(workers);
+      await store.close();
+    },
   };
 }

@@ -4,175 +4,29 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import yazl from 'yazl';
 import { createDeploymentService, ServiceError } from './github.js';
-import { archiveLimits, inspectArchive, validateFiles } from './archive.js';
 import { fetchPublicGithubSource } from './public-github.js';
-import { APP_NAME, APP_NAME_MESSAGE } from './contract.js';
-import { createProductService, ProductError, idempotencyKey } from './product.js';
+import { createProductService } from './product.js';
 import { apiAccessConfig, allowsHost, allowsOrigin, allowsToken } from './access.js';
-import { createEnvironmentAdapter, EnvironmentError } from './environments.js';
-import { DashboardError, cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
+import { createEnvironmentAdapter } from './environments.js';
+import { cookieToken, sessionCookie, SESSION_COOKIE } from './sessions.js';
+import { json, apiError, accepted } from './http/response.js';
+import { jsonInput, pagination, page, requestKey } from './http/request.js';
+import { uploadedSource, sourceArchive } from './http/source.js';
+import { createOpenStackRoutes, isRegistrationRoute } from './http/openstack.js';
+import { isDashboardRoute, serveDashboard } from './http/dashboard.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/src/api.js', ['src/api.js', 'text/javascript; charset=utf-8']],
+  ['/src/openstack-installer.js', ['src/openstack-installer.js', 'text/javascript; charset=utf-8']],
+  ['/src/lifecycle.js', ['src/lifecycle.js', 'text/javascript; charset=utf-8']],
+  ['/src/connections.js', ['src/connections.js', 'text/javascript; charset=utf-8']],
   ['/contracts/application.mjs', ['../../contracts/application.mjs', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
 ]);
-function json(response, code, data, headers = {}) {
-  response.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
-  response.end(JSON.stringify(data));
-}
-async function readLimited(request, limit) {
-  const chunks = []; let size = 0;
-  for await (const chunk of request) {
-    size += chunk.length;
-    if (size > limit) throw new ServiceError('요청 크기가 허용 범위를 초과했습니다.', 413);
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
-function normalizedRepository(value) {
-  let url;
-  try { url = new URL(value); } catch { throw new ServiceError('공개 GitHub 저장소 URL이 필요합니다.', 400); }
-  const match = /^\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/.exec(url.pathname);
-  if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.port || url.username || url.password || url.search || url.hash || !match || match[1].startsWith('-') || match[2].startsWith('.') || match[2].endsWith('.')) throw new ServiceError('공개 GitHub 저장소 기본 URL만 사용할 수 있습니다.', 400);
-  return `https://github.com/${match[1].toLowerCase()}/${match[2].toLowerCase()}`;
-}
-// Parse without fetching GitHub: an idempotency replay must retain its first source snapshot.
-async function uploadedSource(request, strict = false, allowSelection = false, sourceOnly = false) {
-  const contentType = request.headers['content-type'] || '';
-  if (!/^multipart\/form-data\s*;/i.test(contentType)) throw new ServiceError('multipart/form-data 요청이 필요합니다.', 415);
-  const body = await readLimited(request, archiveLimits.maxBytes + 1024 * 1024);
-  let form;
-  try { form = await new Request('http://localhost/', { method: 'POST', headers: { 'content-type': contentType }, body }).formData(); }
-  catch { throw new ServiceError('multipart 요청 형식이 잘못되었습니다.', 400); }
-  const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
-  const allowed = new Set(['app', 'target_id', 'plan_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
-  if (sourceOnly) for (const name of ['app', 'target_id', 'plan_id']) allowed.delete(name);
-  if (allowSelection) for (const name of ['environment', 'provider', 'source_name']) allowed.add(name);
-  for (const key of form.keys()) {
-    if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
-    if (key !== 'files' && form.getAll(key).length !== 1) fail('단일 입력 필드를 중복해서 보낼 수 없습니다.');
-  }
-  const selecting = allowSelection && (form.has('environment') || form.has('provider'));
-  const app = form.has('app') ? form.get('app') : undefined;
-  if (!selecting && !sourceOnly && (typeof app !== 'string' || !APP_NAME.test(app))) fail(APP_NAME_MESSAGE);
-  const target_id = form.has('target_id') ? form.get('target_id') : undefined;
-  if (target_id !== undefined && (typeof target_id !== 'string' || !target_id)) fail('대상 ID가 잘못되었습니다.');
-  if (strict && !selecting && !sourceOnly && !target_id) fail('대상 ID가 필요합니다.');
-  const plan_id = form.has('plan_id') ? form.get('plan_id') : undefined;
-  if (plan_id !== undefined && (!allowSelection || typeof plan_id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(plan_id))) fail('환경 계획 ID가 잘못되었습니다.');
-  let selected = {};
-  if (selecting) {
-    const environment = form.get('environment'), provider = form.get('provider');
-    if (form.has('app') || form.has('target_id') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
-    if (!(environment === 'cloud' && ['aws', 'gcp'].includes(provider) || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
-    const source_name = form.has('source_name') ? form.get('source_name') : undefined;
-    if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
-    selected = { deployment_selection: { environment, provider }, source_name };
-  } else if (form.has('source_name')) fail('소스 이름은 환경 선택과 함께 입력하세요.');
-  const uploads = form.getAll('files');
-  const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
-  if (supplied.length !== 1) fail('배포 소스 하나만 입력하세요.');
-  const source_type = supplied[0];
-  if (form.has('source_type') && form.get('source_type') !== source_type) fail('소스 형식과 입력값이 일치하지 않습니다.');
-  if (source_type !== 'folder' && form.has('paths')) fail('폴더 소스에만 paths를 사용할 수 있습니다.');
-  if (source_type === 'github') {
-    if (typeof form.get('repository_url') !== 'string') fail('공개 GitHub 저장소 URL이 필요합니다.');
-    let repository_url;
-    try { repository_url = normalizedRepository(form.get('repository_url')); } catch { fail('공개 GitHub 저장소 기본 URL이 필요합니다.'); }
-    return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, source_type, repository_url };
-  }
-  try {
-    if (source_type === 'folder') {
-      const paths = JSON.parse(form.get('paths'));
-      if (!Array.isArray(paths) || paths.length !== uploads.length || uploads.length > archiveLimits.maxFiles) fail('폴더 파일 목록이 잘못되었습니다.');
-      const files = await Promise.all(uploads.map(async (file, index) => {
-        if (!file || typeof file.arrayBuffer !== 'function') fail('폴더 파일이 잘못되었습니다.');
-        return { path: paths[index], content: Buffer.from(await file.arrayBuffer()) };
-      }));
-      return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, source_type, files: validateFiles(files) };
-    }
-    const file = form.get('archive');
-    if (!file || typeof file.arrayBuffer !== 'function' || !file.name?.toLowerCase().endsWith('.zip')) fail('ZIP 파일이 필요합니다.');
-    return { ...(sourceOnly ? {} : { app, target_id }), ...(plan_id ? { plan_id } : {}), ...selected, ...(selecting && !selected.source_name ? { source_name: file.name } : {}), source_type, files: await inspectArchive(Buffer.from(await file.arrayBuffer())) };
-  } catch { fail('소스 파일 목록·경로·크기를 확인하세요. 비밀 파일은 보낼 수 없습니다.'); }
-}
-async function jsonInput(request) {
-  if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] || '')) throw new ServiceError('application/json 요청이 필요합니다.', 415);
-  let value, raw;
-  try { raw = (await readLimited(request, 64 * 1024)).toString('utf8'); value = JSON.parse(raw); }
-  catch (error) { if (error.status) throw error; throw new ServiceError('JSON 형식이 잘못되었습니다.', 400); }
-  // JSON.parse validates grammar; this small token pass rejects duplicate decoded object keys at every depth.
-  const tokens = raw.match(/"(?:\\[\s\S]|[^"\\])*"|[{}\[\]:]/g) || [], stack = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
-    if (token === '{' || token === '[') stack.push(token === '{' ? new Set() : null);
-    else if (token === '}' || token === ']') stack.pop();
-    else if (token.startsWith('"') && tokens[i + 1] === ':') {
-      const key = JSON.parse(token), keys = stack.at(-1);
-      if (keys.has(key)) throw new ServiceError('JSON 필드를 중복해서 보낼 수 없습니다.', 422);
-      keys.add(key);
-    }
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ServiceError('JSON 객체가 필요합니다.', 422);
-  return value;
-}
-function pagination(parameters) {
-  for (const key of parameters.keys()) if (!['limit', 'marker'].includes(key) || parameters.getAll(key).length !== 1) throw new ServiceError('조회 조건이 잘못되었습니다.', 422);
-  const rawLimit = parameters.get('limit') ?? '20';
-  if (!/^[1-9]\d?$|^100$/.test(rawLimit)) throw new ServiceError('limit는 1–100이어야 합니다.', 422);
-  const marker = parameters.get('marker');
-  if (marker !== null && (!/^[A-Za-z0-9._-]{1,128}$/.test(marker))) throw new ServiceError('marker가 잘못되었습니다.', 422);
-  return { limit: Number(rawLimit), marker };
-}
-function page(items, parameters) {
-  const { limit, marker } = pagination(parameters);
-  const start = marker === null ? 0 : items.findIndex((item) => item.id === marker) + 1;
-  if (marker !== null && start === 0) throw new ServiceError('marker가 잘못되었습니다.', 422);
-  const visible = items.slice(start, start + limit);
-  return { items: visible, next_marker: start + visible.length < items.length ? visible.at(-1).id : null };
-}
-function apiError(response, error, requestId, versioned) {
-  const status = error instanceof EnvironmentError && error.status === 400 ? 422 : Number.isInteger(error.status) && error.status >= 400 && error.status < 600 ? error.status : 500;
-  const codes = { 400: 'INVALID_INPUT', 401: 'UNAUTHENTICATED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 405: 'METHOD_NOT_ALLOWED', 409: 'CONFLICT', 413: 'PAYLOAD_TOO_LARGE', 415: 'UNSUPPORTED_MEDIA_TYPE', 422: 'INVALID_INPUT', 502: 'UPSTREAM_FAILURE', 503: 'UPSTREAM_UNAVAILABLE' };
-  const message = error instanceof ServiceError || error instanceof ProductError || error instanceof DashboardError ? error.message : '요청을 처리하지 못했습니다.';
-  const headers = { 'X-Request-ID': requestId, ...(error.allow ? { Allow: error.allow } : {}), ...(error.retryable ? { 'Retry-After': '2' } : {}) };
-  const code = error instanceof EnvironmentError && error.status === 400 ? 'INVALID_INPUT'
-    : (error instanceof ServiceError || error instanceof ProductError || error instanceof EnvironmentError || error instanceof DashboardError) && error.code || codes[status] || 'INTERNAL_ERROR';
-  // Correlate the safe error envelope without persisting source URLs, credentials or request bodies.
-  console.error(JSON.stringify({ event: 'api.request_failed', request_id: requestId, status, code }));
-  json(response, status, versioned ? { error: { code, message,
-    request_id: requestId, retryable: Boolean(error.retryable), outcome_unknown: Boolean(error.outcomeUnknown),
-    ...(error instanceof ProductError && error.admission ? { admission: error.admission } : {}) } } : { error: message }, headers);
-}
-function requestKey(request) {
-  const count = request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'idempotency-key').length;
-  if (count !== 1) throw new ServiceError('Idempotency-Key 하나만 입력하세요.', 422);
-  return idempotencyKey(request.headers['idempotency-key']);
-}
-function accepted(response, kind, record, requestId, action = 'create') {
-  const terminal = !['queued', 'running'].includes(record.status);
-  json(response, terminal ? 200 : 202, terminal || kind === 'operations' ? record : { resource_id: record.id, action, status: 'accepted', request_id: requestId },
-    { Location: `/api/v1/${kind}/${record.id}`, 'X-Request-ID': requestId, ...(!terminal ? { 'Retry-After': '2' } : {}) });
-}
-
-async function sourceArchive(files) {
-  const zip = new yazl.ZipFile();
-  for (const file of validateFiles(files)) zip.addBuffer(file.content, file.path);
-  zip.end();
-  const chunks = []; let size = 0;
-  for await (const chunk of zip.outputStream) {
-    size += chunk.length;
-    if (size > archiveLimits.maxBytes + 1024 * 1024) throw new ServiceError('소스 다운로드 크기가 허용 범위를 초과했습니다.', 413);
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
 export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
   service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({ token: process.env.GITHUB_TOKEN,
     owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.RAILSHOT_TENANT || process.env.JASMIN_TENANT,
@@ -181,6 +35,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
   deployPublished, environmentAdapter, applicationAdapter, observeMetrics, observeLogs, product, pollInterval,
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
 } = {}) {
+  const openstack = createOpenStackRoutes();
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
   const productReady = Promise.resolve().then(async () => {
     if (product) return product;
@@ -224,47 +79,33 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);
         }
+        const registrationRoute = isRegistrationRoute(url.pathname);
+        if (registrationRoute) {
+          if (!access.token) throw new ServiceError('등록 요청에는 운영자 API 토큰 설정이 필요합니다.', 503);
+          if (!allowsToken(request.headers.authorization, access.token)) {
+            response.setHeader('www-authenticate', 'Bearer');
+            throw new ServiceError('API authentication required', 401);
+          }
+        }
+        if (versioned && await openstack.serveInstaller(request, response, url)) return;
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
         // Public visitors are anonymous cookie sessions. Existing localhost maintenance clients
         // without a cookie retain their private maintenance channel and legacy contracts.
-        const dashboardRoute = /^\/api\/v1\/(sessions|preferences|connections)(?:\/|$)/.test(url.pathname);
-        const scoped = access.remote || access.publicDemo || dashboardRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
+        const dashboardRoute = isDashboardRoute(url.pathname);
+        const scoped = access.remote || access.publicDemo || dashboardRoute || registrationRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
         const session = scoped ? products.dashboard.session(cookieToken(request.headers.cookie)) : null;
         const sessionId = session?.id ?? null;
         if (session?.token) response.setHeader('Set-Cookie', sessionCookie(session.token, access.remote));
         response.setHeader('Vary', 'Cookie');
         if (versioned) {
+          if (registrationRoute) {
+            await openstack.serveRegistration(request, response, url, products, sessionId);
+            return;
+          }
           if (dashboardRoute) {
-            const route = /^\/api\/v1\/(sessions|preferences|connections)(?:\/([a-f0-9-]{36}))?$/.exec(url.pathname);
-            if (!route) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
-            const [, kind, id] = route;
-            if (id && kind !== 'connections') throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
-            const methods = kind === 'preferences' ? ['GET', 'PUT'] : id ? ['GET', 'PUT', 'DELETE'] : ['GET', 'POST'];
-            if (!methods.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = methods.join(', '); throw error; }
-            if ([...url.searchParams].length && !(kind === 'connections' && !id && request.method === 'GET')) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
-            if (kind === 'sessions' && !id && ['GET', 'POST'].includes(request.method)) {
-              json(response, request.method === 'POST' && session.token ? 201 : 200, { expires_at: session.expires_at }, { 'X-Request-ID': requestId }); return;
-            }
-            if (kind === 'preferences' && !id && ['GET', 'PUT'].includes(request.method)) {
-              json(response, 200, products.dashboard.preferences(sessionId, request.method === 'PUT' ? await jsonInput(request) : undefined)); return;
-            }
-            if (kind === 'connections') {
-              if (!id && request.method === 'GET') { json(response, 200, page(products.dashboard.connections(sessionId), url.searchParams)); return; }
-              if (id && request.method === 'GET') {
-                const connection = products.dashboard.connections(sessionId).find((row) => row.id === id);
-                if (!connection) throw new DashboardError('이 세션에서 자원을 찾을 수 없습니다.', 404, 'NOT_FOUND');
-                json(response, 200, connection); return;
-              }
-              if (!id && request.method === 'POST' || id && request.method === 'PUT') {
-                const connection = products.dashboard.saveConnection(sessionId, id, await jsonInput(request));
-                json(response, id ? 200 : 201, connection, id ? {} : { Location: `/api/v1/connections/${connection.id}` }); return;
-              }
-              if (id && request.method === 'DELETE') {
-                products.dashboard.deleteConnection(sessionId, id); response.writeHead(204, { 'cache-control': 'no-store' }); response.end(); return;
-              }
-            }
-            throw new ServiceError('지원하지 않는 메서드입니다.', 405);
+            await serveDashboard(request, response, url, products, session, requestId);
+            return;
           }
           if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
