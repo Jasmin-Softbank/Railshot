@@ -145,6 +145,30 @@ variable "openstack_app_egress" {
   }
 }
 
+# Operator-owned services are independent of customer application lifecycles.
+variable "shared_service_egress" {
+  description = "Explicit shared service TCP destinations retained when customer apps stop or delete. No routes or listeners are created."
+  type = map(object({
+    target_private_ip = string
+    port              = number
+    description       = string
+  }))
+  default = {}
+  validation {
+    condition = length(var.shared_service_egress) <= 16 && alltrue([
+      for name, rule in var.shared_service_egress : (
+        can(regex("^[a-z][a-z0-9-]{0,62}$", name)) &&
+        can(cidrnetmask("${rule.target_private_ip}/32")) &&
+        can(regex("^(10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)", rule.target_private_ip)) &&
+        rule.port >= 1 && rule.port <= 65535 && floor(rule.port) == rule.port &&
+        length(rule.description) > 0 && length(rule.description) <= 255 &&
+        length(regexall("[\\r\\n]", rule.description)) == 0
+      )
+    ])
+    error_message = "Declare at most 16 named shared services with RFC1918 IPv4, integer TCP port and a single-line description."
+  }
+}
+
 # Rejection sentinel for old tfvars, not a transport option.
 variable "wireguard_network_interface_id" {
   type        = string
