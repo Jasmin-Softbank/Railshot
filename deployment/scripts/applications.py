@@ -174,6 +174,24 @@ def register(config_path, request):
             require(record.get('input_sha256') == fingerprint, 'APPLICATION_BINDING_CHANGED')
             if record.get('status') == 'succeeded':
                 require(record.get('binding_sha256') == hashlib.sha256(runtime.read_private(home / 'binding.json', raw=True)).hexdigest(), 'APPLICATION_BINDING_CHANGED')
+                if 'cluster_registration' not in record:
+                    # Upgrade an already registered app without rebuilding, rebinding or
+                    # replaying its original registration/CD side effects.
+                    binding = runtime.read_private(home / 'binding.json')
+                    registered = binding['registered']; cd = {**config['cd'], 'targets': {app_id: registered}}
+                    runtime.shared_cluster_policy(cd, registered, env_id)
+                    record.update(status='running', stage='cluster')
+                    runtime.save(receipt, record)
+                    try:
+                        runtime.grant_control_objects(cd, registered, app_id, environment_id=env_id)
+                        with runtime.runtime_kubectl(native) as kube:
+                            record['cluster_registration'] = runtime.share_application_cluster(kube, cd, registered, env_id)
+                        record['steps'].append('cluster')
+                        record.update(status='succeeded', stage='registered')
+                    except Exception:
+                        record.update(status='unknown', error={'code': 'APPLICATION_RECONCILE_REQUIRED',
+                                      'retryable': False, 'outcome_unknown': True})
+                    runtime.save(receipt, record)
                 return record
             # A started write or an uncertain outcome requires operator reconciliation.
             record.update(status='unknown', error={'code': 'APPLICATION_RECONCILE_REQUIRED', 'retryable': False, 'outcome_unknown': True})
@@ -209,6 +227,7 @@ def register(config_path, request):
                 registered = {'app': app, 'tenant': profile['tenant'], 'target': target}
                 cd = {**config['cd'], 'targets': {app_id: registered}}
                 runtime.preflight_renewal(cd, registered, app_id)
+                runtime.shared_cluster_policy(cd, registered, env_id)
                 binding = {'version': 1, 'environment_id': env_id, 'application_id': app_id, 'provider': profile['provider'],
                            'cd': copy.deepcopy(config['cd']), 'registered': registered, 'ingress': copy.deepcopy(profile['ingress']),
                            'hostname': service_name(app, profile['tenant'], env_id, profile['ingress']['base_domain'])['hostname']}
@@ -232,12 +251,13 @@ def register(config_path, request):
                 mutation_started = True
                 try:
                     step('namespace', lambda: [runtime.owned_apply(kube, document) for document in documents])
-                    step('permissions', lambda: runtime.grant_control_objects(cd, registered, app_id))
+                    step('permissions', lambda: runtime.grant_control_objects(cd, registered, app_id, environment_id=env_id))
                     tls = {'tls_server_name': descriptor['addresses']['private']} if (
                         profile['provider'] == 'openstack' and native['inventory']['control_plane'][0]['ssh'].get('connect_host')
                         or profile['provider'] == 'gcp' and descriptor.get('management_endpoint')) else {}
                     renewal, expiry = step('argo', lambda: runtime.register_argo(kube, cd, registered, app_id, app_id, None, **tls))
                     step('credentials', lambda: runtime.install_renewal(cd, renewal))
+                    record['cluster_registration'] = step('cluster', lambda: runtime.share_application_cluster(kube, cd, registered, env_id))
                     step('ci', lambda: runtime.bind_ci(profile, registered, app_id))
                     runtime.save(home / 'binding.json', binding)
                     record.update(status='succeeded', stage='registered', credentials={'renewal': 'configured', 'expires_at': expiry},

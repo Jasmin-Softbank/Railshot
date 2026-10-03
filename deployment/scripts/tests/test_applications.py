@@ -33,6 +33,27 @@ class ApplicationsTest(unittest.TestCase):
                     'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '500m', 'memory': '512Mi'}}},
                 'ingress': {'base_domain': 'railshot.io', 'mode': 'operator-finalized'}}}}
         self.config_path = self.fixture.write('applications.json', self.config)
+        # The runtime already has one bounded environment credential. Apps must
+        # extend that server cache instead of registering the server again.
+        cm = self.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']
+        anchor = json.loads(cm['data']['policy.json'])['targets'][0]
+        ca = b'-----BEGIN CERTIFICATE-----\nfake'
+        anchor.update(secret='railshot-' + self.env_id, target_id=self.env_id,
+                      server='https://' + self.fixture.descriptor['addresses']['private'] + ':6443',
+                      ca_sha256=hashlib.sha256(ca).hexdigest())
+        cm['data']['policy.json'] = json.dumps({'version': 1, 'targets': [anchor]})
+        self.fixture.control.objects['argocd', 'role', 'railshot-credentials']['rules'][0]['resourceNames'] = [anchor['secret']]
+        token = self.fixture.runtime('old-app', 'create', '--raw')['status']['token']
+        data = {'name': self.env_id, 'server': anchor['server'], 'project': anchor['project'],
+                'namespaces': 'old-app', 'clusterResources': 'false', 'config': json.dumps({
+                    'bearerToken': token, 'tlsClientConfig': {'caData': base64.b64encode(ca).decode(), 'insecure': False}})}
+        self.fixture.control.objects['argocd', 'secret', anchor['secret']] = {'apiVersion': 'v1', 'kind': 'Secret',
+            'metadata': {'name': anchor['secret'], 'namespace': 'argocd', 'labels': dict(env.credentials.LABELS)},
+            'data': {k: base64.b64encode(v.encode()).decode() for k, v in data.items()}}
+        self.fixture.runtime.objects['old-app', 'serviceaccount', env.SA] = {'metadata': {'uid': anchor['service_account']['uid']}}
+        for document in self.fixture.control.objects.values():
+            document.setdefault('metadata', {}).setdefault('uid', '12345678-1234-1234-1234-123456789012')
+            document['metadata'].setdefault('resourceVersion', '1')
         self.accesses = []
         def customer(server, ca, token, path, doc, **kw):
             item = doc['spec']['resourceAttributes']; self.accesses.append((server, item, kw))
@@ -73,8 +94,87 @@ class ApplicationsTest(unittest.TestCase):
             self.assertEqual(base64.b64decode(secret['data']['namespaces']).decode(), app_id)
             self.assertEqual(base64.b64decode(secret['data']['project']).decode(), app_id)
             self.assertEqual(base64.b64decode(secret['data']['clusterResources']).decode(), 'false')
+            self.assertEqual(secret['metadata']['labels']['argocd.argoproj.io/secret-type'], 'railshot-application')
+            shared_binding = self.fixture.runtime.objects[app_id, 'rolebinding', 'railshot-environment-argocd']
+            self.assertEqual(shared_binding['subjects'], [{'kind': 'ServiceAccount', 'name': env.SA, 'namespace': 'old-app'}])
             self.assertIn(app_id, json.loads(self.fixture.variable['value']))
+        clusters = [value for value in self.fixture.control.objects.values()
+                    if value.get('metadata', {}).get('labels', {}).get('argocd.argoproj.io/secret-type') == 'cluster']
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(set(base64.b64decode(clusters[0]['data']['namespaces']).decode().split(',')),
+                         {'old-app', first['namespace'], second['namespace']})
+        self.assertEqual(base64.b64decode(clusters[0]['data']['project']), b'')
+        policy = json.loads(self.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']['data']['policy.json'])
+        shared = next(row for row in policy['targets'] if row['target_id'] == self.env_id)
+        self.assertEqual(set(shared['namespaces']), {'old-app', first['namespace'], second['namespace']})
         self.native.assert_not_called(); self.execute.assert_not_called()
+
+    def test_completed_legacy_app_migrates_only_cluster_scope_and_preserves_binding(self):
+        first = self.register(); app_id = first['application_id']
+        first.pop('cluster_registration'); first['steps'].remove('cluster')
+        env.save(self.home() / 'registration.json', first)
+        secret = self.fixture.control.objects['argocd', 'secret', 'railshot-' + app_id]
+        secret['metadata']['labels']['argocd.argoproj.io/secret-type'] = 'cluster'
+        before_data = copy.deepcopy(secret['data'])
+        before_binding = (self.home() / 'binding.json').read_bytes()
+        result = self.register()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(result['node_port'], first['node_port'])
+        self.assertEqual((self.home() / 'binding.json').read_bytes(), before_binding)
+        migrated = self.fixture.control.objects['argocd', 'secret', 'railshot-' + app_id]
+        self.assertEqual(migrated['data'], before_data)
+        self.assertEqual(migrated['metadata']['labels']['argocd.argoproj.io/secret-type'], 'railshot-application')
+
+    def test_shared_scope_partial_write_requires_reconciliation_without_replay(self):
+        original = self.fixture.control.__call__
+        def fail_policy(namespace, *args, document=None):
+            if args[0] == 'replace' and document.get('kind') == 'ConfigMap':
+                policy = json.loads(document['data']['policy.json'])
+                if any(row['target_id'] == self.env_id and row['project'] == '' for row in policy['targets']):
+                    raise OSError('ambiguous write')
+            return original(namespace, *args, document=document)
+        with patch.object(env.argo, 'kubectl', lambda context, *a, **kw: fail_policy(*a, **kw)):
+            first = self.register()
+        self.assertEqual(first['status'], 'unknown')
+        counts = self.fixture.runtime.applications, self.fixture.control.applications
+        self.assertEqual(self.register()['status'], 'unknown')
+        self.assertEqual((self.fixture.runtime.applications, self.fixture.control.applications), counts)
+
+    def test_interruption_after_each_scope_write_keeps_environment_credential_valid(self):
+        for interrupted_stage in ('transition', 'scope', 'final'):
+            with self.subTest(stage=interrupted_stage):
+                case = ApplicationsTest(methodName='runTest'); case.setUp()
+                try:
+                    original = case.fixture.control.__call__
+                    def interrupt(namespace, *args, document=None):
+                        result = original(namespace, *args, document=document)
+                        stage = None
+                        if args[0] == 'replace' and document.get('kind') == 'ConfigMap':
+                            rows = json.loads(document['data']['policy.json'])['targets']
+                            row = next(row for row in rows if row['target_id'] == case.env_id)
+                            if row['project'] == '':
+                                stage = 'transition' if 'previous_scope' in row else 'final'
+                        elif args[:3] == ('patch', 'secret', 'railshot-' + case.env_id):
+                            stage = 'scope'
+                        if stage == interrupted_stage:
+                            raise OSError('write committed but response lost')
+                        return result
+                    with patch.object(env.argo, 'kubectl', lambda context, *a, **kw: interrupt(*a, **kw)):
+                        result = case.register()
+                    self.assertEqual(result['status'], 'unknown', result)
+                    objects = case.fixture.control.objects
+                    policy = env.credentials.validate_policy(json.loads(objects['argocd', 'configmap', 'railshot-credentials']['data']['policy.json']))
+                    row = next(row for row in policy['targets'] if row['target_id'] == case.env_id)
+                    env.credentials.registration(objects['argocd', 'secret', row['secret']], row, env.time.time())
+                    counts = case.fixture.runtime.applications, case.fixture.control.applications
+                    self.assertEqual(case.register()['status'], 'unknown')
+                    self.assertEqual((case.fixture.runtime.applications, case.fixture.control.applications), counts)
+                    if interrupted_stage != 'final':
+                        with self.assertRaisesRegex(ValueError, 'transition requires reconciliation'):
+                            case.register('another-app')
+                        self.assertEqual((case.fixture.runtime.applications, case.fixture.control.applications), counts)
+                finally:
+                    case.doCleanups()
 
     def test_full_renewal_policy_rejects_before_namespace_role_argo_or_ci_writes(self):
         self.fixture.fill_renewal_policy(20)
@@ -233,6 +333,15 @@ class ApplicationsTest(unittest.TestCase):
                         selected['management_endpoint'] = 'https://172.31.0.172:16443'
                         expected_private = '10.26.1.5'
                     case.fixture.write('registry.json', case.fixture.registry); case.write_config()
+                    cm = case.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']
+                    policy = json.loads(cm['data']['policy.json'])
+                    policy['targets'][0].update(server=selected['management_endpoint'], tls_server_name=expected_private)
+                    cm['data']['policy.json'] = json.dumps(policy)
+                    secret = case.fixture.control.objects['argocd', 'secret', 'railshot-' + case.env_id]
+                    secret['data']['server'] = base64.b64encode(selected['management_endpoint'].encode()).decode()
+                    config = json.loads(base64.b64decode(secret['data']['config']))
+                    config['tlsClientConfig']['serverName'] = expected_private
+                    secret['data']['config'] = base64.b64encode(json.dumps(config).encode()).decode()
                     result = case.register(); self.assertEqual(result['status'], 'succeeded', result)
                     self.assertTrue(case.accesses)
                     self.assertTrue(all(kwargs == {'server_name': expected_private} for _, _, kwargs in case.accesses))

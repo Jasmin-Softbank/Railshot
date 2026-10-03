@@ -92,6 +92,46 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(bootstrap.ensure_object(wanted, {bootstrap.object_key(wanted): 'same'}), 'same')
             mutate.assert_not_called()
 
+    def test_rebootstrap_preserves_shared_environment_without_reverting_its_scope(self):
+        registration = {'target_id': 'k3s-aws', 'secret': 'railshot-k3s-aws',
+            'server': 'https://10.0.0.17:6443', 'project': 'railshot', 'namespaces': ['tenant-demo'],
+            'service_account': {'name': 'railshot-argocd', 'namespace': 'tenant-demo',
+                'uid': '00000000-0000-0000-0000-000000000001'},
+            'ca_sha256': 'a' * 64, 'audiences': ['api'], 'tls_server_name': '10.0.0.17'}
+        wanted = {'kind': 'ConfigMap', 'metadata': {'name': 'railshot-credentials', 'namespace': 'argocd'},
+            'data': {'kubeconfig': 'fixed-paths', 'policy.json': json.dumps({'version': 1, 'targets': [registration]})}}
+        shared = {**registration, 'project': '', 'namespaces': ['tenant-demo', 'app-' + 'a' * 24]}
+        actual = {**copy.deepcopy(wanted), 'metadata': {**wanted['metadata'], 'uid': 'same'}}
+        actual['data']['policy.json'] = json.dumps({'version': 1, 'targets': [shared]})
+        for baseline in (registration, {**registration, 'project': ''}, shared):
+            with self.subTest(project=baseline['project'], namespaces=baseline['namespaces']):
+                wanted['data']['policy.json'] = json.dumps({'version': 1, 'targets': [baseline]})
+                with patch.object(bootstrap, 'kube_get', return_value=actual), patch.object(bootstrap, 'kube') as mutate:
+                    self.assertEqual(bootstrap.ensure_object(wanted, {bootstrap.object_key(wanted): 'same'}), 'same')
+                    mutate.assert_not_called()
+        wanted['data']['policy.json'] = json.dumps({'version': 1, 'targets': [registration]})
+        for changes in ({'project': 'other-project'}, {'project': registration['project']},
+                {'namespaces': ['app-' + 'a' * 24]}, {'namespaces': ['tenant-demo', 'foreign']},
+                {'namespaces': ['tenant-demo', 'tenant-demo']}, {'server': 'https://10.0.0.18:6443'},
+                {'secret': 'railshot-other'}, {'target_id': 'other'}, {'ca_sha256': 'b' * 64},
+                {'service_account': {**registration['service_account'], 'uid': '00000000-0000-0000-0000-000000000002'}},
+                {'audiences': ['other-api']}, {'tls_server_name': '10.0.0.18'}, {'unknown': 'drift'}):
+            with self.subTest(changes=changes):
+                actual['data']['policy.json'] = json.dumps({'version': 1, 'targets': [{**shared, **changes}]})
+                with patch.object(bootstrap, 'kube_get', return_value=actual), patch.object(bootstrap, 'kube') as mutate:
+                    with self.assertRaisesRegex(bootstrap.Blocked, 'RENEWAL_POLICY_DIFFERS'):
+                        bootstrap.ensure_object(wanted, {bootstrap.object_key(wanted): 'same'})
+                    mutate.assert_not_called()
+        app = 'app-' + 'a' * 24
+        application = {**registration, 'target_id': app, 'secret': 'railshot-' + app,
+            'project': app, 'namespaces': [app], 'service_account': {**registration['service_account'], 'namespace': app}}
+        wanted['data']['policy.json'] = json.dumps({'version': 1, 'targets': [application]})
+        actual['data']['policy.json'] = json.dumps({'version': 1, 'targets': [{**application, 'project': ''}]})
+        with patch.object(bootstrap, 'kube_get', return_value=actual), patch.object(bootstrap, 'kube') as mutate:
+            with self.assertRaisesRegex(bootstrap.Blocked, 'RENEWAL_POLICY_DIFFERS'):
+                bootstrap.ensure_object(wanted, {bootstrap.object_key(wanted): 'same'})
+            mutate.assert_not_called()
+
     def test_registration_role_is_created_empty_once_and_preserves_only_exact_named_grants(self):
         wanted = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role',
                   'metadata': {'name': 'railshot-product-registrations', 'namespace': 'argocd'}, 'rules': []}

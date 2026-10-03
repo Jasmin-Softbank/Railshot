@@ -20,6 +20,20 @@ from argo import LABEL, native, require
 
 LIFETIME = 21600
 LABELS = {'argocd.argoproj.io/secret-type': 'cluster', 'app.kubernetes.io/managed-by': 'railshot'}
+APPLICATION_ID = r'app-[a-f0-9]{24}'
+
+
+def credential_labels_match(labels, target_id, project, namespaces):
+    """An app credential may leave Argo discovery, but never widen its app scope."""
+    application = isinstance(target_id, str) and re.fullmatch(APPLICATION_ID, target_id)
+    if application and (project != target_id or namespaces != [target_id]):
+        return False
+    expected = dict(LABELS)
+    if isinstance(labels, dict) and labels.get('argocd.argoproj.io/secret-type') == 'railshot-application':
+        if not application:
+            return False
+        expected['argocd.argoproj.io/secret-type'] = 'railshot-application'
+    return isinstance(labels, dict) and all(labels.get(key) == value for key, value in expected.items())
 
 
 def tls_name(value):
@@ -36,9 +50,11 @@ def validate_policy(policy):
     require(isinstance(targets, list) and 0 <= len(targets) <= 20, 'registered targets required')
     for target in targets:
         required = {'secret', 'target_id', 'server', 'project', 'namespaces', 'service_account', 'ca_sha256', 'audiences'}
-        require(required <= set(target) <= required | {'tls_server_name'}, 'invalid registration binding')
-        for key in ('secret', 'target_id', 'project'):
+        require(required <= set(target) <= required | {'tls_server_name', 'previous_scope'}, 'invalid registration binding')
+        for key in ('secret', 'target_id'):
             require(isinstance(target[key], str) and re.fullmatch(LABEL, target[key]), 'invalid registration name')
+        require(isinstance(target['project'], str) and (target['project'] == '' or re.fullmatch(LABEL, target['project'])),
+                'invalid registration project')
         require(target['secret'] == 'railshot-' + target['target_id'] and target['project'] != 'default',
                 'Railshot project registration required')
         url = urlsplit(target['server'])
@@ -52,9 +68,28 @@ def validate_policy(policy):
                 all(isinstance(n, str) and re.fullmatch(LABEL, n) and n not in
                     {'default', 'argocd', 'kube-system', 'kube-public', 'kube-node-lease'} for n in namespaces),
                 'dedicated namespaces required')
+        if re.fullmatch(APPLICATION_ID, target['target_id']):
+            require(target['project'] == target['target_id'] and namespaces == [target['target_id']],
+                    'application credential must retain its exact project and namespace')
         sa = target['service_account']
         require(set(sa) == {'name', 'namespace', 'uid'} and sa['namespace'] in namespaces and
                 re.fullmatch(LABEL, sa['name']) and re.fullmatch(r'[a-f0-9-]{36}', sa['uid']), 'registered SA required')
+        if 'previous_scope' in target:
+            previous = target['previous_scope']
+            require(not re.fullmatch(APPLICATION_ID, target['target_id']) and target['project'] == ''
+                    and isinstance(previous, dict) and set(previous) == {'project', 'namespaces'},
+                    'only a shared environment cluster may transition scope')
+            require(isinstance(previous['project'], str) and previous['project'] != 'default'
+                    and (previous['project'] == '' or re.fullmatch(LABEL, previous['project'])), 'invalid previous project')
+            old_namespaces = previous['namespaces']
+            require(isinstance(old_namespaces, list) and old_namespaces and all(isinstance(n, str) and re.fullmatch(LABEL, n)
+                        and n not in {'default', 'argocd', 'kube-system', 'kube-public', 'kube-node-lease'} for n in old_namespaces)
+                    and len(set(old_namespaces)) == len(old_namespaces) and sa['namespace'] in old_namespaces
+                    and (set(old_namespaces) <= set(namespaces) or set(namespaces) <= set(old_namespaces))
+                    and all(re.fullmatch(APPLICATION_ID, n) for n in set(namespaces) ^ set(old_namespaces)),
+                    'scope transition must retain its SA and grow or shrink only app namespaces')
+            require(previous['project'] != target['project'] or set(old_namespaces) != set(namespaces),
+                    'scope transition must change project or namespaces')
         require(isinstance(target['audiences'], list) and target['audiences'] and
                 len(set(target['audiences'])) == len(target['audiences']) and
                 all(isinstance(a, str) and 0 < len(a) < 256 for a in target['audiences']), 'API audiences required')
@@ -126,13 +161,20 @@ def platform(*args, document=None):
 
 
 def registration(secret, target, now):
+    if 'previous_scope' in target:
+        validate_policy({'version': 1, 'targets': [target]})
     meta = secret['metadata']
-    require(secret['kind'] == 'Secret' and meta['name'] == target['secret'] and meta['namespace'] == 'argocd' and
-            all(meta.get('labels', {}).get(k) == v for k, v in LABELS.items()), 'registration owner differs')
+    require(secret['kind'] == 'Secret' and meta['name'] == target['secret'] and meta['namespace'] == 'argocd',
+            'registration owner differs')
     data = {k: base64.b64decode(v, validate=True).decode() for k, v in secret['data'].items()}
+    require(credential_labels_match(meta.get('labels'), target['target_id'], data['project'], data['namespaces'].split(',')),
+            'registration owner or application scope differs')
+    scopes = [target] + ([target['previous_scope']] if 'previous_scope' in target else [])
+    namespaces = data['namespaces'].split(',')
     require(data['name'] == target['target_id'] and data['server'] == target['server'] and
-            data['project'] == target['project'] and data['clusterResources'] == 'false' and
-            set(data['namespaces'].split(',')) == set(target['namespaces']), 'registration scope differs')
+            data['clusterResources'] == 'false' and any(data['project'] == scope['project'] and
+                len(namespaces) == len(scope['namespaces']) and set(namespaces) == set(scope['namespaces']) for scope in scopes),
+            'registration scope differs')
     config = json.loads(data['config'])
     tls_fields = {'caData', 'insecure'} | ({'serverName'} if 'tls_server_name' in target else set())
     require(set(config) == {'bearerToken', 'tlsClientConfig'} and
