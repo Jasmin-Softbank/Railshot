@@ -24,7 +24,14 @@ export function createDeploymentDiagnostics({ store, find, service, classifier, 
   async function collect(id, sessionId) {
     const record = find('deployments', id, sessionId), expected = identity(record), bound = binding(record);
     if (!['failed', 'blocked', 'unknown'].includes(record.status)) return { state: 'not_failed' };
-    if (fresh(record.diagnostic_evidence)) return record.diagnostic_evidence;
+    if (fresh(record.diagnostic_evidence)) {
+      if (service?.diagnosticCurrent) {
+        try { await service.diagnosticCurrent(record.diagnostic_evidence); }
+        catch { return { state: 'unavailable', reason: 'attempt_changed_or_unavailable', checked_at: new Date().toISOString() }; }
+        current(id, sessionId, expected);
+      }
+      return record.diagnostic_evidence;
+    }
     if (!service?.diagnostics) return { state: 'unavailable', reason: 'not_configured' };
     if (collecting.has(id)) { await collecting.get(id); return current(id, sessionId, expected).diagnostic_evidence || { state: 'unavailable' }; }
     const work = (async () => {

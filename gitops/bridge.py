@@ -185,8 +185,9 @@ def observe(config, registered, directory, state):
                    migration=observed.get('migration'))
     from workload_diagnostics import workload
     value['cd']['evidence'] = {'observed_at': datetime.now(timezone.utc).isoformat(),
-        'config_revision': observed['git_revision'], 'observed_revision': observed.get('observed_revision'),
-        'sync': observed.get('sync'), 'health': observed.get('health'),
+        'config_revision': observed['git_revision'], 'observed_revision': observed.get('observed_revision') if re.fullmatch(r'[0-9a-f]{40}', str(observed.get('observed_revision'))) else None,
+        'sync': observed.get('sync') if observed.get('sync') in {'Synced', 'OutOfSync', 'Unknown'} else None,
+        'health': observed.get('health') if observed.get('health') in {'Healthy', 'Progressing', 'Degraded', 'Suspended', 'Missing', 'Unknown'} else None,
         'workload': workload(config, review)}
     return value
 

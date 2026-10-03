@@ -119,7 +119,7 @@ GitHub 앱 저장소에는 기존 workflow의 변수도 설정합니다.
 | `RAILSHOT_RUN_ROOT` | `/var/lib/railshot-runner/runs`; `_work`·`RUNNER_TEMP`와 분리된 재시도 상태 |
 | `QUALITY_NETWORK` | `railshot-quality` |
 | `PLATFORM_REF` | 설치한 executor 계약과 같은 검토된 platform commit 40자리 SHA |
-| `RAILSHOT_MAX_REPAIR_ATTEMPTS` | 선택적 자동 코드 수정 횟수 0–3, 기본 3. 0이면 모델 인증·SDK 없이 결정적 baseline 검사·빌드·게시만 실행한다. 게이트 실패를 성공으로 바꾸거나 검사를 생략하지 않는다. |
+| `RAILSHOT_MAX_REPAIR_ATTEMPTS` | 선택적 자동 코드 수정 횟수 0–3, 기본 0. 0이면 모델 인증·SDK 없이 결정적 baseline 검사·빌드·게시만 실행한다. 게이트 실패를 성공으로 바꾸거나 검사를 생략하지 않는다. |
 | `AGENT_PROVIDER`, `AGENT_AUTH_MODE` | 기존 workflow 계약의 provider와 `subscription` 또는 `api-key` |
 | `RAILSHOT_CODEX_HOME` | subscription일 때 `/var/lib/railshot-runner/codex`; 운영자가 해당 전용 디렉터리에 `auth.json` 준비 |
 

@@ -114,7 +114,7 @@ test('execution links require the latest owned active service and disappear on s
   await page.route('**/api/v1/deployments?*', (route) => json(route, { items: [deployment] }));
   await page.route('**/api/v1/deployments/deployed-v1', (route) => json(route, deployment));
   await page.goto(origin);
-  await page.waitForFunction(() => document.querySelector('#application-link').hasAttribute('href'));
+  await page.waitForFunction(() => ['#application-link', '#monitor-application-link'].every(selector => document.querySelector(selector).hasAttribute('href')));
   const links = ['#application-link', '#monitor-application-link'];
   for (const selector of links) assert.equal(await page.locator(selector).getAttribute('href'), 'https://calculator.example/');
   for (const patch of [{ status: 'stopped' }, { status: 'deleted' },
@@ -992,7 +992,7 @@ test('work log reads bound agent events over HTTP and marks stale or failed obse
   assert.match(await output.innerText(), /agent.heartbeat/);
   assert.doesNotMatch(await output.innerText(), /private event/);
   mode = 'empty'; attempt = 2; await refresh();
-  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('아직 CI 이벤트'));
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('아직 CI 진행 이벤트'));
   assert.doesNotMatch(await output.innerText(), /agent.heartbeat/, 'an earlier attempt is never reused for a new attempt');
   assert.ok(requests.some((request) => request.path === '/api/v1/deployments/events-demo/events'));
   assert.equal(requests.some((request) => request.authorization), false);

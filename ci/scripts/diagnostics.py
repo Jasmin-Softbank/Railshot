@@ -126,7 +126,7 @@ class Diagnostics:
             stdout = str(result.stdout)
             if command == 'native.dependencies':
                 stdout = '\n'.join(line for line in stdout.splitlines() if not line.startswith('RAILSHOT_NATIVE_LOCK='))
-            output, omitted = bounded(stdout + '\n' + str(result.stderr))
+            output, omitted = bounded(stdout + '\n' + str(result.stderr), min(MAX_LOG_BYTES, 512 * 1024 - self.log_bytes))
             self.log_bytes += len(output.encode())
             path = self.directory / (row['id'] + '.log')
             durable_write(path, output.encode())

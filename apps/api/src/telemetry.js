@@ -12,7 +12,7 @@ export function structuredError(error, phase) {
   const code = typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{1,80}$/.test(error.code) ? error.code : 'INTERNAL_ERROR';
   const unknown = error.outcome_unknown === true || error.outcome === 'UNKNOWN';
   return { code, category: telemetryContract.error_categories[code] || 'unknown', component: 'api', phase,
-    retryable: !unknown && error.retryable === true, retry_policy: unknown ? 'after_reconcile' : 'never',
+    retryable: !unknown && error.retryable === true, retry_policy: unknown ? 'after_reconcile' : error.retryable === true ? 'safe' : 'never',
     action: unknown ? 'operator_reconcile' : 'inspect_evidence', outcome_unknown: unknown, retry_decision: 'not_requested',
     causes: [] };
 }
@@ -41,6 +41,15 @@ export function observeOperation(record, patch, before) {
   if (!['deployments', 'builds'].includes(record.kind)) return;
   const add = (name, phase, state, attributes = {}) => appendEvent(record, name, phase, stateOutcome(state),
     { attributes, error: ['failed', 'blocked', 'unknown', 'publication_unverified'].includes(state) ? structuredError(record.error, phase) : null });
+  if (patch.dispatch && canonical(patch.dispatch) !== canonical(before.dispatch || {}))
+    add('dispatch.observed', 'dispatch', patch.dispatch.state === 'accepted' ? 'succeeded' : 'running', { state: patch.dispatch.state });
+  for (const phase of ['ci', 'cd']) {
+    const observation = patch[phase]?.observation;
+    if (observation && canonical(observation) !== canonical(before[phase]?.observation || {}))
+      appendEvent(record, `${phase}.collection.observed`, 'observation', observation.error ? 'UNKNOWN' : 'PASS',
+        { attributes: { checked_at: observation.checked_at, last_success_at: observation.last_success_at, next_retry_at: observation.next_retry_at },
+          error: structuredError(observation.error, phase) });
+  }
   if (patch.stage && patch.stage !== before.stage) add('deployment.phase', patch.stage, record.status);
   if (patch.ci && patch.ci.state !== before.ci?.state) add('ci.observed', 'ci', patch.ci.state,
     { publication_artifact_id: patch.ci.publication_artifact_id || null, github_run_attempt: patch.ci.producer_attempt || null,

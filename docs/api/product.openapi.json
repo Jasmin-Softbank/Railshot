@@ -6814,6 +6814,84 @@
               "last_sdk_event_age_ms"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "sequence": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "occurred_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "event_name": {
+                "enum": [
+                  "gate.layer.started",
+                  "gate.layer.completed",
+                  "gate.layer.heartbeat"
+                ]
+              },
+              "native_run_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "phase": {
+                "enum": [
+                  "L0",
+                  "L1",
+                  "Q",
+                  "L2",
+                  "L4",
+                  "L3"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "RUNNING",
+                  "PASS",
+                  "FAIL",
+                  "BLOCKED",
+                  "UNKNOWN",
+                  "NOT_RUN",
+                  "INCOMPLETE"
+                ]
+              },
+              "attempt_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "completed_steps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 6
+              },
+              "total_steps": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+              },
+              "duration_s": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 86400
+              }
+            },
+            "required": [
+              "sequence",
+              "occurred_at",
+              "event_name",
+              "native_run_id",
+              "phase",
+              "outcome",
+              "attempt_id",
+              "completed_steps",
+              "total_steps",
+              "duration_s"
+            ],
+            "additionalProperties": false
           }
         ]
       },
