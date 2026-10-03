@@ -86,7 +86,7 @@ def container_components(paths):
         if api_native_dependency(path):
             components.add('api')
         if path.startswith(('.github/', 'contracts/')) or path in {
-                '.dockerignore', 'ci/scripts/container-smoke.py'}:
+                '.dockerignore', 'ci/scripts/container-smoke.py', 'ci/scripts/ci_scope.py'}:
             components.update(COMPONENTS)
         elif path in {'package.json', 'package-lock.json', 'apps/api/package.json',
                       'apps/dashboard/package.json'}:
@@ -236,7 +236,7 @@ def previous_release_complete(before):
                          'Promote the tested CI controller runner and workflow source' in successful))
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
         pass
-    # No new admission gate: uncertain history just builds the three deployed images.
+    # No new admission gate: uncertain history builds every platform image.
     return False
 
 
@@ -280,9 +280,6 @@ def main():
         if not previous_release_complete(event.get('before')):
             print('Previous release incomplete or unconfirmed; include platform and CI runner updates.')
             components = set(COMPONENTS)
-        # Only images used by the platform trigger its rollout. Node/LB maintenance
-        # is separate; it must not gate an API or dashboard deployment.
-        components.discard('mcp')
         if 'ci-runner' in components:
             components.update(('dashboard', 'api'))
         release = bool(components)
