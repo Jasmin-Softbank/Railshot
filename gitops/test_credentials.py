@@ -39,9 +39,10 @@ class CredentialsTest(unittest.TestCase):
         self.calls = []
 
     def token(self, issued):
-        body = {'sub': 'system:serviceaccount:tenant-demo:railshot-argocd', 'iat': issued,
+        namespace = self.target['service_account']['namespace']
+        body = {'sub': f'system:serviceaccount:{namespace}:railshot-argocd', 'iat': issued,
                 'exp': issued + 21600, 'aud': ['k3s'], 'kubernetes.io': {
-                    'namespace': 'tenant-demo', 'serviceaccount': {
+                    'namespace': namespace, 'serviceaccount': {
                         'name': 'railshot-argocd', 'uid': self.target['service_account']['uid']}}}
         return 'e30.' + base64.urlsafe_b64encode(json.dumps(body).encode()).decode().rstrip('=') + '.signature'
 
@@ -64,7 +65,7 @@ class CredentialsTest(unittest.TestCase):
                               credentials.datetime.fromtimestamp(self.now + 21600, credentials.timezone.utc).isoformat()}}
         self.assertEqual(token, self.new_token)
         if path.endswith('/selfsubjectreviews'):
-            return {'status': {'userInfo': {'username': 'system:serviceaccount:tenant-demo:railshot-argocd',
+            return {'status': {'userInfo': {'username': 'system:serviceaccount:' + self.target['service_account']['namespace'] + ':railshot-argocd',
                                             'uid': self.target['service_account']['uid']}}}
         return {'kind': 'PodList', 'items': []}
 
@@ -104,6 +105,113 @@ class CredentialsTest(unittest.TestCase):
         customer_role = list(yaml.safe_load_all(Path(__file__).with_name('credentials-customer.yaml').read_text()))[0]
         self.assertEqual(customer_role['rules'], [{'apiGroups': [''], 'resources': ['serviceaccounts/token'],
                                                  'resourceNames': ['railshot-argocd'], 'verbs': ['create']}])
+
+    def test_projectless_environment_registration_renews_without_broadening_namespaces(self):
+        self.target['project'] = ''
+        self.secret['data']['project'] = ''
+        credentials.validate_policy({'version': 1, 'targets': [self.target]})
+        with patch('credentials.platform', side_effect=self.platform), patch('credentials.customer', side_effect=self.customer):
+            self.assertEqual(credentials.renew(self.target, self.now)['status'], 'renewed')
+        self.assertEqual(self.secret['data']['project'], '')
+        self.assertEqual(len(self.calls), 4)
+        self.secret['metadata']['labels'] = {**credentials.LABELS, 'argocd.argoproj.io/secret-type': 'railshot-application'}
+        with self.assertRaises(ValueError):
+            credentials.registration(self.secret, self.target, self.now)
+
+    def test_transition_policy_renews_exact_old_or_new_scope_without_changing_scope(self):
+        original = copy.deepcopy(self.secret); old_namespaces = list(self.target['namespaces'])
+        expanded = old_namespaces + ['app-' + 'a' * 24]
+        for previous, current in [({'project': 'railshot', 'namespaces': old_namespaces}, expanded),
+                                  ({'project': '', 'namespaces': expanded}, old_namespaces)]:
+            self.target.update(project='', namespaces=current, previous_scope=previous)
+            credentials.validate_policy({'version': 1, 'targets': [self.target]})
+            for scope in (previous, self.target):
+                self.secret = copy.deepcopy(original); self.calls.clear(); self.writes.clear()
+                for key, value in {'project': scope['project'], 'namespaces': ','.join(scope['namespaces'])}.items():
+                    self.secret['data'][key] = base64.b64encode(value.encode()).decode()
+                before = copy.deepcopy(self.secret)
+                with self.subTest(previous=previous, observed=scope), patch('credentials.platform', side_effect=self.platform), \
+                        patch('credentials.customer', side_effect=self.customer):
+                    self.assertEqual(credentials.renew(self.target, self.now)['status'], 'renewed')
+                self.assertEqual(len(self.writes), 1)
+                self.assertEqual({k: v for k, v in self.secret['data'].items() if k != 'config'},
+                                 {k: v for k, v in before['data'].items() if k != 'config'})
+                self.assertEqual(json.loads(base64.b64decode(self.secret['data']['config']))['bearerToken'], self.new_token)
+                self.assertEqual(len(self.calls), 2 + len(self.target['namespaces']))
+        previous = {'project': 'railshot', 'namespaces': old_namespaces}
+        self.target.update(namespaces=expanded, previous_scope=previous)
+        for project, namespaces in [(previous['project'], self.target['namespaces']), ('', previous['namespaces']),
+                                    ('foreign', self.target['namespaces']), ('', self.target['namespaces'] + ['other']),
+                                    ('', self.target['namespaces'] + [self.target['namespaces'][0]])]:
+            changed = copy.deepcopy(original)
+            changed['data']['project'] = base64.b64encode(project.encode()).decode()
+            changed['data']['namespaces'] = base64.b64encode(','.join(namespaces).encode()).decode()
+            with self.subTest(project=project, namespaces=namespaces), self.assertRaises(ValueError):
+                credentials.registration(changed, self.target, self.now)
+        self.secret['metadata']['labels'] = {**credentials.LABELS, 'argocd.argoproj.io/secret-type': 'railshot-application'}
+        with patch('credentials.platform', side_effect=self.platform), patch('credentials.customer') as remote, self.assertRaises(ValueError):
+            credentials.renew(self.target, self.now)
+        remote.assert_not_called()
+
+    def test_scope_transition_policy_cannot_widen_arbitrary_namespaces_or_app_credentials(self):
+        previous = {key: copy.deepcopy(self.target[key]) for key in ('project', 'namespaces')}
+        target = {**self.target, 'project': '', 'namespaces': self.target['namespaces'] + ['app-' + 'a' * 24],
+                  'previous_scope': previous}
+        for change in [{'previous_scope': None}, {'previous_scope': {**previous, 'extra': True}},
+                       {'previous_scope': {**previous, 'project': 'default'}}, {'previous_scope': {**previous, 'project': 'bad/project'}},
+                       {'previous_scope': {**previous, 'namespaces': []}},
+                       {'previous_scope': {**previous, 'namespaces': ['tenant-demo', 'tenant-demo']}},
+                       {'previous_scope': {**previous, 'namespaces': ['tenant-atlas']}},
+                       {'previous_scope': {**previous, 'namespaces': ['tenant-demo', 'outside']}},
+                       {'previous_scope': {**previous, 'namespaces': target['namespaces'] + ['old-nonapp']}},
+                       {'previous_scope': {**previous, 'namespaces': target['namespaces'] + ['kube-system']}},
+                       {'previous_scope': {**previous, 'namespaces': target['namespaces'] + ['bad/namespace']}},
+                       {'previous_scope': {**previous, 'namespaces': previous['namespaces'] + ['app-' + 'b' * 24]}},
+                       {'previous_scope': {'project': '', 'namespaces': target['namespaces']}},
+                       {'namespaces': target['namespaces'] + ['other-namespace']}, {'project': 'railshot'}]:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                credentials.validate_policy({'version': 1, 'targets': [{**target, **change}]})
+        # A later app can extend an already projectless cluster; a project-only migration is also real.
+        for change in [{'previous_scope': {**previous, 'project': ''}}, {'namespaces': previous['namespaces']}]:
+            credentials.validate_policy({'version': 1, 'targets': [{**target, **change}]})
+        app_id = 'app-' + 'a' * 24
+        app = {**self.target, 'secret': 'railshot-' + app_id, 'target_id': app_id, 'project': app_id,
+               'namespaces': [app_id], 'service_account': {**self.target['service_account'], 'namespace': app_id},
+               'previous_scope': {'project': app_id, 'namespaces': [app_id]}}
+        with self.assertRaises(ValueError):
+            credentials.validate_policy({'version': 1, 'targets': [app]})
+        with self.assertRaises(ValueError):
+            credentials.registration(self.secret, app, self.now)
+
+    def test_app_credentials_accept_only_exact_app_scope_for_old_and_new_labels(self):
+        app_id = 'app-' + 'a' * 24
+        self.target.update(secret='railshot-' + app_id, target_id=app_id, project=app_id, namespaces=[app_id])
+        self.target['service_account']['namespace'] = app_id
+        self.secret['metadata']['name'] = self.target['secret']
+        self.old_token, self.new_token = self.token(self.now - 3600), self.token(self.now)
+        auth = json.loads(base64.b64decode(self.secret['data']['config'])); auth['bearerToken'] = self.old_token
+        for key, value in {'name': app_id, 'project': app_id, 'namespaces': app_id, 'config': json.dumps(auth)}.items():
+            self.secret['data'][key] = base64.b64encode(value.encode()).decode()
+        original = copy.deepcopy(self.secret)
+        policy = {'version': 1, 'targets': [self.target]}
+        before_policy = copy.deepcopy(policy)
+        for kind in ('cluster', 'railshot-application'):
+            self.secret = copy.deepcopy(original)
+            self.secret['metadata']['labels'] = {**credentials.LABELS, 'argocd.argoproj.io/secret-type': kind}
+            credentials.validate_policy(policy)
+            with patch('credentials.platform', side_effect=self.platform), patch('credentials.customer', side_effect=self.customer):
+                self.assertEqual(credentials.renew(self.target, self.now)['status'], 'renewed')
+            self.assertEqual(policy, before_policy)
+            self.assertEqual(self.secret['metadata']['labels']['argocd.argoproj.io/secret-type'], kind)
+            for key, value in [('project', ''), ('project', 'other-project'), ('namespaces', app_id + ',other-namespace'),
+                               ('namespaces', app_id + ',' + app_id)]:
+                changed = copy.deepcopy(self.secret)
+                changed['data'][key] = base64.b64encode(value.encode()).decode()
+                with self.subTest(kind=kind, field=key, value=value), self.assertRaises(ValueError):
+                    credentials.registration(changed, self.target, self.now)
+        for change in ({'project': ''}, {'project': 'other-project'}, {'namespaces': [app_id, 'other-namespace']}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                credentials.validate_policy({'version': 1, 'targets': [{**self.target, **change}]})
 
     def test_explicit_relay_tls_port_preserves_ca_and_six_hour_scoped_renewal(self):
         self.target['server'] = 'https://172.31.0.172:16443'

@@ -144,6 +144,50 @@ class AdoptionTests(unittest.TestCase):
     def make_plan(self):
         return adopt.plan(self.refs, self.plan_file)['plan_sha256']
 
+    def shared_renewal(self, **changes):
+        row = {**self.renewal, 'project': '', 'namespaces': ['tenant', 'app-' + 'a' * 24], **changes}
+        self.control.objects['argocd', 'configmap', 'railshot-credentials']['data']['policy.json'] = json.dumps(
+            {'version': 1, 'targets': [row]})
+        secret = self.control.objects['argocd', 'secret', self.renewal['secret']]
+        for field in ('project', 'namespaces'):
+            value = ','.join(row[field]) if field == 'namespaces' else row[field]
+            secret['data'][field] = base64.b64encode(value.encode()).decode()
+        return row
+
+    def test_shared_cluster_adoption_preserves_two_legacy_namespaces_new_app_and_original_credential(self):
+        self.shared_renewal(namespaces=['tenant', 'tenant-jihwan-atlas', 'app-' + 'a' * 24])
+        originals = copy.deepcopy(self.control.objects)
+        digest = self.make_plan()
+        self.assertEqual(adopt.apply(self.plan_file, digest)['status'], 'verified')
+        for kind, name in (('configmap', 'railshot-credentials'), ('secret', self.renewal['secret'])):
+            key = 'argocd', kind, name
+            self.assertEqual(self.control.objects[key]['data'], originals[key]['data'])
+            self.assertEqual(self.control.objects[key]['metadata']['uid'], originals[key]['metadata']['uid'])
+        self.assertTrue(all(len(call.args) == 4 for call in self.customer.call_args_list))
+
+    def test_pending_shared_cluster_transition_cannot_be_adopted(self):
+        renewal = self.shared_renewal(previous_scope={'project': self.renewal['project'], 'namespaces': ['tenant']})
+        adopt.env.credentials.validate_policy({'version': 1, 'targets': [renewal]})
+        with self.assertRaisesRegex(ValueError, 'transition requires reconciliation'):
+            self.make_plan()
+        self.assertFalse(self.plan_file.exists())
+        self.assertFalse(self.runtime.patches + self.control.patches)
+        self.customer.assert_not_called()
+
+    def test_shared_cluster_adoption_rejects_scope_and_credential_identity_drift(self):
+        for changes in (
+                {'project': 'foreign-project'}, {'project': self.renewal['project']},
+                {'namespaces': ['tenant', 'kube-system']}, {'namespaces': ['app-' + 'a' * 24]},
+                {'server': 'https://34.47.68.22:6443'}, {'secret': 'railshot-other'},
+                {'ca_sha256': 'b' * 64}, {'audiences': ['other-api']}, {'tls_server_name': '10.66.0.9'},
+                {'service_account': {**self.renewal['service_account'], 'uid': '00000000-0000-0000-0000-999999999999'}}):
+            with self.subTest(changes=changes):
+                self.shared_renewal(**changes)
+                with self.assertRaises(ValueError):
+                    self.make_plan()
+                self.assertFalse(self.plan_file.exists())
+                self.assertFalse(self.runtime.patches + self.control.patches)
+
     def test_plan_and_apply_only_add_exact_labels_preserve_specs_and_credentials(self):
         originals = [copy.deepcopy(k.objects) for k in (self.runtime, self.control)]
         digest = self.make_plan()

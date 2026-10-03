@@ -296,8 +296,116 @@ def register_argo(kube, cd, registered, target_id, owner, binding, *, tls_server
     tls_config = {'caData': ca_data, 'insecure': False}
     if tls_server_name is not None:
         tls_config['serverName'] = tls_server_name
-    argo.register_cluster([review], cd['context'], {'bearerToken': token, 'tlsClientConfig': tls_config})
-    return renewal, token_response['status']['expirationTimestamp']
+    argo.register_cluster([review], cd['context'], {'bearerToken': token, 'tlsClientConfig': tls_config},
+                          application_credential=bool(re.fullmatch(r'app-[a-f0-9]{24}', target_id)))
+    stored = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', renewal['secret'], '-o', 'json')
+    stored_config, _ = credentials.registration(stored, renewal, time.time())
+    expiration = credentials.claims(stored_config['bearerToken'], renewal, time.time())['exp']
+    return renewal, datetime.fromtimestamp(expiration, timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def shared_cluster_policy(cd, registered, environment_id):
+    """The operator's existing renewal row owns the one real cluster connection."""
+    argo.require(label(environment_id) and not environment_id.startswith('app-'), 'environment cluster identity required')
+    cm = argo.kubectl(cd['context'], 'argocd', 'get', 'configmap', 'railshot-credentials', '-o', 'json')
+    policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    selected = next((row for row in policy['targets'] if row['target_id'] == environment_id), None)
+    argo.require(selected is not None and selected['server'] == registered['target']['cluster_server']
+                 and selected['secret'] == 'railshot-' + environment_id, 'existing environment cluster registration required')
+    argo.require('previous_scope' not in selected, 'environment cluster transition requires reconciliation')
+    return cm, policy, selected
+
+
+def shared_cluster_snapshot(cd, registered, environment_id):
+    cm, policy, selected = shared_cluster_policy(cd, registered, environment_id)
+    secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', selected['secret'], '-o', 'json')
+    config, ca = credentials.registration(secret, selected, time.time())
+    argo.require(not secret['metadata'].get('ownerReferences') and not secret['metadata'].get('deletionTimestamp'),
+                 'environment cluster is not available')
+    return cm, policy, selected, secret, config, ca
+
+
+def share_application_cluster(kube, cd, registered, environment_id):
+    """Keep one Argo server cache and append only this app's exact namespace."""
+    target = registered['target']; app_id = target['id']; namespace = target['namespace']
+    argo.require(re.fullmatch(r'app-[a-f0-9]{24}', app_id) and namespace == target['project'] == app_id,
+                 'application cluster scope differs')
+    cm, policy, selected, secret, config, ca = shared_cluster_snapshot(cd, registered, environment_id)
+    app_row = next((row for row in policy['targets'] if row['target_id'] == app_id), None)
+    argo.require(app_row is not None and app_row['server'] == selected['server']
+                 and app_row['ca_sha256'] == selected['ca_sha256']
+                 and app_row.get('tls_server_name') == selected.get('tls_server_name')
+                 and app_row['project'] == app_id and app_row['namespaces'] == [namespace], 'app credential binding differs')
+    app_secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', app_row['secret'], '-o', 'json')
+    credentials.registration(app_secret, app_row, time.time())
+    labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': app_id}
+    live_namespace = kube('default', 'get', 'namespace', namespace, '-o', 'json')
+    argo.require(not live_namespace['metadata'].get('ownerReferences') and all(
+        live_namespace['metadata'].get('labels', {}).get(k) == v for k, v in labels.items()), 'app namespace owner differs')
+    anchor = selected['service_account']
+    sa = kube(anchor['namespace'], 'get', 'serviceaccount', anchor['name'], '-o', 'json')
+    argo.require(sa['metadata']['uid'] == anchor['uid'], 'environment service account was replaced')
+    binding = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding',
+        'metadata': {'name': 'railshot-environment-argocd', 'namespace': namespace, 'labels': labels},
+        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': SA},
+        'subjects': [{'kind': 'ServiceAccount', 'name': anchor['name'], 'namespace': anchor['namespace']}]}
+    existing = kube(namespace, 'get', 'rolebinding', binding['metadata']['name'], '--ignore-not-found', '-o', 'json')
+    if existing:
+        argo.require(not existing['metadata'].get('ownerReferences') and all(
+            existing['metadata'].get('labels', {}).get(k) == v for k, v in labels.items())
+            and all(existing.get(k) == binding[k] for k in ('roleRef', 'subjects')), 'environment app RoleBinding differs')
+    else:
+        owned_apply(kube, binding)
+    tls = {'server_name': selected['tls_server_name']} if 'tls_server_name' in selected else {}
+    for ns, resource, group, verb, allowed in [(namespace, 'deployments', 'apps', 'create', True),
+            (namespace, 'secrets', '', 'get', False), ('kube-system', 'deployments', 'apps', 'create', False)]:
+        access = credentials.customer(selected['server'], ca, config['bearerToken'],
+            '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', {'apiVersion': 'authorization.k8s.io/v1',
+            'kind': 'SelfSubjectAccessReview', 'spec': {'resourceAttributes': {
+                'namespace': ns, 'resource': resource, 'group': group, 'verb': verb}}}, **tls)
+        argo.require(access['status']['allowed'] is allowed, 'shared environment credential scope differs')
+    updated = {**selected, 'project': '', 'namespaces': sorted(set(selected['namespaces']) | {namespace})}
+    replacement = {**policy, 'targets': [updated if row['target_id'] == environment_id else row for row in policy['targets']]}
+    credentials.validate_policy(replacement)
+    wanted_data = {**secret['data'], 'project': base64.b64encode(b'').decode(),
+                   'namespaces': base64.b64encode(','.join(updated['namespaces']).encode()).decode()}
+    if updated != selected:
+        # Keep renewal valid through a crash between the two Kubernetes objects.
+        # Only the exact old/new scopes are authorized during this transition.
+        transition = {**updated, 'previous_scope': {key: selected[key] for key in ('project', 'namespaces')}}
+        transitional_policy = {**policy, 'targets': [transition if row['target_id'] == environment_id else row for row in policy['targets']]}
+        credentials.validate_policy(transitional_policy)
+        cm['data']['policy.json'] = json.dumps(transitional_policy)
+        cm = argo.kubectl(cd['context'], 'argocd', 'replace', '-f', '-', '-o', 'json', document=cm)
+        argo.require(json.loads(cm['data']['policy.json']) == transitional_policy, 'cluster transition readback differs')
+        patch = [{'op': 'test', 'path': '/metadata/uid', 'value': secret['metadata']['uid']},
+                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': secret['metadata']['resourceVersion']},
+                 *[{'op': 'replace', 'path': '/data/' + key, 'value': wanted_data[key]} for key in ('project', 'namespaces')]]
+        argo.kubectl(cd['context'], 'argocd', 'patch', 'secret', selected['secret'], '--type=json',
+                     '--patch-file=/dev/stdin', '-o', 'json', document=patch)
+        cm['data']['policy.json'] = json.dumps(replacement)
+        argo.kubectl(cd['context'], 'argocd', 'replace', '-f', '-', '-o', 'json', document=cm)
+    # Old completed registrations retain their private credential, but stop announcing
+    # a second Argo cluster for the same server. Token renewal patches data only.
+    if app_secret['metadata']['labels'].get('argocd.argoproj.io/secret-type') == 'cluster':
+        patch = [{'op': 'test', 'path': '/metadata/uid', 'value': app_secret['metadata']['uid']},
+                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': app_secret['metadata']['resourceVersion']},
+                 {'op': 'replace', 'path': '/metadata/labels/argocd.argoproj.io~1secret-type', 'value': 'railshot-application'}]
+        argo.kubectl(cd['context'], 'argocd', 'patch', 'secret', app_row['secret'], '--type=json',
+                     '--patch-file=/dev/stdin', '-o', 'json', document=patch)
+    _, _, observed, live, _, _ = shared_cluster_snapshot(cd, registered, environment_id)
+    argo.require(observed == updated and live['metadata']['uid'] == secret['metadata']['uid']
+                 and {k: v for k, v in live['data'].items() if k != 'config'} == {
+                     k: v for k, v in wanted_data.items() if k != 'config'}, 'shared cluster readback differs')
+    private_secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', app_row['secret'], '-o', 'json')
+    credentials.registration(private_secret, app_row, time.time())
+    argo.require(private_secret['metadata']['uid'] == app_secret['metadata']['uid']
+                 and {k: v for k, v in private_secret['data'].items() if k != 'config'} == {
+                     k: v for k, v in app_secret['data'].items() if k != 'config'}
+                 and private_secret['metadata']['labels'].get('argocd.argoproj.io/secret-type') == 'railshot-application',
+                 'private app credential readback differs')
+    return {'secret': selected['secret'], 'uid': secret['metadata']['uid'], 'environment_id': environment_id,
+            'service_account': anchor, 'namespace': namespace}
 
 
 def preflight_renewal(cd, registered, target_id, *, allow_existing=False):
@@ -347,7 +455,7 @@ def install_renewal(cd, renewal):
     argo.require(renewal['secret'] in control('get', 'role', 'railshot-credentials', '-o', 'json')['rules'][0]['resourceNames'], 'renewal role readback differs')
 
 
-def grant_control_objects(cd, registered, target_id):
+def grant_control_objects(cd, registered, target_id, *, environment_id=None):
     """Append snapshot-derived names to one bootstrap-owned Role, under the registration lock."""
     namespace, name = 'argocd', 'railshot-product-registrations'
     expected = {('argoproj.io', 'appprojects'): registered['target']['project'],
@@ -372,6 +480,10 @@ def grant_control_objects(cd, registered, target_id):
             rules.append(rule)
         if resource_name not in rule['resourceNames']:
             rule['resourceNames'].append(resource_name)
+        if resource == 'secrets' and environment_id is not None:
+            argo.require(label(environment_id) and not environment_id.startswith('app-'), 'environment cluster identity required')
+            if 'railshot-' + environment_id not in rule['resourceNames']:
+                rule['resourceNames'].append('railshot-' + environment_id)
     if rules != original:
         role['rules'] = rules
         argo.kubectl(cd['context'], namespace, 'replace', '-f', '-', '-o', 'json', document=role)

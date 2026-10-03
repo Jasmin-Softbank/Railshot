@@ -1,5 +1,6 @@
 """Real publication preparation with native edge and authoritative DNS boundaries stubbed."""
 from contextlib import contextmanager, redirect_stdout
+import base64
 import copy
 import hashlib
 import io
@@ -58,6 +59,15 @@ class ApplicationRoutesTest(unittest.TestCase):
                     'origin_vip': '10.26.1.51', 'ca_configmap': 'origin-ca',
                     'configmap_uid': '22222222-2222-4333-8444-555555555555',
                     'deployment_uid': '33333333-2222-4333-8444-555555555555'})
+            if provider != 'aws':
+                private = descriptor['addresses']['private'] if provider == 'gcp' else '10.26.1.5'
+                endpoint = 'https://' + private + ':6443'
+                cm = case.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']
+                policy = json.loads(cm['data']['policy.json'])
+                policy['targets'][0]['server'] = endpoint
+                cm['data']['policy.json'] = json.dumps(policy)
+                secret = case.fixture.control.objects['argocd', 'secret', 'railshot-' + case.env_id]
+                secret['data']['server'] = base64.b64encode(endpoint.encode()).decode()
             case.write_config()
 
         case = release_fixtures.ApplicationReleaseTest(methodName='runTest')

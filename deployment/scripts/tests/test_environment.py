@@ -34,9 +34,28 @@ class Kube:
             return {'status': {'token': token, 'expirationTimestamp': '2026-10-03T00:00:00Z'}}
         if args[0] in ('apply', 'replace'):
             data = copy.deepcopy(document); data['metadata'].setdefault('uid', '12345678-1234-1234-1234-123456789012')
+            data['metadata']['resourceVersion'] = str(self.applications + 2)
             self.objects[namespace, data['kind'].lower(), data['metadata']['name']] = data
             self.applications += 1
             return data
+        if args[0] == 'patch':
+            key = (namespace, args[1].lower(), args[2])
+            value = copy.deepcopy(self.objects[key])
+            for operation in document:
+                keys = [part.replace('~1', '/').replace('~0', '~') for part in operation['path'].split('/')[1:]]
+                parent = value
+                for part in keys[:-1]:
+                    parent = parent[part]
+                if operation['op'] == 'test':
+                    if parent[keys[-1]] != operation['value']:
+                        raise ValueError('fixture CAS changed')
+                else:
+                    assert operation['op'] == 'replace'
+                    parent[keys[-1]] = operation['value']
+            value['metadata']['resourceVersion'] = str(self.applications + 2)
+            self.objects[key] = value
+            self.applications += 1
+            return copy.deepcopy(value)
         if args[0] == 'get':
             key = (namespace, args[1].lower(), args[2])
             value = self.objects.get(key)
