@@ -20,7 +20,7 @@ agent task and L1 check use that exact identity. A spec mismatch fails before
 quality/build work and remains repairable as F5; publication checks it again.
 
 An early failure starts a bounded proposal, not a pass. Every proposal contains
-an ordered `gate_plan` for **L0 → L1 → Q → L2 → L4 → L3**, the failure evidence,
+an ordered `gate_plan` for the active harness profile (default **L0 → L1 → L2 → L3**), the failure evidence,
 and file-level reasons. The runner durably records `<role>-plan.json` before
 applying any bytes. The loop stores it as `<role>-<attempt>-plan.json`, checkpoints
 it, and includes its hash, gate list and subsequent written files/verdict in

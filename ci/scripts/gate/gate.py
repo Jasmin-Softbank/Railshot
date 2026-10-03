@@ -38,6 +38,10 @@ from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
 from execution import APP_UID, GATE_ORDER, FULL_GATE_ORDER, RELEASE_ORDERS, docker_security, docker_command, quality_advisory  # noqa: E402
 from progress import Progress  # noqa: E402
+from diagnostics import Diagnostics, fingerprint, redact  # noqa: E402
+
+DIAGNOSTICS = None
+PROGRESS = None
 
 ORDER = GATE_ORDER
 
@@ -62,7 +66,20 @@ DEFAULT_CLASS = {"L0": "F5", "L1": "F5", "Q": "QUALITY", "L2": "F2", "L3": "F4",
 
 
 def sh(cmd, cwd=None, timeout=900, check=False, raw=False):
-    return run_bounded(cmd, cwd=cwd, timeout=timeout, check=check, raw=raw)
+    started, result, error = time.monotonic(), None, None
+    try:
+        result = run_bounded(cmd, cwd=cwd, timeout=timeout, check=check, raw=raw,
+                             on_tick=PROGRESS.tick if PROGRESS is not None else None)
+        return result
+    except Exception as exc:
+        error = type(exc).__name__
+        raise
+    finally:
+        if DIAGNOSTICS is not None:
+            try:
+                DIAGNOSTICS.process(cmd, result, started, error)
+            except (OSError, ValueError, TypeError):
+                DIAGNOSTICS.missing.append('process_capture_unavailable')
 
 
 def docker_ok():
@@ -619,7 +636,7 @@ def l4(images, *, network=None):
 # ---------- verdict ----------
 
 def classify(layer, text):
-    if re.search(r"TLS handshake timeout|i/o timeout|429 Too Many Requests|connection reset by peer|temporary failure in name resolution|connection refused|cannot connect to.*docker|failed to download.*database", text, re.I):
+    if re.search(r"TLS handshake timeout|i/o timeout|429 Too Many Requests|connection reset by peer|temporary failure in name resolution|connection refused|cannot connect to.*docker|failed to download.*database|EAI_AGAIN|ENOTFOUND|ETIMEDOUT", text, re.I):
         return "F8"
     for lay, pat, cls in CLASS_RULES:
         if lay == layer and re.search(pat, text, re.I):
@@ -628,14 +645,11 @@ def classify(layer, text):
 
 
 def signature(layer, cls, text):
-    first = next((l for l in text.splitlines() if re.search(r"error|failed|not |invalid|denied|missing|must", l, re.I)),
-                 text.splitlines()[0] if text else "")
-    norm = re.sub(r"[0-9a-f]{8,}|\d+|/[\w./-]+", "#", first.strip().lower())[:160]
-    return f"{layer}:{cls}:{norm}"
+    return fingerprint(layer, cls, text)
 
 
 def excerpt(text, limit=4000):
-    return SECRET.sub("***", text)[:limit]
+    return redact(text)[:limit]
 
 
 def validate_layers(layers):
@@ -691,6 +705,11 @@ def finish_verdict(verdict, run, run_id, attempt_id, *, persist=True):
                             run_id=run_id, attempt_id=attempt_id, error=verdict["error"],
                             attributes={"release_eligible": verdict["release_eligible"], "checks_ok": verdict["checks_ok"]})
     verdict["event"] = complete_event()
+    if persist and DIAGNOSTICS is not None and DIAGNOSTICS.run == run:
+        try:
+            verdict['diagnostics'] = DIAGNOSTICS.finish(verdict)
+        except (OSError, ValueError, KeyError, TypeError):
+            verdict['diagnostics'] = {'state': 'unavailable', 'reason': 'capture_failed'}
     if persist:
         try:
             run.mkdir(parents=True, exist_ok=True)
@@ -709,6 +728,8 @@ def finish_verdict(verdict, run, run_id, attempt_id, *, persist=True):
 
 
 def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None):
+    global DIAGNOSTICS, PROGRESS
+    DIAGNOSTICS = PROGRESS = None
     observation_id = os.environ.get("RAILSHOT_RUN_ID") or str(uuid.uuid4())
     attempt_id = os.environ.get("RAILSHOT_ATTEMPT_ID")
     invalid = validate_layers(layers)
@@ -744,11 +765,19 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
         result = observe_layer({'layer': 'EVIDENCE', 'ok': False, 'blocked': exc.code}, observation_id, attempt_id, exc)
         return finish_verdict({'ok': False, 'release_eligible': False, 'checks_ok': False, 'status': 'UNKNOWN',
                                'layers': [result], 'failure': None}, run, observation_id, attempt_id)
+    PROGRESS = progress
+    try:
+        DIAGNOSTICS = Diagnostics(ws, run, observation_id, attempt_id, layers, repair_scope, before)
+        DIAGNOSTICS.capture()
+    except (OSError, ValueError, TypeError):
+        DIAGNOSTICS = None
     run_id = uuid.uuid4().hex[:16]  # Docker identity is separate from the durable parent run ID.
     for layer in layers:
         errs, error = [], None
         try:
             progress.start(layer)
+            if DIAGNOSTICS is not None:
+                DIAGNOSTICS.layer = layer
             if layer == "L0":
                 errs, changed = l0(ws, paths, repair_scope=repair_scope, native_locks=native_locks)
                 result = {"layer": layer, "ok": not errs, "changed": changed, "errors": errs}

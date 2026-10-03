@@ -30,6 +30,7 @@ from pathlib import Path, PurePosixPath
 PLATFORM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLATFORM))
 from observability import OperationError, event_record
+from execution import GATE_ORDER, RELEASE_ORDERS
 from runner.runtime_boundary import effective_auth_route, private_directory
 from runner.native_preflight import check as codex_preflight, sandbox_failure
 
@@ -254,9 +255,16 @@ def instructions(profile, role_cfg):
     return text
 
 
-def with_files(schema, allow):
+def with_files(schema, allow, gate_order=GATE_ORDER):
     """Add the files array to the role schema (draft-07)."""
+    if tuple(gate_order) not in RELEASE_ORDERS:
+        raise ValueError("invalid repair gate profile")
     s = copy.deepcopy(schema)
+    plan = s["properties"].get("gate_plan")
+    if plan is not None:
+        plan.update(minItems=len(gate_order), maxItems=len(gate_order),
+                    description="Plan the active gate order: " + ",".join(gate_order))
+        plan["items"]["properties"]["gate"]["enum"] = list(gate_order)
     s["properties"]["files"] = {
         "type": "array", "maxItems": 8,
         "items": {"type": "object", "additionalProperties": False, "required": ["path", "content"],
@@ -649,14 +657,13 @@ def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope=
     return applied
 
 
-def record_plan(run, role, output):
+def record_plan(run, role, output, gate_order=GATE_ORDER):
     """A durable proposal precedes application; it never asserts execution success."""
-    from execution import GATE_ORDER
     files = output.get("files", [])
     if not files:
         return
     plan = output.get("gate_plan", [])
-    if [step.get("gate") for step in plan] != list(GATE_ORDER):
+    if [step.get("gate") for step in plan] != list(gate_order):
         raise ValueError("proposal requires a plan for every gate in execution order")
     if {item["path"] for item in output.get("files_changed", [])} != {item["path"] for item in files}:
         raise ValueError("planned files must match proposed files")
@@ -705,6 +712,7 @@ def main():
     ap.add_argument("role", nargs="?", choices=["adapter", "fixer"])
     ap.add_argument("--provider", choices=["claude", "codex"], default="codex")
     ap.add_argument("--repair-scope", choices=["packaging", "source"], default="packaging")
+    ap.add_argument("--gate-order", default=",".join(GATE_ORDER))
     ap.add_argument("--workspace")
     ap.add_argument("--run")
     ap.add_argument("--task")
@@ -733,9 +741,11 @@ def execute(a):
         provider = a.provider
         workspace, run = Path(a.workspace).resolve(), private_directory(a.run)
         allow, protect = writable_rules(role_cfg["writable"], scope=a.repair_scope)
-        schema = with_files(json.loads((PLATFORM / role_cfg["schema"]).read_text()), allow)
+        gate_order = tuple(a.gate_order.split(","))
+        schema = with_files(json.loads((PLATFORM / role_cfg["schema"]).read_text()), allow, gate_order)
         system = instructions(profile, role_cfg)
         system += (f"\n\n## Authority for this run\nRepair scope: {a.repair_scope}.\n"
+                   f"Active gate order: {','.join(gate_order)}. Return gate_plan in this exact order.\n"
                    f"Writable paths: {json.dumps(allow)}\nProtected paths: {json.dumps(protect)}\n"
                    "These concrete bounds replace packaging-only restrictions when source scope is explicitly selected. "
                    "Never weaken tests, lint/type rules, CI gates or approval policy. Return a proposal only.\n")
@@ -764,7 +774,7 @@ def execute(a):
         import jsonschema
         phase = "output"
         jsonschema.validate(out, schema)
-        record_plan(run, a.role, out)
+        record_plan(run, a.role, out, gate_order)
         phase = "patch"
         written = apply_files(workspace, out.get("files", []), allow, protect, applied=written, repair_scope=a.repair_scope)
     except Exception as exc:

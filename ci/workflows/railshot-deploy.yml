@@ -144,7 +144,24 @@ jobs:
             ${{ env.RUN_DIR }}/evidence.json
             ${{ env.RUN_DIR }}/gate-*/verdict.json
             ${{ env.RUN_DIR }}/gate-*/quality.json
+            ${{ env.RUN_DIR }}/gate-*/progress.jsonl
           if-no-files-found: warn
+      - name: Preserve bounded diagnostic evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: diagnostics-${{ github.run_attempt }}
+          path: ${{ env.RUN_DIR }}/diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Preserve exact diagnostic source privately
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: diagnostic-source-${{ github.run_attempt }}
+          path: ${{ env.RUN_DIR }}/diagnostic-source/snapshot.json
+          if-no-files-found: warn
+          retention-days: 7
 
   release:
     environment: railshot-release

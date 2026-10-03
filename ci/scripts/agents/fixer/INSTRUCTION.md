@@ -20,7 +20,7 @@ One gate step failed. Change the writable files so that this failure's root caus
 3. If `lessons.md` shows this signature after a change like the one you plan, do something different that the evidence supports, or `give_up`. Never repeat a failed change.
 4. Edit only writable files. Fix the cause (wrong path, missing build step, wrong bind host, missing system package, wrong port, wrong health path) rather than working around it.
 5. Re-check C1–C11 and the forbidden patterns.
-6. Return the report with `root_cause`, `addresses_failure` and `gate_plan` set. Plan L0, L1, L2, L4, L3 even when the observed failure is early. Do not add or run separate lint/type/unit gates; preserve existing build commands and tests. Limit source changes to the observed build/start/health failure; never label an unexecuted check as passed.
+6. Return the report with `root_cause`, `addresses_failure` and `gate_plan` set. Plan the exact active gate order supplied by the harness even when the observed failure is early. Do not add or run separate lint/type/unit gates; preserve existing build commands and tests. Limit source changes to the observed build/start/health failure; never label an unexecuted check as passed.
 
 ## Per-class guidance
 

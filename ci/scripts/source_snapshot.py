@@ -114,6 +114,14 @@ def export(workspace, bundle, output, env):
     require(not Path(output).resolve().is_relative_to(workspace.resolve()), 'snapshot must be outside source')
     source = bundle_source(bundle)
     require(source_digest(workspace) == source, 'source changed since gate')
+    entries = capture(workspace)
+    require(entries_digest(entries) == source_digest(workspace) == source, 'snapshot differs from gate source')
+    save({'version': 1, **identity(env), 'source_sha256': source, 'entries': entries}, output)
+
+
+def capture(workspace):
+    """Read bounded source bytes; callers separately establish purpose and producer identity."""
+    workspace = Path(workspace)
     entries = []
     total = 0
     def visit(directory):
@@ -138,8 +146,8 @@ def export(workspace, bundle, output, env):
             if content is None:
                 visit(path)
     visit(workspace)
-    require(entries_digest(entries) == source_digest(workspace) == source, 'snapshot differs from gate source')
-    save({'version': 1, **identity(env), 'source_sha256': source, 'entries': entries}, output)
+    require(entries_digest(entries) == source_digest(workspace), 'source changed during capture')
+    return entries
 
 
 def bind(snapshot, bundle, output, env):

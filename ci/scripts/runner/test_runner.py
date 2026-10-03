@@ -557,7 +557,7 @@ class RunnerTest(unittest.TestCase):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
             return {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
-                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in ('L0','L1','L2','L4','L3')],
+                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in run_agent.GATE_ORDER],
                     'files_changed':[{'path':name,'why':'fixture repair'} for name in ('Dockerfile','.dockerignore')], 'assumptions':[], 'confidence':'high',
                     'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}, {}
         with tempfile.TemporaryDirectory() as directory:
@@ -587,7 +587,7 @@ class RunnerTest(unittest.TestCase):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
             return {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
-                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in ('L0','L1','L2','L4','L3')],
+                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in run_agent.GATE_ORDER],
                     'files_changed':[{'path':'../private-canary.py','why':'invalid fixture'}], 'assumptions':[], 'confidence':'high',
                     'files':[{'path':'../private-canary.py','content':'wrong'}]}, {}
         with tempfile.TemporaryDirectory() as directory:
