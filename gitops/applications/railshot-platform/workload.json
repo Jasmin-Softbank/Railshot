@@ -184,7 +184,7 @@
             "containers": [
               {
                 "name": "mcp",
-                "image": "ghcr.io/jasmin-softbank/railshot-mcp@sha256:cf02d80d42ba466bf826f77a854ea6e6f829c1b4ecf918eededc8f2502ade65c",
+                "image": "ghcr.io/jasmin-softbank/railshot-mcp@sha256:1753821ab9a11455eaa2b1c8b5c3d465b138e6aac05682e9016d080e644f2ffb",
                 "command": [
                   "node",
                   "src/remote-mcp.js"
