@@ -1387,10 +1387,11 @@ test('application submission preserves safe phase diagnostics and only blocks ad
     assert.ok(logs.some((row) => row.operation_id === first.id && row.request_id === result.error.request_id && row.phase === phase));
     assert.equal((await f.product.createDeployment(request, 'submission-diagnostic', null, owner)).id, first.id);
     assert.equal(calls, 1);
-    if (unknown) await assert.rejects(f.product.createDeployment(applicationSource('Other'), 'another-request', null, owner), { code: 'EXECUTOR_BUSY' });
-    else {
-      const next = await f.product.createDeployment(applicationSource('Other'), 'another-request', null, owner);
-      assert.equal((await settle(() => f.product.getDeployment(next.id, owner))).status, 'failed');
-    }
+    const next = await f.product.createDeployment(applicationSource('Other'), 'another-request', null, owner);
+    if (unknown) {
+      assert.equal(next.status, 'queued');
+      assert.equal(next.queue.started_at, undefined);
+      await assert.rejects(f.product.createDeployment(request, 'same-app-again', null, owner), { code: 'APPLICATION_RECONCILE_REQUIRED' });
+    } else assert.equal((await settle(() => f.product.getDeployment(next.id, owner))).status, 'failed');
   }
 });
