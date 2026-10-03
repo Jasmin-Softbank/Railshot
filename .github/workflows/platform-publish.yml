@@ -42,6 +42,8 @@ concurrency:
 
 jobs:
   admission:
+    outputs:
+      admitted: ${{ steps.source.outputs.admitted }}
     runs-on: ubuntu-24.04
     permissions: {contents: read, actions: read}
     steps:
@@ -110,23 +112,24 @@ jobs:
         if: inputs.deploy
         with: {persist-credentials: false}
       - name: Require the exact trusted source CI gate before deployment
+        id: source
         if: inputs.deploy
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ github.sha }}
           SOURCE_REF: ${{ github.ref }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-        run: python3 deployment/scripts/release_admission.py --source-sha "$SOURCE_SHA" --ref "$SOURCE_REF" --ci-run-id "$CI_RUN_ID"
+        run: python3 deployment/scripts/release_admission.py --source-sha "$SOURCE_SHA" --ref "$SOURCE_REF" --ci-run-id "$CI_RUN_ID" --skip-superseded
   build:
     needs: admission
-    if: ${{ !inputs.skip_build }}
+    if: ${{ !inputs.skip_build && (!inputs.deploy || needs.admission.outputs.admitted == 'true') }}
     uses: ./.github/workflows/platform-containers.yml
     with:
       components: ${{ inputs.components }}
       export_image: ${{ inputs.publish }}
 
   publish:
-    if: ${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}
+    if: ${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (!inputs.deploy || needs.admission.outputs.admitted == 'true') && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}
     needs: [admission, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -174,12 +177,13 @@ jobs:
           retention-days: 14
 
   deploy:
-    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.admission.result == 'success' && needs.publish.result == 'success' }}
+    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.admission.result == 'success' && needs.admission.outputs.admitted == 'true' && needs.publish.result == 'success' }}
     needs: [admission, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {contents: write, actions: read}
     outputs:
+      admitted: ${{ steps.source.outputs.admitted }}
       revision: ${{ steps.declaration.outputs.revision }}
       dashboard_digest: ${{ steps.declaration.outputs.dashboard_digest }}
       api_digest: ${{ steps.declaration.outputs.api_digest }}
@@ -200,11 +204,13 @@ jobs:
           test -n "$pin"
           python3 -m pip install --disable-pip-version-check "$pin"
       - name: Recheck current source and CI gate immediately before platform publication
+        id: source
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"
+        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID" --skip-superseded
       - name: Commit the tested digest declaration to the platform branch
+        if: steps.source.outputs.admitted == 'true'
         id: declaration
         env:
           PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
@@ -219,7 +225,7 @@ jobs:
             --provider-targets "$PROVIDER_TARGETS"
 
   verify:
-    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.deploy.result == 'success' }}
+    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.deploy.outputs.admitted == 'true' }}
     needs: deploy
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -259,6 +265,8 @@ jobs:
           retention-days: 14
 
   ci-runtime:
+    outputs:
+      admitted: ${{ steps.source.outputs.admitted }}
     if: ${{ always() && !cancelled() && contains(fromJSON(inputs.components), 'ci-runner') && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' }}
     needs: [deploy, verify]
     runs-on: ubuntu-24.04
@@ -281,11 +289,13 @@ jobs:
           role-session-name: railshot-release-${{ github.run_id }}
           allowed-account-ids: '721622471953'
       - name: Recheck current source and CI gate immediately before remote release
+        id: source
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"
+        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID" --skip-superseded
       - name: Promote the tested CI controller runner and workflow source
+        if: steps.source.outputs.admitted == 'true'
         env:
           SOURCE_SHA: ${{ github.sha }}
           REVISION: ${{ needs.deploy.outputs.revision }}
@@ -299,7 +309,7 @@ jobs:
             --document-version "$DOCUMENT_VERSION" --document-hash "$DOCUMENT_HASH" \
             --receipt "$RUNNER_TEMP/ci-runtime-release.json"
       - name: Preserve the CI runtime rollout result
-        if: always()
+        if: ${{ always() && steps.source.outputs.admitted == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ci-runtime-release-${{ github.sha }}-${{ github.run_attempt }}
@@ -308,7 +318,7 @@ jobs:
           retention-days: 30
 
   multicloud:
-    if: ${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' && needs.ci-runtime.result == 'success' }}
+    if: ${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' && needs.ci-runtime.result == 'success' && needs.ci-runtime.outputs.admitted == 'true' }}
     needs: [deploy, verify, ci-runtime]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -330,11 +340,13 @@ jobs:
           role-session-name: railshot-release-${{ github.run_id }}
           allowed-account-ids: '721622471953'
       - name: Recheck current source and CI gate immediately before remote release
+        id: source
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"
+        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID" --skip-superseded
       - name: Apply the same approved release and require three verified providers
+        if: steps.source.outputs.admitted == 'true'
         env:
           SOURCE_SHA: ${{ github.sha }}
           REVISION: ${{ needs.deploy.outputs.revision }}
@@ -348,7 +360,7 @@ jobs:
             --document-version "$DOCUMENT_VERSION" --document-hash "$DOCUMENT_HASH" \
             --receipt "$RUNNER_TEMP/multicloud-release.json"
       - name: Preserve all provider outcomes
-        if: always()
+        if: ${{ always() && steps.source.outputs.admitted == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: multicloud-release-${{ github.sha }}-${{ github.run_attempt }}
