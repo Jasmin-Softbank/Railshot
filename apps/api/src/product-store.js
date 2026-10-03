@@ -78,9 +78,9 @@ export async function createProductStore(directory) {
     const version = db.prepare('PRAGMA user_version').get().user_version;
     if (![0, 1, 2].includes(version)) throw new Error('Unsupported database schema');
     db.exec(await readFile(new URL('./dashboard-schema.sql', import.meta.url), 'utf8'));
-    // Older registrations stored OpenStack metadata that was never used to issue or claim tokens.
+    // Remove registration fields that are no longer used for token issue or claim.
     const registrationColumns = new Set(db.prepare('PRAGMA table_info(registrations)').all().map((column) => column.name));
-    for (const name of ['auth_type', 'project_id', 'user_id']) {
+    for (const name of ['auth_type', 'project_id', 'user_id', 'key_salt', 'key_hash']) {
       if (registrationColumns.has(name)) db.exec(`ALTER TABLE registrations DROP COLUMN ${name}`);
     }
     if (version === 0) {
@@ -98,13 +98,6 @@ export async function createProductStore(directory) {
     }
     if (state.version !== 1 || !state.operations || !state.keys || !state.bindings || !state.plans) throw new Error('Invalid workspace state');
     state.applications ||= {};
-    for (const plan of Object.values(state.plans)) {
-      if (plan.kind === 'application-lifecycle' && plan.public?.status === 'planning') {
-        Object.assign(plan.public, { status: 'failed', updated_at: new Date().toISOString(),
-          error: { code: 'APPLICATION_PLAN_INTERRUPTED', outcome_unknown: false,
-            message: '서버가 재시작되어 계획 확인이 중단됐습니다. 앱 변경은 실행되지 않았습니다. 새 계획을 확인하세요.' } });
-      }
-    }
     for (const app of Object.values(state.applications)) if (['registering', 'stopping', 'starting', 'deleting'].includes(app.status)) app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
       for (const item of Object.values(operation.classifications || {})) if (item.state === 'running') {
@@ -117,6 +110,11 @@ export async function createProductStore(directory) {
         && Number.isSafeInteger(operation.queue?.sequence) && operation.queue.sequence > 0
         && operation.queue.enqueued_at && !operation.queue.started_at;
       if (['queued', 'running'].includes(operation.status) && !unclaimed) {
+        if (operation.stage === 'ci' && operation.dispatch?.state === 'preparing' && !operation.ci?.run_id) {
+          operation.status = 'failed';
+          operation.error = { code: 'CI_DISPATCH_NOT_SENT', request_id: randomUUID(), message: '소스 준비 중 서버가 재시작되었습니다. GitHub 실행 요청은 보내지 않았습니다.', retryable: false, outcome_unknown: false };
+          continue;
+        }
         operation.status = 'unknown';
         operation.unknown_since = new Date().toISOString();
         operation.error = { code: 'INTERRUPTED', request_id: randomUUID(), message: '실행이 중단되어 결과를 다시 확인해야 합니다.', retryable: false, outcome_unknown: true };

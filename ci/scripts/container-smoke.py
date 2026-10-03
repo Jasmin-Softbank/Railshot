@@ -184,6 +184,10 @@ def web_smoke(component, image, token_file, token, upstream=None):
                 assert http(endpoint + '/api/runs/1', headers)[0] == expected, 'API access or run-binding boundary failed'
             status, _, content = http(endpoint + '/api/v1/targets', {'Authorization': 'Bearer ' + token})
             assert status == 200 and json.loads(content)['items'][0]['id'] == 'container-smoke', 'Product state did not initialize'
+            # Build the real installer from image files; source-checkout tests cannot catch missing COPY inputs.
+            docker('exec', container, 'node', '--input-type=module', '-e',
+                   "import assert from 'node:assert/strict'; import {buildOpenStackInstaller} from '/app/apps/api/src/openstack/installer.js'; "
+                   "const {archive,tokenClient}=await buildOpenStackInstaller(); assert(archive.length>0); assert(tokenClient.length>0);")
             docker('exec', container, 'node', '-e', "const fs=require('node:fs');if(process.getuid()!==1000||(fs.statSync('/tmp/railshot-state').mode&0o777)!==0o700)process.exit(1)")
     finally:
         remove_container(name)

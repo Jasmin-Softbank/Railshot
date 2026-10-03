@@ -239,6 +239,22 @@ class PlatformReleaseTests(unittest.TestCase):
         after = json.loads(self.git("show", f"{self.remote_revision()}:{WORKLOAD}").stdout)
         self.assertEqual(next(x for x in after['items'] if x['kind'] == 'Deployment' and x['metadata']['name'] == 'railshot-dashboard'), dashboard)
 
+    def test_dashboard_only_release_preserves_preparation_hook_without_changing_api(self):
+        self.assertEqual(self.deploy().returncode, 0)
+        self.git('switch', '--detach', self.source_sha)
+        self.write_images('b')
+        self.assertEqual(self.deploy().returncode, 0)
+        previous = json.loads(self.git('show', f'{self.remote_revision()}:{WORKLOAD}').stdout)
+        hook = next(item for item in previous['items'] if item['kind'] == 'Job')
+        api = next(item for item in previous['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-api')
+        self.git('switch', '--detach', self.source_sha)
+        (self.artifacts / 'api.json').unlink()
+        (self.artifacts / 'dashboard.json').write_text(json.dumps({'dashboard': 'ghcr.io/jasmin-softbank/railshot-dashboard@sha256:' + 'c' * 64}))
+        self.assertEqual(self.deploy().returncode, 0)
+        after = json.loads(self.git('show', f'{self.remote_revision()}:{WORKLOAD}').stdout)
+        self.assertEqual(next(item for item in after['items'] if item['kind'] == 'Job'), hook)
+        self.assertEqual(next(item for item in after['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-api'), api)
+
     def test_untrusted_or_missing_digest_fails_before_branch_creation(self):
         image = self.artifacts / "api.json"
         image.write_text(json.dumps({"api": "ghcr.io/jasmin-softbank/railshot-api:latest"}))

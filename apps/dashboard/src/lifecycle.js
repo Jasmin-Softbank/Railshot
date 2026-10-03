@@ -212,7 +212,10 @@ export function createLifecycleController({ getApplications, getCurrent, getAppl
       if (['queued', 'running'].includes(data.status)) lifecycleTimer = setTimeout(refreshLifecycleOperation, 15000);
       else await loadApplications();
     } catch (cause) {
-      if (lifecycleOperation === previous) { lifecycleOperation = { ...previous, status: 'unknown', readError: `상태 조회 실패: ${cause.message} 실행을 다시 보내지 않습니다. 상태 다시 조회를 눌러 확인하세요.` }; storeLifecycleOperation(); }
+      if (lifecycleOperation === previous) {
+        lifecycleOperation = { ...previous, readError: `상태 조회 실패: ${cause.message} 마지막 확인 상태를 유지하며 15초 뒤 다시 조회합니다.` };
+        storeLifecycleOperation(); lifecycleTimer = setTimeout(refreshLifecycleOperation, 15000);
+      }
     } finally { lifecycleReadBusy = false; renderLifecycleOperation(); }
   }
   document.querySelector('#lifecycle-form').addEventListener('submit', async (event) => {

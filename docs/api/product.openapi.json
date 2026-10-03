@@ -2222,7 +2222,7 @@
       "post": {
         "operationId": "createApplicationLifecyclePlan",
         "summary": "Preview stopping, starting or deleting an owned application",
-        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted. Registered active deployments can be deleted after cancellation/quiescence. Active deployment deletion uses a private, configuration-bound application scope and requires fresh ownership validation before cleanup. Other queued/running or unexpired unknown work blocks the shared slot; expired unknown still fences its own app or environment. Cloud inspection does not hold the product writer queue. A pending or failed plan cannot authorize any mutation. If the app changes during inspection, the plan fails as stale. Interrupted planning is marked failed after restart, without replay.",
+        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted. Registered active deployments can be deleted after cancellation/quiescence. Active deployment deletion uses a private, configuration-bound application scope and requires fresh ownership validation before cleanup. Other queued/running or unexpired unknown work blocks the shared slot; expired unknown still fences its own app or environment. Cloud inspection does not hold the product writer queue. A pending or failed plan cannot authorize any mutation. If the app changes during inspection, the plan fails as stale. Interrupted read-only planning resumes under the same public plan ID after restart with a fresh private native attempt. Application snapshot checks still apply; mutations are never replayed by recovery.",
         "parameters": [
           {
             "name": "id",
@@ -2939,17 +2939,11 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "provider",
-                  "enrollment_key"
+                  "provider"
                 ],
                 "properties": {
                   "provider": {
                     "const": "openstack"
-                  },
-                  "enrollment_key": {
-                    "type": "string",
-                    "minLength": 16,
-                    "maxLength": 256
                   }
                 },
                 "additionalProperties": false
@@ -3107,7 +3101,7 @@
     "/api/v1/registrations/{id}/tokens": {
       "post": {
         "operationId": "renewOpenStackLinkageToken",
-        "summary": "Issue a new token after expiry with the original enrollment key",
+        "summary": "Issue a new token after expiry for the same browser session",
         "security": [
           {
             "operatorBearer": []
@@ -3130,16 +3124,7 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": [
-                  "enrollment_key"
-                ],
-                "properties": {
-                  "enrollment_key": {
-                    "type": "string",
-                    "minLength": 16,
-                    "maxLength": 256
-                  }
-                },
+                "properties": {},
                 "additionalProperties": false
               }
             }
@@ -4114,6 +4099,67 @@
         ],
         "additionalProperties": false
       },
+      "ExecutionObservation": {
+        "type": "object",
+        "description": "Freshness of the authoritative upstream observation, separate from execution outcome. A read failure preserves the last confirmed execution state.",
+        "properties": {
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "next_retry_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "upstream_status": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "additionalProperties": false
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "checked_at",
+          "last_success_at",
+          "next_retry_at",
+          "error"
+        ],
+        "additionalProperties": false
+      },
       "Deployment": {
         "type": "object",
         "properties": {
@@ -4212,6 +4258,27 @@
               "diagnostics_checked_at": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "observation": {
+                "$ref": "#/components/schemas/ExecutionObservation"
+              },
+              "workflow": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "conclusion": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "additionalProperties": false
               }
             },
             "required": [
@@ -4257,6 +4324,9 @@
                 ],
                 "additionalProperties": false,
                 "description": "Optional observed migration Job result. Its success alone does not establish application deployment or public HTTP success."
+              },
+              "observation": {
+                "$ref": "#/components/schemas/ExecutionObservation"
               }
             },
             "required": [
@@ -4564,6 +4634,28 @@
           },
           "classification": {
             "$ref": "#/components/schemas/FailureClassification"
+          },
+          "dispatch": {
+            "type": "object",
+            "properties": {
+              "prepared_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "preparing",
+                  "requesting",
+                  "accepted"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "additionalProperties": false,
+            "description": "Durable preparation time before dispatch; it does not prove GitHub accepted the request."
           }
         },
         "required": [

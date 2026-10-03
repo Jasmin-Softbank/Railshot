@@ -235,7 +235,8 @@ test('CI publication alone and mismatched publication never report application s
   assert.equal(record.status, 'unknown'); assert.equal(record.url, null);
   const g = await fixture(t, { service: { status: async () => ({ state: 'published', publication: { ...publication, app: 'foreign' } }) } });
   const other = await g.product.createDeployment(input, 'mismatch');
-  assert.equal((await settle(() => g.product.getDeployment(other.id))).status, 'unknown');
+  const mismatch = await settle(() => g.product.getDeployment(other.id));
+  assert.equal(mismatch.status, 'blocked'); assert.equal(mismatch.error.code, 'CI_BINDING_MISMATCH');
   assert.equal(g.cdCalls(), 0);
 });
 
@@ -963,6 +964,7 @@ async function applicationFixture(t, { registrationStatus = 'succeeded', publica
     assert.equal(args.publication.source_commit, args.sourceCommit);
     return { ...deployed, public_http: { ...deployed.public_http, site_url: `https://${args.app}.example.test/` } };
   };
+  adapter.observePublished = undefined; // This fixture stubs CD without creating a native CD journal.
   const target = { id: 'runtime-aws', provider: 'aws' };
   const providerTargets = { gcp: 'runtime-gcp', openstack: 'runtime-openstack' };
   const legacy = Object.assign(async () => assert.fail('A new application must use its own CD binding'), { targets: {} });
@@ -1107,7 +1109,7 @@ test('new app publication cannot substitute source app target or run before CD',
       const f = await applicationFixture(t, { publicationChange: { [field]: field === 'run_id' ? '999' : 'foreign' } });
       const accepted = await f.product.createDeployment(applicationSource('calculator'), field);
       const result = await settle(() => f.product.getDeployment(accepted.id));
-      assert.equal(result.status, 'unknown'); assert.equal(result.url, null);
+      assert.equal(result.status, 'blocked'); assert.equal(result.error.code, 'CI_BINDING_MISMATCH'); assert.equal(result.url, null);
       assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 0);
     });
   }
@@ -1209,7 +1211,7 @@ test('explicit CD resume survives restart, preserves the deployment and publishe
     const responses = await Promise.allSettled([
       product.resumeDeployment(f.created.id, f.owner), product.resumeDeployment(f.created.id, f.owner),
     ]);
-    assert.equal(responses.filter(({ status }) => status === 'fulfilled').length, 1);
+    assert.equal(responses.filter(({ status }) => status === 'fulfilled').length, 1, responses.map(r => r.reason?.code).join(', '));
     assert.equal(responses.find(({ status }) => status === 'rejected').reason.code, 'DEPLOYMENT_NOT_RESUMABLE');
     await settle(() => product.getDeployment(f.created.id, f.owner), () => calls === 1);
     const running = await product.getDeployment(f.created.id, f.owner);
@@ -1252,7 +1254,7 @@ test('resume refuses changed publication identity before overwriting original CI
     if (name === 'unpublished') f.service.status = async () => ({ state: 'running' });
     await f.product.resumeDeployment(f.created.id, f.owner);
     const result = await settle(() => f.product.getDeployment(f.created.id, f.owner));
-    assert.equal(result.status, 'unknown'); assert.equal(result.error.outcome_unknown, true);
+    assert.equal(result.status, ['source', 'app', 'target', 'run'].includes(name) ? 'blocked' : 'unknown'); assert.equal(result.error.outcome_unknown, true);
     assert.deepEqual(result.ci, f.original.ci);
     assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1); assert.equal(f.deliveries.length, 1);
   });
@@ -1495,4 +1497,24 @@ test('restart never replays uncertain CD, unbound CI, changed ownership or delet
       assert.equal(reads, 0); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 0);
     } finally { await restarted.close(); }
   });
+});
+
+test('restart reobserves published customer CD through the read-only adapter, without applying again', async t => {
+  const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+  let applies = 0, observations = 0;
+  f.adapter.deployPublished = async () => { applies++; throw new EnvironmentError('CD_RECONCILE_REQUIRED', 502, true); };
+  const accepted = await f.product.createDeployment(applicationSource('recover-cd'), 'read-cd', undefined, owner);
+  const interrupted = await settle(() => f.product.getDeployment(accepted.id, owner));
+  assert.equal(interrupted.status, 'unknown'); assert.equal(interrupted.stage, 'cd');
+  await f.product.close();
+  f.adapter.observePublished = async (application, args) => {
+    observations++; assert.equal(application.id, accepted.application_id); assert.equal(args.deploymentId, accepted.id);
+    assert.equal(args.publication.source_commit, interrupted.source_commit); return deployed;
+  };
+  const restarted = await createProductService(f.options);
+  try {
+    const done = await settle(() => restarted.getDeployment(accepted.id, owner), row => row.status === 'succeeded');
+    assert.ok(done.cd.observation.last_success_at); assert.equal(done.cd.observation.error, null);
+    assert.equal(applies, 1); assert.equal(observations, 1); assert.equal(f.submissions.length, 1);
+  } finally { await restarted.close(); }
 });

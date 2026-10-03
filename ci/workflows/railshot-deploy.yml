@@ -11,6 +11,7 @@
 # Actions are pinned by SHA; SDK and publisher credentials remain separate.
 # Artifact IDs plus attempt-specific names identify the handoff for a separate CD owner.
 name: railshot-deploy
+run-name: 'railshot:${{ inputs.tenant }}/${{ inputs.app }}:${{ inputs.target_id }}:${{ inputs.source_commit }}'
 on:
   workflow_dispatch:
     inputs:

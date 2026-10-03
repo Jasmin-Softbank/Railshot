@@ -39,7 +39,8 @@ API_NATIVE_FILES = {
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
     'deployment/bootstrap/install.sh', 'deployment/bootstrap/uninstall.sh',
-    'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/requirements.lock',
+    'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/claim_token.py',
+    'deployment/bootstrap/requirements.lock',
     'deployment/bootstrap/templates/agent-authorized-keys.README',
     'infrastructure/providers/openstack/__init__.py',
     'infrastructure/providers/openstack/cli.py', 'infrastructure/providers/openstack/identity.py',
@@ -139,7 +140,8 @@ def select(paths):
         elif path.startswith(('apps/agent/', 'deployment/bootstrap/client_setup/',
                               'deployment/bootstrap/templates/')) or path in {
                 'deployment/bootstrap/install.sh', 'deployment/bootstrap/uninstall.sh',
-                'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/requirements.lock'}:
+                'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/claim_token.py',
+                'deployment/bootstrap/requirements.lock'}:
             selected.add('openstack')
         elif path.startswith('infrastructure/providers/openstack/'):
             selected.update(('openstack', 'contracts'))

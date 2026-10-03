@@ -147,9 +147,15 @@ spec:
           livenessProbe:
             httpGet: {path: /healthz, port: http, httpHeaders: [{name: Host, value: localhost}]}
             initialDelaySeconds: 10
+          startupProbe:
+            httpGet: {path: /readyz, port: http, httpHeaders: [{name: Host, value: localhost}]}
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
           readinessProbe:
-            exec:
-              command: [node, -e, "fetch('http://127.0.0.1:4173/healthz').then(async r=>{if(!r.ok||!(await r.json()).configured)process.exit(1)}).catch(()=>process.exit(1))"]
+            httpGet: {path: /readyz, port: http, httpHeaders: [{name: Host, value: localhost}]}
+            periodSeconds: 2
+            timeoutSeconds: 2
       volumes:
         - {name: tmp, emptyDir: {sizeLimit: 128Mi}}
         - name: api-token
@@ -194,3 +200,53 @@ spec:
   type: ClusterIP
   selector: {app: railshot-api}
   ports: [{name: http, port: 4173, targetPort: http}]
+---
+# Included only when an existing API Pod template actually changes.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: railshot-api-prepare
+  namespace: railshot-system
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels: {railshot.io/api-client: 'true'}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      nodeSelector: {kubernetes.io/arch: amd64, railshot.io/node-role: platform}
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector: {matchLabels: {app: railshot-api}}
+              topologyKey: kubernetes.io/hostname
+      imagePullSecrets: [{name: ghcr-pull}]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: prepare
+          image: BUILD_REQUIRED/api
+          command: [node, /app/apps/api/src/prepare-release.js]
+          env:
+            - {name: RAILSHOT_API_TOKEN_FILE, value: /run/secrets/api/token}
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 96Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: api-token, mountPath: /run/secrets/api, readOnly: true}
+      volumes:
+        - name: api-token
+          secret: {secretName: railshot-api, defaultMode: 288}

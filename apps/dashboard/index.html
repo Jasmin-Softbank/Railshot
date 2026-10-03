@@ -26,10 +26,18 @@
             <h1 id="deploy-title">앱 배포하기</h1>
           </header>
 
-          <section class="panel update-context" id="update-context" aria-labelledby="update-title" hidden>
-            <div class="review-heading"><h2 id="update-title">기존 앱 업데이트</h2><button class="text-button" id="cancel-update" type="button">새 배포로 돌아가기</button></div>
-            <p id="update-identity"></p>
-            <p class="field-note">앱과 배포 환경은 유지됩니다. 파일·폴더·저장소 이름을 바꿔도 앱 이름은 바뀌지 않습니다.</p>
+          <section class="update-context" id="update-context" aria-label="업데이트할 앱" hidden>
+            <div class="update-app-heading">
+              <div><h2 id="update-identity"></h2><p id="update-environment"></p></div>
+              <button class="secondary-button" id="cancel-update" type="button">앱으로 돌아가기</button>
+            </div>
+            <div class="update-service"><span id="update-service-state"></span><a id="update-site" target="_blank" rel="noopener noreferrer" hidden>현재 서비스 열기</a></div>
+            <p id="update-latest-note" class="field-note" hidden></p>
+            <ol class="update-steps" aria-label="업데이트 단계">
+              <li data-update-step="source"><span aria-hidden="true">1</span>소스 선택</li>
+              <li data-update-step="review"><span aria-hidden="true">2</span>변경 검토</li>
+              <li data-update-step="run"><span aria-hidden="true">3</span>업데이트</li>
+            </ol>
           </section>
 
           <form class="panel deploy-form" id="deploy-form" novalidate>
@@ -39,6 +47,7 @@
                 <h2 id="source-title">소스 선택</h2>
               </div>
               <div class="source-box" id="source-box">
+                <div class="file-source">
                 <div class="source-intro">
                   <strong>앱 파일 또는 폴더를 선택하세요</strong>
                   <span>ZIP 파일을 여기에 끌어 놓을 수도 있습니다.</span>
@@ -49,9 +58,12 @@
                 </div>
                 <input id="archive" type="file" accept=".zip,application/zip" hidden />
                 <input id="folder" type="file" webkitdirectory multiple hidden />
+                </div>
                 <div class="source-divider"><span>또는</span></div>
+                <div class="repository-source field">
                 <label class="field-label" for="repository-url">공개 GitHub URL</label>
-                <input id="repository-url" type="url" inputmode="url" autocomplete="url" placeholder="https://github.com/owner/repo" />
+                <input id="repository-url" class="input" type="url" inputmode="url" autocomplete="url" placeholder="https://github.com/owner/repo" />
+                </div>
                 <p class="selection" id="source-selection" role="status" hidden></p>
               </div>
               <div class="provider-field" id="application-name-field">
@@ -99,12 +111,19 @@
               </div>
               <div class="provider-field" id="openstack-install-field" hidden>
                 <strong>OpenStack 인프라 등록</strong>
-                <p class="field-note">연계 키로 등록 요청을 만들고 일회성 토큰을 발급합니다. OpenStack 프로젝트·인증 정보는 고객 노드에서 직접 설정합니다.</p>
-                <label class="field-label" for="openstack-enrollment-key">임의의 연계 키 (16~256자)</label>
-                <input id="openstack-enrollment-key" type="password" autocomplete="new-password" spellcheck="false" minlength="16" maxlength="256" />
-                <button class="secondary-button" id="prepare-openstack-install" type="button">등록하고 설치 파일 받기</button>
+                <p class="field-note">등록 요청을 만들고 10분 동안 유효한 일회성 토큰을 발급합니다. OpenStack 프로젝트·인증 정보는 고객 노드에서 직접 설정합니다.</p>
+                <button class="secondary-button" id="prepare-openstack-install" type="button">등록하고 설치 명령 받기</button>
+                <div id="openstack-pending-registration" hidden>
+                  <label class="field-label" for="openstack-registration-select">기존 미완료 등록</label>
+                  <select id="openstack-registration-select"></select>
+                  <button class="secondary-button" id="reissue-openstack-token" type="button">만료된 토큰 재발급</button>
+                </div>
                 <p class="field-note" id="openstack-install-status" role="status"></p>
                 <div class="installer-result" id="openstack-installer-result" hidden>
+                  <label class="field-label" for="openstack-install-command">설치 파일 다운로드 명령</label>
+                  <textarea id="openstack-install-command" class="installer-code" readonly spellcheck="false" rows="2"></textarea>
+                  <button class="secondary-button" id="copy-openstack-command" type="button">명령 복사</button>
+                  <p class="field-note">고객 노드에서 실행하면 install.sh 파일을 내려받습니다. 설치 실행에는 아래 필수 파일 묶음과 설정 JSON이 별도로 필요합니다.</p>
                   <label class="field-label" for="openstack-linkage-token">일회성 연계 토큰</label>
                   <textarea id="openstack-linkage-token" class="installer-code" readonly spellcheck="false" rows="2"></textarea>
                   <button class="secondary-button" id="copy-openstack-token" type="button">토큰 복사</button>
@@ -136,8 +155,10 @@
           </form>
 
           <section class="panel review-panel" id="review-panel" aria-labelledby="review-title" hidden>
+            <div class="review-workspace">
+            <div class="review-main">
             <div class="review-heading">
-              <div><span class="eyebrow">REVIEW REQUEST</span><h2 id="review-title">선택 내용</h2></div>
+              <div><span class="eyebrow">REVIEW REQUEST</span><h2 id="review-title" tabindex="-1">선택 내용</h2></div>
               <button class="text-button" id="edit-selection" type="button">수정</button>
             </div>
             <dl class="review-list">
@@ -145,30 +166,46 @@
               <div><dt>앱 이름</dt><dd id="review-app"></dd></div>
               <div><dt>배포 환경</dt><dd id="review-target"></dd></div>
             </dl>
-            <p class="review-note" id="review-note">선택 내용을 확인하세요.</p>
+
             <div id="update-review" hidden>
-              <p class="review-note">선택한 소스 전체로 교체합니다. 기존 파일 중 이번 소스에 없는 파일은 삭제됩니다.</p>
-              <p id="update-baseline" class="field-note"></p>
-              <p id="update-origin" class="field-note"></p>
               <p id="update-diff-summary" role="status"></p>
+              <p id="update-impact" class="update-banner"></p>
               <div id="update-changes" class="update-changes"></div>
-              <label id="rebuild-field" class="rebuild-choice" hidden><input id="update-rebuild" type="checkbox" /> 변경이 없어도 다시 검사·빌드·배포</label>
+              <details id="update-source-details" class="update-details"><summary>소스 및 비교 기준</summary>
+                <p id="update-baseline" class="field-note"></p>
+                <p id="update-origin" class="field-note"></p>
+                <p id="update-expiry" class="field-note"></p>
+              </details>
             </div>
+            </div>
+            <div class="review-aside">
+              <div class="update-delivery-summary" hidden><h3>업데이트 요약</h3><span id="update-ready-badge" class="badge" data-variant="secondary">검토 준비됨</span><dl><div><dt>적용 대상</dt><dd id="update-target-summary"></dd></div><div><dt>서비스 주소</dt><dd>기존 주소 유지</dd></div></dl></div>
+              <label id="rebuild-field" class="rebuild-choice" hidden><input id="update-rebuild" type="checkbox" /> 변경이 없어도 다시 검사·빌드·배포</label>
+              <p class="review-note" id="review-note" role="status">선택 내용을 확인하세요.</p>
             <p class="form-error" id="request-error" role="alert" hidden></p>
-            <button class="primary-button" id="deploy-button" type="button" disabled>배포 시작</button>
+            <div class="update-actions">
+              <button class="primary-button" id="deploy-button" type="button" disabled>배포 시작</button>
+              <button class="secondary-button" id="renew-update" type="button" hidden>변경 내용 다시 확인</button>
+            </div>
+            </div>
+            </div>
           </section>
 
           <section class="panel review-panel" id="run-panel" aria-labelledby="run-title" hidden>
-            <h2 id="run-title">실행 상태</h2>
-            <p id="run-meta"></p>
+            <h2 id="run-title" tabindex="-1">실행 상태</h2>
             <p id="run-state" role="status"></p>
             <p class="review-note" id="run-message"></p>
             <p class="field-note" id="run-freshness" role="status"></p>
-            <pre class="execution-binding" id="run-binding"></pre>
-            <ul id="run-steps"></ul>
+            <ol id="update-run-progress" class="update-run-progress" aria-label="업데이트 실행 단계" hidden></ol>
+            <details class="update-details" id="run-details"><summary>실행 상세 및 로그</summary>
+              <p id="run-meta"></p>
+              <pre class="execution-binding" id="run-binding"></pre>
+              <ul id="run-steps"></ul>
+              <a id="actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 로그</a>
+            </details>
             <div id="run-application-actions" class="history-actions" aria-label="선택한 앱 관리"></div>
             <a id="application-link" target="_blank" rel="noopener noreferrer" hidden>배포한 앱 열기</a>
-            <a id="actions-link" target="_blank" rel="noopener noreferrer" hidden>GitHub Actions 로그</a>
+            <button class="secondary-button" id="update-again" type="button" hidden>다른 소스로 업데이트</button>
             <button class="text-button" id="stop-polling" type="button" hidden>상태 조회 중지</button>
             <button class="text-button" id="refresh-run" type="button" hidden>상태 다시 조회</button>
             <button class="secondary-button" id="resume-run" type="button" hidden>게시된 이미지로 배포 이어가기</button>
@@ -256,11 +293,14 @@
     </div>
     <dialog id="lifecycle-dialog" aria-labelledby="lifecycle-title" aria-describedby="lifecycle-description">
       <form id="lifecycle-form">
-        <h2 id="lifecycle-title">앱 관리 계획</h2><p id="lifecycle-description"></p>
+        <h2 id="lifecycle-title">앱 관리 계획</h2>
+        <div class="lifecycle-plan-content" tabindex="0" aria-label="계획 상세">
+        <p id="lifecycle-description"></p>
         <p id="lifecycle-progress" class="field-note" role="status" aria-live="polite" hidden></p>
         <p id="lifecycle-expiry" class="field-note"></p>
         <div class="lifecycle-preview"><section><h3>변경할 리소스</h3><ul id="lifecycle-resources"></ul></section><section><h3>보존할 리소스</h3><ul id="lifecycle-retained"></ul></section></div>
         <p id="lifecycle-error" class="form-error" role="alert" hidden></p>
+        </div>
         <div class="lifecycle-dialog-actions"><button id="lifecycle-retry" class="secondary-button" type="button" hidden>계획 다시 확인</button><button id="lifecycle-cancel" class="secondary-button" type="button" autofocus>취소</button><button id="lifecycle-confirm" class="primary-button" type="submit" disabled>계획 확인 중</button></div>
       </form>
     </dialog>

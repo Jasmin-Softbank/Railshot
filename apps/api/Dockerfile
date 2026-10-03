@@ -67,7 +67,7 @@ RUN python3 runtime-smoke.py
 COPY apps/dashboard/index.html apps/dashboard/app.js apps/dashboard/styles.css /app/apps/dashboard/
 COPY apps/dashboard/src/ /app/apps/dashboard/src/
 # The installer endpoint packages these reviewed public files from the image.
-COPY deployment/bootstrap/install.sh deployment/bootstrap/uninstall.sh deployment/bootstrap/install_payload.py deployment/bootstrap/requirements.lock /app/deployment/bootstrap/
+COPY deployment/bootstrap/install.sh deployment/bootstrap/uninstall.sh deployment/bootstrap/install_payload.py deployment/bootstrap/claim_token.py deployment/bootstrap/requirements.lock /app/deployment/bootstrap/
 COPY deployment/bootstrap/client_setup/ /app/deployment/bootstrap/client_setup/
 COPY deployment/bootstrap/templates/agent-authorized-keys.README /app/deployment/bootstrap/templates/
 COPY infrastructure/providers/openstack/__init__.py infrastructure/providers/openstack/cli.py infrastructure/providers/openstack/identity.py infrastructure/providers/openstack/discovery.py infrastructure/providers/openstack/access.py /app/infrastructure/providers/openstack/

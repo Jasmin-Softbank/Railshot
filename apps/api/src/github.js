@@ -61,8 +61,9 @@ function safeDiagnostics(evidence, attempt, artifactId) {
 }
 
 export class ServiceError extends Error {
-  constructor(message, status = 500, code) { super(message); Object.assign(this, { status, code }); }
+  constructor(message, status = 500, code) { super(message); Object.assign(this, { status, code, retryable: false }); }
 }
+const transientRead = (error) => error.retryable === true || error instanceof TypeError || ['TimeoutError', 'AbortError'].includes(error.name);
 
 export class SubmissionError extends ServiceError {
   constructor(phase, cause) {
@@ -71,9 +72,9 @@ export class SubmissionError extends ServiceError {
     const upstreamStatus = Number.isInteger(cause?.upstreamStatus) ? cause.upstreamStatus : null;
     const reason = cause?.name === 'TimeoutError' ? 'timeout' : 'upstream_failure';
     const detail = upstreamStatus ? `GitHub HTTP ${upstreamStatus}` : reason === 'timeout' ? 'GitHub 응답 시간 초과' : 'GitHub 통신 오류';
-    const unknown = phase === 'ci_dispatch';
-    super(`${labels[phase]} 중 ${detail}가 발생했습니다. ${unknown ? 'CI가 실행됐을 수 있어 결과 확인 전 재요청하지 마세요.' : 'CI 실행은 아직 요청하지 않았습니다.'}`,
-      502, unknown ? 'CI_DISPATCH_UNCONFIRMED' : 'SOURCE_REGISTRATION_FAILED');
+    const unknown = phase === 'ci_dispatch' && (upstreamStatus === null || upstreamStatus >= 500 || upstreamStatus === 408);
+    super(`${labels[phase]} 중 ${detail}가 발생했습니다. ${unknown ? '실행 접수 응답을 확인하지 못했습니다.' : phase === 'ci_dispatch' ? 'GitHub가 CI 실행 접수를 거절했습니다.' : 'CI 실행은 아직 요청하지 않았습니다.'}`,
+      502, phase === 'ci_dispatch' ? unknown ? 'CI_DISPATCH_UNCONFIRMED' : 'CI_DISPATCH_REJECTED' : 'SOURCE_REGISTRATION_FAILED');
     Object.assign(this, { phase, upstream_status: upstreamStatus, reason, outcomeUnknown: unknown });
   }
 }
@@ -105,9 +106,11 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         ...(options.body ? { 'content-type': 'application/json' } : {}),
         ...options.headers,
       },
-    });
+    }).catch((error) => { throw Object.assign(error, { retryable: true }); });
     if (!response.ok) {
-      throw Object.assign(new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502), { upstreamStatus: response.status });
+      throw Object.assign(new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502), {
+        upstreamStatus: response.status, retryable: response.status >= 500 || [408, 429].includes(response.status)
+          || response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after')) });
     }
     if (response.status === 204) return {};
     if (maxBytes === 0) {
@@ -197,9 +200,10 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
   }
 
-  async function deploy({ app, files, source, target_id = targetId }) {
+  async function deploy({ app, files, source, target_id = targetId, operation_id, onPrepared }) {
     if (typeof app !== 'string' || !APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
     permittedTarget(target_id);
+    if (operation_id !== undefined && !/^[a-f0-9-]{36}$/.test(operation_id)) throw new ServiceError('배포 요청 식별자가 잘못되었습니다.', 400);
     const acceptedFiles = validateFiles(files);
     if (documentationOnly(acceptedFiles)) throw new ServiceError(documentationOnlyMessage, 422);
     const prefix = `apps/${tenant}/${app}`;
@@ -232,6 +236,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       }
       const incomingPaths = new Set(acceptedFiles.map((file) => file.path));
       changes.deleted = [...previous.keys()].filter((path) => !incomingPaths.has(path)).length;
+      let treeSha = base.tree.sha;
       if (changes.added || changes.updated || changes.deleted) {
         phase = 'source_tree';
         // Replace only this app's tree; absent paths disappear, while other apps stay on base_tree.
@@ -247,10 +252,14 @@ export function createDeploymentService(config, fetchImpl = fetch) {
             { path: prefix, mode: '040000', type: 'tree', sha: appTree.sha },
           ] }),
         });
+        treeSha = tree.sha;
+      }
+      // A unique source commit binds even an unchanged rebuild to one durable request.
+      if (changes.added || changes.updated || changes.deleted || operation_id) {
         phase = 'source_commit';
         const commit = await request(`${repoPath}/git/commits`, {
           method: 'POST',
-          body: JSON.stringify({ message: `${existing ? 'fix: update' : 'feat: add'} ${tenant}/${app} via entrypoints PoC${source?.type === 'github' ? `\n\nSource: ${source.repository}@${source.sha}` : ''}`, tree: tree.sha, parents: [parent] }),
+          body: JSON.stringify({ message: `${existing ? 'fix: update' : 'feat: add'} ${tenant}/${app} via entrypoints PoC${source?.type === 'github' ? `\n\nSource: ${source.repository}@${source.sha}` : ''}${operation_id ? `\n\nRailshot-Request: ${operation_id}\nRailshot-Target: ${target_id}` : ''}`, tree: treeSha, parents: [parent] }),
         });
         if (!SOURCE_COMMIT.test(commit.sha)) throw new ServiceError('등록된 commit SHA를 확인하지 못했습니다.', 502);
         sourceCommit = commit.sha;
@@ -259,6 +268,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
           method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
         });
       }
+      await onPrepared?.({ source_commit: sourceCommit });
       phase = 'ci_dispatch';
       const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
         method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id } }),
@@ -271,6 +281,27 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
       };
     } catch (error) { throw new SubmissionError(phase, error); }
+  }
+
+  async function findDeployment({ operation_id, source_commit, app, target_id }) {
+    permittedTarget(target_id);
+    if (!/^[a-f0-9-]{36}$/.test(operation_id) || !SOURCE_COMMIT.test(source_commit || '') || !APP_NAME.test(app || ''))
+      throw new ServiceError('실행 접수 기록이 잘못되었습니다.', 409, 'CI_BINDING_MISMATCH');
+    const commit = await request(`${repoPath}/git/commits/${source_commit}`);
+    if (!commit.message?.split('\n').includes(`Railshot-Request: ${operation_id}`)
+        || !commit.message.split('\n').includes(`Railshot-Target: ${target_id}`))
+      throw new ServiceError('소스 커밋과 배포 요청이 일치하지 않습니다.', 409, 'CI_BINDING_MISMATCH');
+    const listing = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/runs?event=workflow_dispatch&head_sha=${source_commit}&per_page=100`);
+    if (!Array.isArray(listing.workflow_runs) || !Number.isSafeInteger(listing.total_count)
+        || listing.total_count !== listing.workflow_runs.length || listing.total_count > 100)
+      throw new ServiceError('실행 목록을 식별할 수 없습니다.', 409, 'CI_DISPATCH_AMBIGUOUS');
+    const matches = listing.workflow_runs.filter((run) => run.head_sha === source_commit && run.head_branch === ref
+      && run.event === 'workflow_dispatch' && run.path === `.github/workflows/${workflow}`
+      && run.display_title === `railshot:${tenant}/${app}:${target_id}:${source_commit}`);
+    if (matches.length > 1 || matches.some((run) => run.run_attempt !== 1))
+      throw new ServiceError('같은 접수 기록에 여러 실행 또는 재실행이 있습니다.', 409, 'CI_DISPATCH_AMBIGUOUS');
+    const run = matches[0];
+    return run ? { run_id: run.id, source_commit, app, target_id, actions_url: `https://github.com/${owner}/${repo}/actions/runs/${run.id}` } : null;
   }
 
   async function status(runId, expectedTargetId = targetId) {
@@ -304,7 +335,10 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     let artifactError = null;
     if (completed && conclusion === 'success') {
       try { publication = await published(runId, observed.get('release').observed_attempt, run.head_sha, false, expectedTargetId); }
-      catch { artifactError = '게시 산출물의 식별자·무결성·계약을 확인하지 못했습니다. GitHub Actions 기록을 확인하세요.'; }
+      catch (error) {
+        if (transientRead(error)) throw Object.assign(error, { retryable: true });
+        artifactError = '게시 산출물의 식별자·무결성·계약을 확인하지 못했습니다. GitHub Actions 기록을 확인하세요.';
+      }
     }
     const state = publication ? 'published' : artifactError ? 'publication_unverified'
       : completed ? 'failed' : run.status === 'in_progress' ? 'running' : 'queued';
@@ -364,7 +398,8 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     const response = await fetchImpl(`${API}${repoPath}/actions/artifacts/${artifact.id}/zip`, {
       signal: AbortSignal.timeout(30_000), headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' },
     });
-    if (!response.ok) throw new ServiceError('게시 artifact를 다운로드하지 못했습니다.', 502);
+    if (!response.ok) throw Object.assign(new ServiceError('게시 artifact를 다운로드하지 못했습니다.', 502), {
+      upstreamStatus: response.status, retryable: response.status >= 500 || [408, 429].includes(response.status) });
     const files = await inspectArchive(await readSourceResponse(response, archiveLimits.maxBytes));
     const receipt = readPublished(files, { runId, attempt, headSha, targetId: expectedTargetId, tenant });
     const publication = { ...receipt, artifact_id: artifact.id, artifact_name: name };
@@ -499,7 +534,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return files;
   }
 
-  return { deploy, status, cancel, events, diagnostics, diagnosticCurrent, diagnosticSource, publishedFiles, sourceFiles, allowTarget, targetId,
+  return { deploy, findDeployment, status, cancel, events, diagnostics, diagnosticCurrent, diagnosticSource, publishedFiles, sourceFiles, allowTarget, targetId,
     identity: Object.freeze({ tenant, sourceRepository: `${owner}/${repo}` }),
     get targetIds() { return Object.freeze([...targetIds]); } };
 }
