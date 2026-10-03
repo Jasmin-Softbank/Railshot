@@ -191,6 +191,36 @@ def changed_paths(event_name, event, cwd):
     return [os.fsdecode(path) for path in output.split(b'\0') if path]
 
 
+def previous_release_complete(before):
+    """A skipped/superseded predecessor cannot be used as the deployed baseline."""
+    if not isinstance(before, str) or not SHA.fullmatch(before) or before == '0' * 40:
+        return False
+    repository = 'repos/Jasmin-Softbank/Railshot/'
+    def read(path):
+        return json.loads(subprocess.check_output(['gh', 'api', repository + path],
+                                                 stderr=subprocess.PIPE, timeout=20))
+    try:
+        runs = read('actions/workflows/railshot-ci.yml/runs?event=push&head_sha=' + before + '&per_page=5')
+        for run in runs['workflow_runs']:
+            if run.get('head_branch') != os.environ.get('GITHUB_REF_NAME') or run.get('conclusion') != 'success':
+                continue
+            jobs = read(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
+            # The run may be green because its source was superseded. Require an
+            # actual successful verification step, not the aggregate job status.
+            successful = {step.get('name') for job in jobs['jobs'] for step in job.get('steps', [])
+                          if step.get('conclusion') == 'success'}
+            runner_published = any(job.get('name', '').endswith('publish (ci-runner)')
+                                   and job.get('conclusion') == 'success' for job in jobs['jobs'])
+            return (jobs['total_count'] <= 100
+                    and 'Verify the exact Argo revision, running digests and public edge' in successful
+                    and (not runner_published or
+                         'Promote the tested CI controller runner and workflow source' in successful))
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    # No new admission gate: uncertain history just builds the three deployed images.
+    return False
+
+
 def validate_gate(checks):
     jobs = set(checks) - {'changes'}
     if jobs not in (set(JOBS), {'containers'}) or 'changes' not in checks:
@@ -228,6 +258,9 @@ def main():
     components = set(COMPONENTS) if paths is None else container_components(paths)
     release = release_required(paths)
     if os.environ.get('AUTO_RELEASE') == 'true':
+        if not previous_release_complete(event.get('before')):
+            print('Previous release incomplete or unconfirmed; include platform and CI runner updates.')
+            components = set(COMPONENTS)
         # Only images used by the platform trigger its rollout. Node/LB maintenance
         # is separate; it must not gate an API or dashboard deployment.
         components.discard('mcp')

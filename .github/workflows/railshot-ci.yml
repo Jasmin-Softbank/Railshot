@@ -21,6 +21,7 @@ jobs:
   changes:
     if: github.event_name != 'workflow_dispatch'
     name: Select affected checks
+    permissions: {contents: read, actions: read}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -38,6 +39,7 @@ jobs:
       - name: Compare the complete PR or push change set
         id: select
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           AUTO_RELEASE: ${{ github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && vars.RAILSHOT_AUTO_RELEASE == 'true' }}
         run: python3 ci/scripts/ci_scope.py select
 
