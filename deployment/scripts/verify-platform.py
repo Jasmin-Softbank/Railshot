@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -149,7 +150,9 @@ def remote(revision, images, version, document_hash, call=aws, health=public_hea
     command_id = command["Command"]["CommandId"]
     if not re.fullmatch(r"[a-f0-9-]{36}", command_id):
         raise NotReady("INVALID_COMMAND_ID")
-    deadline = time.monotonic() + 720
+    started = time.monotonic()
+    deadline, next_log = started + 720, started
+    print(f"Verifying Argo revision {revision} and ready API/dashboard image digests; then public HTTPS.", file=sys.stderr, flush=True)
     while time.monotonic() < deadline:
         result = call("get-command-invocation", "--command-id", command_id, "--instance-id", INSTANCE)
         if result.get("Status") == "Success":
@@ -162,7 +165,18 @@ def remote(revision, images, version, document_hash, call=aws, health=public_hea
             return {**proof, "status": "verified", "command_id": command_id, "public_http": health(),
                     "verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         if result.get("Status") not in {"Pending", "InProgress", "Delayed"}:
-            raise NotReady("REMOTE_VERIFIER_FAILED")
+            try:
+                failure = json.loads(result.get("StandardOutputContent", ""))
+                reason = failure.get("code") if failure.get("status") == "failed" else None
+            except (ValueError, AttributeError):
+                reason = None
+            allowed = {"ARGO_REVISION_NOT_HEALTHY", "DEPLOYMENT_NOT_READY", "POD_COUNT_NOT_READY",
+                       "POD_DIGEST_NOT_READY", "KUBERNETES_READ_FAILED", "CLUSTER_READ_FAILED"}
+            raise NotReady(reason if reason in allowed else "REMOTE_VERIFIER_FAILED")
+        now = time.monotonic()
+        if now >= next_log:
+            print(f"Waiting for cluster verification: SSM={result['Status']}, elapsed={int(now - started)}s/720s, revision={revision}.", file=sys.stderr, flush=True)
+            next_log = now + 30
         time.sleep(5)
     raise NotReady("SSM_VERIFICATION_TIMEOUT")
 

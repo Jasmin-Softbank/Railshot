@@ -206,6 +206,37 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual(ev['attempts'][1]['role'], 'adapter')
         self.assertEqual(ev['attempts'][1]['repair_scope'], 'packaging')
 
+    def test_two_or_three_attempt_budget_preserves_gate_first_and_scoped_repairs(self):
+        for budget, failure_count in ((2, 0), (2, 2), (2, 3), (3, 3)):
+            with self.subTest(budget=budget, failure_count=failure_count):
+                self.run = self.root / f'budget-{budget}-failures-{failure_count}'
+                sequence, scopes = [], []
+                def gate_result(ws, run, attempt, layers, **options):
+                    sequence.append(('gate', attempt))
+                    layer, code = ('L1', 'F5') if attempt == 0 else ('L3', 'F4')
+                    verdict = ({'ok': False, 'status': 'FAIL', 'layers': [{'layer': layer, 'ok': False}],
+                                'failure': {'layer': layer, 'class': code, 'signature': f'failure-{attempt}'}}
+                               if attempt < failure_count else {'ok': True, 'release_eligible': True, 'status': 'PASS'})
+                    (run / f'gate-{attempt}').mkdir()
+                    (run / f'gate-{attempt}/verdict.json').write_text(json.dumps(verdict))
+                    return verdict
+                def proposal(*args):
+                    role, _, _, run, attempt, _, _, scope = args[:8]
+                    sequence.append(('agent', attempt))
+                    scopes.append((role, scope))
+                    return 0, {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
+                               'meta': {'sdk_status': 'completed'}}
+                with patch.object(loop, 'gate', side_effect=gate_result), self.agent_result(side_effect=proposal), \
+                        redirect_stdout(io.StringIO()):
+                    code = self.cli(False, '--max-attempts', str(budget), '--repair-scope', 'source')
+                used = min(budget, failure_count)
+                self.assertEqual(code, 0 if failure_count <= budget else 1)
+                self.assertEqual(sequence, [('gate', 0)] + [item for n in range(1, used + 1)
+                                                         for item in [('agent', n), ('gate', n)]])
+                self.assertEqual(scopes, ([('adapter', 'packaging')] + [('fixer', 'source')] * (used - 1)) if used else [])
+                evidence = json.loads((self.run / 'evidence.json').read_text())
+                self.assertEqual(evidence['agent_attempts'], used)
+
     def test_every_gate_prefix_failure_reruns_complete_order_after_source_proposal(self):
         for layer, failure_class in (('L0', 'F5'), ('L1', 'F5'),
                                      ('L2', 'F3'), ('L4', 'F6'), ('L3', 'F7')):

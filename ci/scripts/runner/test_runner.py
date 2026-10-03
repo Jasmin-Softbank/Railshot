@@ -56,6 +56,45 @@ class RunnerTest(unittest.TestCase):
             self.assertFalse((ws/'Dockerfile').exists())
             self.assertEqual(run_agent.apply_files(ws, [{'path':'.railshot/test','content':'x'}], allow, deny), ['.railshot/test'])
 
+    def test_delete_is_explicit_scoped_and_validated_before_mutation(self):
+        for scope in ('packaging', 'source'):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as d:
+                ws = Path(d)
+                (ws / 'Dockerfile').write_text('old')
+                (ws / 'app.py').write_text('print("app")')
+                (ws / 'app_test.py').write_text('assert True')
+                (ws / 'package.json').write_text('{}')
+                allow, protect = run_agent.writable_rules('contract/paths.yaml', scope)
+                for rejected in ('package.json', 'app_test.py', 'missing.Dockerfile'):
+                    with self.assertRaises(ValueError):
+                        run_agent.apply_files(ws, [
+                            {'path': 'Dockerfile', 'content': 'new'},
+                            {'path': rejected, 'action': 'delete', 'content': ''}],
+                            allow, protect, repair_scope=scope)
+                    self.assertEqual((ws / 'Dockerfile').read_text(), 'old')
+                patch_files = [{'path': 'app.py', 'action': 'delete', 'content': ''}]
+                if scope == 'packaging':
+                    with self.assertRaises(ValueError):
+                        run_agent.apply_files(ws, patch_files, allow, protect, repair_scope=scope)
+                else:
+                    run_agent.apply_files(ws, patch_files, allow, protect, repair_scope=scope)
+                    self.assertFalse((ws / 'app.py').exists())
+                run_agent.apply_files(ws, [{'path': 'Dockerfile', 'action': 'delete', 'content': ''}], allow, protect)
+                self.assertFalse((ws / 'Dockerfile').exists())
+
+    def test_deletion_preserves_symlink_binary_and_size_boundaries(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = Path(d)
+            (ws / 'real.Dockerfile').write_text('old')
+            (ws / 'link.Dockerfile').symlink_to(ws / 'real.Dockerfile')
+            (ws / 'binary.Dockerfile').write_bytes(b'abc\0def')
+            (ws / 'large.Dockerfile').write_text('x' * 20001)
+            allow, protect = run_agent.writable_rules('contract/paths.yaml')
+            for name in ('link.Dockerfile', 'binary.Dockerfile', 'large.Dockerfile'):
+                with self.assertRaises(ValueError):
+                    run_agent.apply_files(ws, [{'path': name, 'action': 'delete', 'content': ''}], allow, protect)
+                self.assertTrue((ws / name).exists())
+
     def test_sdk_contract(self):
         import openai_codex
         profile = run_agent.load_yaml(run_agent.PLATFORM / 'runner/profiles.yaml')

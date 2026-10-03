@@ -1,6 +1,8 @@
 # Bound deployment diagnostics
 
-CI runs without a model by default (`max_attempts=0`, packaging scope). It emits
+The model-free CI baseline explicitly uses `RAILSHOT_MAX_REPAIR_ATTEMPTS=0` and
+packaging scope. The workflow fallback from PR #126 is two attempts/source;
+repository variables override it, while direct CLI defaults remain zero/packaging. CI emits
 redacted diagnostic artifacts and source snapshots independently of gate verdicts.
 The API joins those facts with dispatch, publication, GitOps revision, controller,
 workload and public HTTP observations in the existing SQLite operation record.

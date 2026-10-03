@@ -32,7 +32,7 @@ PLATFORM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLATFORM))
 sys.path.insert(0, str(PLATFORM / "runner"))
 from observability import OperationError, event_record  # noqa: E402
-from run_agent import path_ok, writable_rules, source_change_allowed  # noqa: E402
+from run_agent import path_ok, writable_rules, source_change_allowed, deletion_allowed  # noqa: E402
 from quality import run_quality  # noqa: E402
 from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
@@ -135,13 +135,21 @@ def l0(ws, paths, *, repair_scope="packaging", native_locks=None):
     from repair import verified_lock
     changes = changed_files(ws)
     allow, protected = writable_rules("contract/paths.yaml", scope=repair_scope)
-    errors, native = [], set()
+    errors, native, deleted_bytes = [], set(), 0
     for kind, path in changes:
         if repair_scope == "source" and kind != "D" and not (ws / path).is_symlink() and verified_lock(ws, path, native_locks or {}):
             native.add(path)
             continue
         if kind == "D":
-            errors.append(f"deleted file: {path}")
+            try:
+                original = sh(["git", "show", "HEAD:" + path], cwd=ws, check=True, raw=True).stdout
+                mode = sh(["git", "ls-tree", "HEAD", "--", path], cwd=ws, check=True).stdout.split()[0]
+                if mode not in {"100644", "100755"}:
+                    raise ValueError("cannot delete a non-regular file: " + path)
+                deletion_allowed(path, original, allow, protected, repair_scope=repair_scope)
+                deleted_bytes += len(original)
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                errors.append(str(exc))
         elif not path_ok(path, allow, protected):
             errors.append(f"path not writable: {path}")
         elif (ws / path).is_symlink():
@@ -158,7 +166,7 @@ def l0(ws, paths, *, repair_scope="packaging", native_locks=None):
     if len(changes) - len(native) > lim["max_files_changed"]:
         errors.append(f"too many files changed: {len(changes)} > {lim['max_files_changed']}")
     lines = added_lines(ws, [c for c in changes if c[0] != "D" and c[1] not in native])
-    if sum(len(l) + 1 for l in lines) > lim["max_patch_bytes"]:
+    if deleted_bytes + sum(len(l) + 1 for l in lines) > lim["max_patch_bytes"]:
         errors.append(f"patch too large: > {lim['max_patch_bytes']} bytes")
     for pat in paths["forbidden_patterns"]:
         hit = next((l for l in lines if re.search(pat, l)), None)

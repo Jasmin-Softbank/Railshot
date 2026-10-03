@@ -74,15 +74,14 @@ class WorkflowPolicyTest(unittest.TestCase):
                         self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
                         self.assertEqual(Path(tmp, 'output').read_text(), f'passed={str(loop_exit == 0).lower()}\n')
 
-    def test_default_runs_without_sdk_or_model_credentials(self):
+    def test_default_allows_two_repairs_with_configured_provider(self):
         for attempts in (None, ''):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
-                result = self.run_loop_policy(tmp, attempts)
+                result = self.run_loop_policy(tmp, attempts, credentials=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 invocation = json.loads(Path(tmp, 'invocation.json').read_text())
-                self.assertEqual(invocation['args'][invocation['args'].index('--max-attempts') + 1], '0')
-                self.assertEqual(invocation['model_env'], [])
-                self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
+                self.assertEqual(invocation['args'][invocation['args'].index('--max-attempts') + 1], '2')
+                self.assertIn('CODEX_API_KEY', invocation['model_env'])
 
     def test_nonzero_repair_requires_explicit_budget_and_provider_auth(self):
         for attempts in ('1', '2', '3'):

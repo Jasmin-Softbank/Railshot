@@ -163,6 +163,8 @@ def writable_rules(spec, scope="packaging"):
 
 def source_change_allowed(rel, content, previous):
     """Additional source authority never permits rewriting an existing oracle/config."""
+    if content is None and PurePosixPath(rel).name == "package.json":
+        raise ValueError("cannot delete a package manifest")
     is_test = path_ok(rel, ["**/test/**", "**/tests/**", "**/__tests__/**", "**/test*.*", "**/*_test.*",
                            "**/*.test.*", "**/*.spec.*", "**/*Test.java", "**/*Tests.java", "**/Test*.java"], [])
     if is_test:
@@ -249,10 +251,13 @@ def path_ok(rel, allow, deny):
 
 def instructions(profile, role_cfg):
     text = "\n\n".join((PLATFORM / path).read_text() for path in
-                       (profile["instructions_prefix"], "agents/DONT.md", role_cfg["instructions"]))
+                       (profile["instructions_prefix"], "agents/DONT.md", *profile.get("skills", []), role_cfg["instructions"]))
+    for skill in profile.get("skills", []):
+        text += f"\nSkill resources: {(PLATFORM / skill).parent}\n"
     text += ("\n\n## How to return files\nYou cannot edit files. Return the full content of every file you create or "
              "change in the `files` array of your JSON output, with paths relative to the workspace root. "
-             "Files you do not list stay unchanged.\n")
+             "For a justified deletion set action=delete and content to an empty string. "
+             "Omit action or use action=write for creation/update. Files you do not list stay unchanged.\n")
     return text
 
 
@@ -269,7 +274,8 @@ def with_files(schema, allow, gate_order=GATE_ORDER):
     s["properties"]["files"] = {
         "type": "array", "maxItems": 8,
         "items": {"type": "object", "additionalProperties": False, "required": ["path", "content"],
-                  "properties": {"path": {"type": "string"}, "content": {"type": "string", "maxLength": 20000}}}}
+                  "properties": {"path": {"type": "string"}, "action": {"enum": ["write", "delete"]},
+                                 "content": {"type": "string", "maxLength": 20000}}}}
     if not allow:
         s["properties"]["files"]["maxItems"] = 0
     return s
@@ -397,7 +403,7 @@ def codex_permissions(workspace, run, credential_home, read_deny):
     profile = "permissions.railshot_read"
     values = ['default_permissions="railshot_read"', f'{profile}.network.enabled=false']
     rules = {":root": "deny", ":minimal": "read"}
-    for path in (workspace, PLATFORM / "contract", PLATFORM / "schemas", run):
+    for path in (workspace, PLATFORM / "contract", PLATFORM / "schemas", PLATFORM / "agents/skills", run):
         rules[str(Path(path).resolve())] = "read"
         for pattern in read_deny:
             rules[str(Path(path).resolve() / pattern)] = "deny"
@@ -541,7 +547,7 @@ def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=No
         raise OperationError("SDK_CONFIG_INVALID", component="runner", phase="config", retry_policy="after_configuration")
     if read_deny is None:
         read_deny = load_yaml(PLATFORM / "runner/profiles.yaml")["read_deny"]
-    validate_read_roots([workspace, PLATFORM / "contract", PLATFORM / "schemas", run], read_deny)
+    validate_read_roots([workspace, PLATFORM / "contract", PLATFORM / "schemas", PLATFORM / "agents/skills", run], read_deny)
     emit = emit or (lambda *args, **kwargs: None)
     # The operator provisions an auth-only home on the dedicated agent VM.
     # Never select an account or copy credentials from an uploaded repository.
@@ -619,6 +625,8 @@ def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope=
     if len(files) > 8 or sum(len(f["content"].encode()) for f in files) > 20000:
         raise ValueError("proposal exceeds file/byte limit")
     targets = []
+    policies = load_yaml(PLATFORM / "contract/paths.yaml")
+    patch_bytes = sum(len(f["content"].encode()) for f in files)
     for f in files:
         rel = f["path"]
         dest = workspace / rel
@@ -627,9 +635,21 @@ def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope=
             raise ValueError(f"rejected patch path: {rel}")
         if rel in [p for p, _ in targets]:
             raise ValueError(f"duplicate patch path: {rel}")
+        action = f.get("action", "write")
+        if action not in {"write", "delete"}:
+            raise ValueError("unsupported file action")
+        if action == "delete":
+            if f["content"] != "" or not dest.is_file():
+                raise ValueError("deletion needs an existing regular file and empty content")
+            previous = dest.read_bytes()
+            deletion_allowed(rel, previous, allow, protect, repair_scope=repair_scope)
+            patch_bytes += len(previous)
+            if patch_bytes > policies["limits"]["max_patch_bytes"]:
+                raise ValueError("proposal exceeds file/byte limit")
+            targets.append((rel, None))
+            continue
         if repair_scope == "source":
             source_change_allowed(rel, f["content"], dest.read_text() if dest.exists() else None)
-        policies = load_yaml(PLATFORM / "contract/paths.yaml")
         if any(re.search(pattern, f["content"], re.M) for pattern in policies["forbidden_patterns"]):
             raise ValueError("proposal contains a forbidden bypass pattern")
         targets.append((rel, f["content"]))
@@ -640,15 +660,20 @@ def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope=
     # filesystem transaction: preserve the exact completed subset on any failure.
     with tempfile.TemporaryDirectory(prefix='.railshot-patch-', dir=workspace) as staging:
         for index, (rel, content) in enumerate(targets):
+            if content is None:
+                continue
             dest, staged = workspace / rel, Path(staging) / str(index)
             with staged.open('x') as stream:
                 os.fchmod(stream.fileno(), dest.stat().st_mode & 0o777 if dest.exists() else 0o644)
                 stream.write(content)
                 stream.flush(); os.fsync(stream.fileno())
-        for index, (rel, _) in enumerate(targets):
+        for index, (rel, content) in enumerate(targets):
             dest = workspace / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(Path(staging) / str(index), dest)
+            if content is None:
+                dest.unlink()
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(Path(staging) / str(index), dest)
             applied.append(rel)
             fd = os.open(dest.parent, os.O_RDONLY)
             try:
@@ -656,6 +681,17 @@ def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope=
             finally:
                 os.close(fd)
     return applied
+
+
+def deletion_allowed(rel, previous, allow, protect, *, repair_scope="packaging"):
+    """Runner and L0 share deletion checks; original bytes also count toward limits."""
+    if not load_yaml(PLATFORM / "contract/paths.yaml")["limits"].get("delete_files") or not path_ok(rel, allow, protect):
+        raise ValueError("deleted file not writable: " + rel)
+    if b"\0" in previous:
+        raise ValueError("cannot delete a binary file: " + rel)
+    original = previous.decode("utf-8")
+    if repair_scope == "source":
+        source_change_allowed(rel, None, original)
 
 
 def record_plan(run, role, output, gate_order=GATE_ORDER, *, workspace=None, repair_scope="packaging", expected=None):
@@ -672,6 +708,7 @@ def record_plan(run, role, output, gate_order=GATE_ORDER, *, workspace=None, rep
         raise ValueError("file proposal needs an evidence-backed root cause")
     evidence = repair_evidence.verify(run, workspace, output, gate_order, repair_scope, expected)
     receipt = {"status": "planned", "execution_verified": False, "evidence": evidence,
+               "file_actions": {item["path"]: item.get("action", "write") for item in files},
                **{key: output.get(key) for key in ("root_cause", "addresses_failure", "gate_plan", "files_changed", "assumptions")},
                "files_sha256": {item["path"]: hashlib.sha256(item["content"].encode()).hexdigest() for item in files}}
     with (run / f"{role}-plan.json").open("x") as stream:
@@ -763,7 +800,7 @@ def execute(a):
     except Exception as exc:
         raise OperationError("SDK_CONFIG_INVALID", component="runner", phase="config",
                              retry_policy="after_configuration", cause=exc) from exc
-    read_roots = [workspace, PLATFORM / "contract", PLATFORM / "schemas", run]
+    read_roots = [workspace, PLATFORM / "contract", PLATFORM / "schemas", PLATFORM / "agents/skills", run]
 
     state, emit = lifecycle(run, a.role, provider, profile["providers"][provider].get("model"))
     emit("agent.started", status="running")

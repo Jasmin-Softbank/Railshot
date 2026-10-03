@@ -889,6 +889,7 @@ export async function createProductService({ service, directory, target, provide
       const state = store.read();
       return Object.values(state.applications)
         .filter((row) => owns(row, sessionId) && row.status !== 'deleted')
+        .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '') || b.id.localeCompare(a.id))
         .map((row) => publicApplication(state, row));
     },
     getApplication(id, sessionId = null) {
@@ -930,7 +931,7 @@ export async function createProductService({ service, directory, target, provide
       const plan = Object.hasOwn(state.plans, planId) ? state.plans[planId] : null;
       if (!plan || plan.session_id !== sessionId || plan.kind !== 'application-lifecycle' || plan.public.application_id !== applicationId)
         throw new ProductError(404, 'NOT_FOUND', '앱 계획을 찾을 수 없습니다.');
-      return structuredClone(plan.public);
+      return structuredClone({ ...plan.public, ...(plan.operation_id ? { operation_id: plan.operation_id } : {}) });
     },
     async createApplicationOperation(applicationId, input, key, sessionId = null) {
       idempotencyKey(key);

@@ -2,18 +2,19 @@
 
 ## Goal
 
-Make the repository deployable on Railshot with the fewest new files. You write the container build and the workload spec. The platform renders manifests, infrastructure values, DNS and TLS from your spec with best-practice defaults, so you never write those.
+Understand the repository and make it deployable on Railshot with the smallest coherent create/update/delete proposal. The shared prepare-deployment skill supplies the system flow and decision examples. You write the container build and the workload spec. The platform renders manifests, infrastructure values, DNS and TLS from your spec with best-practice defaults, so you never write those.
 
 ## Inputs (paths given in the task message)
 
 - `contract/stack-contract.md`, `contract/paths.yaml`, `contract/catalog.yaml`, `schemas/railshot.schema.json`: read these first.
+- Latest verdict, `failure.txt`, and `lessons.md`: why this attempt is running and what was already tried.
 - `ir.json`: deterministic inventory of the repository: languages, package managers, framework hints, candidate entrypoints and ports, existing Dockerfiles, build and data scripts, size.
 - The workspace: a sanitized copy of the user's repository. Only the writable paths may change.
 - `request.txt` (optional): what the user said about this deployment.
 
 ## Procedure
 
-1. Read the contract, then `ir.json`. Draft a service map: what runs, on which port, what must be built first (data generation, frontend build), which service users reach.
+1. Read the contract, then `ir.json`. Trace the real entrypoint, imports and asset references. Draft a service map: what runs, on which port, what must be built first (data generation, frontend build), which service users reach.
 2. Confirm every fact in the source code, not in docs or comments:
    - the real start command and how to bind `0.0.0.0` (existing CLI flag or env var);
    - the port and whether the app reads `PORT`;
@@ -23,9 +24,9 @@ Make the repository deployable on Railshot with the fewest new files. You write 
 3. Choose the build per service, in this order:
    1. An existing Dockerfile that meets the contract: keep it; fix only contract violations.
    2. Otherwise write a multi-stage Dockerfile (rules below).
-4. For a new spec, write `.railshot/railshot.yaml` with `apiVersion: railshot/v0`. If the workspace already has legacy `.jasmin/jasmin.yaml`, edit that file in place and preserve its API version; never create a second spec. Include only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. If the app requires a capability listed in `unsupported_mvp` (such as persistent volumes for SQLite data or attachments), return `give_up` and name the missing capability. Never relocate persistent data to `/tmp` or disable persistence to pass health checks.
+4. For a new spec, write `.railshot/railshot.yaml` with `apiVersion: railshot/v0`. If only legacy `.jasmin/jasmin.yaml` exists, edit it in place and preserve its API version. If both specs exist, compare them and retain one complete intended definition; propose deletion of a proven redundant duplicate. Never create a second spec. Include only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. If the app requires a capability listed in `unsupported_mvp` (such as persistent volumes for SQLite data or attachments), return `give_up` and name the missing capability. Never relocate persistent data to `/tmp` or disable persistence to pass health checks.
 5. Re-check your files against C1–C11 and the forbidden patterns in `paths.yaml`.
-6. Plan every active gate in `gate_plan` in the exact order supplied by the harness. Do not add or run separate lint/type/unit gates; preserve the existing build command and tests. Return the smallest packaging proposal (`status: proposed`), or `give_up` if it exceeds the trusted scope. The outer executor checks the actual build and runtime before requesting any source repair.
+6. Plan every active gate in the exact harness order in `gate_plan`. Do not add or run separate lint/type/unit gates; preserve the existing build command and tests. Return the smallest packaging proposal (`status: proposed`), or `give_up` if no useful valid proposal is possible within the trusted scope. Record suspected later source defects in assumptions instead of hiding them. The outer executor checks the actual build and runtime before requesting any source repair.
 
 ## Dockerfile rules
 

@@ -114,9 +114,9 @@ test('execution links require the latest owned active service and disappear on s
   await page.route('**/api/v1/deployments?*', (route) => json(route, { items: [deployment] }));
   await page.route('**/api/v1/deployments/deployed-v1', (route) => json(route, deployment));
   await page.goto(origin);
-  await page.waitForFunction(() => ['#application-link', '#monitor-application-link'].every(selector => document.querySelector(selector).hasAttribute('href')));
   const links = ['#application-link', '#monitor-application-link'];
-  for (const selector of links) assert.equal(await page.locator(selector).getAttribute('href'), 'https://calculator.example/');
+  await page.waitForFunction(() => ['#application-link', '#monitor-application-link']
+    .every(selector => document.querySelector(selector).getAttribute('href') === 'https://calculator.example/'));
   for (const patch of [{ status: 'stopped' }, { status: 'deleted' },
     { status: 'ready', current_deployment: { ...deployment, id: 'deployed-v2' } },
     { current_deployment: deployment, current_deployment_state: 'unverified' }]) {

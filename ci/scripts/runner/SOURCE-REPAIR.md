@@ -1,9 +1,10 @@
 # Source repair in customer CI
 
-The customer workflow and direct CLI default to `REPAIR_SCOPE=packaging` and
-zero model repair attempts. Source repair and a positive bounded attempt limit
-require explicit trusted configuration. Jev diagnostics run separately in the API
-and never enable the fixer or change these defaults.
+The workflow fallback is two repair attempts and source scope following PR #126.
+A model-free baseline explicitly sets `RAILSHOT_MAX_REPAIR_ATTEMPTS=0` and
+`REPAIR_SCOPE=packaging`; direct CLI defaults remain zero and packaging. Repository
+variables override workflow fallbacks. Jev diagnostics run separately in the API
+and do not enable the fixer or change the selected attempt budget.
 Set the apps repository's `PLATFORM_REF` to the reviewed platform commit and
 update its workflow from `ci/workflows/railshot-deploy.yml`. A saved run is bound
 to its original harness and source; start a new request after changing these
@@ -28,8 +29,8 @@ applying any bytes. The loop stores it as `<role>-<attempt>-plan.json`, checkpoi
 it, and includes its hash, gate list and subsequent written files/verdict in
 `evidence.json`. Workflow artifacts expose that safe linkage; source text and
 raw model planning text remain in the private run directory. Every changed
-attempt reruns the deterministic gates from L0. There are at most three model
-attempts; an unchanged failure signature stops the run sooner.
+attempt reruns the deterministic gates from L0. The default is at most two SDK
+attempts, with three available through `RAILSHOT_MAX_REPAIR_ATTEMPTS`; an unchanged failure signature stops the run sooner.
 
 A completed model response rejected by schema or patch validation can consume a
 remaining attempt for a fresh fixer plan only when the runner proves zero source
@@ -41,7 +42,7 @@ repeat the completed model call. A corrected proposal still reruns every gate.
 
 | First failure | Authorized remediation | Required evidence afterward |
 | --- | --- | --- |
-| L0 prohibited patch | Revise proposal within unchanged platform limits | Full patch policy; no deleted files, escaped paths, secret files or bypasses |
+| L0 prohibited patch | Revise proposal within unchanged platform limits | Full patch policy; scoped regular-text deletion only, no protected/escaped paths, secret files or bypasses |
 | L1 missing/invalid Dockerfile or service spec | Generate the smallest packaging proposal | Schema, port, image and service contract |
 | Q missing tests/checkers or completed lint/type/unit failure | Record the original result as advisory and continue; no model repair | Required build, scan and runtime checks still pass |
 | Missing JS dependency lock / additive dependencies | Native npm/pnpm/Yarn resolution in existing filtered-network Docker sandbox | External hash-bound native lock receipt, then frozen install and full gates |
@@ -51,7 +52,7 @@ repeat the completed model call. A corrected proposal still reruns every gate.
 | Runner, Docker, network/auth/secret absence, uncertain execution | Stop with the actual operator action | Infrastructure recovery evidence before a new execution |
 
 The model retains read-only, network-disabled tools. It proposes at most eight
-files and 20 KB per patch. Existing tests, scripts (except the exact npm empty-test
+files and 20 KB per patch, including original bytes of deleted files. Creation/update uses the full content; deletion uses `action: delete` with empty content. File actions are recorded before applying them. Existing tests, scripts (except the exact npm empty-test
 placeholder), dependency versions, checker configuration, migrations and schemas
 are immutable. The underlying source validator accepts additive manifest test setup and exact
 public package versions; it never accepts model-authored locks. Native locks have

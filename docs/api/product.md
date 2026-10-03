@@ -165,3 +165,7 @@ AWS 경로 사전 검사가 등록 시작 전에 `APPLICATION_AWS_ROUTE_PREFLIGH
 `ci.observation`과 `cd.observation`은 원본 시스템의 마지막 조회 시각(`checked_at`), 마지막 성공 조회(`last_success_at`), 조회 오류(`error`), 다음 조회 시각(`next_retry_at`)을 별도로 제공한다. 브라우저가 API를 읽은 시각과 다르다. 일시적인 GitHub/클러스터 조회 장애는 마지막 실행 사실을 유지하며, CI 재실행이나 CD 재적용 없이 재조회한다. 조회 사이에는 저장된 다음 조회 시각을 사용하여 작업자를 반납하고 다른 앱을 처리한다. 같은 앱의 대기 요청과 실제 변경 작업은 직렬 처리한다. 명시적인 조회 권한 거절이나 식별자 충돌은 원인을 가진 `blocked`로 표시하며, 이미 접수된 실행의 결과가 불확실하면 같은 앱의 변경은 계속 보류한다.
 
 제품 요청은 소스가 동일한 재빌드도 요청 ID를 포함한 고유 커밋으로 기록한다. `dispatch.state=preparing`은 소스 준비, `requesting`은 영속 저장 후 외부 접수 요청, `accepted`는 run ID 저장을 뜻한다. `prepared_at`은 GitHub 접수 성공 증거가 아니다. 응답 유실 시 저장한 커밋·요청 ID와 workflow 실행 이름을 대조하여 기존 실행을 찾는다. 접수가 명시적으로 거절된 4xx는 `CI_DISPATCH_REJECTED`, 정상 조회로 5분 동안 실행을 찾지 못하면 `CI_DISPATCH_NOT_IDENTIFIED`이며 자동 재접수하지 않는다. 재시작 시 CI는 저장된 run ID를 조회하고, 게시가 확인된 고객 CD는 기존 `cd.json` 및 native journal을 읽기 전용으로 관측한다. CD 기록이 없으면 `CD_RECORD_MISSING`을 표시하며 라우팅 설정이나 앱 적용을 자동 재실행하지 않는다.
+
+### 앱 관리 접수 확인과 목록 순서
+
+앱 계획 GET은 해당 계획으로 접수된 작업이 있으면 `operation_id`를 반환한다. 대시보드는 삭제·중지·재개 응답을 잃어도 저장한 `plan_id`로 기존 작업을 찾아 조회하며 변경 요청을 다시 보내지 않는다. 앱 목록은 생성 시각 내림차순, 같은 시각에는 ID 내림차순이다. 실행 이력은 기존 생성 시각/ID 내림차순을 유지한다.
