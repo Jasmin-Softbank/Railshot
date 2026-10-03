@@ -43,8 +43,7 @@ class RepairEvidenceTest(unittest.TestCase):
                 'root_cause':'app.py:1 prints a constant', 'assumptions':[]})
             check = lambda proposal: repair_evidence.verify(run, ws, proposal, GATE_ORDER, 'packaging', raw)
             self.assertFalse(check(output)['causal_claim_verified'])
-            for key, value in [('root_cause','nonexistent.py:999'), ('assumptions',['app.py:999']),
-                               ('addresses_failure','unrelated-case-signature'), ('evidence_refs',[]),
+            for key, value in [('addresses_failure','unrelated-case-signature'), ('evidence_refs',[]),
                                ('evidence_binding', {**output['evidence_binding'], 'source_sha256':'0'*64}),
                                ('evidence_refs',[{'kind':'source','path':'app.py','line':1,'sha256':'0'*64}])]:
                 with self.subTest(key=key), self.assertRaises(ValueError): check({**output,key:value})
@@ -54,6 +53,25 @@ class RepairEvidenceTest(unittest.TestCase):
             (run/'diagnostics/case.json').write_bytes(raw+b' ')
             with self.assertRaises(ValueError): check(output)
             self.assertEqual((ws/'app.py').read_text(),'print(1)\n')
+
+    def test_prose_is_not_a_reference_but_typed_source_refs_are_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            ws, run = Path(directory)/'work', Path(directory)/'run'; ws.mkdir()
+            (ws/'app.py').write_text('print(1)\n')
+            raw = case_fixture(ws, run)
+            output = bind_proposal(run, {'files': [{'path': 'app.py', 'content': 'print(2)\n'}],
+                'root_cause': 'The listener defaults to 0.0.0.0:8080.',
+                'assumptions': ['localhost.localdomain:8080 and https://example.com:443 are endpoints.',
+                                'nonexistent.py:999 is an unverified model hypothesis.']})
+            source = json.loads(raw)['source']['files']['app.py']
+            ref = {'kind': 'source', 'path': 'app.py', 'line': 1, 'sha256': source['sha256']}
+            output['evidence_refs'].append(ref)
+            check = lambda value: repair_evidence.verify(run, ws, value, GATE_ORDER, 'packaging', raw)
+            self.assertTrue(check(output)['reference_integrity_verified'])
+            self.assertFalse(check(output)['causal_claim_verified'])
+            for change in ({'path': 'nonexistent.py'}, {'line': 999}, {'sha256': '0'*64}):
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    check({**output, 'evidence_refs': [{**ref, **change}]})
 
     def test_initial_context_is_bounded_and_retains_original_reference_hash(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -141,12 +159,15 @@ class RepairEvidenceTest(unittest.TestCase):
                 ws, run = Path(directory)/'work', Path(directory)/'run'; ws.mkdir(); (ws/'app.py').write_text('print(1)\n')
                 raw = case_fixture(ws, run, order)
                 output = bind_proposal(run, {'status':'proposed', 'root_cause':'app.py:1',
-                    'files':[{'path':'app.py','content':'print(2)\n'}], 'files_changed':[{'path':'app.py','why':'fixture'}],
-                    'gate_plan':[{'gate':layer,'action':'verify'} for layer in order]})
+                    'files':[{'path':'app.py','content':'print(2)\n'}], 'files_changed':[{'path':'app.py','why':'fixture'}]})
                 record_plan(run,'fixer',output,order,workspace=ws,expected=raw)
-                self.assertTrue(json.loads((run/'fixer-plan.json').read_text())['evidence']['reference_integrity_verified'])
+                receipt = json.loads((run/'fixer-plan.json').read_text())
+                self.assertTrue(receipt['evidence']['reference_integrity_verified'])
+                self.assertEqual(receipt['plan_owner'], 'host')
+                self.assertEqual([step['gate'] for step in receipt['gate_plan']], list(order))
+                self.assertFalse(receipt['execution_verified'])
                 schema=with_files(json.loads((Path(__file__).resolve().parents[1]/'schemas/report.schema.json').read_text()), ['**'], order)
-                self.assertEqual(schema['properties']['gate_plan']['minItems'],len(order))
+                self.assertNotIn('gate_plan', schema['properties'])
                 with self.assertRaises(ValueError): repair_evidence.verify(run,ws,output,order,'source',raw)
 
 if __name__ == '__main__': unittest.main()

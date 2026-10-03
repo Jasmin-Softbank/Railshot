@@ -22,20 +22,26 @@ The workflow also passes the registered `APP` as `--app-id`: the durable binding
 agent task and L1 check use that exact identity. A spec mismatch fails before
 quality/build work and remains repairable as F5; publication checks it again.
 
-An early failure starts a bounded proposal, not a pass. Every proposal contains
-an ordered `gate_plan` for the active harness profile (default **L0 → L1 → L2 → L3**), the failure evidence,
-and file-level reasons. The runner durably records `<role>-plan.json` before
-applying any bytes. The loop stores it as `<role>-<attempt>-plan.json`, checkpoints
+An early failure starts a bounded proposal, not a pass. The model returns failure
+evidence and file-level reasons. The runner derives the ordered `gate_plan` from
+the active host profile (default **L0 → L1 → L2 → L3**), marks its owner as `host`,
+and durably records `<role>-plan.json` before applying any bytes. The loop stores it as `<role>-<attempt>-plan.json`, checkpoints
 it, and includes its hash, gate list and subsequent written files/verdict in
 `evidence.json`. Workflow artifacts expose that safe linkage; source text and
 raw model planning text remain in the private run directory. Every changed
-attempt reruns the deterministic gates from L0. The default is at most two SDK
-attempts, with three available through `RAILSHOT_MAX_REPAIR_ATTEMPTS`; an unchanged failure signature stops the run sooner.
+attempt reruns the deterministic gates from L0. The loop supplies the configured
+total attempt count.
+`RAILSHOT_MAX_REPAIR_ATTEMPTS` controls the repair allowance (0–3);
+`RAILSHOT_MAX_PACKAGING_ATTEMPTS=1` reserves a separate preparation call, while
+zero retains the shared budget. An unchanged failure signature stops the run sooner.
 
 A completed model response rejected by schema or patch validation can consume a
 remaining attempt for a fresh fixer plan only when the runner proves zero source
 writes. Safe registered validation guidance is recorded in `rejection-N.json`
-and the next failure context. Invalid/partial filesystem writes, authentication,
+and the next failure context. Reference errors include a fixed reason and field
+(e.g. `EVIDENCE_LINE_OUT_OF_RANGE`, `evidence_refs[0].line`) in the existing
+`evidence.json` artifact. Host case/source/policy drift is not safe to replan.
+Invalid/partial filesystem writes, authentication,
 native policy failures and unknown execution outcomes never use this path.
 Rejected attempts count toward the same limit, and checkpoint/resume does not
 repeat the completed model call. A corrected proposal still reruns every gate.
@@ -72,7 +78,8 @@ policy digest and failure fingerprint. At proposal recording and again immediate
 before applying bytes, the runner compares the immutable host case, current source,
 active profile and protected policy. Source references must identify an existing
 line with the exact file digest; log references must match captured redacted bytes.
-Fabricated file:line citations in root_cause or assumptions are rejected. These
+Only structured `evidence_refs` are citations. Prose in `root_cause` and
+`assumptions` remains unverified; host:port text is not a file reference. These
 checks verify reference integrity, not the truth of a causal interpretation.
 Missing evidence blocks writes. Gate execution still decides every outcome.
 
@@ -102,6 +109,6 @@ interval; this is progress observation, not a subsecond stream.
 
 `test_source_repair.py` executes generated calculator tests with real Node,
 demonstrates that a wrong arithmetic implementation fails, checks native npm lock
-generation/receipt tampering, and tests every gate's repair decision and complete
-plan requirement. Docker transport is mocked in those local checks. A real
+generation/receipt tampering, and tests every gate's repair decision and the
+host's complete plan recording. Docker transport is mocked in those local checks. A real
 customer workflow and deployment receipt are separate production evidence.

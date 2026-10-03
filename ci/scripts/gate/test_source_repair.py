@@ -13,7 +13,7 @@ import quality
 import repair
 from test_pipeline import imported_workspace
 import loop
-from runner.run_agent import apply_files, source_change_allowed, writable_rules, record_plan, proposal_rejection, instructions, load_yaml
+from runner.run_agent import apply_files, source_change_allowed, writable_rules, record_plan, proposal_rejection
 
 TEST = """import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -33,12 +33,7 @@ SOURCE = """export function calculate(a, b, operator) {
 
 
 class SourceRepairTest(unittest.TestCase):
-    def test_native_behavior_tests_and_prompt_match_writer_contract(self):
-        profile = load_yaml(gate.PLATFORM / "runner/profiles.yaml")
-        for role in ("adapter", "fixer"):
-            prompt = instructions(profile, profile["roles"][role])
-            for rule in ("node --test", "--experimental-strip-types", "ssrLoadModule", "assert.strictEqual", "20,000"):
-                self.assertIn(rule, prompt)
+    def test_native_behavior_tests_match_writer_contract(self):
         variants = [TEST.replace("import assert from 'node:assert/strict';", "import { strictEqual, throws } from 'node:assert/strict';")
                     .replace("assert.strictEqual", "strictEqual").replace("assert.throws", "throws"),
                     TEST.replace("import { calculate } from '../src/calculator.mjs';",
@@ -87,7 +82,7 @@ class SourceRepairTest(unittest.TestCase):
         self.assertTrue(quality.quality_failure("Cannot find package jsdom", 204, repair_scope="source")["source_repair_eligible"])
         self.assertTrue(quality.quality_failure("Cannot find package jsdom; API_KEY required", 204, repair_scope="source").get("blocked"))
 
-    def test_every_failed_gate_can_plan_all_gates_and_plan_precedes_writes(self):
+    def test_host_plans_all_gates_before_writes_for_every_failure(self):
         for layer, failure_class in (("L0", "F5"), ("L1", "F5"),
                                      ("L2", "F3"), ("L4", "F6"), ("L3", "F7")):
             with self.subTest(layer=layer), tempfile.TemporaryDirectory() as tmp:
@@ -95,16 +90,15 @@ class SourceRepairTest(unittest.TestCase):
                            "failure": {"class": failure_class, "layer": layer, "signature": layer, "source_repair_eligible": layer == "Q"}}
                 self.assertIsNone(loop.decide(verdict, None, set(), "source"))
                 self.assertIn("same failure", loop.decide(verdict, None, {layer}, "source"))
-                plan = [{"gate": gate_id, "action": "Inspect requirements; this check remains unverified."} for gate_id in gate.ORDER]
                 from runner.test_repair_evidence import case_fixture, bind_proposal
                 ws = Path(tmp) / "work"; ws.mkdir()
                 source = ws / "app.py"; source.write_text("original = True\n")
                 raw = case_fixture(ws, Path(tmp))
-                output = {"status": "proposed", "root_cause": layer + " evidence", "gate_plan": plan,
+                output = {"status": "proposed", "root_cause": layer + " evidence",
                           "files_changed": [{"path": "app.py", "why": "fix the observed cause"}],
                           "files": [{"path": "app.py", "content": "original = False\n"}]}
                 with self.assertRaises(ValueError):
-                    record_plan(Path(tmp), "fixer", {**output, "gate_plan": plan[:1]})
+                    record_plan(Path(tmp), "fixer", output, ("L2",))
                 output = bind_proposal(Path(tmp), output)
                 record_plan(Path(tmp), "fixer", output, workspace=ws, expected=raw)
                 receipt = json.loads((Path(tmp) / "fixer-plan.json").read_text())

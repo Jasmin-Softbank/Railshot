@@ -86,9 +86,12 @@ command arguments, reports or provider logs.
 
 Optional repair separately verifies exact case/source/policy identity at proposal
 recording and immediately before application, including real file-line/log hash
-references. Source/policy changes or fabricated citations reject all writes. These
-are reference-integrity checks, not semantic verification. Dynamic profiles require
-exact ordered gate plans; Q/L4 disabled by the profile are NOT_RUN. The default L3
+references in structured `evidence_refs`. Source/policy changes or invalid typed
+references reject all writes. Explanatory prose remains an unverified hypothesis;
+URLs and host:port text are not parsed as file citations. These are
+reference-integrity checks, not semantic verification. The host derives the ordered gate plan
+from the selected profile and records it before applying files; the model does not
+return `gate_plan`. Q/L4 disabled by the profile are NOT_RUN. The default L3
 check verifies runtime health, not application business behavior.
 
 CD workload facts use the existing application-scoped credential and GET-only
@@ -129,6 +132,14 @@ cost, latency or higher success rate. No such model A/B result is claimed here.
 
 The prior follow-up's Jev-specific selector and API coalescing changes have been
 removed; PR #131's original classifier remains unchanged. Disabling/removing that
-existing API feature is a separate product change. No retry-policy, attempt-budget,
-provider, source-write authority, runtime-health or citation-validation changes are
-part of this repair-input work.
+existing API feature is a separate product change. Attempt budgets, model provider,
+source-write authority and runtime-health checks remain unchanged.
+
+Proposal reference errors carry a fixed `reason`, a schema `field` (for example,
+`evidence_refs[1].line`), and host-written `guidance`. The runner receipt, next
+attempt's bounded history, and the existing loop `evidence.json` artifact preserve
+this `proposal_rejection`; raw proposed file contents are not added to artifacts.
+A rejection before any writes can consume another configured attempt. Changed host
+source/case/policy evidence cannot be repaired by a new model proposal and is not
+marked safe to replan. Reference integrity does not establish that the proposed fix
+will work; unchanged scope checks and gates still decide acceptance.

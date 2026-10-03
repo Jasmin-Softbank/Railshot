@@ -9,6 +9,18 @@ from diagnostics import bounded
 from execution import stage_contract
 
 
+class EvidenceStateError(ValueError):
+    """Host evidence is unavailable or changed; another proposal cannot repair it."""
+
+
+class ProposalEvidenceError(ValueError):
+    """A model-correctable reference error, without echoing model text or paths."""
+
+    def __init__(self, code, field, guidance):
+        super().__init__('repair evidence ' + code)
+        self.rejection = {'reason': code, 'field': field, 'guidance': guidance}
+
+
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -18,7 +30,7 @@ def load(run):
     if not path.exists():
         return None
     if path.is_symlink() or path.stat().st_size > 1024 * 1024:
-        raise ValueError('repair evidence invalid')
+        raise EvidenceStateError('repair evidence invalid')
     return path.read_bytes()
 
 
@@ -34,13 +46,13 @@ START_FILES = {'Dockerfile', 'package.json', 'pom.xml', 'build.gradle', 'build.g
 
 def read_log(run, item):
     if not re.fullmatch(r'process-[1-9][0-9]*\.log', item['path']):
-        raise ValueError('repair evidence log invalid')
+        raise EvidenceStateError('repair evidence log invalid')
     path = Path(run) / 'diagnostics' / item['path']
     if path.is_symlink() or path.stat().st_size > 65536:
-        raise ValueError('repair evidence log invalid')
+        raise EvidenceStateError('repair evidence log invalid')
     data = path.read_bytes()
     if sha(data) != item['sha256']:
-        raise ValueError('repair evidence log changed')
+        raise EvidenceStateError('repair evidence log changed')
     return data
 
 
@@ -52,7 +64,7 @@ def previous_attempts(run):
     result = []
     for path in sorted(paths, key=lambda p: int(p.stem.rsplit('-', 1)[1]))[-3:]:
         if path.is_symlink() or path.stat().st_size > 1024 * 1024:
-            raise ValueError('repair evidence history invalid')
+            raise EvidenceStateError('repair evidence history invalid')
         record = json.loads(path.read_bytes())
         output = record.get('output') or {}
         attempt = int(path.stem.rsplit('-', 1)[1])
@@ -60,7 +72,7 @@ def previous_attempts(run):
         gate_result = None
         if verdict_path.exists():
             if verdict_path.is_symlink() or verdict_path.stat().st_size > 1024 * 1024:
-                raise ValueError('repair evidence history invalid')
+                raise EvidenceStateError('repair evidence history invalid')
             verdict = json.loads(verdict_path.read_bytes())
             gate_result = {'status': verdict.get('status'),
                            'failure_layer': (verdict.get('failure') or {}).get('layer')}
@@ -119,11 +131,11 @@ def verify(run, workspace, output, gate_order, repair_scope, expected):
     if not output.get('files'):
         return None
     if expected is None or load(run) != expected:
-        raise ValueError('repair evidence missing or changed')
+        raise EvidenceStateError('repair evidence missing or changed')
     case = json.loads(expected)
     policy, source = case['policy'], case['source']
     if case['case_id'] != sha(json.dumps([case['native_run_id'], case['attempt_id'], source['tested_sha256']], separators=(',', ':')).encode()):
-        raise ValueError('repair evidence identity differs')
+        raise EvidenceStateError('repair evidence identity differs')
     actual_policy = sha(json.dumps(policy, sort_keys=True, separators=(',', ':')).encode())
     policy_path = Path(__file__).resolve().parents[1] / 'contract/paths.yaml'
     if (case['policy_sha256'] != actual_policy or policy['protected_policy_sha256'] != sha(policy_path.read_bytes())
@@ -132,45 +144,56 @@ def verify(run, workspace, output, gate_order, repair_scope, expected):
             or source['tested_sha256'] != source['after_sha256']
             or entries_digest(capture(workspace)) != source['tested_sha256']
             or case['verification']['release_eligible'] or case['verification']['gate_outcome'] != 'FAIL'):
-        raise ValueError('repair evidence source or policy differs')
+        raise EvidenceStateError('repair evidence source or policy differs')
     binding = {'case_id': case['case_id'], 'case_sha256': sha(expected),
                'source_sha256': source['tested_sha256'], 'policy_sha256': actual_policy}
-    if output.get('evidence_binding') != binding or output.get('addresses_failure') != case['failure']['fingerprint']:
-        raise ValueError('repair evidence binding differs')
+    for field, value in (('evidence_binding', binding), ('addresses_failure', case['failure']['fingerprint'])):
+        if output.get(field) != value:
+            raise ProposalEvidenceError('EVIDENCE_BINDING_MISMATCH', field,
+                                        'Copy the unchanged binding and failure fingerprint from the initial evidence.')
     refs = output.get('evidence_refs')
     if not isinstance(refs, list) or not 1 <= len(refs) <= 12:
-        raise ValueError('repair evidence references required')
+        raise ProposalEvidenceError('EVIDENCE_REFS_REQUIRED', 'evidence_refs',
+                                    'Supply one to twelve structured source or log references from the captured case.')
 
-    def file_ref(path, line, digest=None):
+    def file_ref(path, line, digest, field):
         entry = source['files'].get(path)
-        if (not entry or type(line) is not int or not 1 <= line <= entry['lines']
-                or digest is not None and digest != entry['sha256']):
-            raise ValueError('repair evidence file reference invalid')
+        if not entry:
+            raise ProposalEvidenceError('EVIDENCE_SOURCE_NOT_FOUND', field + '.path',
+                                        'Choose an observed source path from the case inventory; do not infer one from prose.')
+        if type(line) is not int or not 1 <= line <= entry['lines']:
+            raise ProposalEvidenceError('EVIDENCE_LINE_OUT_OF_RANGE', field + '.line',
+                                        'Read the cited source and choose an existing one-based line within its recorded line count.')
+        if digest != entry['sha256']:
+            raise ProposalEvidenceError('EVIDENCE_HASH_MISMATCH', field + '.sha256',
+                                        'Use the original reference hash recorded in the case, not a hash of a shortened excerpt.')
         target = Path(workspace) / path
         if target.is_symlink() or sha(target.read_bytes()) != entry['sha256']:
-            raise ValueError('repair evidence file changed')
+            raise EvidenceStateError('repair evidence file changed')
 
     logs = {p['id']: p['log'] for p in case['processes'] if p.get('log')}
-    for ref in refs:
+    for index, ref in enumerate(refs):
+        field = f'evidence_refs[{index}]'
         if set(ref) == {'kind', 'path', 'line', 'sha256'} and ref['kind'] == 'source':
-            file_ref(ref['path'], ref['line'], ref['sha256'])
+            file_ref(ref['path'], ref['line'], ref['sha256'], field)
         elif set(ref) == {'kind', 'id', 'sha256'} and ref['kind'] == 'log':
             if ref['id'] == 'failure':
                 data = case['failure']['excerpt'].encode()
                 if not data:
-                    raise ValueError('repair evidence failure is empty')
+                    raise EvidenceStateError('repair evidence failure is empty')
             else:
                 item = logs.get(ref['id'])
                 if not item:
-                    raise ValueError('repair evidence log invalid')
+                    raise ProposalEvidenceError('EVIDENCE_LOG_NOT_FOUND', field + '.id',
+                                                'Choose failure or an observed process log id from the captured case.')
                 data = read_log(run, item)
             if sha(data) != ref['sha256']:
-                raise ValueError('repair evidence log hash differs')
+                raise ProposalEvidenceError('EVIDENCE_HASH_MISMATCH', field + '.sha256',
+                                            'Use the original reference hash recorded in the case, not a hash of a shortened excerpt.')
         else:
-            raise ValueError('repair evidence reference invalid')
-    # Reject fabricated file:line citations even inside explanatory prose.
-    text = '\n'.join([output.get('root_cause') or '', *(output.get('assumptions') or [])])
-    for match in re.finditer(r'(?<![\w/])([A-Za-z0-9_@./-]+\.[A-Za-z0-9]+):(\d+)', text):
-        file_ref(match[1].removeprefix('./'), int(match[2]))
+            raise ProposalEvidenceError('EVIDENCE_REF_INVALID', field,
+                                        'Use only the source or log reference fields defined by the response schema.')
+    # Only typed evidence_refs carry reference authority. Explanatory prose is
+    # an unverified hypothesis: host:port text is not a source-file citation.
     return {**binding, 'evidence_refs': refs, 'reference_integrity_verified': True,
             'causal_claim_verified': False}

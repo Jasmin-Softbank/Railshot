@@ -141,11 +141,11 @@ def task_text(role, attempt, n, run, request, repair_scope="packaging", app_id=N
         body = ("Goal: resolve the observed failed gate with a minimal change. Start with the supplied failure, previous applied changes and corresponding source/configuration. Do not rediscover the whole application unless the evidence requires it.\n"
                 "Return only the files you create, update or delete in the files array; explain each operation.\n")
     return head + body + (
-        f"Before proposing files, return gate_plan for this exact active gate order: {','.join(gate_order)}. "
         "Make the smallest packaging proposal first; fix application source only after an observed build/start/health failure. "
         "Q failures or missing tests do not require repair. Do not add tests, checker setup, features or unrelated refactors for deployment. "
         "Unexecuted gates are not passes. Existing tests and checker rules remain protected. "
-        "The harness records this plan before writing and reruns all gates from L0 after each proposal. "
+        "The host records its verification plan before writing and reruns all gates from L0 after each proposal, "
+        "reusing only matching verified build receipts. Do not return a gate plan or run build/test commands yourself. "
         "Write summary and user_action in Korean.\n")
 
 
