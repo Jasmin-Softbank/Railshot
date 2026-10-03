@@ -140,6 +140,10 @@ test('unknown registration is preserved and published source binding reaches the
   const cd = JSON.parse(await readFile(join(dirname(f.calls[0].requestPath), 'cd.json.observed.json'), 'utf8'));
   assert.equal(cd.target_id, application.target_id); assert.equal(cd.deployment_id, args.deploymentId);
   assert.deepEqual(cd.publication, publication); assert.deepEqual(cd.files, saved.files);
+  const observed = await f.adapter.observePublished(application, args);
+  assert.equal(observed.cd.deployed, true); assert.equal(f.calls.length, 1, 'recovery must not finalize routes again');
+  const read = JSON.parse(await readFile(join(dirname(f.calls[0].requestPath), 'cd.json.observed.json'), 'utf8'));
+  assert.equal(read.action, 'observe');
 });
 
 test('publication above the operator-config limit replays unchanged and still rejects changed bytes', async (t) => {

@@ -151,6 +151,16 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       const deploy = createCdAdapter({ configPath: join(run, 'cd.json'), loadPublished, python });
       return deploy(args);
     },
+    async observePublished(application, args) {
+      const home = await current(application);
+      if (!/^[a-f0-9-]{36}$/.test(args.deploymentId) || args.app !== application.app || args.targetId !== application.target_id)
+        throw fail('APPLICATION_PUBLICATION_MISMATCH');
+      const configPath = join(home, 'deployments', args.deploymentId, 'cd.json');
+      // Recovery reads an existing CD journal; it never runs route finalization or apply.
+      try { await privateJson(configPath); }
+      catch (error) { if (error.code === 'ENOENT') throw fail('CD_RECORD_MISSING', 409, true); throw error; }
+      return createCdAdapter({ configPath, loadPublished, python })({ ...args, observeOnly: true });
+    },
     async observeLogs(application, record) {
       const home = await current(application);
       if (!/^[a-f0-9-]{36}$/.test(record.id)) throw fail('APPLICATION_BINDING_MISMATCH');

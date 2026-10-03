@@ -536,6 +536,13 @@ function renderRun() {
   resume.disabled = Boolean(resuming) || observationError || applicationBusy(current.application_id);
   const label = executionLabel(current);
   document.querySelector('#run-freshness').textContent = lastReadAt ? `마지막 상태 조회: ${new Date(lastReadAt).toLocaleString()}${observationError ? ' · 조회 실패, 마지막 기록입니다.' : ''}` : '서버 상태 조회 전';
+  const ciObservation = current.ci?.observation;
+  if (ciObservation) {
+    const checked = ciObservation.last_success_at ? new Date(ciObservation.last_success_at).toLocaleString() : '아직 확인 전';
+    document.querySelector('#run-freshness').textContent = `CI 원본 마지막 확인: ${checked}${ciObservation.error ? ' · 원본 조회 지연' : ''}${observationError ? ' · 대시보드 API 조회 실패' : ''}`;
+  }
+  const cdObservation = current.cd?.observation;
+  if (cdObservation) document.querySelector('#run-freshness').textContent += ` · 클러스터 원본 마지막 확인: ${cdObservation.last_success_at ? new Date(cdObservation.last_success_at).toLocaleString() : '아직 확인 전'}${cdObservation.error ? ' · 원본 조회 지연' : ''}`;
   document.querySelector('#run-meta').textContent = `${current.app || '앱'} · ${current.id} · ${current.target_id || ''}`;
   document.querySelector('#run-state').textContent = label;
   document.querySelector('#run-message').textContent = current.error?.message || current.message || (activeRun()
@@ -546,6 +553,14 @@ function renderRun() {
     document.querySelector('#run-message').textContent = '소스를 저장하고 대기열에 접수했습니다. 앞선 작업이 끝나면 자동으로 실행됩니다.';
   if (current.status === 'unknown' && current.queue?.released_at)
     document.querySelector('#run-message').textContent = `${current.error?.message || '기존 실행 결과는 확인이 필요합니다.'} 대기 제한 시간이 지나 다른 앱의 실행을 허용했습니다. 이 작업을 자동으로 재실행하지 않습니다.`;
+  if (current.status === 'running' && ciObservation?.error) {
+    document.querySelector('#run-state').textContent = current.ci.run_id ? '마지막 CI 상태 유지 · 재조회 중' : 'CI 접수 확인 중';
+    document.querySelector('#run-message').textContent = `${ciObservation.error.message}${ciObservation.next_retry_at ? ` 다음 조회: ${new Date(ciObservation.next_retry_at).toLocaleTimeString()}.` : ''}${current.ci.run_id ? ` 기존 실행 #${current.ci.run_id}을 조회하며 새 실행을 만들지 않습니다.` : ''}`;
+  }
+  if (current.status === 'running' && cdObservation?.error) {
+    document.querySelector('#run-state').textContent = '마지막 배포 상태 유지 · 클러스터 재조회 중';
+    document.querySelector('#run-message').textContent = `${cdObservation.error.message} 기존 배포 revision을 조회하며 CI나 앱 적용을 다시 실행하지 않습니다.`;
+  }
   const steps = current.steps || current.ci?.steps || [];
   document.querySelector('#run-steps').replaceChildren(...steps.map((step) => {
     const item = document.createElement('li');
@@ -571,7 +586,7 @@ function renderRun() {
   document.querySelector('#run-binding').textContent = binding;
   renderMonitorSteps();
   renderHistory();
-  document.querySelector('#monitor-state').textContent = observationError ? `${label} · 상태 조회 실패` : label;
+  document.querySelector('#monitor-state').textContent = `${document.querySelector('#run-state').textContent}${observationError ? ' · 상태 조회 실패' : ''}`;
   renderMetrics();
   renderConsole();
 }
