@@ -80,8 +80,19 @@ test('session app controls stop and resume through fresh plans; native dialog ca
   const { state, page } = await fixture(t);
   assert.equal(await appAction(page, 'my-app', '재개').isDisabled(), true);
   assert.equal(await appAction(page, 'paused-app', '중지').isDisabled(), true);
+  await page.evaluate(() => {
+    const schedule = window.setTimeout.bind(window);
+    window.planTimeouts = [];
+    window.setTimeout = (callback, delay, ...args) => {
+      window.planTimeouts.push(delay);
+      return schedule(callback, delay, ...args);
+    };
+  });
   await appAction(page, 'my-app', '중지').click();
   await page.waitForFunction(() => !document.querySelector('#lifecycle-confirm').disabled);
+  const timeouts = await page.evaluate(() => window.planTimeouts);
+  assert.ok(timeouts.includes(600000), 'application planning shares the executor ten-minute deadline');
+  assert.ok(!timeouts.includes(120000), 'a plan must not abort at the normal POST deadline');
   assert.match(await page.locator('#lifecycle-description').innerText(), /데이터와 스토리지는 보존/);
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('#lifecycle-dialog').isVisible(), false);
