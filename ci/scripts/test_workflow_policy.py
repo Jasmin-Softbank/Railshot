@@ -87,7 +87,7 @@ class WorkflowPolicyTest(unittest.TestCase):
                             continue
                         self.assertEqual(result.returncode, 0, result.stderr)
                         args = json.loads(Path(tmp, 'invocation.json').read_text())['args']
-                        self.assertEqual(args[args.index('--max-attempts') + 1], attempts or '3')
+                        self.assertEqual(args[args.index('--max-attempts') + 1], attempts or '1')
                         self.assertEqual(Path(tmp, 'pip.log').read_text().splitlines(),
                                          [f'install -q {sdk}', 'install -q pyyaml jsonschema'])
 

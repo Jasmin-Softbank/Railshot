@@ -6,6 +6,7 @@ import { validateFiles } from './archive.js';
 import { createMetricsObserver } from './metrics.js';
 import { emptyAgentEvents } from './agent-events.js';
 import { EnvironmentError } from './environments.js';
+import { SubmissionError } from './github.js';
 import { exact, lifecycleActions, lifecycleId, lifecycleHash, lifecycleResources, lifecycleSteps } from './application-lifecycle.js';
 
 export class ProductError extends Error {
@@ -291,9 +292,15 @@ export async function createProductService({ service, directory, target, provide
           source_commit: result.source_commit || null, ci: { ...record.ci, run_id: runId } });
       });
       return result;
-    } catch {
-      await update(record.id, { status: 'unknown', error: operationError() });
-      throw new ProductError(502, 'UPSTREAM_FAILURE', 'CI 접수 결과를 확인할 수 없습니다. 자동으로 재전송하지 마세요.', { outcomeUnknown: true });
+    } catch (error) {
+      const known = error instanceof SubmissionError;
+      const unknown = !known || error.outcomeUnknown;
+      const failure = { ...operationError(known ? error.code : 'UPSTREAM_FAILURE', unknown),
+        ...(known ? { message: error.message, phase: error.phase, upstream_status: error.upstream_status, reason: error.reason } : {}) };
+      await update(record.id, { status: unknown ? 'unknown' : 'failed', error: failure });
+      console.error(JSON.stringify({ event: 'api.deployment_failed', operation_id: record.id, request_id: failure.request_id,
+        code: failure.code, phase: failure.phase || 'ci_submission', upstream_status: failure.upstream_status || null, outcome_unknown: unknown }));
+      throw new ProductError(502, failure.code, failure.message, { outcomeUnknown: unknown });
     }
   }
   async function readBuild(runId, sessionId = null) {
@@ -708,7 +715,11 @@ export async function createProductService({ service, directory, target, provide
           }
           const result = await submit(reserved.record, reserved.input);
           if (result && !deletionRequested(reserved.record.id)) await observe(reserved.record, String(result.run_id));
-        } catch (error) { await update(reserved.record.id, { status: 'unknown', error: operationError('STACK_OUTCOME_UNKNOWN', true) }); }
+        } catch (error) {
+          // submit already persisted the precise failure; do not erase its diagnosis.
+          if (!store.read().operations[reserved.record.id]?.error)
+            await update(reserved.record.id, { status: 'unknown', error: operationError('STACK_OUTCOME_UNKNOWN', true) });
+        }
       }, reserved.record.id);
       return publicRecord(reserved.record);
     },

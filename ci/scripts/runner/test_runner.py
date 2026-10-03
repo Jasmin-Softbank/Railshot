@@ -61,7 +61,7 @@ class RunnerTest(unittest.TestCase):
         profile = run_agent.load_yaml(run_agent.PLATFORM / 'runner/profiles.yaml')
         cfg = profile['providers']['codex']
         self.assertEqual(cfg['model'], 'gpt-6.1-sol')
-        self.assertEqual(cfg['reasoning_effort'], 'xhigh')
+        self.assertEqual(cfg['reasoning_effort'], 'medium')
         result = SimpleNamespace(status='completed', final_response='{"status":"proposed"}', id='turn-test')
         observed = []
         def complete():
@@ -91,9 +91,9 @@ class RunnerTest(unittest.TestCase):
             self.assertTrue(args['ephemeral'])
             self.assertEqual(args['model'], 'gpt-6.1-sol')
             thread.turn.assert_called_once()
-            self.assertEqual(thread.turn.call_args.kwargs['effort'], 'xhigh')
+            self.assertEqual(thread.turn.call_args.kwargs['effort'], 'medium')
             self.assertEqual(meta['requested_model'], 'gpt-6.1-sol')
-            self.assertEqual(meta['requested_reasoning_effort'], 'xhigh')
+            self.assertEqual(meta['requested_reasoning_effort'], 'medium')
             self.assertEqual(meta['session_id'], 'thread-test')
             self.assertEqual(meta['turn_id'], 'turn-test')
             self.assertEqual([event for event, _ in observed if event != 'turn.progress'],
@@ -557,7 +557,7 @@ class RunnerTest(unittest.TestCase):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
             return {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
-                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in ('L0','L1','Q','L2','L4','L3')],
+                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in ('L0','L1','L2','L4','L3')],
                     'files_changed':[{'path':name,'why':'fixture repair'} for name in ('Dockerfile','.dockerignore')], 'assumptions':[], 'confidence':'high',
                     'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}, {}
         with tempfile.TemporaryDirectory() as directory:
@@ -587,7 +587,7 @@ class RunnerTest(unittest.TestCase):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
             return {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
-                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in ('L0','L1','Q','L2','L4','L3')],
+                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in ('L0','L1','L2','L4','L3')],
                     'files_changed':[{'path':'../private-canary.py','why':'invalid fixture'}], 'assumptions':[], 'confidence':'high',
                     'files':[{'path':'../private-canary.py','content':'wrong'}]}, {}
         with tempfile.TemporaryDirectory() as directory:

@@ -1,5 +1,8 @@
 """Shared release order and application container execution contract."""
-GATE_ORDER = ("L0", "L1", "Q", "L2", "L4", "L3")
+GATE_ORDER = ("L0", "L1", "L2", "L4", "L3")
+# Keep explicit quality diagnostics and previously published bundle receipts readable.
+FULL_GATE_ORDER = ("L0", "L1", "Q", "L2", "L4", "L3")
+RELEASE_ORDERS = (GATE_ORDER, FULL_GATE_ORDER)
 APP_UID = 65532
 
 

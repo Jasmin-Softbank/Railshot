@@ -227,7 +227,8 @@ class BundleTest(unittest.TestCase):
         self.assertEqual(manifest, bundle.verify(self.out))
 
     def test_only_quality_advisories_are_publishable_and_their_failure_is_preserved(self):
-        q = self.verdict["layers"][2]
+        q = {"layer": "Q"}
+        self.verdict["layers"].insert(2, q)
         q.update(ok=False, advisory=True, outcome="BLOCKED", blocked="NO_TESTS",
                  error={"code": "GATE_CONFIG_INVALID", "phase": "Q.discovery", "outcome": "BLOCKED"})
         self.write_verdict()
