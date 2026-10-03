@@ -4,8 +4,6 @@ on:
   push:
     branches: [feature/deployment-runtime-seungmin]
     paths: ['deployment/**', '.github/workflows/deployment-runtime.yml']
-  pull_request:
-    paths: ['deployment/**', '.github/workflows/deployment-runtime.yml']
   workflow_dispatch:
 
 permissions:
