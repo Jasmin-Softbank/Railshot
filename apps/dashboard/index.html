@@ -100,13 +100,7 @@
               </div>
               <div class="provider-field" id="openstack-install-field" hidden>
                 <strong>OpenStack 인프라 등록</strong>
-                <p class="field-note">프로젝트·사용자 ID와 연계 키를 백엔드에 등록합니다. Keystone 인증정보는 고객 노드에서 install.sh 실행 시 직접 입력하세요.</p>
-                <label class="field-label" for="openstack-project-id">프로젝트 ID</label>
-                <input id="openstack-project-id" type="text" autocomplete="off" spellcheck="false" />
-                <label class="field-label" for="openstack-user-id">사용자 ID</label>
-                <input id="openstack-user-id" type="text" autocomplete="off" spellcheck="false" />
-                <label class="field-label" for="openstack-auth-type">OpenStack 인증 형식</label>
-                <select id="openstack-auth-type"><option value="token">OpenStack 프로젝트 토큰</option><option value="application_credential">Application Credential</option></select>
+                <p class="field-note">연계 키로 등록 요청을 만들고 일회성 토큰을 발급합니다. OpenStack 프로젝트·인증 정보는 고객 노드에서 직접 설정합니다.</p>
                 <label class="field-label" for="openstack-enrollment-key">임의의 연계 키 (16~256자)</label>
                 <input id="openstack-enrollment-key" type="password" autocomplete="new-password" spellcheck="false" minlength="16" maxlength="256" />
                 <button class="secondary-button" id="prepare-openstack-install" type="button">등록하고 설치 파일 받기</button>
@@ -116,7 +110,9 @@
                   <textarea id="openstack-linkage-token" class="installer-code" readonly spellcheck="false" rows="2"></textarea>
                   <button class="secondary-button" id="copy-openstack-token" type="button">토큰 복사</button>
                   <p class="field-note" id="openstack-token-expires"></p>
-                  <p class="field-note">현재 install.sh는 이 토큰을 사용한 WireGuard 연결을 아직 지원하지 않습니다.</p>
+                  <p class="field-note">고객 노드에서 아래 토큰 접수 파일을 실행하고 이 토큰을 입력하세요.</p>
+                  <a class="secondary-button" id="openstack-token-client-download" download="claim_token.py">토큰 접수 파일 다운로드</a>
+                  <p class="field-note">단독 파일 실행: <code>python3 claim_token.py --service-url https://서비스-주소</code>. ZIP에서는 <code>deployment/bootstrap/claim_token.py</code> 경로를 사용하세요.</p>
                   <a class="secondary-button" id="openstack-script-download" download="install.sh">install.sh 파일 다운로드</a>
                   <a class="secondary-button" id="openstack-bundle-download" download="railshot-openstack-installer.zip">필수 파일 묶음 다운로드</a>
                   <p class="field-note">실행에는 필수 파일 묶음과 고객 노드에서 작성한 설치 설정 JSON이 필요합니다. 아래 install.sh 코드만 복사한 경우에도 동반 파일을 준비하세요.</p>
