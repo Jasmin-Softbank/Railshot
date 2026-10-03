@@ -48,7 +48,7 @@ export async function createProductStore(directory) {
       await unlink(lockPath);
     }
   }
-  let closed = false, poisoned = false;
+  let closed = false, poisoned = false, closePromise;
   let snapshotBytes = 0;
   for (const name of await readdir(root)) if (name.endsWith('.source.json')) snapshotBytes += (await stat(join(root, name))).size;
   async function atomic(name, data) {
@@ -170,14 +170,16 @@ export async function createProductStore(directory) {
         snapshotBytes += (await stat(join(root, `${id}.source.json`))).size;
       } catch (error) { poisoned = true; throw error; }
     },
-    async close() {
-      await tail;
-      if (closed) return;
-      closed = true;
-      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
-      db.close();
-      const current = await readPrivate(lockPath);
-      if (current.nonce === owner.nonce) await unlink(lockPath);
+    close() {
+      // Server shutdown and explicit callers must all wait until the owner lock is released.
+      return closePromise ||= (async () => {
+        await tail;
+        closed = true;
+        db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        db.close();
+        const current = await readPrivate(lockPath);
+        if (current.nonce === owner.nonce) await unlink(lockPath);
+      })();
     },
   };
 }
