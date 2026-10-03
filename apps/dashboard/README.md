@@ -53,3 +53,11 @@ The new-deployment form resolves the source-derived or explicit app name through
 Another session's matching name remains an ownership conflict. Different names/environments are separate apps; repository URL alone does not select an app because one repository may have multiple deployments. Stopped/deleted/pending apps are not silently recreated. A ready registration with no successful baseline can retry normal deployment. The explicit app-detail update flow still supports source files whose archive/repository name changes.
 
 An uncertain published CD/HTTP result fences its registered environment, so a GCP route reconciliation does not block a same-named AWS application. Uncertain CI/registration or missing environment bindings keep the conservative name-level fence because CI source paths are shared. The affected environment still requires reconciliation; this does not retry it or alter its resources.
+
+## Update UI design system
+
+The update workflow uses pinned [Basecoat 1.0.2](https://basecoatui.com/installation/) Vega Button, Field/Input and Badge components with native disclosure and a bounded review workspace. Basecoat is a framework-independent shadcn-style library; no React migration, remote CDN, font request or extra runtime JS is required.
+
+`node apps/dashboard/sync-design-system.mjs` bundles the official component stylesheet into `styles.css`, scoped to `.update-mode`. Global Tailwind property definitions are preserved; root tokens are rebound to the scope root. The production build checks the bundle against the pinned npm package. This serves the same CSS through the API's existing raw dashboard and Vite without adding backend routes. The MIT notices remain embedded in the distributed CSS.
+
+The app and last verified service are fixed context. Source, review and execution are exclusive stages. The review workspace separates file changes from the execution summary; destructive file removal is explicit but not a large warning banner. Full URLs, commits and expiry timestamps live in details. Expiry disables dispatch and offers re-review. An uncertain start retries the same preview and locks source editing. No-change completion and explicit rebuild retain their server semantics.
