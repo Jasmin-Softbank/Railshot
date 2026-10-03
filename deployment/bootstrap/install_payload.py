@@ -36,7 +36,9 @@ def install_payload(source, target):
     if any(p.is_symlink() for p in (target, *target.parents)):
         raise RuntimeError('설치 경로 심볼릭 링크는 허용하지 않습니다.')
     files = {}
-    for subtree in ('deployment/bootstrap', 'infrastructure/providers/openstack', 'apps/agent'):
+    for subtree in ('deployment/bootstrap', 'deployment/scripts', 'deployment/cilium',
+                    'deployment/airgap', 'deployment/manifests', 'deployment/cloudflared',
+                    'infrastructure/providers/openstack', 'apps/agent'):
         for path in (source / subtree).rglob('*'):
             relative = path.relative_to(source)
             if any(part in ('.venv', '__pycache__', '.pytest_cache', 'tests') for part in relative.parts):
@@ -45,7 +47,8 @@ def install_payload(source, target):
                 raise RuntimeError('배포본의 심볼릭 링크는 허용하지 않습니다.')
             if path.is_file():
                 files[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
-    if not files or 'deployment/bootstrap/client_setup/main.py' not in files:
+    if ('deployment/bootstrap/client_setup/main.py' not in files
+            or 'deployment/scripts/deploy.sh' not in files):
         raise RuntimeError('설치 배포본이 불완전합니다.')
     marker = '.jasmin-install.json'
     if target.exists():

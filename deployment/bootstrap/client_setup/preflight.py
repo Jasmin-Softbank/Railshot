@@ -55,7 +55,7 @@ def validate_config(config):
     access = config.get("vm_access")
     if not isinstance(identity, dict) or not isinstance(access, dict):
         raise ValueError("OpenStack and vm_access configurations are required")
-    for name in ("auth_url", "user_domain_name", "project_id", "role_id"):
+    for name in ("auth_url", "project_id", "user_id"):
         if not isinstance(identity.get(name), str) or not identity[name].strip():
             raise ValueError("Missing identity configuration")
     endpoint = urlsplit(identity["auth_url"])
@@ -74,7 +74,12 @@ def parse_args(argv=None):
     parser.add_argument("--config-dir", type=Path, default=Path("/etc/jasmin"))
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init")
-    init.add_argument("--config", type=Path, required=True)
+    init.add_argument("--config", type=Path, default=Path('/etc/jasmin-install/config.json'))
+    init.add_argument("--project-id")
+    init.add_argument("--user-id")
+    init.add_argument("--auth-type", choices=('token', 'application_credential'))
+    init.add_argument("--runtime-input", type=Path,
+                      help="로컬 앱 배포 입력 JSON. 인증 및 인프라 준비 후 동봉된 배포 스크립트를 실행합니다.")
     commands.add_parser("diagnose")
     commands.add_parser("uninstall")
     verify = commands.add_parser("verify-vm")
@@ -85,9 +90,12 @@ def parse_args(argv=None):
 
 if __name__ == '__main__':
     args = parse_args()
-    if args.command == 'init':
+    if args.command == 'init' and args.config.exists():
         try:
-            load_config(args.config)
+            config = load_config(args.config)
+            if ((args.project_id and args.project_id != config['openstack']['project_id'])
+                    or (args.user_id and args.user_id != config['openstack']['user_id'])):
+                raise ValueError('명령의 프로젝트·사용자 ID와 기존 설정이 다릅니다.')
         except RetiredEnrollment as exc:
             raise SystemExit(str(exc)) from None
         except Exception as exc:

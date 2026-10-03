@@ -44,14 +44,10 @@ const providerField = document.querySelector('#provider-field');
 const cloudProvider = document.querySelector('#cloud-provider');
 const connectionFields = {
   root: document.querySelector('#openstack-connection-field'),
-  existing: document.querySelector('#existing-connection-field'),
-  new: document.querySelector('#new-connection-field'),
-  issued: document.querySelector('#issued-connection-field'),
-  issuedToken: document.querySelector('#issued-connection-token'),
-  status: document.querySelector('#connection-registration-status'),
-  registerButton: document.querySelector('#register-connection'),
+  result: document.querySelector('#openstack-installer-result'),
+  status: document.querySelector('#openstack-install-status'),
+  prepareButton: document.querySelector('#prepare-openstack-install'),
 };
-const connectionToken = document.querySelector('#connection-token');
 const openstackProjectId = document.querySelector('#openstack-project-id');
 const openstackUserId = document.querySelector('#openstack-user-id');
 const openstackAuthType = document.querySelector('#openstack-auth-type');
@@ -173,13 +169,6 @@ function deploymentSelection() {
 function isOpenStack(selection) {
   return selection.environment === 'onprem' && selection.provider === 'openstack';
 }
-function connectionMode() {
-  return document.querySelector('[name="connection-mode"]:checked').value;
-}
-function showConnectionMode(mode) {
-  connectionFields.existing.hidden = mode === 'new';
-  connectionFields.new.hidden = mode !== 'new';
-}
 function selectedOption() {
   const selected = deploymentSelection();
   return deploymentOptions.find((item) => item.environment === selected.environment && item.provider === selected.provider);
@@ -227,11 +216,6 @@ document.querySelectorAll('[name="environment"]').forEach((input) => input.addEv
 provider.addEventListener('change', updateSelection);
 cloudProvider.addEventListener('change', updateSelection);
 deploymentDatabase.addEventListener('change', updateSelection);
-document.querySelectorAll('[name="connection-mode"]').forEach((input) => input.addEventListener('change', () => {
-  showConnectionMode(connectionMode());
-  invalidateReview();
-}));
-connectionToken.addEventListener('input', invalidateReview);
 openstackAuthType.addEventListener('change', () => {
   document.querySelector('#openstack-token-field').hidden = openstackAuthType.value !== 'token';
   document.querySelector('#openstack-credential-field').hidden = openstackAuthType.value !== 'application_credential';
@@ -259,52 +243,59 @@ async function request(path, options = {}, controller = new AbortController()) {
   } finally { clearTimeout(timeout); requests.delete(controller); }
 }
 
-async function registerConnection() {
-  const { status, registerButton } = connectionFields;
+async function prepareOpenStackInstaller() {
+  const { status, prepareButton } = connectionFields;
   status.textContent = '';
-  connectionFields.issued.hidden = true;
-  connectionFields.issuedToken.value = '';
+  connectionFields.result.hidden = true;
   const project_id = openstackProjectId.value.trim();
   const user_id = openstackUserId.value.trim();
   const auth_type = openstackAuthType.value;
-  const credential = auth_type === 'token'
-    ? { token: openstackToken.value.trim() }
-    : { application_credential_id: openstackCredentialId.value.trim(),
-      application_credential_secret: openstackCredentialSecret.value };
-  if (!project_id || !user_id || Object.values(credential).some((value) => !value || /[\r\n]/.test(value))) {
+  const credentialValues = auth_type === 'token'
+    ? [openstackToken.value.trim()]
+    : [openstackCredentialId.value.trim(), openstackCredentialSecret.value];
+  if (![project_id, user_id].every((value) => /^[A-Za-z0-9._-]{1,255}$/.test(value))
+    || credentialValues.some((value) => !value || /[\r\n]/.test(value))) {
     status.textContent = '프로젝트·사용자 ID와 선택한 인증 정보를 입력하세요.';
     return;
   }
-
-  registerButton.disabled = true;
+  prepareButton.disabled = true;
   try {
-    const { data } = await request('/api/v1/identities', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ auth_type, project_id, user_id, ...credential }),
-    });
-    if (typeof data.connection_token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(data.connection_token)) {
-      throw new Error('연결 토큰 발급 응답을 확인하지 못했습니다.');
+    const { data } = await request('/api/v1/installers/openstack');
+    if (typeof data.install_sh !== 'string' || !data.install_sh.startsWith('#!/usr/bin/env bash')
+      || !/^[a-f0-9]{64}$/.test(data.bundle_sha256) || data.bundle_url !== '/api/v1/installers/openstack/bundle') {
+      throw new Error('설치 파일 응답을 확인하지 못했습니다.');
     }
-
-    connectionFields.issuedToken.value = data.connection_token;
-    connectionFields.issued.hidden = false;
-    connectionToken.value = data.connection_token;
+    document.querySelector('#openstack-install-script').value = data.install_sh;
+    document.querySelector('#openstack-bundle-download').href = data.bundle_url;
+    document.querySelector('#openstack-install-command').value = [
+      '# 다운로드한 railshot-openstack-installer.zip을 고객 노드로 옮긴 뒤 실행',
+      `printf '%s  %s\\n' '${data.bundle_sha256}' railshot-openstack-installer.zip | sha256sum --check -`,
+      'mkdir -p railshot-openstack',
+      'python3 -m zipfile -e railshot-openstack-installer.zip railshot-openstack',
+      'cd railshot-openstack',
+      `sudo bash deployment/bootstrap/install.sh --install-dependencies init --project-id '${project_id}' --user-id '${user_id}' --auth-type '${auth_type}'`,
+    ].join('\n');
     openstackToken.value = '';
     openstackCredentialSecret.value = '';
-    document.querySelector('[name="connection-mode"][value="existing"]').checked = true;
-    showConnectionMode('existing');
-    status.textContent = `${data.project_name} 프로젝트의 ${data.user_id} 사용자 연결을 확인했습니다. 발급된 토큰은 이번 화면에서만 확인할 수 있습니다.`;
-    invalidateReview();
+    connectionFields.result.hidden = false;
+    status.textContent = '설치 파일을 준비했습니다. Keystone 인증은 고객 노드에서 install.sh를 실행할 때 진행합니다.';
   } catch (cause) {
     status.textContent = cause.name === 'AbortError'
-      ? '연결 등록 요청 시간이 초과되었습니다. 상태를 확인한 뒤 다시 시도하세요.'
+      ? '설치 파일 요청 시간이 초과되었습니다. 다시 시도하세요.'
       : cause.message;
   } finally {
-    registerButton.disabled = false;
+    prepareButton.disabled = false;
   }
 }
-connectionFields.registerButton.addEventListener('click', registerConnection);
+connectionFields.prepareButton.addEventListener('click', prepareOpenStackInstaller);
+for (const [button, source] of [['#copy-openstack-command', '#openstack-install-command'],
+  ['#copy-openstack-script', '#openstack-install-script']]) {
+  document.querySelector(button).addEventListener('click', async () => {
+    const field = document.querySelector(source);
+    try { await navigator.clipboard.writeText(field.value); connectionFields.status.textContent = '복사했습니다.'; }
+    catch { field.focus(); field.select(); connectionFields.status.textContent = '내용을 선택했습니다. 직접 복사하세요.'; }
+  });
+}
 
 async function checkConnection() {
   try {
@@ -492,8 +483,6 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else if (selectedSource.kind === 'repository' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s?#]+\/?$/.test(selectedSource.label)) error.textContent = '공개 GitHub 저장소 URL을 입력하세요.';
   else if (selectedSource.kind === 'archive' && !archive.files[0].name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
   else if (selected.environment === 'onprem' && !selected.provider) error.textContent = '온프레미스 인프라 종류를 선택하세요.';
-  else if (isOpenStack(selected) && connectionMode() === 'new') error.textContent = '먼저 OpenStack 연결을 등록하고 토큰을 발급받으세요.';
-  else if (isOpenStack(selected) && !connectionToken.value.trim()) error.textContent = '기존 OpenStack 연결 토큰을 입력하세요.';
   else if (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available)) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
   else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
@@ -519,7 +508,6 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
       return;
     } finally { reviewing = false; reviewButton.disabled = false; }
     reviewed = { ...selected, source, kind: 'deployments', key: crypto.randomUUID(), plan,
-      ...(isOpenStack(selected) ? { connectionToken: connectionToken.value.trim() } : {}),
       targetId: plan?.runtime_target_id || profile?.target_id };
     document.querySelector('#review-source').textContent = source.label;
     document.querySelector('#review-app').textContent = app;
@@ -629,7 +617,6 @@ deployButton.addEventListener('click', async () => {
       payload.set('app', draft.plan.name); payload.set('target_id', draft.targetId); payload.set('plan_id', draft.plan.id);
     } else { payload.set('environment', draft.environment); payload.set('provider', draft.provider); }
     if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (draft.source.files[0].webkitRelativePath || draft.source.files[0].name).split('/')[0]);
-    if (draft.connectionToken) payload.set('connection_token', draft.connectionToken);
     if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (draft.source.files[0].webkitRelativePath || draft.source.files[0].name).split('/')[0]);
     appendSource(payload, draft.source);
     draft.attempted = true;

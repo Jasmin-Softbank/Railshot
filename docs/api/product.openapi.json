@@ -3,7 +3,7 @@
   "info": {
     "title": "RAILSHOT session-scoped product API",
     "version": "1.1.0",
-    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Console connection metadata is session-scoped and not execution configuration. POST /api/v1/identities separately validates user-provided OpenStack credentials against the configured Keystone endpoint for deployment admission. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. One API process on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
+    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Console connection metadata is session-scoped and not execution configuration. The API serves an OpenStack installer package; Keystone credentials are entered on the customer node and never sent to this endpoint. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. One API process on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence."
   },
   "servers": [
     {
@@ -12,171 +12,6 @@
   ],
   "security": [],
   "paths": {
-    "/api/v1/identities": {
-      "post": {
-        "operationId": "registerOpenStackIdentity",
-        "summary": "Register a verified user-provided OpenStack identity",
-        "description": "Requires an operator-configured HTTPS Keystone v3 endpoint and encryption key. The user supplies a scoped token or Application Credential plus project and user IDs. The backend validates identity and roles and does not create a credential. The returned RailShot connection token is only displayed once.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "auth_type",
-                      "project_id",
-                      "user_id",
-                      "token"
-                    ],
-                    "properties": {
-                      "auth_type": {
-                        "const": "token"
-                      },
-                      "project_id": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 255
-                      },
-                      "user_id": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 255
-                      },
-                      "token": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 8192,
-                        "writeOnly": true
-                      }
-                    }
-                  },
-                  {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "auth_type",
-                      "project_id",
-                      "user_id",
-                      "application_credential_id",
-                      "application_credential_secret"
-                    ],
-                    "properties": {
-                      "auth_type": {
-                        "const": "application_credential"
-                      },
-                      "project_id": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 255
-                      },
-                      "user_id": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 255
-                      },
-                      "application_credential_id": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 255
-                      },
-                      "application_credential_secret": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 8192,
-                        "writeOnly": true
-                      }
-                    }
-                  }
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Connection registered; connection_token is returned only in this response.",
-            "headers": {
-              "X-Request-ID": {
-                "schema": {
-                  "type": "string",
-                  "format": "uuid"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "id",
-                    "provider",
-                    "project_id",
-                    "project_name",
-                    "user_id",
-                    "auth_type",
-                    "connection_token"
-                  ],
-                  "properties": {
-                    "id": {
-                      "type": "string",
-                      "format": "uuid"
-                    },
-                    "provider": {
-                      "const": "openstack"
-                    },
-                    "project_name": {
-                      "type": "string"
-                    },
-                    "connection_token": {
-                      "type": "string",
-                      "writeOnly": true
-                    },
-                    "project_id": {
-                      "type": "string"
-                    },
-                    "user_id": {
-                      "type": "string"
-                    },
-                    "auth_type": {
-                      "enum": [
-                        "token",
-                        "application_credential"
-                      ]
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Error401"
-          },
-          "405": {
-            "$ref": "#/components/responses/Error405"
-          },
-          "415": {
-            "$ref": "#/components/responses/Error415"
-          },
-          "422": {
-            "$ref": "#/components/responses/Error422"
-          },
-          "502": {
-            "$ref": "#/components/responses/Error502"
-          },
-          "503": {
-            "$ref": "#/components/responses/Error503"
-          },
-          "403": {
-            "$ref": "#/components/responses/Error403"
-          }
-        }
-      }
-    },
     "/api/v1/targets": {
       "get": {
         "operationId": "listTargets",
@@ -466,7 +301,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/builds/{id}": {
@@ -706,7 +541,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/deployments/{id}": {
@@ -1176,7 +1011,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/environments/{id}": {
@@ -3038,6 +2873,63 @@
           }
         }
       }
+    },
+    "/api/v1/installers/openstack": {
+      "get": {
+        "operationId": "getOpenStackInstallerMetadata",
+        "summary": "Download the customer-side OpenStack installer metadata",
+        "description": "No Keystone authentication is performed by this API. The bundle contains install.sh and companion deployment scripts.",
+        "responses": {
+          "200": {
+            "description": "Installer metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "install_sh",
+                    "bundle_sha256",
+                    "bundle_url"
+                  ],
+                  "properties": {
+                    "install_sh": {
+                      "type": "string"
+                    },
+                    "bundle_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "bundle_url": {
+                      "type": "string",
+                      "const": "/api/v1/installers/openstack/bundle"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/bundle": {
+      "get": {
+        "operationId": "getOpenStackInstallerBundle",
+        "summary": "Download the customer-side OpenStack installer package",
+        "description": "No Keystone authentication is performed by this API. The bundle contains install.sh and companion deployment scripts.",
+        "responses": {
+          "200": {
+            "description": "Installer file",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4380,11 +4272,6 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
-              },
-              "connection_token": {
-                "type": "string",
-                "writeOnly": true,
-                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -4417,11 +4304,6 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
-              },
-              "connection_token": {
-                "type": "string",
-                "writeOnly": true,
-                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -4461,11 +4343,6 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9._-]{1,128}$",
                 "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
-              },
-              "connection_token": {
-                "type": "string",
-                "writeOnly": true,
-                "description": "Required when the direct deployment target is the configured OpenStack target; only for POST /api/v1/deployments."
               }
             },
             "required": [
@@ -4892,11 +4769,6 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
-              },
-              "connection_token": {
-                "type": "string",
-                "writeOnly": true,
-                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [
@@ -4965,11 +4837,6 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
-              },
-              "connection_token": {
-                "type": "string",
-                "writeOnly": true,
-                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [
@@ -5045,11 +4912,6 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
-              },
-              "connection_token": {
-                "type": "string",
-                "writeOnly": true,
-                "description": "Required for environment=onprem and provider=openstack."
               }
             },
             "required": [
