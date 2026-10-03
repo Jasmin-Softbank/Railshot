@@ -201,7 +201,7 @@ test('application detail keeps update and lifecycle controls while active deploy
   await page.locator('#deploy-form button[type="submit"]').click();
   await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
   assert.equal(previews.length, 1, 'another app running must not block this app update preview');
-  assert.equal(await page.locator('#review-app').innerText(), 'stable-app');
+  assert.equal(await page.locator('#update-identity').innerText(), 'stable-app');
   await page.locator('[data-view="history"]').click();
   await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
   await page.locator('#detail-application-actions').getByRole('button', { name: 'stable-app 중지', exact: true }).click();
@@ -307,11 +307,19 @@ test('application updates keep app and environment fixed across all source forma
   await review(); await page.waitForFunction(() => !document.querySelector('#form-error').hidden);
   await review(); await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
   assert.equal(uploads[0].key, uploads[1].key, 'preview failure retries the same request key');
-  assert.equal(await page.locator('#review-app').innerText(), 'stable-app');
+  assert.equal(await page.locator('#update-identity').innerText(), 'stable-app');
+  assert.equal(await page.locator('#deploy-form').isVisible(), false, 'review replaces the source form');
+  assert.equal(await page.locator('#run-panel').isVisible(), false, 'previous execution cannot look like this update result');
+  assert.equal(await page.locator('#update-source-details').getAttribute('open'), null);
+  await page.locator('#update-source-details summary').click();
+  await page.waitForFunction(() => document.querySelector('#update-baseline').innerText.length > 0);
   assert.match(await page.locator('#update-baseline').innerText(), /AI 수정 후 최종 소스는 보관되어 있지/);
-  assert.match(await page.locator('#update-diff-summary').innerText(), /추가 1 · 수정 1 · 삭제 1/);
+  for (const label of ['추가 1', '수정 1', '삭제 1']) assert.ok((await page.locator('#update-diff-summary').innerText()).includes(label));
   assert.match(await page.locator('#update-origin').innerText(), /bbbbbbbb/);
   assert.equal(await page.locator('#update-changes img').count(), 0, 'file paths render as text');
+  assert.match(await page.locator('#update-impact').innerText(), /파일 1개는 새 버전에서 제외/);
+  await page.locator('#update-source-details summary').click();
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('#update-source-details'), '::details-content').opacity === '0');
   if (process.env.CI_OUTPUT_DIR) {
     await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
     await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'application-update-desktop.png'), fullPage: true });
@@ -331,14 +339,14 @@ test('application updates keep app and environment fixed across all source forma
   const zip = await archiveFromPath(files);
   await open(); await page.locator('#archive').setInputFiles({ name: 'renamed-archive.zip', mimeType: 'application/zip', buffer: zip.bytes });
   await review(); await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
-  assert.equal(await page.locator('#review-app').innerText(), 'stable-app');
+  assert.equal(await page.locator('#update-identity').innerText(), 'stable-app');
   assert.equal(await page.locator('#update-rebuild').isChecked(), false);
   assert.equal(await page.locator('#deploy-button').innerText(), '변경 없음으로 완료');
   await page.locator('#deploy-button').click(); await page.waitForFunction(() => document.querySelector('#run-state').textContent.includes('실행 생략'));
   assert.deepEqual(starts.at(-1).body, { rebuild: false });
   await open(); await page.locator('#folder').setInputFiles(files);
   await review(); await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
-  assert.equal(await page.locator('#review-app').innerText(), 'stable-app');
+  assert.equal(await page.locator('#update-identity').innerText(), 'stable-app');
   await page.locator('#update-rebuild').check(); await page.locator('#deploy-button').click();
   await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
   assert.deepEqual(starts.at(-1).body, { rebuild: true });
@@ -353,7 +361,7 @@ test('application updates keep app and environment fixed across all source forma
   assert.match(await page.locator('#request-error').innerText(), /만료/);
   assert.equal(starts.length, startCount, 'locally expired preview never dispatches');
   await page.evaluate(() => { Date.now = window.originalNow; delete window.originalNow; });
-  await review(); await page.waitForFunction(() => !document.querySelector('#deploy-button').disabled);
+  await page.locator('#renew-update').click(); await page.waitForFunction(() => !document.querySelector('#deploy-button').disabled);
   assert.notEqual(uploads.at(-1).key, expiredKey, 'same-source re-review after expiry creates a fresh preview key');
   assert.deepEqual(errors, []);
 });
@@ -421,6 +429,8 @@ test('browser update crosses real preview/start/source HTTP routes and reuses th
   await page.waitForFunction(() => !document.querySelector('#update-review').hidden);
   assert.equal(await page.locator('#review-app').innerText(), 'stable-repo');
   assert.match(await page.locator('#update-diff-summary').innerText(), /수정 1/);
+  await page.locator('#update-source-details summary').click();
+  await page.waitForFunction(() => document.querySelector('#update-baseline').innerText.length > 0);
   assert.match(await page.locator('#update-baseline').innerText(), /검증된 최종 소스/);
   assert.equal(submissions.length, 1, 'preview does not dispatch');
   version = 3;
@@ -1008,5 +1018,71 @@ test('removed connections view falls back to deployment without loading saved co
   const saved = page.waitForResponse((response) => response.url().endsWith('/api/v1/preferences') && response.request().method() === 'PUT');
   await page.getByRole('radio', { name: /온프레미스/ }).check();
   assert.equal((await saved).status(), 200);
+  assert.deepEqual(errors, []);
+});
+
+test('update review expires visibly and a lost start response resumes the same preview without claiming service success', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors } = await start(t, { service: null });
+  const baseline = { id: 'stable-v1', app: 'stable-app', status: 'succeeded', cd: { deployed: true, revision: 'a'.repeat(40) },
+    public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: 'https://stable.example.test/' } };
+  const application = { id: 'app-timing', app: 'stable-app', provider: 'aws', target_id: 'same-target', environment_target_id: 'k3s-aws', status: 'ready',
+    current_deployment_state: 'verified', current_deployment: baseline, latest_deployment: { id: 'failed-v2', status: 'failed' } };
+  let preview, startCount = 0, previewCount = 0, pendingStart;
+  const json = (route, data, headers = {}) => route.fulfill({ contentType: 'application/json', headers, body: JSON.stringify(data) });
+  await page.route('**/api/v1/applications?*', route => json(route, { items: [application], next_marker: null }));
+  await page.route('**/api/v1/applications/app-timing', route => json(route, application));
+  await page.route('**/api/v1/applications/app-timing/updates', route => {
+    previewCount++;
+    preview = { id: `timing-${previewCount}`, application_id: application.id, app: application.app, target_id: application.target_id,
+      status: 'preview', expires_at: new Date(Date.now() + 600000).toISOString(), base_deployment_id: baseline.id, baseline_kind: 'deployed',
+      no_changes: false, changes: { added: [], modified: ['app.js'], deleted: [], unchanged: 10 } };
+    return json(route, preview, { location: `/api/v1/deployments/${preview.id}` });
+  });
+  await page.route('**/api/v1/deployments/timing-*/start', async route => {
+    startCount++;
+    if (startCount === 1) { pendingStart = route; return; }
+    application.current_deployment_state = 'unverified';
+    preview = { ...preview, status: 'unknown', stage: 'cd', ci: { state: 'published' }, cd: { state: 'unknown' } };
+    return json(route, preview, { location: `/api/v1/deployments/${preview.id}` });
+  });
+  await page.route('**/api/v1/deployments/timing-*', route => json(route, preview));
+  await page.goto(origin); await page.locator('[data-view="history"]').click();
+  await page.getByRole('button', { name: 'stable-app 앱 상세·업데이트' }).click();
+  await page.locator('#application-update').click();
+  assert.equal(await page.locator('#update-site').getAttribute('href'), 'https://stable.example.test/');
+  assert.match(await page.locator('#update-latest-note').innerText(), /마지막으로 검증된 배포/);
+  await page.locator('#repository-url').fill('https://github.com/example/update');
+  await page.locator('#deploy-form button[type="submit"]').click();
+  await page.locator('#review-panel').waitFor({ state: 'visible' });
+  assert.equal(await page.locator('#update-changes details').count(), 1, 'empty change groups are omitted');
+  assert.equal(await page.locator('#update-changes details').getAttribute('open'), null);
+  await page.evaluate(() => { window.savedNow = Date.now; Date.now = () => 4102444800000; document.dispatchEvent(new Event('visibilitychange')); });
+  assert.equal(await page.locator('#deploy-button').isDisabled(), true);
+  assert.match(await page.locator('#review-note').innerText(), /만료/);
+  assert.equal(startCount, 0);
+  await page.evaluate(() => { Date.now = window.savedNow; delete window.savedNow; });
+  await page.locator('#renew-update').click();
+  await page.waitForFunction(() => !document.querySelector('#deploy-button').disabled);
+  assert.equal(previewCount, 2);
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#deploy-button').disabled);
+  assert.equal(await page.locator('#edit-selection').isDisabled(), true);
+  assert.equal(await page.locator('#cancel-update').isDisabled(), true);
+  const deadline = Date.now() + 10000;
+  while (!pendingStart && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(pendingStart); await pendingStart.abort();
+  await page.waitForFunction(() => !document.querySelector('#request-error').hidden);
+  assert.equal(await page.locator('#deploy-button').innerText(), '실행 상태 다시 확인');
+  assert.equal(await page.locator('#edit-selection').isDisabled(), true);
+  await page.locator('#deploy-button').click();
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent === '실행 결과 확인 필요');
+  await page.waitForFunction(() => document.querySelector('#update-site').hidden);
+  assert.equal(startCount, 2);
+  assert.equal(previewCount, 2, 'retry reads/starts the same preview rather than uploading again');
+  assert.equal(await page.locator('#deploy-form').isVisible(), false);
+  assert.equal(await page.locator('#review-panel').isVisible(), false);
+  assert.equal(await page.locator('#update-again').isVisible(), false);
+  assert.match(await page.locator('#update-service-state').innerText(), /확인 필요/);
+  assert.equal(await page.locator('#run-details').getAttribute('open'), null);
   assert.deepEqual(errors, []);
 });
