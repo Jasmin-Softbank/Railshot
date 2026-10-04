@@ -15,6 +15,7 @@ fi
 # private checkout/temp directory per ephemeral runner. Never lock the whole host.
 [[ "$RAILSHOT_RUNNER_NAME" =~ ^[a-z][a-z0-9-]{0,62}$ ]] || exit 2
 work="/var/lib/railshot-runner/work/$RAILSHOT_RUNNER_NAME"
+[[ ! -L "$work" ]] || exit 2
 mkdir -p "$work"
 exec 9>"$work/.runner.lock"
 flock -n 9 || { echo 'This runner workspace is already active.' >&2; exit 2; }
@@ -34,4 +35,17 @@ if [ -z "$token" ]; then echo 'Empty runner registration token file.' >&2; exit 
   --name "$RAILSHOT_RUNNER_NAME" --labels "$RAILSHOT_RUNNER_LABELS" \
   --work "$work"
 unset token
-exec ./run.sh
+# Keep durable run evidence outside checkout; discard only this runner's
+# disposable workspace after the runner has exited, including failed jobs.
+./run.sh &
+runner_pid=$!
+trap 'kill -TERM "$runner_pid" 2>/dev/null || true' TERM INT
+set +e
+wait "$runner_pid"
+result=$?
+# A signal interrupts wait before the child exits. Do not remove its workspace
+# while it is still finishing cancellation and post-job steps.
+if kill -0 "$runner_pid" 2>/dev/null; then wait "$runner_pid"; fi
+trap - TERM INT
+rm -rf -- "$work"
+exit "$result"

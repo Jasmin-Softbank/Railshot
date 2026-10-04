@@ -15,6 +15,8 @@ Status: local implementation and verification; live 12-runner capacity is not ye
 
 No new VM is required. The existing AWS build node has 4 vCPU and 16 GiB RAM. Twelve concurrent workflows are not twelve full-speed builds: resource-heavy gates wait for host capacity. BuildKit retains its existing 2 CPU / 4 GiB bound. Runner container requests/limits remain enforced separately; Docker child workloads are not included in Kubernetes quota.
 
+After a runner exits, its disposable checkout is removed; abrupt host failure/SIGKILL can still leave a directory that needs operator reconciliation. Durable evidence is not removed by this cleanup.
+
 Each ephemeral runner uses its own `work/<runner-name>` checkout, temporary directory and lock. Durable run evidence remains under the separate run root. The shared Codex home is protected by a cross-process lock; private customer execution boundaries remain unchanged. Capacity wait emits a diagnostic, has a bounded timeout, and never reports a successful gate without running it.
 
 ## Queue and recovery
