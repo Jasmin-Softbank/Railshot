@@ -1,0 +1,99 @@
+{
+  "status": "passed",
+  "results": [
+    {
+      "test": "01-online-clean",
+      "status": "PASS",
+      "duration_seconds": 134.073
+    },
+    {
+      "test": "02-online-with-bundle",
+      "status": "PASS",
+      "duration_seconds": 25.001
+    },
+    {
+      "test": "03-registry-fallback",
+      "status": "PASS",
+      "duration_seconds": 37.001
+    },
+    {
+      "test": "04-no-bundle",
+      "status": "PASS",
+      "duration_seconds": 0.373
+    },
+    {
+      "test": "05-offline-clean",
+      "status": "PASS",
+      "duration_seconds": 76.027
+    },
+    {
+      "test": "06-corrupt-bundle",
+      "status": "PASS",
+      "duration_seconds": 0.29
+    },
+    {
+      "test": "07-wrong-checksum",
+      "status": "PASS",
+      "duration_seconds": 0.074
+    },
+    {
+      "test": "08-missing-image",
+      "status": "PASS",
+      "duration_seconds": 0.788
+    },
+    {
+      "test": "09-offline-repeat",
+      "status": "PASS",
+      "duration_seconds": 22.766
+    },
+    {
+      "test": "10-offline-cleanup-redeploy",
+      "status": "PASS",
+      "duration_seconds": 27.927
+    },
+    {
+      "test": "11-offline-update",
+      "status": "PASS",
+      "duration_seconds": 28.0
+    },
+    {
+      "test": "12-network-restored",
+      "status": "PASS",
+      "duration_seconds": 32.991
+    },
+    {
+      "test": "13-cloudflare-unavailable",
+      "status": "PASS",
+      "duration_seconds": 11.995
+    },
+    {
+      "test": "14-preflight-timeout",
+      "status": "PASS",
+      "duration_seconds": 2.588
+    },
+    {
+      "test": "15-architecture-mismatch",
+      "status": "PASS",
+      "duration_seconds": 0.067
+    },
+    {
+      "test": "16-no-duplicate-import",
+      "status": "PASS",
+      "duration_seconds": 28.22
+    }
+  ],
+  "errors": [],
+  "counts": {
+    "PASS": 16,
+    "FAIL": 0,
+    "SKIP": 0
+  },
+  "scope": "Disposable Linux VM only; nft restored; no host/CSP firewall changes",
+  "not_verified": [
+    "amd64",
+    "real AWS/GCP/OpenStack networks",
+    "authenticated WireGuard",
+    "QUIC/Cloudflare tunnel provisioning",
+    "private registry credentials"
+  ]
+}

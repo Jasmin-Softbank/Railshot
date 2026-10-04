@@ -1,0 +1,5 @@
+time="2026-10-02T08:05:16+09:00" level=info msg="Terminal is not available, proceeding without opening an editor"
+time="2026-10-02T08:05:16+09:00" level=info msg="Attempting to download the image" arch=aarch64 digest="sha256:7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc" location="https://cloud-images.ubuntu.com/releases/noble/release-20260705/ubuntu-24.04-server-cloudimg-arm64.img"
+time="2026-10-02T08:05:16+09:00" level=info msg="Using cache `/Users/seungminlee/Library/Caches/lima/download/by-url-sha256/a86fcad92c34622c13997952c2e003f9ccca1cf26abb4ad626c3e04f268f4dfb/imgconv/raw`"
+time="2026-10-02T08:05:16+09:00" level=info msg="Resize instance railshot-sim-gcp-20261002080234's disk from 3.5GiB to 20GiB"
+time="2026-10-02T08:05:16+09:00" level=info msg="Run `limactl start railshot-sim-gcp-20261002080234` to start the instance."

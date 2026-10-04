@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "final_input_output_pairs": 17,
+  "supplemental_runtime_responses": 4,
+  "schemas": [
+    "input-v0.2",
+    "output-v0.2"
+  ]
+}

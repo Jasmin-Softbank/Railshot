@@ -1,0 +1,156 @@
+{
+  "status": "passed",
+  "timestamp": "2026-10-01T22:23:42.743019+00:00",
+  "results": [
+    {
+      "test": "clean-install",
+      "status": "SKIP",
+      "reason": "already installed; full cleanup/reinstall tested later"
+    },
+    {
+      "test": "existing-bootstrap",
+      "status": "PASS",
+      "duration_seconds": 8.543
+    },
+    {
+      "test": "repeat-aws",
+      "status": "PASS",
+      "duration_seconds": 8.725
+    },
+    {
+      "test": "repeat-gcp",
+      "status": "PASS",
+      "duration_seconds": 6.966
+    },
+    {
+      "test": "repeat-openstack",
+      "status": "PASS",
+      "duration_seconds": 7.884
+    },
+    {
+      "test": "health-and-endpoint",
+      "status": "PASS",
+      "duration_seconds": 3.877
+    },
+    {
+      "test": "workload-update",
+      "status": "PASS",
+      "duration_seconds": 17.983
+    },
+    {
+      "test": "update-restore",
+      "status": "PASS",
+      "duration_seconds": 12.915
+    },
+    {
+      "test": "generic-workload",
+      "status": "PASS",
+      "duration_seconds": 18.083
+    },
+    {
+      "test": "generic-verify",
+      "status": "PASS",
+      "duration_seconds": 5.002
+    },
+    {
+      "test": "missing-image",
+      "status": "PASS",
+      "duration_seconds": 22.066
+    },
+    {
+      "test": "missing-image-restore",
+      "status": "PASS",
+      "duration_seconds": 10.937
+    },
+    {
+      "test": "health-failure",
+      "status": "PASS",
+      "duration_seconds": 25.051
+    },
+    {
+      "test": "health-restore",
+      "status": "PASS",
+      "duration_seconds": 8.941
+    },
+    {
+      "test": "service-drift",
+      "status": "PASS",
+      "duration_seconds": 2.208
+    },
+    {
+      "test": "service-restore",
+      "status": "PASS",
+      "duration_seconds": 9.432
+    },
+    {
+      "test": "cilium-unhealthy",
+      "status": "PASS",
+      "duration_seconds": 18.345
+    },
+    {
+      "test": "cilium-recovered",
+      "status": "PASS",
+      "duration_seconds": 5.263
+    },
+    {
+      "test": "ownership-guard",
+      "status": "PASS",
+      "duration_seconds": 1.629
+    },
+    {
+      "test": "foreign-cleanup-guard",
+      "status": "PASS",
+      "duration_seconds": 0.314
+    },
+    {
+      "test": "network-policy",
+      "status": "PASS"
+    },
+    {
+      "test": "network-policy-restored",
+      "status": "PASS",
+      "duration_seconds": 5.303
+    },
+    {
+      "test": "cleanup-guard",
+      "status": "PASS",
+      "duration_seconds": 0.047
+    },
+    {
+      "test": "workload-cleanup",
+      "status": "PASS",
+      "duration_seconds": 0.537
+    },
+    {
+      "test": "workload-cleanup-repeat",
+      "status": "PASS",
+      "duration_seconds": 0.498
+    },
+    {
+      "test": "workload-redeploy",
+      "status": "PASS",
+      "duration_seconds": 13.372
+    },
+    {
+      "test": "full-cleanup",
+      "status": "PASS",
+      "duration_seconds": 17.413
+    },
+    {
+      "test": "full-cleanup-repeat",
+      "status": "PASS",
+      "duration_seconds": 0.057
+    },
+    {
+      "test": "reinstall",
+      "status": "PASS",
+      "duration_seconds": 73.457
+    },
+    {
+      "test": "final-verify",
+      "status": "PASS",
+      "duration_seconds": 3.984
+    }
+  ],
+  "note": "Provider labels use the same local node. This is not live AWS/GCP/OpenStack verification."
+}

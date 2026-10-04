@@ -1,0 +1,13 @@
+{
+  "authenticated": true,
+  "account": "adgk2349",
+  "repository": "Jasmin-Softbank/Railshot",
+  "push_permission": true,
+  "checked_with": [
+    "gh auth status",
+    "gh api repos/Jasmin-Softbank/Railshot"
+  ],
+  "release_creation_attempted": false,
+  "release_upload_attempted": false,
+  "remote_release_download_attempted": false
+}

@@ -1,0 +1,29 @@
+[PASS] output schema: aws/bootstrap-repeat.json
+[PASS] output schema: aws/clean-install.json
+[PASS] output schema: aws/full-cleanup.json
+[PASS] output schema: aws/health-endpoint.json
+[PASS] output schema: aws/update-health.json
+[PASS] output schema: aws/workload-cleanup.json
+[PASS] output schema: aws/workload-redeploy.json
+[PASS] output schema: aws/workload-update.json
+[PASS] output schema: gcp/bootstrap-repeat.json
+[PASS] output schema: gcp/clean-install.json
+[PASS] output schema: gcp/full-cleanup.json
+[PASS] output schema: gcp/health-endpoint.json
+[PASS] output schema: gcp/update-health.json
+[PASS] output schema: gcp/workload-cleanup.json
+[PASS] output schema: gcp/workload-redeploy.json
+[PASS] output schema: gcp/workload-update.json
+[PASS] output schema: openstack/bootstrap-repeat.json
+[PASS] output schema: openstack/clean-install.json
+[PASS] output schema: openstack/full-cleanup.json
+[PASS] output schema: openstack/health-endpoint.json
+[PASS] output schema: openstack/update-health.json
+[PASS] output schema: openstack/workload-cleanup.json
+[PASS] output schema: openstack/workload-redeploy.json
+[PASS] output schema: openstack/workload-update.json
+[PASS] 24 runtime JSON responses match output schema
+[PASS] identical 15 core files on three VMs
+[PASS] three distinct Linux boot IDs
+[PASS] all 24 lifecycle cases
+[PASS] host HTTP 200/body on all three forwarded endpoints

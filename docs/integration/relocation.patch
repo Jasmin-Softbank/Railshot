@@ -1,0 +1,222 @@
+--- a/apps/api/src/server.js
++++ b/apps/api/src/server.js
+@@ -6,7 +6,7 @@
+ import { archiveLimits, inspectArchive, validateFiles } from './archive.js';
+ import { fetchPublicGithubSource } from './public-github.js';
+ 
+-const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'public');
++const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dashboard');
+ const assets = new Map([
+   ['/', ['index.html', 'text/html; charset=utf-8']],
+   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+--- a/ci/scripts/codebuild.py
++++ b/ci/scripts/codebuild.py
+@@ -16,7 +16,7 @@
+ import uuid
+ import zipfile
+ 
+-PLATFORM = Path(__file__).resolve().parents[1] / 'platform'
++PLATFORM = Path(__file__).resolve().parent
+ sys.path[:0] = [str(PLATFORM), str(PLATFORM / 'gate')]
+ import bundle
+ from observability import OperationError
+@@ -74,7 +74,7 @@
+             or env['computeType'] != 'BUILD_GENERAL1_SMALL' or values != expected
+             or len(env['environmentVariables']) != 3 or source['type'] != 'GITHUB'
+             or source['location'] != 'https://github.com/Jasmin-Softbank/Jasmin.git'
+-            or source['buildspec'] != 'ci/codebuild-release.yml'):
++            or source['buildspec'] != 'ci/workflows/codebuild-release.yml'):
+         raise fail('project.binding')
+ 
+ 
+--- a/ci/scripts/codebuild_release.py
++++ b/ci/scripts/codebuild_release.py
+@@ -11,7 +11,7 @@
+ import uuid
+ import zipfile
+ 
+-PLATFORM = Path(__file__).resolve().parents[1] / 'platform'
++PLATFORM = Path(__file__).resolve().parent
+ sys.path[:0] = [str(PLATFORM), str(PLATFORM / 'gate')]
+ import bundle
+ from observability import OperationError
+--- a/ci/scripts/test_codebuild.py
++++ b/ci/scripts/test_codebuild.py
+@@ -118,7 +118,7 @@
+     def test_project_drift_is_blocked_before_upload(self):
+         project = {'sourceVersion': self.config['platform_ref'], 'serviceRole': self.config['role_arn'],
+                    'timeoutInMinutes':15, 'concurrentBuildLimit':1, 'projectVisibility':'PRIVATE',
+-                   'source':{'type':'GITHUB','location':'https://github.com/Jasmin-Softbank/Jasmin.git','buildspec':'ci/codebuild-release.yml'},
++                   'source':{'type':'GITHUB','location':'https://github.com/Jasmin-Softbank/Jasmin.git','buildspec':'ci/workflows/codebuild-release.yml'},
+                    'environment':{'privilegedMode':False,'image':'aws/codebuild/standard:7.0','computeType':'BUILD_GENERAL1_SMALL',
+                      'environmentVariables':[{'type':'PLAINTEXT','name':'RAILSHOT_'+k,'value':v} for k,v in
+                        [('SOURCE_REF',self.config['platform_ref']),('ARTIFACT_BUCKET',self.config['artifact_bucket']),('REGISTRY_PREFIX',self.config['registry_prefix'])]]}}
+--- a/ci/scripts/test_workflow_policy.py
++++ b/ci/scripts/test_workflow_policy.py
+@@ -13,7 +13,7 @@
+ 
+ class WorkflowPolicyTest(unittest.TestCase):
+     def test_registry_target_and_credentials_belong_only_to_trusted_release(self):
+-        jobs = yaml.safe_load((HERE / 'railshot-deploy.yml').read_text())['jobs']
++        jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
+         release = jobs['release']
+         self.assertEqual(release['environment'], 'railshot-release')
+         self.assertEqual(release['env']['REGISTRY_PREFIX'], '${{ vars.REGISTRY_PREFIX }}')
+@@ -31,7 +31,7 @@
+         self.assertNotIn('GITOPS_TOKEN', json.dumps(release))
+ 
+     def test_registry_binding_rejects_ambiguous_or_source_controlled_targets(self):
+-        release = yaml.safe_load((HERE / 'railshot-deploy.yml').read_text())['jobs']['release']
++        release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
+         script = next(s['run'] for s in release['steps'] if s.get('name') == 'Validate trusted platform bindings')
+         env = {**os.environ, 'PLATFORM_REF': 'a' * 40, 'REGISTRY_VISIBILITY': 'public'}
+         for prefix in ('ghcr.io/owner', 'ghcr.io/owner/project/nested'):
+@@ -46,7 +46,7 @@
+                 self.assertNotEqual(result.returncode, 0)
+ 
+     def test_private_default_blocks_before_registry_login_and_cannot_use_ready_flag(self):
+-        release = yaml.safe_load((HERE / 'railshot-deploy.yml').read_text())['jobs']['release']
++        release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
+         guard = release['steps'][0]
+         self.assertEqual(guard['name'], 'Validate trusted platform bindings')
+         env = {**os.environ, 'PLATFORM_REF': 'a' * 40, 'REGISTRY_PREFIX': 'ghcr.io/owner', 'REGISTRY_READY': 'true', 'IMAGE_PULL_SECRET_READY': 'true'}
+@@ -59,7 +59,7 @@
+         self.assertNotEqual(subprocess.run(['bash', '-c', guard['run']], env=env, capture_output=True).returncode, 0)
+ 
+     def test_login_uses_password_stdin_and_private_ephemeral_config(self):
+-        release = yaml.safe_load((HERE / 'railshot-deploy.yml').read_text())['jobs']['release']
++        release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
+         login = next(s for s in release['steps'] if s.get('name') == 'Log in to GHCR')
+         cleanup = next(s for s in release['steps'] if s.get('name') == 'Remove ephemeral registry credentials')
+         self.assertEqual(cleanup['if'], 'always()')
+@@ -81,7 +81,7 @@
+             self.assertFalse((root / 'docker').exists())
+ 
+     def test_public_mode_requires_each_digest_without_inherited_docker_credentials(self):
+-        release = yaml.safe_load((HERE / 'railshot-deploy.yml').read_text())['jobs']['release']
++        release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
+         check = next(s for s in release['steps'] if s.get('name') == 'Require anonymous access to published digests')
+         steps = release['steps']
+         self.assertLess(steps.index(check), next(i for i,s in enumerate(steps) if s.get('id') == 'published'))
+@@ -114,7 +114,7 @@
+             self.assertNotEqual(subprocess.run(['bash', '-c', stub + check['run']], cwd=tmp, env=env, capture_output=True).returncode, 0)
+ 
+     def test_publication_handoff_contains_bound_evidence_without_deployment(self):
+-        text = (HERE / 'railshot-deploy.yml').read_text()
++        text = (HERE.parent / 'workflows/railshot-deploy.yml').read_text()
+         jobs = yaml.safe_load(text)['jobs']
+         self.assertEqual(set(jobs), {'loop', 'release'})
+         release = jobs['release']
+--- a/ci/workflows/codebuild-release.yml
++++ b/ci/workflows/codebuild-release.yml
+@@ -8,4 +8,4 @@
+       - apt-get update -qq && apt-get install -y --no-install-recommends skopeo
+   build:
+     commands:
+-      - python3 ci/codebuild_release.py
++      - python3 ci/scripts/codebuild_release.py
+--- a/ci/workflows/railshot-deploy.yml
++++ b/ci/workflows/railshot-deploy.yml
+@@ -88,7 +88,7 @@
+           args=(--repair-scope "$REPAIR_SCOPE")
+           if [ -f "$RUN_DIR/state.sqlite3" ]; then args+=(--resume); fi
+           if [ -n "$QUALITY_NETWORK" ]; then args+=(--quality-network "$QUALITY_NETWORK"); fi
+-          if python .railshot/platform/loop/loop.py "apps/$TENANT/$APP" "$RUN_DIR" --provider "$PROVIDER" "${args[@]}"; then
++          if python .railshot/ci/scripts/loop/loop.py "apps/$TENANT/$APP" "$RUN_DIR" --provider "$PROVIDER" "${args[@]}"; then
+             echo "passed=true" >> "$GITHUB_OUTPUT"
+           else
+             echo "passed=false" >> "$GITHUB_OUTPUT"
+@@ -99,7 +99,7 @@
+         run: |
+           set -euo pipefail
+           verdict=$(python -c 'import json,os; from pathlib import Path; r=Path(os.environ["RUN_DIR"]); e=json.loads((r/"evidence.json").read_text()); assert e["passed"]; print(r/("gate-"+str(e["attempts"][-1]["attempt"])+"/verdict.json"))')
+-          python .railshot/platform/gate/bundle.py export "$RUN_DIR/work" "$verdict" release-bundle
++          python .railshot/ci/scripts/gate/bundle.py export "$RUN_DIR/work" "$verdict" release-bundle
+       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+         id: bundle
+         if: steps.loop.outputs.passed == 'true'
+@@ -166,7 +166,7 @@
+           set -euo pipefail
+           pip install -q pyyaml jsonschema
+           python -c 'import os,yaml; s=yaml.safe_load(open("release-bundle/jasmin.yaml")); assert s["app"]==os.environ["APP"], "APP/spec.app mismatch"'
+-          python .railshot/platform/gate/bundle.py publish release-bundle \
++          python .railshot/ci/scripts/gate/bundle.py publish release-bundle \
+             "$REGISTRY_PREFIX/${TENANT}-${APP}" "${GITHUB_SHA::12}" --output images.json
+       - name: Require anonymous access to published digests
+         run: |
+--- a/ci/scripts/gate/test_pipeline.py
++++ b/ci/scripts/gate/test_pipeline.py
+@@ -392,7 +392,7 @@
+     def test_executor_profile_is_shared_with_installer_and_native_verifier(self):
+         builder, digest = gate.ci_profile()
+         self.assertEqual(len(digest), 64)
+-        infra = gate.PLATFORM.parent / "infra/ansible"
++        infra = gate.PLATFORM.parents[1] / "infrastructure/ansible"
+         tasks = gate.yaml.safe_load((infra / "ci.yml").read_text())[0]["tasks"]
+         copy = next(t["ansible.builtin.copy"] for t in tasks
+                     if t.get("ansible.builtin.copy", {}).get("dest") == "/etc/railshot/ci-executor.yaml")
+@@ -524,7 +524,7 @@
+         self.assertFalse(any("-p" in call.args[0] for call in shell.call_args_list))
+ 
+     def test_worker_installer_and_native_verifier_shell_parse(self):
+-        infra = gate.PLATFORM.parent / "infra/ansible"
++        infra = gate.PLATFORM.parents[1] / "infrastructure/ansible"
+         tasks = gate.yaml.safe_load((infra / "ci.yml").read_text())[0]["tasks"]
+         installer = next(t["ansible.builtin.copy"]["content"] for t in tasks
+                          if t.get("ansible.builtin.copy", {}).get("dest") == gate.CI_NETWORK_HELPER)
+--- a/infrastructure/ansible/ci.yml
++++ b/infrastructure/ansible/ci.yml
+@@ -1,5 +1,5 @@
+ # Dedicated, disposable Ubuntu CI VM only. No app cluster, SDK auth, or runner registration.
+-# Run: sudo ansible-playbook -i localhost, -c local infra/ansible/ci.yml
++# Run: sudo ansible-playbook -i localhost, -c local infrastructure/ansible/ci.yml
+ - name: Credential-free CI runtime and bounded dependency network
+   hosts: localhost
+   connection: local
+@@ -52,7 +52,7 @@
+ 
+     - name: Install the reviewed executor contract from the same repository revision
+       ansible.builtin.copy:
+-        src: ../../platform/contract/ci-executor.yaml
++        src: ../../ci/scripts/contract/ci-executor.yaml
+         dest: /etc/railshot/ci-executor.yaml
+         owner: root
+         group: root
+--- a/infrastructure/terraform/ci/cloud-init.yaml.tftpl
++++ b/infrastructure/terraform/ci/cloud-init.yaml.tftpl
+@@ -46,7 +46,7 @@
+       test ! -e "$source"
+       install -d -m 0755 "$source"
+       tar --extract --gzip --file "$archive" --strip-components=1 --directory "$source" --no-same-owner
+-      ansible-playbook -i localhost, -c local "$source/infra/ansible/ci.yml"
++      ansible-playbook -i localhost, -c local "$source/infrastructure/ansible/ci.yml"
+       install -d -m 0700 /var/lib/railshot-console /var/lib/railshot-console/docker-config
+       # Buildx registration contains no registry login. Use one fixed noncredential config.
+       DOCKER_CONFIG=/var/lib/railshot-console/docker-config docker buildx create \
+--- a/infrastructure/providers/terraform_tools/provision.py
++++ b/infrastructure/providers/terraform_tools/provision.py
+@@ -18,12 +18,12 @@
+ import costs
+ from capabilities import capabilities, validate_profile, validate_maintenance, timestamp
+ 
+-REPO = Path(__file__).resolve().parents[2]
+-sys.path.insert(0, str(REPO / 'platform'))
++REPO = Path(__file__).resolve().parents[3]
++sys.path.insert(0, str(REPO / 'ci/scripts'))
+ from observability import OperationError, event_record
+ from storage import durable_write
+ 
+-MODULES = {name: REPO / 'infra' / 'terraform' / name for name in ('aws', 'gcp', 'azure')}
++MODULES = {name: REPO / 'infrastructure' / 'terraform' / name for name in ('aws', 'gcp', 'azure')}
+ 
+ 
+ def digest(value):
+@@ -52,7 +52,7 @@
+ 
+ def executor_hash():
+     paths = [Path(__file__), Path(__file__).with_name('capabilities.py'), Path(__file__).with_name('costs.py'),
+-             REPO / 'platform/storage.py', REPO / 'platform/observability.py']
++             REPO / 'ci/scripts/storage.py', REPO / 'ci/scripts/observability.py']
+     return source_hash({str(p.relative_to(REPO)): p.read_bytes() for p in paths})
+ 
+ 

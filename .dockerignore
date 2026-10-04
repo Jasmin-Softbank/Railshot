@@ -1,0 +1,23 @@
+.git
+**/.git
+**/node_modules
+**/dist
+**/output
+**/.env
+**/.env.*
+**/.local
+**/.venv
+**/__pycache__
+**/.terraform
+**/*.tfstate*
+**/*.tfvars*
+**/*.pem
+**/*.key
+**/auth.json
+**/config.json
+**/credentials*
+# Public renewal implementation; credential data remains excluded.
+!gitops/credentials.py
+!deployment/bootstrap/client_setup/credentials.py
+**/secrets
+**/.token-usage

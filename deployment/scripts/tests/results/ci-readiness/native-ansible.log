@@ -1,0 +1,86 @@
+@all:
+  |--@ungrouped:
+  |--@db_nodes:
+  |  |--db01
+  |  |--db02
+  |  |--db03
+  |--@etcd_nodes:
+  |  |--etcd01
+  |  |--etcd02
+  |  |--etcd03
+  |--@proxy_nodes:
+  |  |--proxy01
+
+playbook: playbooks/backup.yml
+
+playbook: playbooks/common.yml
+
+playbook: playbooks/etcd.yml
+
+playbook: playbooks/patroni.yml
+
+playbook: playbooks/preflight.yml
+[WARNING]: Could not match supplied host pattern, ignoring: restore_targets
+
+playbook: playbooks/restore.yml
+
+playbook: playbooks/routing.yml
+
+playbook: playbooks/site.yml
+
+playbook: playbooks/verify.yml
+
+playbook: site.yml
+
+PLAY [Validate templates offline without SSH or infrastructure changes] ********
+
+TASK [Set explicit test inputs after loading defaults] *************************
+ok: [localhost]
+
+TASK [Parse configuration and workload templates] ******************************
+ok: [localhost]
+
+TASK [Assert minimal cluster and bounded smoke test contracts] *****************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Check that legacy ownership cannot be accepted as Cilium ownership] ******
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+TASK [Override sample port and confirm rendering uses it] **********************
+ok: [localhost]
+
+TASK [Check customized port] ***************************************************
+ok: [localhost] => {
+    "changed": false,
+    "msg": "All assertions passed"
+}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=6    changed=0    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+
+/private/tmp/railshot-runtime-validation/lib/python3.14/site-packages/ansiblelint/__main__.py:36: UserWarning: UNSUPPORTED: ansible-core 2.19.13 supports Python up to 3.13 and we found 3.14.7. Some features may not work.
+  from ansible_compat.prerun import get_cache_dir
+WARNING: PATH altered to expand ~ in it. Read https://stackoverflow.com/a/44704799/99834 and correct your system configuration.
+WARNING: PATH altered to include /private/tmp/railshot-runtime-validation/bin, /private/tmp/railshot-runtime-validation/bin :: This is usually a sign of broken local setup, which can cause unexpected behaviors.
+WARNING  Skipped installing collection dependencies due to running in offline mode.
+WARNING  Directory expansion discovered 52 file(s). If this is more than expected, use 'exclude_paths' in your ansible-lint configuration to narrow the scope. See: https://docs.ansible.com/projects/lint/configuring/
+
+Passed: 0 failure(s), 0 warning(s) in 58 files processed of 63 encountered. Last profile that met the validation criteria was 'production'.
+Contract guards passed (not a live deployment test).
+..................                                                       [100%]
+18 passed in 14.75s
+test_executor_timeout_kills_spawned_children (test_database.NativeBoundaries.test_executor_timeout_kills_spawned_children) ... ok
+test_prior_proxy_failure_prevents_the_database_receipt (test_database.NativeBoundaries.test_prior_proxy_failure_prevents_the_database_receipt) ... ok
+test_real_vault_accepts_only_the_three_credential_values (test_database.NativeBoundaries.test_real_vault_accepts_only_the_three_credential_values) ... ok
+test_sigterm_drains_bounded_worker_and_persists_unknown_before_exit (test_database.NativeBoundaries.test_sigterm_drains_bounded_worker_and_persists_unknown_before_exit) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 3.834s
+
+OK

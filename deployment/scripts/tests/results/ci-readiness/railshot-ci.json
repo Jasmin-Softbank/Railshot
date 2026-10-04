@@ -1,0 +1,73 @@
+{
+  "headSha": "003fc3ba0f84b4179ca697dfa31d4de5bc844b4d",
+  "status": "completed",
+  "conclusion": "success",
+  "url": "https://github.com/Jasmin-Softbank/Railshot/actions/runs/37015888888",
+  "jobs": [
+    {
+      "name": "Select affected checks",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Linux amd64 runtime E2E and cleanup",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Python contracts",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "OpenStack contracts",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "HTTP publication and browser E2E",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Database Ansible contracts",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Observability configuration and probes",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Terraform validation",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Container build and smoke / images (mcp)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Container build and smoke / images (ci-runner)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Container build and smoke / images (api)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Container build and smoke / images (dashboard)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "Railshot CI gate",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

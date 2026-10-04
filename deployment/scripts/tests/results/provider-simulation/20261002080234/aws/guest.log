@@ -1,0 +1,8 @@
+[PASS] aws: clean-install
+[PASS] aws: bootstrap-repeat
+[PASS] aws: health-endpoint
+[PASS] aws: workload-update
+[PASS] aws: update-health
+[PASS] aws: workload-cleanup
+[PASS] aws: workload-redeploy
+[PASS] aws: full-cleanup

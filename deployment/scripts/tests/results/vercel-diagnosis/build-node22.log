@@ -1,0 +1,18 @@
+
+> build
+> npm run build --workspace @railshot/dashboard
+
+
+> @railshot/dashboard@0.1.0 build
+> vite build
+
+vite v8.2.2 building client environment for production...
+transforming...
+✓ 5 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                 10.29 kB │ gzip: 3.05 kB
+dist/assets/index-7avNDjN8.css   9.30 kB │ gzip: 2.70 kB
+dist/assets/index-B8_8-LbO.js   12.16 kB │ gzip: 4.61 kB
+
+✓ built in 300ms

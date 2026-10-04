@@ -74,7 +74,7 @@ railshot/
 
 ## API Conventions
 
-Follow the [REST API conventions on the integration branch](https://github.com/Jasmin-Softbank/Railshot/blob/integration/team-assembly-20261002/docs/api/conventions.md). Use product resource names such as `builds`, `deployments`, `profiles`, and `plans`; do not join words with hyphens or underscores in collection names. This naming rule does not restrict resource IDs or JSON field names.
+For new or changed HTTP API contracts, follow [docs/api/conventions.md](docs/api/conventions.md), based on the existing Hwagyun OpenStack controller. Use resource-oriented `/api/v1` routes and its response/error formats for new product APIs. Static resource names must be short lowercase plural nouns such as `builds`, `deployments`, `profiles`, and `plans`: no hyphens, underscores, camelCase compounds, or internal executor terminology. This is a local naming rule, not a REST or URI standard requirement. Keep the existing snake_case JSON format; do not rename HTTP headers or opaque external IDs to enforce route naming. Preserve documented legacy routes and internal Ansible contracts until their callers are explicitly migrated. Keep designs, implemented routes, generated OpenAPI, and HTTP verification results distinct; do not claim an endpoint exists from a design document alone.
 
 ## Scope of This Guidelines Task
 

@@ -1,0 +1,8 @@
+[PASS] openstack: clean-install
+[PASS] openstack: bootstrap-repeat
+[PASS] openstack: health-endpoint
+[PASS] openstack: workload-update
+[PASS] openstack: update-health
+[PASS] openstack: workload-cleanup
+[PASS] openstack: workload-redeploy
+[PASS] openstack: full-cleanup

@@ -1,0 +1,122 @@
+{
+  "shell": [
+    {
+      "file": "deployment/airgap/bundles/2026-10-02.1-arm64/artifacts/install-k3s.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/airgap/check-updates.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/airgap/install-offline.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/airgap/preload-images.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/airgap/prepare-bundle.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/airgap/release-download.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/airgap/release-pack.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/airgap/release-upload.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/airgap/verify-bundle.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/bootstrap/cleanup.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/bootstrap/health.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/bootstrap/install-k3s.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/bootstrap/preflight.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/cilium/health.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/cilium/install.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/scripts/cleanup.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/scripts/common.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/scripts/deploy.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/scripts/test-poc.sh",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/scripts/verify.sh",
+      "status": "PASS"
+    }
+  ],
+  "yaml": [
+    {
+      "file": "deployment/compose.yaml",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/manifests/build-controller.yaml",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/manifests/platform.yaml",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/manifests/build-runner.yaml",
+      "status": "PASS"
+    },
+    {
+      "file": "deployment/manifests/product-access.yaml",
+      "status": "PASS"
+    },
+    {
+      "file": ".github/workflows/control-cilium.yml",
+      "status": "PASS"
+    },
+    {
+      "file": ".github/workflows/platform-containers.yml",
+      "status": "PASS"
+    },
+    {
+      "file": ".github/workflows/platform-publish.yml",
+      "status": "PASS"
+    },
+    {
+      "file": ".github/workflows/railshot-ci.yml",
+      "status": "PASS"
+    }
+  ]
+}

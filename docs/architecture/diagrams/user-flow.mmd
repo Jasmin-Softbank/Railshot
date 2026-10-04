@@ -1,0 +1,27 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, Apple SD Gothic Neo, sans-serif","fontSize":"18px","lineColor":"#64748b","primaryTextColor":"#172033","clusterBkg":"#f8fafc","clusterBorder":"#cbd5e1","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"linear","defaultRenderer":"elk","nodeSpacing":28,"rankSpacing":42,"htmlLabels":true,"wrappingWidth":340,"padding":16}}}%%
+flowchart TB
+ T["운영자가 준비한 target<br/>VM · guest · runtime 각각 확인"]
+ I["앱 입력<br/>폴더 · ZIP · 공개 GitHub URL"]
+ Q["API 제공 UI / CLI / 로컬 MCP<br/>승인 target으로 요청 · HTTP 202"]
+ CI["CI 실행<br/>기본 검사 · 필요한 AI 수정 · 재검사"]
+ G{"gate와 게시 증거가<br/>모두 유효한가?"}
+ P["published<br/>이미지 게시 확인 / 앱 배포 미확인"]
+ CD["운영자 CD 절차<br/>config Git → Argo → 공개 HTTP 검사"]
+ END["운영자 인수 결과<br/>target · digest · revision · 공개 응답"]
+ FAIL["실패 / 확인 필요<br/>실패 단계와 산출물 불일치 구분"]
+ T -->|"등록한 대상 재사용"| I
+ I -->|"소스 검증"| Q
+ Q -->|"고정 source SHA와 target"| CI
+ CI --> G
+ G -->|"예"| P
+ G -->|"아니오"| FAIL
+ P -.->|"제품 자동 연결은 별도 작업"| CD
+ CD -->|"적용과 공개 응답을 모두 확인"| END
+ CD -->|"적용 또는 공개 응답 실패"| FAIL
+ class T,I,Q,CI,G,P code
+ class CD,END evidence
+ class FAIL pending
+classDef code fill:#dbeafe,stroke:#2563eb,color:#172033,stroke-width:2px
+classDef evidence fill:#dcfce7,stroke:#16a34a,color:#172033,stroke-width:2px
+classDef pending fill:#fef3c7,stroke:#d97706,color:#172033,stroke-width:2px
+classDef external fill:#f1f5f9,stroke:#64748b,color:#172033,stroke-width:2px

@@ -1,0 +1,15 @@
+[2026-10-02T03:18:58Z] [preflight] Linux node prerequisites ready
+[NODE_READY]
+[NETWORK_CHECKING]
+[BUNDLE_VERIFYING]
+[K3S_INSTALLING]
+[2026-10-02T03:19:01Z] [install-k3s] 동일 설정/버전의 K3s 재사용
+[2026-10-02T03:19:02Z] [install-k3s] Kubernetes API 준비 대기. Node Ready는 Cilium 설치 후 확인합니다.
+[K3S_READY]
+[AIRGAP_PRELOADING]
+[CILIUM_INSTALLING]
+[2026-10-02T03:19:04Z] [install] Cilium Helm release 재조정: 1.20.2
+[CILIUM_READY]
+[WORKLOAD_DEPLOYING]
+[WORKLOAD_READY]
+[ENDPOINT_READY]
