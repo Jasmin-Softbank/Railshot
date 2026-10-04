@@ -194,31 +194,106 @@ test('GitHub successful response near exhaustion preserves account reserve', asy
   assert.equal(calls, 1);
 });
 
-test('graceful shutdown finishes an admitted source submission and restart observes its run without redispatch', async t => {
-  const entered = deferred(), uploaded = deferred();
-  let sends = 0;
+test('shutdown after a source checkpoint resumes the same commit and dispatches once', async t => {
+  const checkpointed = deferred(), release = deferred();
+  let uploads = 0, dispatches = 0;
+  const { SubmissionCheckpointError } = await import('../src/github.js');
   const f = await fixture(t, {
-    deploy: async ({ onPrepared }) => {
-      sends++; entered.resolve(); await uploaded.promise;
-      await onPrepared({ source_commit: publication.source_commit });
-      return { run_id: 123, source_commit: publication.source_commit };
+    deploy: async ({ onSourcePrepared, onPrepared }) => {
+      uploads++;
+      await onSourcePrepared({ source_commit: publication.source_commit, source_parent: 'b'.repeat(40) });
+      checkpointed.resolve(); await release.promise;
+      try { await onPrepared({ source_commit: publication.source_commit }); }
+      catch { throw new SubmissionCheckpointError(); }
+      assert.fail('Shutdown must stop before dispatch');
+    },
+    findDeployment: async () => null,
+    resumePrepared: async ({ source_commit, source_parent, onPrepared }) => {
+      assert.equal(source_commit, publication.source_commit); assert.equal(source_parent, 'b'.repeat(40));
+      await onPrepared({ source_commit }); dispatches++;
+      return { run_id: 123, source_commit };
     },
   });
-  const accepted = await f.product.createDeployment(input, 'shutdown-source');
-  await entered.promise;
-  const closing = f.product.close();
-  uploaded.resolve(); await closing;
+  const accepted = await f.product.createDeployment(input, 'source-shutdown');
+  await checkpointed.promise;
+  const closing = f.product.close(); release.resolve(); await closing;
   f.product = await createProductService(f.options);
   const done = await until(() => f.product.getDeployment(accepted.id), row => row.status === 'succeeded');
   assert.equal(done.source_commit, publication.source_commit);
-  assert.equal(done.ci.run_id, '123'); assert.equal(sends, 1);
+  assert.equal(uploads, 1); assert.equal(dispatches, 1); assert.equal(f.counts().cdCalls, 1);
 });
 
-test('local source checkpoint errors are never reported as GitHub communication errors', () => {
-  const error = new SubmissionError('source_checkpoint', new Error('private storage path'));
-  assert.equal(error.code, 'SOURCE_CHECKPOINT_FAILED');
-  assert.equal(error.reason, 'local_checkpoint_failure');
-  assert.equal(error.outcomeUnknown, false);
-  assert.equal(error.upstream_status, null);
-  assert.doesNotMatch(error.message, /GitHub|private/);
+test('source-ref acknowledgement loss recovers a saved source instead of failing permanently', async t => {
+  let uploads = 0, resumes = 0;
+  const f = await fixture(t, {
+    deploy: async ({ onSourcePrepared }) => {
+      uploads++; await onSourcePrepared({ source_commit: publication.source_commit, source_parent: 'b'.repeat(40) });
+      throw new SubmissionError('source_ref', new TypeError('private transport detail'));
+    },
+    findDeployment: async () => null,
+    resumePrepared: async ({ source_commit, onPrepared }) => {
+      resumes++; await onPrepared({ source_commit }); return { run_id: 123, source_commit };
+    },
+  });
+  const accepted = await f.product.createDeployment(input, 'source-lost-ack');
+  const done = await until(() => f.product.getDeployment(accepted.id), row => row.status === 'succeeded');
+  assert.equal(uploads, 1); assert.equal(resumes, 1);
+  assert.ok(!JSON.stringify(done).includes('private transport detail'));
+});
+
+function preparedService(mode, checkpoint = async () => {}) {
+  const binding = { operation_id: '11111111-1111-4111-8111-111111111111', source_commit: 'a'.repeat(40), source_parent: 'b'.repeat(40), app: 'demo-app', target_id: 'demo', onPrepared: checkpoint };
+  const counts = { patches: 0, dispatches: 0 };
+  const service = createDeploymentService({ token: 'fixture', owner: 'org', repo: 'apps', targetId: 'demo' }, async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith('/git/commits/' + binding.source_commit)) return Response.json({ message: `feat: add demo/demo-app\n\nRailshot-Request: ${binding.operation_id}\nRailshot-Target: demo`, parents: [{ sha: mode === 'wrong-parent' ? 'c'.repeat(40) : binding.source_parent }] });
+    if (path.endsWith('/runs')) return Response.json({ total_count: mode === 'existing' ? 1 : 0, workflow_runs: mode === 'existing' ? [{ id: 123, head_sha: binding.source_commit, head_branch: 'main', event: 'workflow_dispatch', path: '.github/workflows/railshot-deploy.yml', run_attempt: 1, display_title: `railshot:demo/demo-app:demo:${binding.source_commit}` }] : [] });
+    if (path.endsWith('/git/ref/heads/main')) return Response.json({ object: { sha: mode === 'pending' ? binding.source_parent : mode === 'ahead' || mode === 'conflict' ? 'c'.repeat(40) : binding.source_commit } });
+    if (path.includes('/compare/')) return Response.json({ status: mode === 'ahead' ? 'ahead' : 'diverged' });
+    if (path.endsWith('/git/refs/heads/main')) { counts.patches++; assert.equal(JSON.parse(options.body).force, false); return Response.json({}); }
+    if (path.endsWith('/dispatches')) { counts.dispatches++; return Response.json({ workflow_run_id: 123 }); }
+    assert.fail(path);
+  });
+  return { service, binding, counts };
+}
+
+for (const mode of ['pending', 'published', 'existing']) test(`prepared source reconciliation: ${mode}`, async () => {
+  let checkpoints = 0;
+  const f = preparedService(mode, async () => { checkpoints++; });
+  const result = await f.service.resumePrepared(f.binding);
+  assert.equal(result.run_id, 123);
+  assert.equal(f.counts.patches, mode === 'pending' ? 1 : 0);
+  assert.equal(f.counts.dispatches, mode === 'existing' ? 0 : 1);
+  assert.equal(checkpoints, mode === 'existing' ? 0 : 1);
+});
+for (const mode of ['conflict', 'ahead', 'wrong-parent']) test(`prepared source refuses ${mode} without dispatch`, async () => {
+  const f = preparedService(mode);
+  await assert.rejects(f.service.resumePrepared(f.binding), { code: mode === 'wrong-parent' ? 'CI_BINDING_MISMATCH' : 'SOURCE_REF_CONFLICT' });
+  assert.deepEqual(f.counts, { patches: 0, dispatches: 0 });
+});
+test('local source checkpoint failure is not labeled as a GitHub communication error', async () => {
+  const f = preparedService('published', async () => { throw new Error('Submission interrupted before dispatch'); });
+  await assert.rejects(f.service.resumePrepared(f.binding), error => error.code === 'CI_SUBMISSION_INTERRUPTED' && error.reason === 'local_interruption' && !error.message.includes('GitHub 통신'));
+  assert.equal(f.counts.dispatches, 0);
+});
+
+test('restart only requeues protocol-2 source work that could not have dispatched', async t => {
+  const { createProductStore } = await import('../src/product-store.js');
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-source-checkpoint-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let store = await createProductStore(directory);
+  await store.transaction(state => {
+    for (const [id, extra] of Object.entries({ fresh: {}, legacy: { dispatch: { state: 'preparing' } }, deleting: { deletion_requested: true }, requesting: { dispatch: { version: 2, state: 'requesting' }, source_commit: 'a'.repeat(40) } })) {
+      state.operations[id] = { id, kind: 'deployments', status: 'running', stage: 'ci', created_at: new Date().toISOString(),
+        dispatch: { version: 2, state: 'preparing' }, ci: { run_id: null },
+        queue: { sequence: 1, enqueued_at: new Date().toISOString(), started_at: new Date().toISOString() }, ...extra };
+    }
+  });
+  await store.close(); store = await createProductStore(directory);
+  try {
+    const rows = store.read().operations;
+    assert.equal(rows.fresh.status, 'queued'); assert.equal(rows.fresh.queue.started_at, undefined);
+    assert.equal(rows.legacy.status, 'failed'); assert.equal(rows.deleting.status, 'failed');
+    assert.equal(rows.requesting.status, 'unknown'); assert.equal(rows.requesting.dispatch.state, 'requesting');
+  } finally { await store.close(); }
 });

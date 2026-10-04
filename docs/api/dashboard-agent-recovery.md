@@ -229,3 +229,21 @@ API·대시보드를 먼저 배포한 뒤 CI가 참조하는 플랫폼 커밋을
 새 이벤트 이름을 거부하므로 CI 생산자만 먼저 승격하지 않는다. 기존 CI에는 변경 파일 이벤트가
 없으므로 실행 metadata까지만 표시하고 적용 파일·복구 성공을 추정하지 않는다. 배포 여부와
 실제 클라우드 검증은 이 PR의 로컬 테스트와 별개다.
+
+## Source preparation and process restart
+
+Submission protocol 2 persists the request-bound source commit and parent before
+updating the source branch. `source_prepared` proves that CI dispatch has not
+started. After restart, the worker checks for an existing matching run, verifies
+the commit/request/target binding and exact branch head, and sends the missing
+dispatch only after saving `requesting`. Changed branches are blocked rather than overwritten or dispatched with a different workflow head.
+A saved `requesting` record is ambiguous: recovery only looks up the original run;
+it never blindly repeats a dispatch after a lost response. Pre-checkpoint source
+work may be rebuilt from saved input only for protocol-2 queued deployments.
+Legacy failed submissions without a durable commit remain operator-reviewed.
+
+Local checkpoint interruptions use `CI_SUBMISSION_INTERRUPTED`, not a GitHub
+communication error. API failure logs preserve only allowlisted exception types
+and transport codes, without raw exception text. Every 30 seconds and at shutdown,
+`api.runtime_observation` records event-loop max/p99 delay, interval CPU time, RSS
+and shutdown signal to distinguish a stalled API from an upstream error.
