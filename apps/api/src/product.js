@@ -74,7 +74,7 @@ function checkFree(state, sessionId = null, except = null) {
     { retryable: blocker.status !== 'unknown', admission });
 }
 
-export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 5000, unknownGraceMs = 60_000, maxConcurrentDeployments = 16, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 5000, unknownGraceMs = 60_000, maxConcurrentDeployments = 3, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const targetId = target?.id || service?.targetId;
   if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
   const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
@@ -317,7 +317,7 @@ export async function createProductService({ service, directory, target, provide
   function pump() {
     if (pumping || releasePaused || abort.signal.aborted) return pumping;
     // Read-only CI retries retain an admission slot, even between polls. Otherwise
-    // a queue of 100 requests would dispatch 100 builds despite a limit of 16.
+    // a queue of 100 requests would dispatch 100 builds despite the configured limit.
     const admitted = (row) => row.status === 'running'
       || row.status === 'unknown' && !row.queue?.released_at;
     const snapshot = store.read(), rows = Object.values(snapshot.operations);
