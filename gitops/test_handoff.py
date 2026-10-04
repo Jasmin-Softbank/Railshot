@@ -43,6 +43,8 @@ class HandoffTest(unittest.TestCase):
                       'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
             receipt = prepare()
             result = render(root, target)
+            container = result['workload']['items'][0]['spec']['template']['spec']['containers'][0]
+            self.assertFalse(container['securityContext']['readOnlyRootFilesystem'])
             spec['services'][0]['storage'] = {'mountPath': '/var/opt/memos', 'sizeGi': 1}
             prepare()
             persistent = render(root, target)

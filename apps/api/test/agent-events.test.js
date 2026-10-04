@@ -198,12 +198,12 @@ test('declared optional agent budget is bounded and preserved without fabricatin
   const summary = summarizeAgentEvents(observed);
   assert.deepEqual(summary.agent_budget, started.agent_budget);
   assert.equal(summary.sdk_invocations, 0);
-  for (const budget of [{ enabled: true, max_invocations: 5 }, { enabled: false, max_invocations: 4 },
+  for (const budget of [{ enabled: true, max_invocations: 17 }, { enabled: false, max_invocations: 4 },
     { enabled: true, max_invocations: '2' }, { enabled: true, max_invocations: 2, command: 'raw-secret-canary' }]) {
     const bad = fixture(); bad.envelope.items = [{ ...started, agent_budget: budget }]; bad.save();
     assert.equal((await bad.read()).reason, 'invalid_payload');
   }
-  for (const limit of [0, 1, 2, 3]) {
+  for (const limit of [0, 1, 2, 3, 10, 16]) {
     const older = fixture();
     older.envelope.items = [{ ...started, agent_budget: { enabled: limit > 0, max_invocations: limit } }]; older.save();
     assert.equal((await older.read()).state, 'live', 'older and disabled budgets remain compatible');

@@ -35,15 +35,15 @@ it, and includes its hash, gate list and subsequent written files/verdict in
 raw model planning text remain in the private run directory. Every changed
 attempt reruns the deterministic gates from L0. The loop supplies the configured
 total attempt count.
-The CLI uses `--max-attempts 0|1|2` for fixers and `--max-packaging-attempts 0|1|2`
+The CLI uses `--max-attempts 0..8` for fixers and `--max-packaging-attempts 0..8`
 for the initial adapter. Neither role may borrow the other role's unused slots:
-an existing spec permits at most two fixer invocations even when the adapter is
-unused. Packaging `0` disables model-based adaptation but keeps deterministic
+an existing spec uses only the configured fixer allowance. The workflow defaults
+to two adapter and eight fixer invocations; CLI defaults remain two each. Packaging `0` disables model-based adaptation but keeps deterministic
 packaging. Repair `0` runs only deterministic checks even when packaging is `2`,
-without model credentials or SDK installation. A safely rejected adapter can replan within its two packaging slots and cannot
+without model credentials or SDK installation. A safely rejected adapter can replan within its configured packaging slots and cannot
 switch roles to borrow fixer slots. Safe fixer replans consume fixer slots.
-Rejected proposals consume the same role slots, and an unchanged failure signature stops
-the run sooner. Completed checkpoints consume their original slots on resume;
+Rejected proposals consume the same role slots. A repeated failure signature does not
+stop repair before the configured allowance is exhausted. Completed checkpoints consume their original slots on resume;
 changing either configured limit rejects the resume binding.
 
 A completed model response rejected by schema or patch validation can consume a
@@ -106,7 +106,7 @@ gate success. The trusted parent also publishes at most 60 recent safe events to
 a `Railshot agent events` GitHub Check, bound to the source commit, workflow run,
 run attempt, tenant, app and target. Its completion is neutral, not gate success.
 `loop.started` and `loop.completed` include `agent_budget` with `enabled` and
-`max_invocations` (`0`, `1`, `2`, `3` or `4`). The default declaration of four is not an
+`max_invocations` (an integer from `0` to `16`). The workflow default declaration of ten is not an
 observed count. Final `sdk_invocations` counts only SDK invocations
 established by receipts; an uncertain count remains null. Model requests within an
 SDK invocation are separate. `evidence.json` retains the declared budget, while

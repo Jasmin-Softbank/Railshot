@@ -75,7 +75,7 @@ class ChecksProgressTest(unittest.TestCase):
 
     def test_loop_budget_is_optional_bounded_and_survives_check_restore(self):
         self.assertNotIn('agent_budget', progress.row(event('loop.started')))
-        for limit in (0, 1, 2, 3, 4):
+        for limit in (0, 1, 2, 3, 4, 10, 16):
             budget = {'enabled': limit > 0, 'max_invocations': limit}
             for name in ('loop.started', 'loop.completed'):
                 with self.subTest(limit=limit, event=name):
@@ -84,7 +84,7 @@ class ChecksProgressTest(unittest.TestCase):
                     self.assertIsNone(row['sdk_invocations'])
                     row['sequence'] = 1
                     self.assertEqual(progress.restored_row(row), row)
-        for budget in (None, {}, {'enabled': True, 'max_invocations': 5},
+        for budget in (None, {}, {'enabled': True, 'max_invocations': 17},
                        {'enabled': True, 'max_invocations': 0}, {'enabled': False, 'max_invocations': 2},
                        {'enabled': 1, 'max_invocations': 1}, {'enabled': True, 'max_invocations': True},
                        {'enabled': True, 'max_invocations': 2, 'token': 'sentinel'}):
