@@ -24,12 +24,6 @@ export function hasDeploymentIssue(record) {
   return Boolean(record.error) || ['failed', 'blocked', 'unknown', 'awaiting_input', 'publication_unverified'].includes(record.status)
     || [record.ci?.state, record.environment?.status, record.cd?.state].some((state) => ['failed', 'blocked', 'unknown'].includes(state));
 }
-// An agent can be repairing a running build, or have repaired a now-successful deployment.
-export function hasProcessingDetail(record) {
-  return hasDeploymentIssue(record) || Boolean(record.agent_activity_summary || record.agent_activity)
-    || (record.kind !== 'builds' && record.status === 'running' && record.stage === 'ci')
-    || Boolean(record.telemetry?.items?.some(event => event.event_name?.startsWith('agent.')));
-}
 export function deploymentStages(record) {
   const describe = (id, label, value) => ({ id, label, state: value || 'not_started' });
   const failure = ['failed', 'blocked', 'unknown'].includes(record.status) ? record.status : undefined;
@@ -89,17 +83,17 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       if (value) { const chip = node('span', '', 'dh-chip'); chip.append(node('span', label), node('b', value)); metadata.append(chip); }
     }
     const heading = node('div'); heading.append(title, metadata);
-    const actions = node('div', '', 'dh-actions'); actions.append(button('모니터링', () => onMonitor(record)), button('작업 로그', () => onLogs(record)), button('새로고침', () => open(record)));
+    const actions = node('div', '', 'dh-actions'); actions.append(button('모니터링', () => onMonitor(record)), button('작업 로그', () => onLogs(record)), button('새로고침', () => viewport.dataset.pane === 'issue' && progressRecord ? showProgress(progressRecord) : open(record)));
     const url = serviceUrl(application);
     if (url) { const link = node('a', '서비스 접속 ↗', 'primary-button'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; actions.append(link); }
     header.append(heading, actions); host.append(back, header);
     for (const note of notes) { const message = node('p', note, 'dh-note'); message.setAttribute('role', 'status'); host.append(message); }
     const viewport = node('div', '', 'dh-detail-viewport'); viewport.dataset.pane = 'history';
     const overview = node('section', '', 'dh-history-pane'), issuePane = node('section', '', 'dh-issue-pane');
-    overview.setAttribute('aria-label', '접속정보 및 배포내역'); issuePane.setAttribute('aria-label', '선택한 배포의 오류 상세');
+    overview.setAttribute('aria-label', '접속정보 및 배포내역'); issuePane.setAttribute('aria-label', '선택한 배포의 진행 현황');
     issuePane.inert = true; issuePane.setAttribute('aria-hidden', 'true');
     viewport.append(overview, issuePane); host.append(viewport);
-    let issueSequence = 0, issueController, disposePipeline = () => {}, originButton = null, issueRecordId = null;
+    let issueSequence = 0, issueController, disposePipeline = () => {}, originButton = null, issueRecordId = null, progressRecord = null;
     const epoch = generation;
     function switchPane(show, event) {
       viewport.classList.toggle('dh-instant', event?.detail === 0);
@@ -107,34 +101,33 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       overview.inert = show; overview.setAttribute('aria-hidden', String(show));
       issuePane.inert = !show; issuePane.setAttribute('aria-hidden', String(!show));
     }
-    function hideIssue(event) {
+    function hideProgress(event) {
       issueSequence++; issueController?.abort(); disposePipeline();
       switchPane(false, event); originButton?.focus({ preventScroll: true });
     }
-    async function showIssue(item, event, refresh = false) {
-      if (!hasProcessingDetail(item)) return;
+    async function showProgress(item, event) {
       const sequence = ++issueSequence; issueController?.abort(); disposePipeline(); issueController = new AbortController();
       if (issueRecordId !== item.id) selectedStage = null;
-      issueRecordId = item.id;
+      issueRecordId = item.id; progressRecord = item;
       originButton = [...body.querySelectorAll('.dh-issue-trigger')].find((trigger) => trigger.dataset.deploymentId === item.id);
-      const backToHistory = button('‹ 배포내역으로 돌아가기', hideIssue, 'dh-back');
+      const backToHistory = button('‹ 배포내역으로 돌아가기', hideProgress, 'dh-back');
       const issueHeader = node('div', '', 'dh-issue-heading');
-      issueHeader.append(node('h3', '문제 및 처리 내역'), node('p', `${time(item.created_at)} · ${item.id}`, 'dh-note'));
+      issueHeader.append(node('h3', '배포 진행 현황'), node('p', `${time(item.created_at)} · ${item.id}`, 'dh-note'));
       const content = node('div');
       issuePane.replaceChildren(backToHistory, issueHeader, content);
       switchPane(true, event); backToHistory.focus({ preventScroll: true }); viewport.scrollIntoView({ block: 'nearest' });
       try {
-        content.append(node('p', '오류 상세를 불러오고 있습니다.', 'dh-note'));
-        const result = item.id === record.id && !refresh && !record.agent_activity ? [record, diagnostic, question, []] : await readDetail(item, issueController);
+        content.append(node('p', '배포 진행 현황을 불러오고 있습니다.', 'dh-note'));
+        const result = await readDetail(item, issueController);
         if (sequence !== issueSequence || generation !== epoch) return;
         content.replaceChildren(); const [selected, evidence, followup, warnings] = result;
         for (const warning of warnings) content.append(node('p', warning, 'dh-note'));
-        if (!hasProcessingDetail(selected)) { content.append(node('p', '이 배포에는 현재 확인된 오류가 없습니다. 배포내역을 새로고침해 주세요.', 'dh-note')); return; }
-        const pipeline = renderPipeline(selected, evidence, followup, () => showIssue(selected, null, true));
+        progressRecord = selected; issueHeader.append(stateBadge(selected));
+        const pipeline = renderPipeline(selected, evidence, followup, () => showProgress(selected));
         disposePipeline = pipeline.dispose; content.append(pipeline.layout);
       } catch (error) {
         if (sequence !== issueSequence || generation !== epoch) return;
-        content.replaceChildren(node('p', `오류 상세 조회 실패: ${error.message}`, 'dh-error'), button('다시 시도', () => showIssue(item, null, true)));
+        content.replaceChildren(node('p', `배포 진행 현황 조회 실패: ${error.message}`, 'dh-error'), button('다시 시도', () => showProgress(item)));
       }
     }
     cleanup = () => { issueSequence++; issueController?.abort(); disposePipeline(); };
@@ -158,17 +151,15 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       date.append(node('span', time(item.created_at)));
       if (application?.current_deployment_state === 'verified' && application.current_deployment?.id === item.id) { row.className = 'dh-current'; date.append(node('span', '현재', 'dh-tag')); }
       image.append(node('code', imageText(item)));
-      if (hasProcessingDetail(item)) {
-        row.classList.add('dh-issue-row');
-        const trigger = button('', (event) => { event.stopPropagation(); showIssue(item, event); }, 'dh-issue-trigger');
-        trigger.dataset.deploymentId = item.id;
-        trigger.setAttribute('aria-label', `${time(item.created_at)} ${item.app || record.app} 처리 내역 보기`);
-        const arrow = node('span', '→', 'dh-row-arrow'); arrow.setAttribute('aria-hidden', 'true');
-        trigger.append(stateBadge(item));
-        if (item.agent_activity_summary) trigger.append(node('span', `자동 처리 ${item.agent_activity_summary.attempt}회`, 'dh-tag'));
-        trigger.append(arrow); status.append(trigger);
-        row.addEventListener('click', (event) => showIssue(item, event));
-      } else status.append(stateBadge(item));
+      row.classList.add('dh-issue-row');
+      const trigger = button('', (event) => { event.stopPropagation(); showProgress(item, event); }, 'dh-issue-trigger');
+      trigger.dataset.deploymentId = item.id;
+      trigger.setAttribute('aria-label', `${time(item.created_at)} ${item.app || record.app} 배포 진행 현황 보기`);
+      const arrow = node('span', '→', 'dh-row-arrow'); arrow.setAttribute('aria-hidden', 'true');
+      trigger.append(stateBadge(item));
+      if (item.agent_activity_summary) trigger.append(node('span', `자동 처리 ${item.agent_activity_summary.attempt}회`, 'dh-tag'));
+      trigger.append(arrow); status.append(trigger);
+      row.addEventListener('click', (event) => showProgress(item, event));
       row.append(date, image, status); body.append(row);
     }
     table.append(head, body); tableWrap.append(table); historyPanel.append(tableWrap, node('p', '현재 불러온 페이지의 같은 앱·배포환경 기록입니다. 다른 기록은 목록의 이전·다음 페이지에서 확인하세요.', 'dh-table-note'));
@@ -176,9 +167,12 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
     h1.focus();
   }
   function renderPipeline(record, diagnostic, question, refresh) {
-    const stages = deploymentStages(record);
+    const stages = deploymentStages(record), hasIssue = hasDeploymentIssue(record);
+    if (!hasIssue) question = null;
     if (!stages.some((stage) => stage.id === selectedStage)) selectedStage = null;
-    selectedStage ||= (record.agent_activity ? 'build' : null) || stages.find((stage) => ['failed', 'blocked', 'unknown'].includes(stage.state))?.id || (question ? 'deploy' : stages.at(-1).id);
+    selectedStage ||= stages.find((stage) => ['failed', 'blocked', 'unknown'].includes(stage.state))?.id
+      || stages.find((stage) => ['running', 'progressing', 'queued', 'awaiting_input'].includes(stage.state))?.id
+      || (record.agent_activity ? 'build' : null) || (question ? question.stage || 'deploy' : stages.at(-1).id);
     const logLayout = node('div', '', 'dh-log-layout'), stepList = node('div', '', 'dh-steps'), detail = node('section', '', 'dh-stage-detail');
     stepList.setAttribute('role', 'group'); stepList.setAttribute('aria-label', '배포 단계');
     let disposeForm = () => {}, activity = record.agent_activity || null, card = null, stopped = false, timer, polling = false;
@@ -217,7 +211,7 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       for (const item of stepList.querySelectorAll('button[data-stage]')) item.setAttribute('aria-pressed', String(item.dataset.stage === stage.id));
       detail.replaceChildren(); const heading = node('h3', `${stage.label} · ${stageLabel(stage.state)}`); heading.tabIndex = -1; detail.append(heading);
       const failureStage = record.stage === 'ci' ? 'build' : record.stage === 'environment' ? 'environment' : 'deploy';
-      if (!question && stage.id === failureStage && record.error?.message) { detail.append(node('h4', '원인'), node('p', record.error.message, 'dh-cause')); }
+      if (hasIssue && !question && stage.id === failureStage && record.error?.message) { detail.append(node('h4', '원인'), node('p', record.error.message, 'dh-cause')); }
       // The optional question adapter binds the proposed form to one deployment and stage.
       if (question && stage.id === (question.stage || failureStage)) {
         detail.append(node('h4', '원인 요약'), node('p', question.summary.replace(/\s+/g, ' '), 'dh-cause'), node('h4', '근거'));
@@ -241,7 +235,7 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       if (question && stage.id === (question.stage || failureStage)) {
         const formHost = node('div'); detail.append(formHost); disposeForm = renderRecovery(formHost, { question, deploymentId: record.id,
           submit: recovery.submit ? submitOnce : null, onRefresh: refresh, preview, submissionState: submissions.get(submissionKey(question)) });
-      } else if (['failed', 'blocked', 'unknown'].includes(stage.state)) detail.append(node('p', '해결 방법은 준비되는 대로 표시됩니다.', 'dh-note'));
+      } else if (hasIssue && ['failed', 'blocked', 'unknown'].includes(stage.state)) detail.append(node('p', '해결 방법은 준비되는 대로 표시됩니다.', 'dh-note'));
       detail.append(button('로그 전체 보기', () => onLogs(record), 'text-button'));
       if (downloads && record.kind !== 'builds') { const disclosure = node('details'); disclosure.append(node('summary', '배포 소스 다운로드'), downloads(record)); detail.append(disclosure); }
       if (focus) heading.focus({ preventScroll: true });
