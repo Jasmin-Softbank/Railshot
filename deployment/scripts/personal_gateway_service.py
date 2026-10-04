@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Root-only WireGuard gateway service on an authenticated local Unix socket."""
 import argparse
+import errno
+import fcntl
 import hmac
 from http.server import BaseHTTPRequestHandler
 import json
@@ -134,12 +136,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def answer(self, status, value):
         body = json.dumps(value, separators=(',', ':')).encode()
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # A probe may be terminated by the container runtime while the
+            # response is in flight. Never turn that into a server traceback.
+            return
 
     def authenticated(self, *, mutation=False):
         authorization = self.headers.get('Authorization', '')
@@ -187,22 +194,86 @@ class Handler(BaseHTTPRequestHandler):
             self.answer(422, {'status': 'failed', 'error': 'GATEWAY_OPERATION_FAILED'})
 
 
+def acquire_instance_lock(path, owner_uid=None):
+    path = Path(path)
+    owner_uid = os.geteuid() if owner_uid is None else owner_uid
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == owner_uid
+                and stat.S_IMODE(info.st_mode) == 0o600, 'GATEWAY_LOCK_UNSAFE')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('GATEWAY_ALREADY_RUNNING') from None
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def remove_stale_socket(path, client_gid, owner_uid=None):
+    """Remove only an expected, inactive socket left by this root service."""
+    path = Path(path)
+    owner_uid = os.geteuid() if owner_uid is None else owner_uid
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    require(stat.S_ISSOCK(info.st_mode) and info.st_uid == owner_uid and info.st_gid == client_gid
+            and stat.S_IMODE(info.st_mode) == 0o660, 'GATEWAY_SOCKET_UNSAFE')
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(1)
+        try:
+            client.connect(str(path))
+        except OSError as error:
+            if error.errno == errno.ENOENT:
+                return False
+            require(error.errno == errno.ECONNREFUSED, 'GATEWAY_SOCKET_ACTIVE')
+        else:
+            raise ValueError('GATEWAY_ALREADY_RUNNING')
+    # Refuse replacement races: only unlink the exact inode inspected above.
+    try:
+        observed = path.lstat()
+    except FileNotFoundError:
+        return False
+    require((observed.st_dev, observed.st_ino) == (info.st_dev, info.st_ino)
+            and stat.S_ISSOCK(observed.st_mode) and observed.st_uid == owner_uid
+            and observed.st_gid == client_gid and stat.S_IMODE(observed.st_mode) == 0o660,
+            'GATEWAY_SOCKET_CHANGED')
+    path.unlink()
+    return True
+
+
 def serve(socket_path, config_path, token_path, client_uid):
     require(os.geteuid() == 0, 'GATEWAY_ROOT_REQUIRED')
     path = Path(socket_path)
-    require(path.is_absolute() and not path.exists() and path.parent.is_dir()
-            and path.parent.stat().st_uid == 0 and not path.parent.stat().st_mode & 0o007)
+    parent = path.parent
+    parent_info = parent.lstat()
+    require(path.is_absolute() and stat.S_ISDIR(parent_info.st_mode)
+            and parent_info.st_uid == 0 and parent_info.st_gid == client_uid
+            and not parent_info.st_mode & 0o027)
     config = json.loads(gateway.private(config_path))
     gateway.validate(config)
     token = private_token(token_path)
-    with UnixHTTPServer(str(path), Handler, config=config, token=token, client_uid=client_uid) as server:
-        require(path.stat().st_uid == 0 and path.stat().st_gid == client_uid,
-                'GATEWAY_SOCKET_OWNERSHIP_INVALID')
-        os.chmod(path, 0o660)
-        try:
-            server.serve_forever(poll_interval=0.5)
-        finally:
-            path.unlink(missing_ok=True)
+    lock = acquire_instance_lock(parent / 'gateway.lock')
+    try:
+        remove_stale_socket(path, client_uid)
+        with UnixHTTPServer(str(path), Handler, config=config, token=token, client_uid=client_uid) as server:
+            info = path.lstat()
+            require(stat.S_ISSOCK(info.st_mode) and info.st_uid == 0 and info.st_gid == client_uid,
+                    'GATEWAY_SOCKET_OWNERSHIP_INVALID')
+            os.chmod(path, 0o660)
+            try:
+                server.serve_forever(poll_interval=0.5)
+            finally:
+                current = path.lstat() if path.exists() else None
+                if current and stat.S_ISSOCK(current.st_mode) and current.st_uid == 0 \
+                        and current.st_gid == client_uid:
+                    path.unlink()
+    finally:
+        os.close(lock)
 
 
 def probe(socket_path, token_path):
@@ -212,7 +283,13 @@ def probe(socket_path, token_path):
         client.settimeout(5)
         client.connect(socket_path)
         client.sendall(request)
-        response = client.recv(4096)
+        response = bytearray()
+        while len(response) <= MAX_REQUEST:
+            part = client.recv(4096)
+            if not part:
+                break
+            response.extend(part)
+    require(len(response) <= MAX_REQUEST, 'GATEWAY_RESPONSE_INVALID')
     require(response.startswith(b'HTTP/1.0 200 ') or response.startswith(b'HTTP/1.1 200 '), 'GATEWAY_NOT_READY')
 
 

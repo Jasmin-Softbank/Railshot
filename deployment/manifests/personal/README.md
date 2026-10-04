@@ -17,12 +17,12 @@ docker compose -f deployment/manifests/personal/production.compose.yaml up -d
 docker compose -f deployment/manifests/personal/production.compose.yaml ps
 ```
 
-one-shot `prepare` 컨테이너는 소켓 볼륨을 `root:1000`과 0770으로 만든 뒤 종료합니다. 게이트웨이는 소유권 변경 권한 없이도 `root:1000` 소켓을 만들며 API가 그 소켓에 접근합니다. 실제 볼륨과 컨테이너 권한은 비밀값을 출력하지 않는 다음 검사로 확인합니다.
+one-shot `prepare` 컨테이너는 소켓 볼륨을 `root:1000`과 0770으로 만든 뒤 종료합니다. 게이트웨이는 시작할 때 이를 0750으로 제한하고 `root:1000`과 0660인 소켓을 만듭니다. API는 디렉터리를 통과해 소켓에 연결할 수 있지만 잠금 파일이나 소켓을 바꿀 수 없습니다. 실행 중인 실제 볼륨과 컨테이너 권한은 비밀값을 출력하지 않는 다음 검사로 확인합니다.
 
 ```sh
 docker compose -f deployment/manifests/personal/production.compose.yaml run --rm --no-deps \
   --entrypoint sh gateway -ec \
-  'test "$(stat -c %u:%g:%a /run/railshot-personal-gateway)" = 0:1000:770'
+  'test "$(stat -c %u:%g:%a /run/railshot-personal-gateway)" = 0:1000:750'
 docker compose -f deployment/manifests/personal/production.compose.yaml exec api \
   python3 /app/deployment/scripts/personal-production-preflight.py \
   --config /var/lib/railshot/config/personal.json --test-allow-http

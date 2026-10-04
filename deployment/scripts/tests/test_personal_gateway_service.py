@@ -87,6 +87,10 @@ def test_authenticated_socket_forwards_only_bounded_requests_and_health_is_side_
                 locked.assert_called_once_with(config)
                 applied.assert_called_once_with(config, {}, service.gateway.run)
                 execute.assert_called_once()
+                token_file = Path(temporary) / 'ipc-token'
+                token_file.write_text(token + '\n')
+                token_file.chmod(0o600)
+                service.probe(path, token_file)
                 applied.side_effect = ValueError('GATEWAY_INTERFACE_MISSING')
                 status, value = response(path, 'GET', '/healthz', token)
                 assert status == 503 and value['error'] == 'GATEWAY_NOT_READY'
@@ -94,6 +98,82 @@ def test_authenticated_socket_forwards_only_bounded_requests_and_health_is_side_
             server.shutdown()
             server.server_close()
             worker.join(timeout=5)
+
+
+def test_response_disconnect_during_headers_does_not_escape_handler():
+    handler = object.__new__(service.Handler)
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda *_args: None
+
+    def disconnected():
+        raise BrokenPipeError
+
+    handler.end_headers = disconnected
+    handler.answer(200, {'status': 'ready'})
+
+
+def test_stale_socket_recovery_refuses_live_and_unsafe_paths():
+    with tempfile.TemporaryDirectory(dir='/private/tmp' if Path('/private/tmp').is_dir() else None) as temporary:
+        root = Path(temporary)
+        stale = root / 'stale.sock'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as abandoned:
+            abandoned.bind(str(stale))
+        stale.chmod(0o660)
+        assert service.remove_stale_socket(stale, stale.lstat().st_gid) is True
+        assert not stale.exists()
+
+        live = root / 'live.sock'
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(live))
+            listener.listen(1)
+            live.chmod(0o660)
+            try:
+                service.remove_stale_socket(live, live.lstat().st_gid)
+            except ValueError as error:
+                assert str(error) == 'GATEWAY_ALREADY_RUNNING'
+            else:
+                raise AssertionError('live gateway socket was removed')
+            assert live.exists()
+
+        unsafe = root / 'gateway.sock'
+        unsafe.write_text('not a socket')
+        unsafe.chmod(0o660)
+        try:
+            service.remove_stale_socket(unsafe, unsafe.lstat().st_gid)
+        except ValueError as error:
+            assert str(error) == 'GATEWAY_SOCKET_UNSAFE'
+        else:
+            raise AssertionError('regular file was removed as a stale socket')
+        assert unsafe.is_file()
+
+        target = root / 'foreign-target'
+        target.write_text('keep')
+        link = root / 'linked.sock'
+        link.symlink_to(target)
+        try:
+            service.remove_stale_socket(link, target.lstat().st_gid)
+        except ValueError as error:
+            assert str(error) == 'GATEWAY_SOCKET_UNSAFE'
+        else:
+            raise AssertionError('symlink was followed as a stale socket')
+        assert link.is_symlink() and target.read_text() == 'keep'
+
+
+def test_instance_lock_rejects_a_second_server_and_is_reusable_after_close():
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / 'gateway.lock'
+        first = service.acquire_instance_lock(path)
+        try:
+            try:
+                service.acquire_instance_lock(path)
+            except ValueError as error:
+                assert str(error) == 'GATEWAY_ALREADY_RUNNING'
+            else:
+                raise AssertionError('second gateway acquired the instance lock')
+        finally:
+            os.close(first)
+        second = service.acquire_instance_lock(path)
+        os.close(second)
 
 
 def test_initialize_normalizes_new_fsgroup_pvc_before_writing_private_state():
