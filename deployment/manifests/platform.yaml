@@ -310,14 +310,20 @@ spec:
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: {name: railshot-personal-gateway, namespace: railshot-system}
+metadata:
+  name: railshot-personal-gateway
+  namespace: railshot-system
+  annotations: {argocd.argoproj.io/sync-options: Prune=false}
 spec:
   accessModes: [ReadWriteOnce]
   resources: {requests: {storage: 1Gi}}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: {name: railshot-personal-wireguard, namespace: railshot-system}
+metadata:
+  name: railshot-personal-wireguard
+  namespace: railshot-system
+  annotations: {argocd.argoproj.io/sync-options: Prune=false}
 spec:
   accessModes: [ReadWriteOnce]
   resources: {requests: {storage: 1Gi}}
