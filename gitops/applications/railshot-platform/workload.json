@@ -46,7 +46,7 @@
             "containers": [
               {
                 "name": "dashboard",
-                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:29b02f694dbc15654cb69322c8d5b997d37b5faee6c1989ff722861f272c51bf",
+                "image": "ghcr.io/jasmin-softbank/railshot-dashboard@sha256:4c4277b22b77767068185a494a56d2ebbb0a987dea8b7e8988cc984fd82f7055",
                 "ports": [
                   {
                     "name": "http",
@@ -184,7 +184,7 @@
             "containers": [
               {
                 "name": "mcp",
-                "image": "ghcr.io/jasmin-softbank/railshot-mcp@sha256:89dbfc1dc717c5b346785c3155d31254c82f80bdaa4f1adf2a6a71f677650e1d",
+                "image": "ghcr.io/jasmin-softbank/railshot-mcp@sha256:a50d34f6ce43273c9cfd080ded9f38fe5eae1c8a46cb6bf066a954e1bb58ade6",
                 "command": [
                   "node",
                   "src/remote-mcp.js"
@@ -369,7 +369,7 @@
             "initContainers": [
               {
                 "name": "private-config",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:1bffae978a30d8544b34c3f6c3e9c225c3a4e796ff3eddd2dca5a88a7117f545",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:6ec7857558a69f81b9e8946b9ebe2cd22966c8c4c5d516ce6bb319f9dd6d2322",
                 "command": [
                   "node",
                   "/app/apps/api/prepare-state.js"
@@ -439,7 +439,7 @@
             "containers": [
               {
                 "name": "api",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:1bffae978a30d8544b34c3f6c3e9c225c3a4e796ff3eddd2dca5a88a7117f545",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:6ec7857558a69f81b9e8946b9ebe2cd22966c8c4c5d516ce6bb319f9dd6d2322",
                 "ports": [
                   {
                     "name": "http",
@@ -600,16 +600,16 @@
                   },
                   {
                     "name": "RAILSHOT_POD_TEMPLATE_ID",
-                    "value": "a2b1bcb32e7b89e78841aa611a49d494f774c1c32bfe8188c2ca949634ec1f65"
+                    "value": "e7c2af66b7ef38e44fc4e02afbdd7bf40c10295b44b153290a7a97a2843e0505"
                   }
                 ],
                 "resources": {
                   "requests": {
-                    "cpu": "100m",
+                    "cpu": "500m",
                     "memory": "256Mi"
                   },
                   "limits": {
-                    "cpu": "1",
+                    "cpu": "2",
                     "memory": "1Gi"
                   }
                 },
@@ -653,7 +653,8 @@
                       }
                     ]
                   },
-                  "initialDelaySeconds": 10
+                  "initialDelaySeconds": 10,
+                  "timeoutSeconds": 5
                 },
                 "startupProbe": {
                   "httpGet": {
@@ -681,8 +682,8 @@
                       }
                     ]
                   },
-                  "periodSeconds": 2,
-                  "timeoutSeconds": 2
+                  "periodSeconds": 5,
+                  "timeoutSeconds": 5
                 }
               }
             ],
@@ -885,7 +886,7 @@
             "containers": [
               {
                 "name": "prepare",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:1bffae978a30d8544b34c3f6c3e9c225c3a4e796ff3eddd2dca5a88a7117f545",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:6ec7857558a69f81b9e8946b9ebe2cd22966c8c4c5d516ce6bb319f9dd6d2322",
                 "command": [
                   "node",
                   "/app/apps/api/src/prepare-release.js"
@@ -897,7 +898,7 @@
                   },
                   {
                     "name": "RAILSHOT_DESIRED_TEMPLATE_ID",
-                    "value": "a2b1bcb32e7b89e78841aa611a49d494f774c1c32bfe8188c2ca949634ec1f65"
+                    "value": "e7c2af66b7ef38e44fc4e02afbdd7bf40c10295b44b153290a7a97a2843e0505"
                   }
                 ],
                 "resources": {
