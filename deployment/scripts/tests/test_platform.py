@@ -169,7 +169,8 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(environment['RAILSHOT_OBSERVER_CONFIG'], '/var/lib/railshot/config/observer.json')
         self.assertIn({'name': 'state', 'mountPath': '/var/lib/railshot'}, container['volumeMounts'])
         self.assertEqual(container["readinessProbe"]["httpGet"]["path"], "/readyz")
-        self.assertEqual(container["readinessProbe"]["periodSeconds"], 2)
+        self.assertEqual(container["readinessProbe"]["periodSeconds"], 5)
+        self.assertEqual(container["livenessProbe"]["timeoutSeconds"], 5)
         self.assertTrue(all(item["spec"]["type"] == "ClusterIP" for item in output["items"] if item["kind"] == "Service"))
         public = module.render(images, "k3s-aws", 31080)
         services = {item["metadata"]["name"]: item["spec"] for item in public["items"] if item["kind"] == "Service"}
