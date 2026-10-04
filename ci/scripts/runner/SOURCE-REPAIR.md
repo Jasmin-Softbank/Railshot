@@ -1,9 +1,9 @@
 # Source repair in customer CI
 
-The workflow and CLI default to one initial adapter invocation plus at most two
-fixer invocations, with a hard cap of three SDK invocations. The existing operator
+The workflow and CLI default to at most two initial adapter invocations plus at most two
+fixer invocations, with a hard cap of four SDK invocations. The existing operator
 variable `RAILSHOT_MAX_REPAIR_ATTEMPTS` bounds fixers (`0|1|2`, default `2`), while
-`RAILSHOT_MAX_PACKAGING_ATTEMPTS` bounds adapters (`0|1`, default `1`). Repair `0`
+`RAILSHOT_MAX_PACKAGING_ATTEMPTS` bounds adapters (`0|1|2`, default `2`). Repair `0`
 remains the explicit switch that disables all SDK work, including the adapter.
 Out-of-range role limits are rejected before SDK setup. The workflow retains source scope
 and the CLI retains packaging scope; the budget does not broaden either.
@@ -35,19 +35,19 @@ it, and includes its hash, gate list and subsequent written files/verdict in
 raw model planning text remain in the private run directory. Every changed
 attempt reruns the deterministic gates from L0. The loop supplies the configured
 total attempt count.
-The CLI uses `--max-attempts 0|1|2` for fixers and `--max-packaging-attempts 0|1`
+The CLI uses `--max-attempts 0|1|2` for fixers and `--max-packaging-attempts 0|1|2`
 for the initial adapter. Neither role may borrow the other role's unused slots:
 an existing spec permits at most two fixer invocations even when the adapter is
 unused. Packaging `0` disables model-based adaptation but keeps deterministic
-packaging. Repair `0` runs only deterministic checks even when packaging is `1`,
-without model credentials or SDK installation. A rejected adapter exhausts its
-single slot and cannot switch roles to retry. Safe fixer replans consume fixer slots.
+packaging. Repair `0` runs only deterministic checks even when packaging is `2`,
+without model credentials or SDK installation. A safely rejected adapter can replan within its two packaging slots and cannot
+switch roles to borrow fixer slots. Safe fixer replans consume fixer slots.
 Rejected proposals consume the same role slots, and an unchanged failure signature stops
 the run sooner. Completed checkpoints consume their original slots on resume;
 changing either configured limit rejects the resume binding.
 
 A completed model response rejected by schema or patch validation can consume a
-remaining attempt for a fresh fixer plan only when the runner proves zero source
+remaining attempt for a fresh plan by the same role only when the runner proves zero source
 writes. Safe registered validation guidance is recorded in `rejection-N.json`
 and the next failure context. Reference errors include a fixed reason and field
 (e.g. `EVIDENCE_LINE_OUT_OF_RANGE`, `evidence_refs[0].line`) in the existing
@@ -106,7 +106,7 @@ gate success. The trusted parent also publishes at most 60 recent safe events to
 a `Railshot agent events` GitHub Check, bound to the source commit, workflow run,
 run attempt, tenant, app and target. Its completion is neutral, not gate success.
 `loop.started` and `loop.completed` include `agent_budget` with `enabled` and
-`max_invocations` (`0`, `1`, `2` or `3`). The default declaration of three is not an
+`max_invocations` (`0`, `1`, `2`, `3` or `4`). The default declaration of four is not an
 observed count. Final `sdk_invocations` counts only SDK invocations
 established by receipts; an uncertain count remains null. Model requests within an
 SDK invocation are separate. `evidence.json` retains the declared budget, while

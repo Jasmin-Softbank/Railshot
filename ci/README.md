@@ -58,11 +58,11 @@ AI의 책임은 제한된 근거로 수정안을 제안하는 것이다. 호스�
 
 ### 최초 구성 1회와 실패 수정 2회
 
-Actions Variable `RAILSHOT_MAX_PACKAGING_ATTEMPTS`는 최초 구성(adapter)을 최대 `1`회, `RAILSHOT_MAX_REPAIR_ATTEMPTS`는 실패 수정(fixer)을 최대 `2`회 허용한다. 기본값은 각각 `1`, `2`이며 전체 SDK 호출은 최대 `3`회다. 두 역할은 사용하지 않은 상대 역할의 횟수를 빌릴 수 없다. 명세가 이미 있으면 fixer만 최대 2회 호출한다. CLI는 `--max-packaging-attempts 0|1`, `--max-attempts 0|1|2`를 사용한다.
+Actions Variable `RAILSHOT_MAX_PACKAGING_ATTEMPTS`는 최초 구성(adapter)을 최대 `2`회, `RAILSHOT_MAX_REPAIR_ATTEMPTS`는 실패 수정(fixer)을 최대 `2`회 허용한다. 기본값은 각각 `2`, `2`이며 전체 SDK 호출은 최대 `4`회다. 두 역할은 사용하지 않은 상대 역할의 횟수를 빌릴 수 없다. 명세가 이미 있으면 fixer만 최대 2회 호출한다. CLI는 `--max-packaging-attempts 0|1|2`, `--max-attempts 0|1|2`를 사용한다.
 
 기존 끄기 옵션 `RAILSHOT_MAX_REPAIR_ATTEMPTS=0`은 패키징 값과 관계없이 모든 SDK 호출을 끈다. 이때 모델 인증과 SDK 설치 없이 결정적 검사만 실행한다. 패키징 `0`은 adapter 호출을 끄며 규칙 기반 자동 패키징은 계속 실행한다. 초기 adapter 제안이 거부되면 1회 몫을 소진하므로 fixer로 역할을 바꿔 재호출하지 않는다. fixer의 안전한 재계획은 수정 2회 안에서만 가능하다. 검사를 통과한 입력은 예산이 남아 있어도 모델을 호출하지 않는다.
 
-`evidence.json`의 `agent_budget`은 선언한 전체 상한, `budget_used`는 역할별 supervisor 시도, `sdk_invocations`는 기록으로 확인한 SDK 호출 수다. 기본 선언 3은 실제 호출 3을 뜻하지 않는다. SDK 내부 모델 요청 수와 구분하며 확인할 수 없는 횟수는 null로 남긴다. 기존 GitHub Checks의 `loop.started/completed`에도 예산을 전달한다. `max_invocations`의 0~3을 받는 API를 먼저 배포한 뒤 CI 워크플로와 실행기 참조를 승격한다. 플랫폼 코드나 예산이 바뀌면 기존 run을 덮어쓰거나 강제 resume하지 않고 새 run으로 비교한다.
+`evidence.json`의 `agent_budget`은 선언한 전체 상한, `budget_used`는 역할별 supervisor 시도, `sdk_invocations`는 기록으로 확인한 SDK 호출 수다. 기본 선언 4는 실제 호출 4을 뜻하지 않는다. SDK 내부 모델 요청 수와 구분하며 확인할 수 없는 횟수는 null로 남긴다. 기존 GitHub Checks의 `loop.started/completed`에도 예산을 전달한다. `max_invocations`의 0~4을 받는 API를 먼저 배포한 뒤 CI 워크플로와 실행기 참조를 승격한다. 플랫폼 코드나 예산이 바뀌면 기존 run을 덮어쓰거나 강제 resume하지 않고 새 run으로 비교한다.
 
 ### 검증 범위와 측정
 
