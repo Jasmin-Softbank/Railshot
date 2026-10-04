@@ -128,9 +128,9 @@ export const tools = {
   },
 };
 
-export function createToolRunner(api = createApiClient()) {
+export function createToolRunner(api = createApiClient(), catalog = tools) {
   return async function call(name, input) {
-    const tool = tools[name];
+    const tool = catalog[name];
     if (!tool) throw new Error('지원하지 않는 도구입니다.');
     return tool.run(api, tool.schema.parse(input));
   };

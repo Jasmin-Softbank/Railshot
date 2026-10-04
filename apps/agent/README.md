@@ -20,6 +20,47 @@ Node 22 이상에서 실행합니다. 이 패키지의 stdio MCP 서버는 RailS
 
 로컬 stdio MCP 진입점은 `apps/agent/src/mcp.js`입니다. 원격 Streamable HTTP MCP 진입점은 `apps/agent/src/remote-mcp.js`입니다. `apps/api/Dockerfile`의 `mcp` 이미지는 기본적으로 stdio를 실행하며 원격 배포에서는 명령을 `node src/remote-mcp.js`로 바꿉니다. 제품 API의 구형 `/api/deploy`는 CLI 호환 경로로 남아 있지만 MCP 배포에는 사용하지 않습니다.
 
+## 로컬 프로젝트 배포 MCP
+
+로컬 폴더·ZIP을 배포하려면 사용자 컴퓨터에서 **`apps/agent/src/mcp-local.js`**를 실행합니다.
+기존 도구에 `deploy_local_project` 하나를 추가하는 별도 stdio 진입점입니다.
+원격 `/mcp`와 기존 서버용 진입점에는 로컬 파일 경로 도구가 노출되지 않습니다.
+저장소 루트에서 의존성을 설치해야 합니다(`npm ci --ignore-scripts`). `apps/agent`만 복사하면
+공유 파일 패키징 코드를 사용할 수 없습니다. Node 22 이상을 사용합니다.
+
+```sh
+codex mcp add railshot-local --env RAILSHOT_API_URL=https://railshot.io -- node /absolute/path/to/Railshot/apps/agent/src/mcp-local.js
+```
+
+도구 호출 예시:
+
+```json
+{
+  "path": "/home/user/my-app",
+  "app": "my-app",
+  "target_id": "<list_targets에서 선택한 ID>",
+  "idempotency_key": "local-my-app-attempt-1"
+}
+```
+
+- 도구가 지정된 폴더 또는 ZIP을 읽어 기존 `/api/v1/deployments` 업로드 API로 직접 보냅니다.
+  GitHub에 올릴 필요가 없고 소스 내용은 모델에 반환하지 않습니다. 접수 결과에는 파일 수·ZIP 크기·SHA-256만 추가합니다.
+- 기존 CLI 패키징과 API ZIP 검사를 재사용합니다. `.git`, `node_modules` 등은 제외합니다.
+  `.env`, 키 파일, 심볼릭 링크 등은 자동 삭제하지 않고 **전송 전에 거부**하므로 제거한 사본을 지정하세요.
+  ZIP 입력도 검증한 파일만 다시 묶어 제외 항목이 실제 전송 바이트에 남지 않게 합니다.
+- 파일 2,000개·소스 100 MB·ZIP 100 MB 제한을 적용합니다. 비밀 파일 이름 검사는
+  소스에 하드코딩된 모든 비밀값을 탐지하는 기능은 아닙니다.
+- 응답을 잃으면 자동으로 재배포하지 않고 `outcome_unknown=true`를 반환합니다.
+  재확인 시 동일한 소스·앱·대상·요청 키를 유지합니다. 멱등성 판정과 CI/CD 실행은 기존 API가 담당합니다.
+- 배포 후 `resource_id`로 **같은 railshot-local MCP**의 `get_deployment_progress`,
+  `get_app_overview`를 호출합니다. 원격 OAuth/브라우저 세션과 로컬 쿠키 세션은 자동 공유되지 않습니다.
+  로컬에서 만든 배포가 기존 웹/OAuth 세션 내역에 자동으로 나타난다고 가정하면 안 됩니다.
+- 공개 데모 API는 기존 익명 세션 방식을 사용합니다. 보호된 사설 API라면 기존 운영자 인증 구성이
+  필요합니다. 원격 MCP OAuth 토큰을 제품 API의 내부 토큰으로 대신 사용하지 않습니다.
+
+이 기능은 배포 pipeline, 소스 자동 수정, 환경 생성 및 관측 자동 등록을 추가하지 않습니다.
+핵심 검사: `node --test apps/agent/test/local-project.test.js`.
+
 ## ChatGPT·Codex·Claude 원격 연결
 
 운영 플랫폼에서 dashboard, api, mcp 이미지를 함께 배포하면 Nginx가 `https://railshot.io/mcp`를 MCP 서버로 연결합니다. 공개 OAuth 메타데이터는 `/.well-known/oauth-protected-resource/mcp`와 `/.well-known/oauth-authorization-server`에 있습니다. MCP 서버는 내부 API 토큰을 서버 측에서만 사용합니다.
@@ -40,7 +81,7 @@ Node 22 이상에서 실행합니다. 이 패키지의 stdio MCP 서버는 RailS
 - `POST /v1/approvals`, 본문 `{"approval_token":"..."}`: 제안된 인자를 변경하지 않고 MCP 도구로 배포를 한 번 요청합니다. 토큰은 10분 유효하며 같은 토큰 재호출은 제품 API의 같은 `Idempotency-Key`로 처리됩니다.
 - `GET /healthz`: 프로세스 생존만 나타냅니다.
 
-MCP 도구는 `list_options`, `list_targets`, `get_deployment`, `get_deployment_progress`, `get_build`, `deploy_repository`입니다. 마지막 도구의 성공은 **요청 접수**이며 배포 성공이 아닙니다. 배포 완료는 `get_deployment`에서 대상 적용 및 공개 HTTP 검증 후 `status=succeeded`와 URL을 확인해야 합니다. MCP 배포 소스는 공개 GitHub 저장소 URL만 지원합니다. 로컬 폴더·파일·ZIP 업로드 배포, 환경 생성 및 소스 자동 수정은 제공하지 않습니다.
+공통 MCP 도구는 `list_options`, `list_targets`, `get_deployment`, `get_deployment_progress`, `get_build`, `deploy_repository`, `get_app_overview`, `get_deployment_evidence`입니다. 배포 도구의 성공은 **요청 접수**이며 배포 성공이 아닙니다. 배포 완료는 `get_deployment`에서 대상 적용 및 공개 HTTP 검증 후 `status=succeeded`와 URL을 확인해야 합니다. 공통 MCP 배포 소스는 공개 GitHub 저장소 URL만 지원하며, 위 로컬 전용 진입점에서만 폴더·ZIP 업로드를 추가합니다. 환경 생성 및 소스 자동 수정은 제공하지 않습니다.
 
 배포 접수 후 반환된 `resource_id`를 `get_deployment_progress.deployment_id`로 전달하면 현재 배포 단계·상태와 `/events`의 `agent_activity`를 함께 조회합니다. `agent_activity`에는 AI의 상태·작업 요약·현재 작업·시도 횟수·시간·변경 파일과 적용 여부·재검증 결과·이전 시도·관측 상태가 담깁니다. `run_attempt`, `events_status`, `events_state`, `activity_cursor`, `deployment_updated`, `agent_activity_updated`도 반환합니다. 다음 조회에서는 직전 `activity_cursor`를 `since`에 그대로 전달하세요. `deployment_updated`이면 단계·상태를, `agent_activity_updated`이면 AI 작업 변화를 대화에 설명합니다. 이전 GitHub Actions 시도나 낮은 revision의 응답은 새 AI 작업으로 표시하지 않습니다. `agent_activity.state=succeeded`는 자동 처리의 결과일 뿐, 배포 성공 여부는 최상위 `status`와 검증된 URL로 별도로 확인해야 합니다.
 
