@@ -193,8 +193,8 @@ spec:
             - {name: RAILSHOT_TARGET_ID, value: TARGET_REQUIRED}
             - {name: RAILSHOT_TARGET_PROVIDER, value: aws}
           resources:
-            requests: {cpu: 100m, memory: 256Mi}
-            limits: {cpu: '1', memory: 1Gi}
+            requests: {cpu: 500m, memory: 256Mi}
+            limits: {cpu: '2', memory: 1Gi}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -207,6 +207,7 @@ spec:
           livenessProbe:
             httpGet: {path: /healthz, port: http, httpHeaders: [{name: Host, value: localhost}]}
             initialDelaySeconds: 10
+            timeoutSeconds: 5
           startupProbe:
             httpGet: {path: /readyz, port: http, httpHeaders: [{name: Host, value: localhost}]}
             periodSeconds: 2
@@ -214,8 +215,8 @@ spec:
             failureThreshold: 30
           readinessProbe:
             httpGet: {path: /readyz, port: http, httpHeaders: [{name: Host, value: localhost}]}
-            periodSeconds: 2
-            timeoutSeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 5
       volumes:
         - {name: tmp, emptyDir: {sizeLimit: 128Mi}}
         - name: api-token
