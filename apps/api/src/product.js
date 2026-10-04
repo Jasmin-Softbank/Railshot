@@ -74,7 +74,7 @@ function checkFree(state, sessionId = null, except = null) {
     { retryable: blocker.status !== 'unknown', admission });
 }
 
-export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 2000, unknownGraceMs = 60_000, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 5000, unknownGraceMs = 60_000, maxConcurrentDeployments = 16, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const targetId = target?.id || service?.targetId;
   if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
   const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
@@ -88,6 +88,8 @@ export async function createProductService({ service, directory, target, provide
     }
   }
   if (!Number.isSafeInteger(unknownGraceMs) || unknownGraceMs < 1) throw invalid('unknown 대기 시간은 양의 정수여야 합니다.');
+  if (!Number.isSafeInteger(maxConcurrentDeployments) || maxConcurrentDeployments < 1 || maxConcurrentDeployments > 64)
+    throw invalid('배포 동시 실행 한도는 1..64 정수여야 합니다.');
   const store = await createProductStore(directory);
   const abort = new AbortController();
   const diagnostics = createDeploymentDiagnostics({ store, find, service, classifier: classifyFailure, signal: abort.signal });
@@ -113,6 +115,17 @@ export async function createProductService({ service, directory, target, provide
   }
   const workers = new Set();
   const deploymentWorkers = new Map();
+  // CI observation is concurrent. Each shared writer remains single-file: source
+  // commits use one branch, while native registration/CD share Git/edge state.
+  function serialWriter() {
+    let tail = Promise.resolve();
+    return (fn) => {
+      const next = tail.then(() => { if (abort.signal.aborted) throw new Error('Worker stopped'); return fn(); });
+      tail = next.catch(() => {});
+      return next;
+    };
+  }
+  const writeSource = serialWriter(), writeInfrastructure = serialWriter();
   const sharedTargets = new Set(service?.targetIds || (service?.targetId ? [service.targetId] : []));
   const scopeKey = (kind, key, sessionId) => `${sessionId ? sessionId + ':' : ''}${kind}:${key}`;
   const owns = (value, sessionId) => value && (store.dashboard.isOwnerSession(value.session_id)
@@ -295,44 +308,47 @@ export async function createProductService({ service, directory, target, provide
     return interruptedCI(state, { ...row, status: 'unknown', stage: 'ci', error: { code: 'INTERRUPTED' }, cd: { state: 'not_started' } });
   }
   let pumping;
+  const waiting = (row) => row.kind === 'deployments' && row.status === 'queued'
+    && row.queue?.enqueued_at && !row.queue.started_at;
   function pump() {
-    if (pumping || releasePaused || abort.signal.aborted || workers.size) return pumping;
+    if (pumping || releasePaused || abort.signal.aborted) return pumping;
+    // Read-only CI retries retain an admission slot, even between polls. Otherwise
+    // a queue of 100 requests would dispatch 100 builds despite a limit of 16.
+    const admitted = (row) => row.status === 'running'
+      || row.status === 'unknown' && !row.queue?.released_at;
     const snapshot = store.read(), rows = Object.values(snapshot.operations);
-    const due = (row) => row.status === 'unknown' && !row.queue?.released_at
-      && (!Number.isFinite(Date.parse(row.unknown_since || row.updated_at || row.created_at))
-        || Date.now() - Date.parse(row.unknown_since || row.updated_at || row.created_at) >= unknownGraceMs);
-    const waiting = (row) => row.kind === 'deployments' && row.status === 'queued' && row.queue?.enqueued_at && !row.queue.started_at;
-    if (!rows.some((row) => interruptedCI(snapshot, row) || recoveringCD(snapshot, row)) && !rows.some(due) && (!rows.some(waiting) || rows.some((row) => occupiesSlot(row) && !waiting(row)))) return;
-    // ponytail: existing SQLite operations are a bounded FIFO for one API replica;
-    // use a broker with fenced workers only when the runtime gains multiple writers.
+    if (!rows.some(row => waiting(row) || interruptedCI(snapshot, row) || recoveringCD(snapshot, row)
+        || row.status === 'unknown' && !row.queue?.released_at)) return;
+    const visited = new Set();
     pumping = (async () => {
-      while (!abort.signal.aborted && !releasePaused) {
-        if (workers.size) break; // Never detach a live writer merely because its clock expired.
+      while (!abort.signal.aborted && !releasePaused && deploymentWorkers.size < maxConcurrentDeployments) {
+        // Legacy builds, lifecycle changes and provisioning retain exclusive admission.
+        if (workers.size > deploymentWorkers.size) break;
         const record = await store.transaction((state) => {
           if (abort.signal.aborted || releasePaused) return null;
           const now = Date.now(), iso = new Date(now).toISOString();
-          for (const row of Object.values(state.operations)) {
-            if (row.status !== 'unknown' || row.queue?.released_at) continue;
+          const rows = Object.values(state.operations);
+          for (const row of rows) {
+            if (row.status !== 'unknown' || row.queue?.released_at || deploymentWorkers.has(row.id)) continue;
             if (!Number.isFinite(Date.parse(row.unknown_since))) row.unknown_since =
               Number.isFinite(Date.parse(row.updated_at || row.created_at)) ? row.updated_at || row.created_at : iso;
             if (now - Date.parse(row.unknown_since) >= unknownGraceMs)
               row.queue = { ...row.queue, released_at: iso, release_reason: 'unknown_timeout' };
           }
-          const recovery = Object.values(state.operations).find((row) => interruptedCI(state, row) || recoveringCD(state, row));
-          if (Object.values(state.operations).some((row) => row.id !== recovery?.id && occupiesSlot(row)
-              && !(row.status === 'queued' && row.queue?.enqueued_at))) return null;
+          if (rows.some(row => !['deployments', 'builds'].includes(row.kind) && occupiesSlot(row))) return null;
+          const recovery = rows.find(row => !visited.has(row.id) && !deploymentWorkers.has(row.id)
+            && (interruptedCI(state, row) || recoveringCD(state, row)));
           if (recovery) {
             const recoveringDelivery = ['cd', 'http'].includes(recovery.stage);
             Object.assign(recovery, { status: 'running', ...(recoveringDelivery ? {} : { error: null }), updated_at: iso });
-            // Hold the writer while a read may advance into CD; yield only after
-            // persisting the next read time. HTTP lifecycle writes use this same slot.
             const phase = recoveringDelivery ? recovery.cd : recovery.ci;
             if (phase.observation) phase.observation.next_retry_at = null;
             if (recovery.queue) { delete recovery.queue.released_at; delete recovery.queue.release_reason; }
             return { ...structuredClone(recovery), recoveringCI: !recoveringDelivery, recoveringDelivery };
           }
-          const next = Object.values(state.operations).filter((row) => row.kind === 'deployments' && row.status === 'queued' && row.queue?.enqueued_at && !row.queue.started_at
-            && !Object.values(state.operations).some(other => other.status === 'running' && other.app === row.app))
+          if (rows.filter(admitted).length >= maxConcurrentDeployments) return null;
+          const next = rows.filter(row => waiting(row) && !rows.some(other => other.id !== row.id
+            && other.app === row.app && (other.status === 'running' || deploymentWorkers.has(other.id))))
             .sort((a, b) => a.queue.sequence - b.queue.sequence)[0];
           if (!next) return null;
           try {
@@ -348,7 +364,8 @@ export async function createProductService({ service, directory, target, provide
           return structuredClone(next);
         });
         if (!record || abort.signal.aborted) break;
-        if (!record.skipped) await launch(() => record.recoveringDelivery ? observeDelivery(record) : record.recoveringCI
+        visited.add(record.id);
+        if (!record.skipped) launch(() => record.recoveringDelivery ? observeDelivery(record) : record.recoveringCI
           ? record.ci?.run_id ? observe(record, String(record.ci.run_id)) : recoverDispatch(record)
           : runDeployment(record), record.id);
       }
@@ -511,12 +528,12 @@ export async function createProductService({ service, directory, target, provide
         if (!admitted || typeof service.allowTarget !== 'function') throw unavailable();
         service.allowTarget(record.target_id);
       }
-      const result = await service.deploy({ ...input, operation_id: record.id,
+      const result = await writeSource(() => service.deploy({ ...input, operation_id: record.id,
         onPrepared: async ({ source_commit }) => {
           if (!/^[a-f0-9]{40}$/.test(source_commit || '')) throw new Error('Invalid prepared source');
           if (abort.signal.aborted || deletionRequested(record.id)) throw new Error('Submission interrupted before dispatch');
           await update(record.id, { source_commit, dispatch: { state: 'requesting', prepared_at: new Date().toISOString() } });
-        } });
+        } }));
       await bindRun(record, result);
       return result;
     } catch (error) {
@@ -534,7 +551,8 @@ export async function createProductService({ service, directory, target, provide
     const now = Date.now();
     const ci = store.read().operations[record.id].ci;
     const failures = (ci.observation?.consecutive_failures || 0) + 1;
-    const delay = Math.min(30_000, pollInterval * 2 ** Math.min(failures, 8));
+    const delay = Math.max(Math.min(30_000, pollInterval * 2 ** Math.min(failures, 8)),
+      Number.isFinite(error.retryAt) ? Math.max(0, error.retryAt - now) : 0);
     const diagnostic = { code: error.code || 'CI_OBSERVATION_UNAVAILABLE',
       message: error.message, retryable: true, ...(error.upstream_status ? { upstream_status: error.upstream_status } : {}) };
     await update(record.id, { ci: { ...ci, observation: { ...ci.observation, checked_at: new Date(now).toISOString(),
@@ -569,7 +587,7 @@ export async function createProductService({ service, directory, target, provide
     try { observed = await service.status(runId, binding.target_id); }
     catch (error) { throw Object.assign(new ProductError(502, error.retryable === false ? 'CI_OBSERVATION_REJECTED' : 'CI_OBSERVATION_UNAVAILABLE',
       error.retryable === false ? 'CI 조회 권한 또는 실행 정보를 확인해야 합니다.' : 'GitHub 상태 조회에 실패했습니다. 마지막 확인 상태를 유지하고 재조회합니다.',
-      { retryable: error.retryable !== false, outcomeUnknown: error.retryable === false }), { upstream_status: error.upstreamStatus || null }); }
+      { retryable: error.retryable !== false, outcomeUnknown: error.retryable === false }), { upstream_status: error.upstreamStatus || null, retryAt: error.retryAt }); }
     if (observed.publication && (String(observed.publication.run_id) !== runId || observed.publication.target_id !== binding.target_id || observed.publication.app !== binding.app || binding.source_commit && observed.publication.source_commit !== binding.source_commit)) {
       throw new ProductError(502, 'CI_BINDING_MISMATCH', '게시 결과와 접수 기록이 일치하지 않습니다.');
     }
@@ -580,9 +598,9 @@ export async function createProductService({ service, directory, target, provide
   async function observeDelivery(record) {
     const now = new Date().toISOString();
     try {
-      const result = await applicationAdapter.observePublished(store.read().applications[record.application_id], {
+      const result = await writeInfrastructure(() => applicationAdapter.observePublished(store.read().applications[record.application_id], {
         deploymentId: record.id, app: record.app, targetId: record.target_id, sourceCommit: record.source_commit,
-        publication: record.publication, signal: abort.signal });
+        publication: record.publication, signal: abort.signal }));
       if (abort.signal.aborted || deletionRequested(record.id)) return;
       const succeeded = result.cd?.deployed === true && result.cd.revision && result.public_http?.state === 'succeeded'
         && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
@@ -641,7 +659,8 @@ export async function createProductService({ service, directory, target, provide
         }
         const ci = ciObservation(build, store.read().operations[record.id].ci);
         if (!['published', 'failed', 'publication_unverified'].includes(build.status))
-          ci.observation.next_retry_at = new Date(Date.now() + pollInterval).toISOString();
+          ci.observation.next_retry_at = new Date(Date.now() + pollInterval * Math.max(1, Object.values(store.read().operations)
+            .filter(row => row.status === 'running' && row.stage === 'ci').length)).toISOString();
         await update(record.id, { ci, ...(build.publication ? { publication: build.publication } : {}) });
         if (build.status === 'published') {
           if (record.kind === 'builds') { await update(record.id, { status: 'succeeded', stage: 'ci' }); return; }
@@ -650,9 +669,9 @@ export async function createProductService({ service, directory, target, provide
           personal.writable(store.read(), record.environment_target_id || record.target_id, record.session_id);
           const deploy = record.application_id ? (args) => applicationAdapter.deployPublished(store.read().applications[record.application_id], args)
             : record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
-          const result = await deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
+          const result = await writeInfrastructure(() => deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
             sourceCommit: build.source_commit, publication: build.publication, signal: abort.signal,
-            onProgress: (progress) => update(record.id, { stage: progress.cd?.deployed ? 'http' : 'cd', cd: progress.cd, public_http: progress.public_http }) });
+            onProgress: (progress) => update(record.id, { stage: progress.cd?.deployed ? 'http' : 'cd', cd: progress.cd, public_http: progress.public_http }) }));
           if (deletionRequested(record.id)) {
             if (!(result.cd?.deployed === true || ['blocked', 'failed'].includes(result.cd?.state) && !result.error?.outcome_unknown))
               await update(record.id, { status: 'unknown', error: operationError('CD_OUTCOME_UNKNOWN', true) });
@@ -840,7 +859,7 @@ export async function createProductService({ service, directory, target, provide
         await store.transaction((state) => { if (!state.operations[record.id].deletion_requested) state.applications[appId].status = 'registering'; });
         try {
           if (deletionRequested(record.id)) return;
-          const registered = await applicationAdapter.register(application);
+          const registered = await writeInfrastructure(() => applicationAdapter.register(application));
           await store.transaction((state) => { Object.assign(state.applications[appId], registered,
             state.operations[record.id].deletion_requested ? { status: 'deleting' } : {}); });
         } catch (error) {
@@ -855,8 +874,8 @@ export async function createProductService({ service, directory, target, provide
       }
       if (plan) {
         await update(record.id, { status: 'running', stage: 'environment' });
-        const environment = await environmentAdapter.execute(plan, { id: record.environment_id,
-          onProgress: (value) => update(record.id, { environment: value }) });
+        const environment = await writeInfrastructure(() => environmentAdapter.execute(plan, { id: record.environment_id,
+          onProgress: (value) => update(record.id, { environment: value }) }));
         await update(record.id, { environment });
         if (environment.status !== 'succeeded' || environment.deployment_supported !== true || environment.runtime_target_id !== record.target_id) {
           await update(record.id, { status: environment.status === 'succeeded' ? 'blocked' : environment.status,

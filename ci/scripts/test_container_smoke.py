@@ -33,7 +33,7 @@ class ContainerSmokeTests(unittest.TestCase):
 
     def test_dashboard_verifier_rejects_token_leaks_lost_origin_and_browser_auth_forwarding(self):
         token, marker, endpoint = 'synthetic-internal-token', 'local-marker', 'http://127.0.0.1:1234'
-        for broken in (None, 'asset-secret', 'origin', 'authorization', 'static-secret'):
+        for broken in (None, 'asset-secret', 'origin', 'authorization', 'static-secret', 'mcp-authorization'):
             calls = []
             def http(url, headers=None, data=None):
                 if url == endpoint:
@@ -49,6 +49,10 @@ class ContainerSmokeTests(unittest.TestCase):
                                   'authenticated': not (broken == 'authorization' and data is not None),
                                   'host': headers['Host'], 'origin': None if broken == 'origin' else headers['Origin']})
                     return 200, {}, json.dumps({'proxy_smoke': marker}).encode()
+                if url.removeprefix(endpoint) in ['/mcp', '/mcp/', '/.well-known/oauth-protected-resource']:
+                    calls.append({'path': url.removeprefix(endpoint), 'authenticated': broken == 'mcp-authorization',
+                                  'host': headers['Host']})
+                    return 401, {}, b'authentication required'
                 return (200, {}, token.encode()) if broken == 'static-secret' else (404, {}, b'not found')
             with self.subTest(broken=broken), patch.object(smoke, 'http', side_effect=http):
                 if broken:

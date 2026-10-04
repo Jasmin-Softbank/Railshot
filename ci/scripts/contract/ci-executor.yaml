@@ -9,6 +9,12 @@
     "memory_bytes": 4294967296,
     "cpu_period": 100000,
     "cpu_quota": 200000,
-    "flags": ["--oci-worker-net=bridge"]
+    "flags": [
+      "--oci-worker-net=bridge"
+    ]
+  },
+  "concurrency": {
+    "gate": 2,
+    "agent": 1
   }
 }

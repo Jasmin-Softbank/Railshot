@@ -1574,3 +1574,52 @@ test('missing CD observation preserves the route failure and the owner can resum
     assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1);
   } finally { await product.close(); }
 });
+
+test('16 independent deployments overlap CI, retain slots between polls and serialize shared writers', async (t) => {
+  const submitted = new Map(), completed = new Set();
+  let sourceWriters = 0, peakSourceWriters = 0, cdWriters = 0, peakCdWriters = 0;
+  const f = await fixture(t, { maxConcurrentDeployments: 16, service: {
+    deploy: async ({ app, target_id }) => {
+      peakSourceWriters = Math.max(peakSourceWriters, ++sourceWriters);
+      await pause(2);
+      const run_id = String(1000 + submitted.size), source_commit = Number(run_id).toString(16).padStart(40, '0');
+      submitted.set(run_id, { app, target_id, run_id, source_commit });
+      sourceWriters--;
+      return submitted.get(run_id);
+    },
+    status: async (id) => {
+      const row = submitted.get(String(id));
+      return { ...row, state: completed.has(row.app) ? 'published' : 'running',
+        ...(completed.has(row.app) ? { publication: { ...row, artifact_id: Number(id) + 100, producer_attempt: 1 } } : {}) };
+    },
+  }, deployPublished: async ({ app, publication: result }) => {
+    assert.equal(result.app, app);
+    peakCdWriters = Math.max(peakCdWriters, ++cdWriters);
+    await pause(4); cdWriters--;
+    return deployed;
+  } });
+  const rows = await Promise.all(Array.from({ length: 18 }, (_, i) =>
+    f.product.createDeployment({ ...input, app: `parallel-${i}` }, `parallel-${i}`)));
+  await settle(() => f.product.getDeployment(rows[15].id), row => Boolean(row.ci.run_id));
+  await pause(60); // Several polling rounds must not manufacture more admission slots.
+  assert.equal(submitted.size, 16);
+  assert.equal((await f.product.getDeployment(rows[16].id)).status, 'queued');
+  assert.equal((await f.product.getDeployment(rows[17].id)).queue.started_at, undefined);
+  const same = await f.product.createDeployment({ ...input, app: 'parallel-0' }, 'same-app-later');
+  completed.add('parallel-1');
+  await settle(() => f.product.getDeployment(rows[16].id), row => Boolean(row.ci.run_id));
+  assert.equal(submitted.size, 17);
+  assert.equal((await f.product.getDeployment(same.id)).status, 'queued');
+  for (let i = 0; i < 18; i++) completed.add(`parallel-${i}`);
+  await Promise.all([...rows, same].map(row => settle(() => f.product.getDeployment(row.id))));
+  assert.equal(submitted.size, 19);
+  assert.equal(peakSourceWriters, 1);
+  assert.equal(peakCdWriters, 1);
+  assert.equal(new Set((await Promise.all([...rows, same].map(row => f.product.getDeployment(row.id)))).map(row => row.ci.run_id)).size, 19);
+});
+
+test('concurrency configuration is bounded and rejects invalid limits before opening the store', async (t) => {
+  for (const maxConcurrentDeployments of [0, -1, 65, 1.5, NaN, '16']) {
+    await assert.rejects(fixture(t, { maxConcurrentDeployments }), { code: 'INVALID_INPUT' });
+  }
+});

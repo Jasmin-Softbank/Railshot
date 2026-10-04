@@ -99,12 +99,14 @@ def render_build_runner(images, name, url, node):
     return {"apiVersion": "v1", "kind": "List", "items": documents}
 
 
-def render_build_controller(images, url, node):
+def render_build_controller(images, url, node, runner_count=1):
+    if type(runner_count) is not int or not 1 <= runner_count <= 64:
+        raise ValueError("runner_count must be 1..64")
     runners = render_build_runner(images, 'railshot-runner-template', url, node)['items']
     template = next(item for item in runners if item['kind'] == 'Job')
     encoded = json.dumps(template, sort_keys=True, separators=(',', ':'))
     policy = {'version': 1, 'template_sha256': hashlib.sha256(encoded.encode()).hexdigest(),
-              'repository': url.removeprefix('https://github.com/'), 'node': node,
+              'repository': url.removeprefix('https://github.com/'), 'node': node, 'runner_count': runner_count,
               'image': image_ref(images, 'ci-runner')}
     source = Path(__file__).resolve().parents[1] / 'manifests/build-controller.yaml'
     documents = list(yaml.safe_load_all(source.read_text()))
@@ -125,12 +127,15 @@ if __name__ == "__main__":
     mode.add_argument("--build-runner-name", help="render a separate one-job build runner and scoped RBAC")
     mode.add_argument("--build-controller", action="store_true", help="render the platform CronJob that replenishes reviewed ephemeral runners")
     parser.add_argument("--runner-url")
+    parser.add_argument("--runner-count", type=int, default=1, help="maximum isolated runners on the existing build node")
     parser.add_argument("--build-node", help="exact approved build worker hostname label")
     parser.add_argument("--dashboard-node-port", type=int, help="optional allocated ALB backend port; API stays private")
     parser.add_argument("--provider-targets", default="{}", help="optional JSON provider-to-target map; enable only after CI and CD registration")
     parser.add_argument('--prepare-api-rollout', action='store_true', help='prewarm the API image and prepare the existing single writer')
     args = parser.parse_args()
     try:
+        if args.runner_count != 1 and not args.build_controller:
+            raise ValueError("--runner-count requires --build-controller")
         images = json.loads(args.images.read_text())
         provider_targets = json.loads(args.provider_targets)
         if not isinstance(provider_targets, dict):
@@ -138,7 +143,7 @@ if __name__ == "__main__":
         if args.build_runner_name or args.build_controller:
             if args.dashboard_node_port or provider_targets:
                 raise ValueError("build runner cannot configure dashboard ports or provider targets")
-            output = (render_build_controller(images, args.runner_url, args.build_node) if args.build_controller
+            output = (render_build_controller(images, args.runner_url, args.build_node, args.runner_count) if args.build_controller
                       else render_build_runner(images, args.build_runner_name, args.runner_url, args.build_node))
         else:
             if args.runner_url or args.build_node:

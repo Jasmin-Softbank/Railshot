@@ -48,7 +48,8 @@ WORKFLOW = '.github/workflows/railshot-deploy.yml'
 def scoped_config(config, scope):
     require(scope in {'all', 'ci', 'credentials'}, 'WORKER_SCOPE_INVALID')
     keys = set(KEYS) if scope == 'all' else {key for key in KEYS if key.startswith('build_' if scope == 'ci' else 'credentials_')}
-    require(set(config) == {'runner_url', 'build_node', 'object_uids'} and
+    require(set(config) in ({'runner_url', 'build_node', 'object_uids'}, {'runner_url', 'build_node', 'object_uids', 'runner_count'}) and
+            type(config.get('runner_count', 1)) is int and 1 <= config.get('runner_count', 1) <= 64 and
             keys <= set(config['object_uids']) <= set(KEYS), 'WORKER_CONFIG_REQUIRED')
     return {**config, 'object_uids': {key: config['object_uids'][key] for key in sorted(keys)}}
 
@@ -269,7 +270,7 @@ def apply_workers(config, images, source_sha, state_path, *, kube=kubectl, befor
                 'CI_WORKER_SUSPENDED_BY_OPERATOR')
     desired_crons = {}
     if 'build_cron' in objects:
-        desired = renderer.render_build_controller(images, config['runner_url'], config['build_node'])['items']
+        desired = renderer.render_build_controller(images, config['runner_url'], config['build_node'], config.get('runner_count', 1))['items']
         desired_config = next(obj['data'] for obj in desired if obj['kind'] == 'ConfigMap')
         old_policy = json.loads(objects['build_config']['data']['policy.json'])
         require(old_policy['repository'] == config['runner_url'].removeprefix('https://github.com/') and

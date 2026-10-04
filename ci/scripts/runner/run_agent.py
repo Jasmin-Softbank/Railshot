@@ -535,6 +535,14 @@ def collect_codex_turn(turn, emit=None):
 
 
 def run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=None):
+    from runner.capacity import host_capacity
+    # Shared subscription auth/state stays single-writer; unrelated deterministic
+    # CI stages proceed concurrently and SDK scopes remain unchanged.
+    with host_capacity('agent'):
+        return _run_codex(cfg, system, task, schema, workspace, run, read_deny, emit)
+
+
+def _run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=None):
     from importlib.metadata import version
     from codex_cli_bin import bundled_codex_path
     from openai_codex import ApprovalMode, Codex, CodexConfig

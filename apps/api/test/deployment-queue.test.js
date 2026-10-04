@@ -24,7 +24,7 @@ async function until(read, predicate = (record) => !['queued', 'running'].includ
   assert.fail(`Queue did not settle: ${JSON.stringify(value)}`);
 }
 
-async function fixture(t, { unknownGraceMs = 40, environmentAdapter } = {}) {
+async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments = 16 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-queue-'));
   const submissions = [], deliveries = [], publications = new Map(), releases = [];
   const service = { targetId: 'runtime-aws', targetIds: ['runtime-aws', 'runtime-gcp'],
@@ -48,7 +48,7 @@ async function fixture(t, { unknownGraceMs = 40, environmentAdapter } = {}) {
   };
   const options = { directory, service, applicationAdapter: adapter, environmentAdapter,
     target: { id: 'runtime-aws', provider: 'aws' }, providerTargets: { gcp: 'runtime-gcp' },
-    pollInterval: 5, unknownGraceMs, observeMetrics: async () => ({ metrics: {} }) };
+    pollInterval: 5, unknownGraceMs, maxConcurrentDeployments, observeMetrics: async () => ({ metrics: {} }) };
   const f = { directory, service, adapter, options, submissions, deliveries,
     gate() { let release; const wait = new Promise((resolve) => { release = resolve; }); releases.push(release); return { wait, release }; } };
   f.product = await createProductService(options);
@@ -63,8 +63,8 @@ async function fixture(t, { unknownGraceMs = 40, environmentAdapter } = {}) {
   return f;
 }
 
-test('concurrent different apps persist FIFO while identical keys produce only one dispatch', async (t) => {
-  const f = await fixture(t), hold = f.gate();
+test('one-slot configuration: concurrent different apps persist FIFO while identical keys produce only one dispatch', async (t) => {
+  const f = await fixture(t, { maxConcurrentDeployments: 1 }), hold = f.gate();
   const deliver = f.adapter.deployPublished;
   let inFlight = 0, maximum = 0;
   f.adapter.deployPublished = async (...args) => {
@@ -111,7 +111,7 @@ test('unavailable CI observation yields the writer to another app and later fini
 });
 
 test('expired published delivery frees the global slot but preserves the affected environment fence', async (t) => {
-  const grace = 100, f = await fixture(t, { unknownGraceMs: grace });
+  const grace = 100, f = await fixture(t, { unknownGraceMs: grace, maxConcurrentDeployments: 1 });
   const deliver = f.adapter.deployPublished;
   f.adapter.deployPublished = async (...args) => args[1].app === 'alpha' && args[0].environment_target_id === 'runtime-aws'
     ? { cd: { state: 'unknown', deployed: false }, public_http: { state: 'not_run' }, error: { outcome_unknown: true } }
@@ -143,7 +143,7 @@ test('expired published delivery frees the global slot but preserves the affecte
 });
 
 test('restart retains waiting source snapshots, never redispatches the started job, and starts each waiting job once', async (t) => {
-  const f = await fixture(t), hold = f.gate();
+  const f = await fixture(t, { maxConcurrentDeployments: 1 }), hold = f.gate();
   const deliver = f.adapter.deployPublished;
   f.adapter.deployPublished = async (...args) => {
     if (args[1].app === 'alpha') {
@@ -258,7 +258,7 @@ test('queued updates recheck the deployed base so a later preview cannot overwri
 });
 
 test('a released unknown app does not prevent confirmed deletion of another app with an active deployment', async (t) => {
-  const f = await fixture(t), hold = f.gate();
+  const f = await fixture(t, { maxConcurrentDeployments: 1 }), hold = f.gate();
   const calls = { pendingPlan: 0, cancel: 0, apply: 0 };
   f.adapter.deployPublished = async (_application, args) => {
     if (args.app === 'alpha') return { cd: { state: 'unknown', deployed: false }, public_http: { state: 'not_run' }, error: { outcome_unknown: true } };

@@ -37,6 +37,7 @@ from quality import run_quality  # noqa: E402
 from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
 from storage import durable_write
+from runner.capacity import host_capacity
 from execution import APP_UID, GATE_ORDER, FULL_GATE_ORDER, RELEASE_ORDERS, docker_security, docker_command, quality_advisory, stage_contract  # noqa: E402
 from progress import Progress  # noqa: E402
 from diagnostics import Diagnostics, fingerprint, redact  # noqa: E402
@@ -771,8 +772,9 @@ def reuse_build(path, binding):
 def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None, build_receipt=None):
     global DIAGNOSTICS, PROGRESS
     try:
-        return _run_gate(ws, run, layers, selected_root=selected_root, quality_network=quality_network,
-                         repair_scope=repair_scope, native_locks=native_locks, app_id=app_id, build_receipt=build_receipt)
+        with host_capacity('gate'):
+            return _run_gate(ws, run, layers, selected_root=selected_root, quality_network=quality_network,
+                             repair_scope=repair_scope, native_locks=native_locks, app_id=app_id, build_receipt=build_receipt)
     finally:
         DIAGNOSTICS = PROGRESS = None
 

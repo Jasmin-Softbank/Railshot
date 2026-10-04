@@ -20,9 +20,9 @@ render = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(render)
 
 
-def rendered():
+def rendered(count=1):
     images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + 'a' * 64 for name in ('api', 'ci-runner')}
-    return render.render_build_controller(images, 'https://github.com/Jasmin-Softbank/railshot-apps', 'build-worker')['items']
+    return render.render_build_controller(images, 'https://github.com/Jasmin-Softbank/railshot-apps', 'build-worker', count)['items']
 
 
 class FakeAPI:
@@ -33,6 +33,7 @@ class FakeAPI:
             'data': {'token': base64.b64encode(b'initial-token').decode(), 'unrelated': 'a2VlcA=='}}
         self.calls, self.issued, self.created = [], 0, []
         self.queued_id = 1
+        self.demand = 1
         self.labels = ['self-hosted', 'Linux', 'X64', 'railshot-ci']
         self.lose_create = self.drop_create = self.conflict_patch = False
         self.deny_jobs = False
@@ -67,7 +68,8 @@ class FakeAPI:
                         return self.reply(200, {'items': state.jobs, 'metadata': {}})
                     if self.command == 'POST':
                         intent = json.loads(state.secret['metadata']['annotations'][replenish.ANNOTATION])
-                        assert intent['pending'] == body['metadata']['name']
+                        slot = body['metadata']['annotations']['railshot.io/runner-slot']
+                        assert intent['slots'][slot]['pending'] == body['metadata']['name']
                         state.created.append(body['metadata']['name'])
                         if not state.drop_create:
                             state.jobs.append(copy.deepcopy(body))
@@ -80,7 +82,7 @@ class FakeAPI:
                     status = parse_qs(path.query).get('status', [''])[0]
                     return self.reply(200, {'workflow_runs': [{'id': state.queued_id}] if state.queued_id and status == 'queued' else []})
                 if path.path.endswith('/jobs') and github:
-                    return self.reply(200, {'jobs': [{'id': state.queued_id, 'status': 'queued', 'labels': state.labels}]})
+                    return self.reply(200, {'jobs': [{'id': state.queued_id + i, 'status': 'queued', 'labels': state.labels} for i in range(state.demand)]})
                 if path.path.endswith('/actions/runners/registration-token') and self.command == 'POST':
                     state.issued += 1
                     return self.reply(201, {'token': 'short-registration-' + str(state.issued), 'expires_at': '2099-01-01T00:00:00Z'})
@@ -106,8 +108,8 @@ class FakeAPI:
         self.server.server_close()
         self.thread.join()
 
-    def controller(self):
-        config = next(item for item in rendered() if item['kind'] == 'ConfigMap')['data']
+    def controller(self, count=1):
+        config = next(item for item in rendered(count) if item['kind'] == 'ConfigMap')['data']
         return replenish.Controller(replenish.Client(self.base, 'kube-token'), replenish.Client(self.base, 'long-github-token'),
                                     json.loads(config['job.json']), json.loads(config['policy.json']))
 
@@ -218,6 +220,44 @@ class ReplenishTests(unittest.TestCase):
         self.assertNotIn('hostNetwork', pod)
         self.assertFalse(any('hostPath' in volume for volume in pod['volumes']))
         self.assertEqual([v['secret']['secretName'] for v in pod['volumes'] if 'secret' in v], ['railshot-runner-controller-github'])
+
+    def test_twelve_runner_slots_on_one_node_and_only_freed_slot_is_refilled(self):
+        self.api.demand = 20
+        result = self.api.controller(12).tick()
+        self.assertEqual(result['capacity'], 12)
+        self.assertEqual(len(result['jobs']), 12)
+        assigned = [job['metadata']['annotations']['railshot.io/runner-slot'] for job in self.api.jobs]
+        self.assertEqual(len(set(assigned)), 12)
+        self.assertEqual({job['spec']['template']['spec']['nodeSelector']['kubernetes.io/hostname'] for job in self.api.jobs}, {'build-worker'})
+        self.assertEqual(self.api.controller(12).tick(), {'state': 'active'})
+        self.api.finish()
+        refill = self.api.controller(12).tick()
+        self.assertEqual(len(refill['jobs']), 1)
+        self.assertEqual(self.api.jobs[-1]['metadata']['annotations']['railshot.io/runner-slot'], 'slot-11')
+        self.assertEqual(len([job for job in self.api.jobs if not replenish.terminal(job)]), 12)
+
+    def test_uncertain_create_reserves_one_slot_and_other_slots_can_progress(self):
+        self.api.demand = 3
+        self.api.drop_create = self.api.lose_create = True
+        self.assertEqual(self.api.controller(3).tick()['code'], 'JOB_CREATE_UNCERTAIN')
+        self.api.drop_create = self.api.lose_create = False
+        result = self.api.controller(3).tick()
+        self.assertEqual(len(result['jobs']), 2)
+        self.assertEqual({job['metadata']['annotations']['railshot.io/runner-slot'] for job in self.api.jobs}, {'slot-1', 'slot-2'})
+        self.assertEqual(self.api.controller(3).tick()['code'], 'PENDING_JOB_NOT_OBSERVED')
+        self.assertEqual(len(self.api.created), 3)
+
+    def test_legacy_intent_migrates_and_active_legacy_workspace_blocks_expansion(self):
+        self.api.secret['metadata']['annotations'][replenish.ANNOTATION] = json.dumps({'version': 1, 'failures': 3, 'pending': None})
+        self.api.demand = 2
+        self.assertEqual(self.api.controller(2).tick()['state'], 'created')
+        self.assertEqual(self.api.jobs[0]['metadata']['annotations']['railshot.io/runner-slot'], 'slot-1')
+        state = json.loads(self.api.secret['metadata']['annotations'][replenish.ANNOTATION])
+        self.assertEqual(state['slots']['slot-0']['failures'], 3)
+        with self.assertRaisesRegex(replenish.Blocked, 'INVALID_CONTROLLER_STATE'):
+            self.api.controller().tick()
+        self.api.jobs[0]['metadata'].pop('annotations')
+        self.assertEqual(self.api.controller(2).tick(), {'state': 'active'})
 
     def test_http_deadline_is_bounded_and_never_exposes_token(self):
         client = replenish.Client(self.api.base, 'must-not-be-printed', deadline=time.monotonic() - 1)
