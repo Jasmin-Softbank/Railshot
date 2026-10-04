@@ -1,10 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import { createToolRunner, tools } from './tools.js';
 
-export function createToolServer(api) {
+export function createToolServer(api, extraTools = {}) {
   const server = new McpServer({ name: 'railshot-agent-tools', version: '0.1.0' });
-  const call = createToolRunner(api);
-  for (const [name, tool] of Object.entries(tools)) {
+  const availableTools = { ...tools, ...extraTools };
+  const call = createToolRunner(api, availableTools);
+  for (const [name, tool] of Object.entries(availableTools)) {
     server.registerTool(name, {
       title: tool.title, description: tool.description, inputSchema: tool.schema,
       annotations: { readOnlyHint: tool.readOnly, destructiveHint: false, idempotentHint: tool.readOnly, openWorldHint: false },

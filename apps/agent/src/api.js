@@ -56,13 +56,14 @@ export function createApiClient({ baseUrl = process.env.RAILSHOT_API_URL || 'htt
   if (directory !== null && !isAbsolute(directory)) throw new Error('RAILSHOT_AGENT_SESSION_DIR은 절대 경로여야 합니다.');
   const sessionPath = directory && join(directory, `${createHash('sha256').update(base.origin).digest('hex')}.cookie`);
   let pending = Promise.resolve();
-  async function send(path, { method = 'GET', body, key } = {}) {
+  async function send(path, { method = 'GET', body, key, contentType, timeout = 30000 } = {}) {
     const token = apiToken(env);
     const cookie = session ?? await savedSession(sessionPath, directory);
     const headers = { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(cookie ? { cookie: `${sessionCookie}=${cookie}` } : {}),
-      ...(key ? { 'Idempotency-Key': key } : {}) };
+      ...(key ? { 'Idempotency-Key': key } : {}), ...(contentType ? { 'content-type': contentType } : {}) };
     const response = await fetchImpl(new URL(path, base), {
-      method, headers, body, redirect: 'error', signal: AbortSignal.timeout(30000),
+      method, headers, body, ...(body && typeof body.getReader === 'function' ? { duplex: 'half' } : {}),
+      redirect: 'error', signal: AbortSignal.timeout(timeout),
     });
     const received = response.headers.get('set-cookie')?.match(/^railshot_session=([^;,\s]+)/)?.[1];
     if (received) {
@@ -109,5 +110,8 @@ export function createApiClient({ baseUrl = process.env.RAILSHOT_API_URL || 'htt
       form.set('target_id', target_id);
       return request('/api/v1/deployments', { method: 'POST', body: form, key: idempotency_key });
     },
+    deployMultipart: (body, contentType, idempotencyKey) => request('/api/v1/deployments', {
+      method: 'POST', body, contentType, key: idempotencyKey, timeout: 120000,
+    }),
   };
 }
