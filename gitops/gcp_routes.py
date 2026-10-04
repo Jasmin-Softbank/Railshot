@@ -101,7 +101,7 @@ def unknown_paths(value, path=()):
 
 
 def comparable_resource(address, value):
-    """Normalize only optional GCP fields whose empty representations are equivalent."""
+    """Compare GCP resource references and unset routing fields by their meaning."""
     result = copy.deepcopy(value)
     if not isinstance(result, dict):
         return result
@@ -116,6 +116,16 @@ def comparable_resource(address, value):
             for block in result.get(field) or []:
                 if block.get('description') in (None, ''):
                     block.pop('description', None)
+                if field == 'path_matcher':
+                    backend = block.get('default_service')
+                    if backend == '':
+                        block['default_service'] = None
+                    elif isinstance(backend, str):
+                        block['default_service'] = backend.removeprefix('https://www.googleapis.com/compute/v1/')
+                    for redirect in block.get('default_url_redirect') or []:
+                        for key in ('path_redirect', 'prefix_redirect'):
+                            if redirect.get(key) == '':
+                                redirect[key] = None
     return result
 
 

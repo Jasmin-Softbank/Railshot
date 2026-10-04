@@ -276,6 +276,24 @@ class GcpRoutesTest(unittest.TestCase):
         plan['resource_changes'].pop(0)
         with self.assertRaisesRegex(ValueError, 'exact seven'): routes.validate_plan(plan, app(), self.values)
 
+    def test_existing_backend_self_link_and_empty_redirect_are_equivalent(self):
+        values = {**self.values, 'routes': {app()['application_id']: routes.checked_request(app())}}
+        plan = plan_for(app(2), values)
+        web = next(r['change'] for r in plan['resource_changes'] if r['address'] == 'google_compute_url_map.app')
+        web['before']['path_matcher'][0]['default_service'] = 'https://www.googleapis.com/compute/v1/' + web['before']['path_matcher'][0]['default_service']
+        redirect = next(r['change'] for r in plan['resource_changes'] if r['address'] == 'google_compute_url_map.redirect')
+        for side, empty in [('before', ''), ('after', None)]:
+            block = redirect[side]['path_matcher'][0]
+            block['default_service'] = empty
+            block['default_url_redirect'][0].update(path_redirect=empty, prefix_redirect=empty)
+        self.assertEqual(len(routes.validate_plan(plan, app(2), values)), 7)
+        changed = copy.deepcopy(plan)
+        row = next(r['change'] for r in changed['resource_changes'] if r['address'] == 'google_compute_url_map.app')
+        row['after']['path_matcher'][0]['default_service'] += '-foreign'
+        with self.assertRaises(ValueError): routes.validate_plan(changed, app(2), values)
+        redirect['after']['path_matcher'][0]['default_url_redirect'][0]['prefix_redirect'] = '/changed'
+        with self.assertRaises(ValueError): routes.validate_plan(plan, app(2), values)
+
     def test_mutation_delete_replacement_network_expansion_and_unknown_existing_blocked(self):
         for mutation in ('delete', 'replace', 'unrelated', 'old_host', 'old_matcher', 'default', 'port', 'source', 'unknown', 'new_health'):
             plan = plan_for(app(), self.values); changes = plan['resource_changes']
