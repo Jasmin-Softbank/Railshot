@@ -22,7 +22,7 @@ Direct CLI calls default to packaging-only repair. The customer workflow allows 
 | C2 | Base images come from the allowlist in §5. The final stage is a slim, distroless or unprivileged variant. L2 records built image IDs for scan, runtime and artifact release; automatic rewriting of FROM tags to digests is not implemented. | L1 static / L2 evidence |
 | C3 | The final stage sets `USER` to a numeric non-root UID of 10000 or higher (default 65532). | L1, L4 |
 | C4 | The process listens on `0.0.0.0` and on the port declared in `railshot.yaml` (1024–65535). | L3 readiness |
-| C5 | The declared health path answers HTTP 2xx or 3xx within 60 s of start, without auth and without side effects. The platform probe decides; a Dockerfile `HEALTHCHECK` is rejected by L1. | L3 readiness |
+| C5 | The declared health path answers HTTP 2xx or 3xx within 60 s of start, without auth and without side effects. The platform HTTP probe decides; a Dockerfile `HEALTHCHECK` is allowed but does not replace this probe. | L3 readiness |
 | C6 | No secrets in the image, build args or context: no `.env*`, keys, tokens or credential files. `.dockerignore` excludes `.git`, `.env*`, `node_modules`, caches and build outputs. | L0, L4 |
 | C7 | No CRITICAL vulnerability that has a fixed version. Fix it by moving to a newer base image or package version; ignore files are forbidden. | L4 conformance |
 | C8 | Image size is at most 1 GiB compressed. | L4 |

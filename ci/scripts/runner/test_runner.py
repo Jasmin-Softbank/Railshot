@@ -60,6 +60,13 @@ class RunnerTest(unittest.TestCase):
             self.assertNotIn("private-canary", json.dumps(receipt))
             self.assertEqual([], list(workspace.iterdir()))
 
+    def test_standard_docker_healthcheck_and_build_root_are_not_proposal_bypasses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            content = 'FROM node:22-slim AS build\nUSER root\nFROM node:22-slim\nUSER 65532\nHEALTHCHECK CMD curl -f http://localhost:8080/ || exit 1\n'
+            self.assertEqual(['Dockerfile'], run_agent.apply_files(workspace,
+                [{'path': 'Dockerfile', 'content': content}], ['Dockerfile'], []))
+
     def test_patch_is_validated_before_any_write(self):
         with tempfile.TemporaryDirectory() as d:
             ws = Path(d) / 'work'; ws.mkdir()

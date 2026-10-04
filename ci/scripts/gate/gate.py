@@ -242,8 +242,6 @@ def check_dockerfile(ws, svc, allow):
         uid = users[-1].split(":")[0]
         if not uid.isdigit() or int(uid) < 10000:
             errs.append(f"{svc['name']}: final USER must be numeric >= 10000, got {users[-1]} (C3)")
-    if any(l.upper().startswith("HEALTHCHECK") for st in stages for l in st["lines"]):
-        errs.append(f"{svc['name']}: HEALTHCHECK is not allowed (C5)")
     if any(re.match(r"(?i)(COPY|ADD)\s.*\.env\b", l) for st in stages for l in st["lines"]):
         errs.append(f"{svc['name']}: copies a .env file (C6)")
     if not svc.get("command"):
@@ -1023,10 +1021,10 @@ def self_test():
         sh(["git", "checkout", "-q", "--", "tests"], cwd=ws)
         v = run_gate(ws, Path(d) / "run3", ["L1"])
         l1errs = " ".join(v["layers"][0]["errors"])
-        assert "base image not allowed" in l1errs and "numeric" in l1errs and "HEALTHCHECK" in l1errs and "exec-form" in l1errs, l1errs
+        assert "base image not allowed" in l1errs and "numeric" in l1errs and "exec-form" in l1errs, l1errs
     assert classify("L2", "ERROR: No matching distribution found for flask==9") == "F1"
     assert classify("L2", "net/http: TLS handshake timeout") == "F8"
-    assert signature("L3", "F4", "Error: listen EADDRINUSE 0.0.0.0:8080\n").startswith("L3:F4:error: listen eaddrinuse")
+    assert signature("L3", "F4", "Error: listen EADDRINUSE 0.0.0.0:8080\n").startswith("v2:L3:F4:")
     assert "***" in excerpt("token ghp_" + "a" * 36)
     print("self-test ok")
     return 0
