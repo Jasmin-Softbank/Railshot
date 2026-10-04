@@ -1,3 +1,4 @@
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { createServer } from 'node:http';
 import { createTrafficObserver } from './traffic.js';
 import { createInsightsService } from './insights.js';
@@ -464,12 +465,26 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT || 4173), access = apiAccessConfig();
   const server = createAppServer({ access });
   server.listen(port, access.bindHost, () => { console.log(`RAILSHOT API listening on ${access.bindHost}:${port}`); });
+  const delay = monitorEventLoopDelay({ resolution: 20 });
+  delay.enable();
+  let cpu = process.cpuUsage(), observedAt = performance.now();
+  const runtimeObservation = (reason) => {
+    const now = performance.now(), usage = process.cpuUsage(cpu);
+    console.log(JSON.stringify({ event: 'api.runtime_observation', reason, observed_at: new Date().toISOString(),
+      interval_ms: Math.round(now - observedAt), cpu_ms: Math.round((usage.user + usage.system) / 1000),
+      event_loop_max_ms: Math.round(delay.max / 1e6), event_loop_p99_ms: Math.round(delay.percentile(99) / 1e6),
+      rss_bytes: process.memoryUsage().rss }));
+    cpu = process.cpuUsage(); observedAt = now; delay.reset();
+  };
+  const runtimeTimer = setInterval(() => runtimeObservation('interval'), 30_000);
+  runtimeTimer.unref();
   let stopping = false;
-  const stop = () => {
+  const stop = (signal) => {
     if (stopping) return;
     stopping = true;
+    runtimeObservation(signal); clearInterval(runtimeTimer); delay.disable();
     server.shutdown().then(() => process.exit(0), () => process.exit(1));
   };
-  process.on('SIGTERM', stop);
-  process.on('SIGINT', stop);
+  process.on('SIGTERM', () => stop('SIGTERM'));
+  process.on('SIGINT', () => stop('SIGINT'));
 }

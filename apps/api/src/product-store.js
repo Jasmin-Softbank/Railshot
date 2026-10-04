@@ -112,6 +112,14 @@ export async function createProductStore(directory) {
         && operation.queue.enqueued_at && !operation.queue.started_at;
       if (['queued', 'running'].includes(operation.status) && !unclaimed) {
         if (operation.stage === 'ci' && operation.dispatch?.state === 'preparing' && !operation.ci?.run_id) {
+          // Protocol 2 persists the commit before any ref write or CI dispatch.
+          // A killed pre-checkpoint worker can safely rebuild from its saved input.
+          if (operation.dispatch.version === 2 && operation.kind === 'deployments' && operation.queue?.enqueued_at
+              && !operation.source_commit && !operation.deletion_requested) {
+            operation.status = 'queued'; operation.error = null;
+            delete operation.queue.started_at;
+            continue;
+          }
           operation.status = 'failed';
           operation.error = { code: 'CI_DISPATCH_NOT_SENT', request_id: randomUUID(), message: '소스 준비 중 서버가 재시작되었습니다. GitHub 실행 요청은 보내지 않았습니다.', retryable: false, outcome_unknown: false };
           continue;

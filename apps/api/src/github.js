@@ -72,11 +72,25 @@ export class SubmissionError extends ServiceError {
     const upstreamStatus = Number.isInteger(cause?.upstreamStatus) ? cause.upstreamStatus : null;
     const reason = cause?.name === 'TimeoutError' ? 'timeout' : 'upstream_failure';
     const detail = upstreamStatus ? `GitHub HTTP ${upstreamStatus}` : reason === 'timeout' ? 'GitHub 응답 시간 초과' : 'GitHub 통신 오류';
-    const unknown = phase === 'ci_dispatch' && (upstreamStatus === null || upstreamStatus >= 500 || upstreamStatus === 408);
+    const unknown = ['source_ref', 'ci_dispatch'].includes(phase) && (upstreamStatus === null || upstreamStatus >= 500 || upstreamStatus === 408);
     super(`${labels[phase]} 중 ${detail}가 발생했습니다. ${unknown ? '실행 접수 응답을 확인하지 못했습니다.' : phase === 'ci_dispatch' ? 'GitHub가 CI 실행 접수를 거절했습니다.' : 'CI 실행은 아직 요청하지 않았습니다.'}`,
       502, phase === 'ci_dispatch' ? unknown ? 'CI_DISPATCH_UNCONFIRMED' : 'CI_DISPATCH_REJECTED' : 'SOURCE_REGISTRATION_FAILED');
-    Object.assign(this, { phase, upstream_status: upstreamStatus, reason, outcomeUnknown: unknown });
+    Object.assign(this, { phase, upstream_status: upstreamStatus, reason, outcomeUnknown: unknown,
+      cause_type: ['TypeError', 'TimeoutError', 'AbortError', 'SyntaxError', 'Error'].includes(cause?.name) ? cause.name : 'ServiceError',
+      cause_code: ['ECONNRESET', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET'].find(code => code === cause?.code || code === cause?.cause?.code) || null });
   }
+}
+
+// Local durable-state failures must never masquerade as a GitHub transport failure.
+export class SubmissionCheckpointError extends ServiceError {
+  constructor() {
+    super('소스 준비 단계의 내부 처리가 중단되었습니다. 저장된 기록을 확인해 재개합니다.', 503, 'CI_SUBMISSION_INTERRUPTED');
+    Object.assign(this, { phase: 'source_checkpoint', reason: 'local_interruption', outcomeUnknown: true });
+  }
+}
+async function checkpoint(callback, value) {
+  try { await callback?.(value); }
+  catch { throw new SubmissionCheckpointError(); }
 }
 
 export function createDeploymentService(config, fetchImpl = fetch) {
@@ -218,7 +232,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
   }
 
-  async function deploy({ app, files, source, target_id = targetId, operation_id, onPrepared }) {
+  async function deploy({ app, files, source, target_id = targetId, operation_id, onSourcePrepared, onPrepared }) {
     if (typeof app !== 'string' || !APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
     permittedTarget(target_id);
     if (operation_id !== undefined && !/^[a-f0-9-]{36}$/.test(operation_id)) throw new ServiceError('배포 요청 식별자가 잘못되었습니다.', 400);
@@ -281,12 +295,13 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         });
         if (!SOURCE_COMMIT.test(commit.sha)) throw new ServiceError('등록된 commit SHA를 확인하지 못했습니다.', 502);
         sourceCommit = commit.sha;
+        await checkpoint(onSourcePrepared, { source_commit: sourceCommit, source_parent: parent });
         phase = 'source_ref';
         await request(`${repoPath}/git/refs/heads/${encodeURIComponent(ref)}`, {
           method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
         });
       }
-      await onPrepared?.({ source_commit: sourceCommit });
+      await checkpoint(onPrepared, { source_commit: sourceCommit });
       phase = 'ci_dispatch';
       const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
         method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id } }),
@@ -298,7 +313,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id, state: 'queued', changes, ...(source ? { source } : {}),
         actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
       };
-    } catch (error) { throw new SubmissionError(phase, error); }
+    } catch (error) { if (error instanceof SubmissionCheckpointError) throw error; throw new SubmissionError(phase, error); }
   }
 
   async function findDeployment({ operation_id, source_commit, app, target_id }) {
@@ -320,6 +335,41 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       throw new ServiceError('같은 접수 기록에 여러 실행 또는 재실행이 있습니다.', 409, 'CI_DISPATCH_AMBIGUOUS');
     const run = matches[0];
     return run ? { run_id: run.id, source_commit, app, target_id, actions_url: `https://github.com/${owner}/${repo}/actions/runs/${run.id}` } : null;
+  }
+
+  // Only a durable source_prepared record may enter this path. A requesting
+  // record is ambiguous and must use findDeployment without sending again.
+  async function resumePrepared({ operation_id, source_commit, source_parent, app, target_id, onPrepared }) {
+    const binding = { operation_id, source_commit, app, target_id };
+    const existing = await findDeployment(binding);
+    if (existing) return existing;
+    if (!SOURCE_COMMIT.test(source_parent || '')) throw new ServiceError('소스 복구 기록이 잘못되었습니다.', 409, 'CI_BINDING_MISMATCH');
+    const commit = await request(`${repoPath}/git/commits/${source_commit}`);
+    if (commit.parents?.length !== 1 || commit.parents[0].sha !== source_parent)
+      throw new ServiceError('소스 부모 커밋이 일치하지 않습니다.', 409, 'CI_BINDING_MISMATCH');
+    let phase = 'source_ref';
+    try {
+      const branch = await request(`${repoPath}/git/ref/heads/${encodeURIComponent(ref)}`);
+      if (branch.object.sha === source_parent) {
+        await request(`${repoPath}/git/refs/heads/${encodeURIComponent(ref)}`, {
+          method: 'PATCH', body: JSON.stringify({ sha: source_commit, force: false }),
+        });
+      } else if (branch.object.sha !== source_commit) {
+        // Publication binds workflow head_sha to source_commit. Do not dispatch
+        // an older commit through a newer workflow head or rewind another writer.
+        throw new ServiceError('소스 브랜치가 변경되어 자동 반영을 중단했습니다.', 409, 'SOURCE_REF_CONFLICT');
+      }
+      await checkpoint(onPrepared, { source_commit });
+      phase = 'ci_dispatch';
+      const result = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
+        method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit, target_id } }),
+      });
+      if (!result.workflow_run_id) throw new ServiceError('CI 실행 접수 결과를 확인하지 못했습니다.', 502);
+      return { ...binding, run_id: result.workflow_run_id, actions_url: result.html_url, state: 'queued' };
+    } catch (error) {
+      if (error instanceof SubmissionCheckpointError || error.code === 'SOURCE_REF_CONFLICT') throw error;
+      throw new SubmissionError(phase, error);
+    }
   }
 
   async function status(runId, expectedTargetId = targetId) {
@@ -552,7 +602,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return files;
   }
 
-  return { deploy, findDeployment, status, cancel, events, diagnostics, diagnosticCurrent, diagnosticSource, publishedFiles, sourceFiles, allowTarget, targetId,
+  return { deploy, resumePrepared, findDeployment, status, cancel, events, diagnostics, diagnosticCurrent, diagnosticSource, publishedFiles, sourceFiles, allowTarget, targetId,
     identity: Object.freeze({ tenant, sourceRepository: `${owner}/${repo}` }),
     get targetIds() { return Object.freeze([...targetIds]); } };
 }

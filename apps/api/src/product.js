@@ -7,7 +7,7 @@ import { validateFiles, documentationOnly, documentationOnlyMessage } from './ar
 import { createMetricsObserver } from './metrics.js';
 import { emptyAgentEvents, summarizeAgentEvents } from './agent-events.js';
 import { EnvironmentError } from './environments.js';
-import { SubmissionError } from './github.js';
+import { SubmissionError, SubmissionCheckpointError } from './github.js';
 import { createDeploymentDiagnostics } from './deployment-diagnostics.js';
 import { appendEvent, observeOperation, ingestCiEvents, publicTelemetry } from './telemetry.js';
 import { exact, lifecycleActions, lifecycleId, lifecycleHash, lifecycleResources, lifecycleSteps } from './application-lifecycle.js';
@@ -282,13 +282,15 @@ export async function createProductService({ service, directory, target, provide
   function interruptedCI(state, row) {
     const due = row.status === 'running' && row.ci?.observation?.next_retry_at && Date.parse(row.ci.observation.next_retry_at) <= Date.now();
     if (!['deployments', 'builds'].includes(row.kind) || !(due || row.status === 'unknown'
-        && ['INTERRUPTED', 'CD_OUTCOME_UNKNOWN', 'CI_DISPATCH_UNCONFIRMED'].includes(row.error?.code)) || row.stage !== 'ci' || row.deletion_requested
+        && ['INTERRUPTED', 'CD_OUTCOME_UNKNOWN', 'CI_DISPATCH_UNCONFIRMED', 'CI_SUBMISSION_INTERRUPTED', 'SOURCE_REGISTRATION_FAILED'].includes(row.error?.code)) || row.stage !== 'ci' || row.deletion_requested
         || row.kind === 'deployments' && (row.cd?.state !== 'not_started' || row.cd?.deployed || row.cd?.revision)) return false;
     const runId = String(row.ci?.run_id), binding = state.bindings[runId];
     if (!/^[a-f0-9]{40}$/.test(row.source_commit || '')) return false;
     if (row.ci?.run_id) {
       if (!/^\d+$/.test(runId) || !binding || binding.operation_id !== row.id || binding.app !== row.app
           || binding.target_id !== row.target_id || binding.source_commit !== row.source_commit) return false;
+    } else if (row.dispatch?.state === 'source_prepared') {
+      if (!/^[a-f0-9]{40}$/.test(row.dispatch.source_parent || '') || typeof service.resumePrepared !== 'function') return false;
     } else if (!Number.isFinite(Date.parse(row.dispatch?.prepared_at)) || typeof service.findDeployment !== 'function') return false;
     if (row.application_id) {
       const app = state.applications[row.application_id];
@@ -538,7 +540,7 @@ export async function createProductService({ service, directory, target, provide
   }
   async function submit(record, input) {
     if (deletionRequested(record.id)) return null;
-    await update(record.id, { status: 'running', stage: 'ci', dispatch: { state: 'preparing' } });
+    await update(record.id, { status: 'running', stage: 'ci', dispatch: { version: 2, state: 'preparing' } });
     try {
       if (deletionRequested(record.id)) return null;
       if (!(service.targetIds || [targetId]).includes(record.target_id)) {
@@ -550,6 +552,11 @@ export async function createProductService({ service, directory, target, provide
         service.allowTarget(record.target_id);
       }
       const result = await writeSource(() => service.deploy({ ...input, operation_id: record.id,
+        onSourcePrepared: async ({ source_commit, source_parent }) => {
+          if (!/^[a-f0-9]{40}$/.test(source_commit || '') || !/^[a-f0-9]{40}$/.test(source_parent || '')) throw new Error('Invalid prepared source');
+          await update(record.id, { source_commit, dispatch: { version: 2, state: 'source_prepared', source_parent, source_prepared_at: new Date().toISOString() } });
+          if (abort.signal.aborted || deletionRequested(record.id)) throw new Error('Submission interrupted before dispatch');
+        },
         onPrepared: async ({ source_commit }) => {
           if (!/^[a-f0-9]{40}$/.test(source_commit || '')) throw new Error('Invalid prepared source');
           if (abort.signal.aborted || deletionRequested(record.id)) throw new Error('Submission interrupted before dispatch');
@@ -558,13 +565,14 @@ export async function createProductService({ service, directory, target, provide
       await bindRun(record, result);
       return result;
     } catch (error) {
-      const known = error instanceof SubmissionError;
+      const known = error instanceof SubmissionError || error instanceof SubmissionCheckpointError;
       const unknown = !known || error.outcomeUnknown;
       const failure = { ...operationError(known ? error.code : 'UPSTREAM_FAILURE', unknown),
         ...(known ? { message: error.message, phase: error.phase, upstream_status: error.upstream_status, reason: error.reason } : {}) };
       await update(record.id, { status: unknown ? 'unknown' : 'failed', error: failure });
       console.error(JSON.stringify({ event: 'api.deployment_failed', operation_id: record.id, request_id: failure.request_id,
-        code: failure.code, phase: failure.phase || 'ci_submission', upstream_status: failure.upstream_status || null, outcome_unknown: unknown }));
+        code: failure.code, phase: failure.phase || 'ci_submission', upstream_status: failure.upstream_status || null, outcome_unknown: unknown,
+        cause_type: error.cause_type || null, cause_code: error.cause_code || null }));
       throw new ProductError(502, failure.code, failure.message, { outcomeUnknown: unknown });
     }
   }
@@ -583,8 +591,25 @@ export async function createProductService({ service, directory, target, provide
     try {
       while (!abort.signal.aborted && !deletionRequested(record.id)) {
         let result;
-        try { result = await service.findDeployment({ operation_id: record.id, source_commit: record.source_commit, app: record.app, target_id: record.target_id }); }
+        try {
+          const saved = store.read().operations[record.id];
+          const binding = { operation_id: record.id, source_commit: saved.source_commit, app: record.app, target_id: record.target_id };
+          if (saved.dispatch?.state === 'source_prepared') {
+            service.allowTarget?.(record.target_id);
+            result = await writeSource(() => service.resumePrepared({ ...binding, source_parent: saved.dispatch.source_parent,
+              onPrepared: async ({ source_commit }) => {
+                if (source_commit !== saved.source_commit) throw new Error('Source binding changed');
+                if (abort.signal.aborted || deletionRequested(record.id)) throw new Error('Submission interrupted before dispatch');
+                await update(record.id, { dispatch: { ...saved.dispatch, state: 'requesting', prepared_at: new Date().toISOString() } });
+              } }));
+          } else result = await service.findDeployment(binding);
+        }
         catch (error) {
+          if (error instanceof SubmissionCheckpointError) return;
+          if (error instanceof SubmissionError && error.outcomeUnknown) {
+            await observationRetry(record, { code: 'CI_DISPATCH_LOOKUP_UNAVAILABLE', message: '소스 반영 또는 CI 접수 결과를 다시 확인합니다.' });
+            return;
+          }
           if (error.retryable === false) throw error;
           await observationRetry(record, { code: 'CI_DISPATCH_LOOKUP_UNAVAILABLE', message: 'GitHub 실행 목록 조회를 재시도하고 있습니다.' });
           return;
