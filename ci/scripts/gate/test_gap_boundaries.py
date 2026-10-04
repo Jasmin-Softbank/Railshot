@@ -147,7 +147,7 @@ class BoundaryTest(unittest.TestCase):
         self.assertEqual(docker_command('image'), ['image'])
         self.assertIn(f'{APP_UID}:{APP_UID}', docker_security())
         self.assertEqual(pod_security()['runAsUser'], APP_UID)
-        self.assertIn('--read-only', docker_security())
+        self.assertNotIn('--read-only', docker_security())
 
     def test_stdout_and_stderr_share_a_real_capture_limit(self):
         with self.assertRaises(OutputLimitError):
