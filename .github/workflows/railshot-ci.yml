@@ -9,9 +9,10 @@ on:
 permissions:
   contents: read
 
-# Keep a running deployment intact when a newer commit arrives.
+# Let a new commit build while an earlier release verifies production.
+# platform-publish.yml serializes the actual releases without cancelling a writer.
 concurrency:
-  group: railshot-ci-${{ github.event.pull_request.number || github.ref }}
+  group: railshot-ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: false
 
 env:
