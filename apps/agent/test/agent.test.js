@@ -68,6 +68,9 @@ test('MCP stdio persists the session from deployment acceptance across process r
     RAILSHOT_AGENT_SESSION_DIR: sessionDirectory };
   const client = await connectTools({ env });
   t.after(() => client.close());
+  const listed = await client.list();
+  assert.match(listed.find((tool) => tool.name === 'deploy_repository').description, /로컬 폴더/);
+  assert.ok(listed.some((tool) => tool.name === 'get_deployment_progress'));
   const submitted = await client.call('deploy_repository', args);
   assert.equal(submitted.status, 'accepted');
   client.close();
