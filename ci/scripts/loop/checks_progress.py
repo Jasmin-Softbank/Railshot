@@ -129,6 +129,11 @@ def unavailable():
         pass
 
 
+# Twelve active jobs produce at most 720 periodic updates/hour, leaving room
+# in the repository GITHUB_TOKEN budget for registration/final publications.
+PUBLISH_INTERVAL_SECONDS = 60
+
+
 class ChecksProgress:
     def __init__(self, token, env, app_id):
         patterns = {'GITHUB_REPOSITORY': r'[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}',
@@ -275,7 +280,7 @@ class ChecksProgress:
                 return
             if now < self.next_at and not final:
                 return
-            self.next_at = now + 20
+            self.next_at = now + PUBLISH_INTERVAL_SECONDS
             if self.check_id is None:
                 self.locate()
             self.completed = self.completed or final
@@ -294,7 +299,7 @@ class ChecksProgress:
             else:
                 self.request('PATCH', f'/repos/{self.repository}/check-runs/{self.check_id}', payload)
         except Exception:
-            self.next_at = max(time.monotonic() + 20, self.backoff_until)
+            self.next_at = max(time.monotonic() + PUBLISH_INTERVAL_SECONDS, self.backoff_until)
             unavailable()
 
 

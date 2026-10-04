@@ -120,7 +120,7 @@ class ChecksProgressTest(unittest.TestCase):
             sink.emit(event('loop.started'))
             sink.emit(event(command='sentinel-private-command', reasoning='sentinel-private-reasoning', thread_id='private-thread'))
             self.assertEqual([call[0] for call in sink.calls], ['GET', 'POST'])
-            clock.return_value = 20
+            clock.return_value = progress.PUBLISH_INTERVAL_SECONDS
             sink.emit(event())
             self.assertEqual(sink.calls[-1][0], 'PATCH')
             sink.emit(event('loop.completed'), final=True)
@@ -149,9 +149,9 @@ class ChecksProgressTest(unittest.TestCase):
         with patch.object(sys, 'stderr', output), patch.object(progress.time, 'monotonic', return_value=0) as clock:
             sink.emit(event('loop.started'))
             sink.omit_remote = True
-            clock.return_value = 20; sink.emit(event())
+            clock.return_value = progress.PUBLISH_INTERVAL_SECONDS; sink.emit(event())
             sink.omit_remote = False
-            clock.return_value = 40; sink.emit(event())
+            clock.return_value = 2 * progress.PUBLISH_INTERVAL_SECONDS; sink.emit(event())
         self.assertEqual(sum(method == 'POST' for method, _, _ in sink.calls), 1)
         self.assertEqual(sink.check_id, 55)
         self.assertEqual(sink.calls[-1][0], 'PATCH')
@@ -193,7 +193,7 @@ class ChecksProgressTest(unittest.TestCase):
                 item = event()
                 item['attributes']['progress']['item_counts'] = {key: 2 ** 53 - 1 for key in PROGRESS_ITEMS}
                 item['attributes']['progress']['token_usage'] = {key: 2 ** 53 - 1 for key in PROGRESS_TOKENS}
-                clock.return_value = (index + 1) * 20
+                clock.return_value = (index + 1) * progress.PUBLISH_INTERVAL_SECONDS
                 sink.emit(item)
         text = sink.remote['output']['text']; document = json.loads(text)
         self.assertLess(len(text.encode()), 60000)

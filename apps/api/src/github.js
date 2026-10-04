@@ -96,7 +96,13 @@ export function createDeploymentService(config, fetchImpl = fetch) {
   }
   const repoPath = `/repos/${owner}/${repo}`;
 
+  // Shared by observations and submissions using this credential. Never retry a
+  // write automatically; defer further requests when GitHub asks for backoff.
+  let cooldownUntil = 0;
+  const limited = () => Object.assign(new ServiceError('GitHub API 한도 회복을 기다리고 있습니다.', 502),
+    { upstreamStatus: 429, retryable: true, retryAt: cooldownUntil });
   async function request(path, options = {}, maxBytes = null) {
+    if (Date.now() < cooldownUntil) throw limited();
     const response = await fetchImpl(`${API}${path}`, {
       signal: AbortSignal.timeout(30_000), ...options,
       headers: {
@@ -107,6 +113,18 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         ...options.headers,
       },
     }).catch((error) => { throw Object.assign(error, { retryable: true }); });
+    const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+    const remaining = response.headers.get('x-ratelimit-remaining');
+    // Keep an account reserve for operators and other clients. Missing headers
+    // do not mean zero capacity. In-flight requests may still finish normally.
+    if (remaining !== null && /^\d+$/.test(remaining) && Number(remaining) <= 100 && reset > Date.now())
+      cooldownUntil = Math.max(cooldownUntil, reset);
+    if (response.status === 429 || response.status === 403 && (remaining === '0' || response.headers.has('retry-after'))) {
+      const raw = response.headers.get('retry-after');
+      const retryAt = raw && /^\d+$/.test(raw) ? Date.now() + Number(raw) * 1000 : Date.parse(raw || '');
+      cooldownUntil = Math.max(cooldownUntil, Number.isFinite(retryAt) ? retryAt : Date.now() + 60_000);
+      throw limited();
+    }
     if (!response.ok) {
       throw Object.assign(new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502), {
         upstreamStatus: response.status, retryable: response.status >= 500 || [408, 429].includes(response.status)

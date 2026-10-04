@@ -162,3 +162,29 @@ test('artifact transport failure remains retriable while explicit dispatch rejec
     assert.equal(error.code, 'CI_DISPATCH_REJECTED'); assert.equal(error.outcomeUnknown, false);
   }
 });
+
+
+test('GitHub rate limit backs off across runs without spending another request', async () => {
+  let calls = 0;
+  const service = createDeploymentService({ token: 'test', targetId: 'demo' }, async () => {
+    calls++;
+    return Response.json({}, { status: 429, headers: { 'retry-after': '120' } });
+  });
+  const started = Date.now();
+  await assert.rejects(service.status('123'), error => error.retryable && error.retryAt >= started + 120_000);
+  await assert.rejects(service.status('456'), error => error.upstreamStatus === 429 && error.retryable);
+  assert.equal(calls, 1);
+});
+
+test('GitHub successful response near exhaustion preserves account reserve', async () => {
+  let calls = 0;
+  const reset = Math.floor(Date.now() / 1000) + 300;
+  const service = createDeploymentService({ token: 'test', targetId: 'demo' }, async () => {
+    calls++;
+    return Response.json({ path: '.github/workflows/railshot-deploy.yml', run_attempt: 1 },
+      { headers: { 'x-ratelimit-remaining': '100', 'x-ratelimit-reset': String(reset) } });
+  });
+  await assert.rejects(service.status('123'), error => error.retryAt === reset * 1000 && error.retryable);
+  await assert.rejects(service.status('456'), error => error.retryAt === reset * 1000);
+  assert.equal(calls, 1);
+});
