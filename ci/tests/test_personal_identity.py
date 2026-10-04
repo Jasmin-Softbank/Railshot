@@ -250,6 +250,76 @@ def test_http_only_with_explicit_test_flag():
             bootstrap.validate_endpoint(value)
 
 
+def test_local_http_approval_is_exact_persisted_reused_and_revoked(setup, monkeypatch):
+    config, state, cloud, kwargs = setup
+    endpoint = 'http://192.168.240.166/identity/v3'
+    monkeypatch.setattr(bootstrap, 'select_auth_url', lambda **kw: endpoint)
+    answers = iter(['허용', 'admin', '', '', '', '', 'railshot-service', ''])
+    kwargs['input_fn'] = lambda prompt: next(answers)
+    transports = []
+    def factory(url, **options):
+        transports.append((url, options))
+        return cloud.factory(url, **options)
+    kwargs['keystone_factory'] = factory
+    result = bootstrap.prepare_personal_identity(config, state, **kwargs)
+    assert result['ownership']['test_openstack_http_url'] == endpoint
+    assert result['ownership']['test_allow_http'] is False
+    assert transports == [(endpoint, {'test_allow_http': True})]
+    cloud.calls.clear()
+    kwargs['input_fn'] = lambda _: pytest.fail('Saved approval must not prompt again')
+    assert bootstrap.prepare_personal_identity(config, state, **kwargs)['auth'] == result['auth']
+    assert cloud.calls == []
+    bootstrap._save(config / 'client.json', {'test_openstack_http_url': endpoint, 'test_allow_http': False})
+    assert bootstrap.revoke_personal_identity(config, state, keystone_factory=factory)['application_credential'] == 'revoked'
+    assert transports[-1] == (endpoint, {'test_allow_http': True})
+
+
+@pytest.mark.parametrize('answer', ['', 'y', 'yes', '거절'])
+def test_local_http_refusal_never_requests_credentials_or_contacts_cloud(setup, monkeypatch, answer):
+    config, state, cloud, kwargs = setup
+    monkeypatch.setattr(bootstrap, 'select_auth_url', lambda **kw: 'http://cloud.example/v3')
+    prompts = []
+    kwargs['input_fn'] = lambda prompt: prompts.append(prompt) or answer
+    kwargs['password_fn'] = lambda _: pytest.fail('Password must not be requested')
+    with pytest.raises(ProviderError, match='identity_http_not_approved'):
+        bootstrap.prepare_personal_identity(config, state, **kwargs)
+    assert len(prompts) == 1 and cloud.calls == []
+    assert not bootstrap.CredentialStore(config).path.exists()
+
+
+@pytest.mark.parametrize('approved', [None, True, 1, 'http://other.example/v3',
+                                     'http://cloud.example/v3/', 'https://cloud.example/v3'])
+def test_http_exception_rejects_invalid_or_changed_binding(approved):
+    with pytest.raises((ValueError, ProviderError)):
+        bootstrap.validate_auth_policy('http://cloud.example/v3', {'test_openstack_http_url': approved})
+
+
+def test_http_revoke_rejects_client_ownership_disagreement_before_requests(setup):
+    config, state, cloud, kwargs = setup
+    bootstrap.prepare_personal_identity(config, state, **kwargs)
+    bootstrap._save(config / 'client.json', {'test_openstack_http_url': 'http://other.example/v3'})
+    cloud.calls.clear()
+    with pytest.raises(ProviderError, match='identity_http_binding_changed'):
+        bootstrap.revoke_personal_identity(config, state, keystone_factory=cloud.factory)
+    assert cloud.calls == []
+
+
+def test_saved_http_approval_cannot_follow_changed_vault_endpoint(setup, monkeypatch):
+    config, state, cloud, kwargs = setup
+    monkeypatch.setattr(bootstrap, 'select_auth_url', lambda **kw: 'http://cloud.example/v3')
+    answers = iter(['허용', 'admin', '', '', '', '', 'railshot-service', ''])
+    kwargs['input_fn'] = lambda prompt: next(answers)
+    bootstrap.prepare_personal_identity(config, state, **kwargs)
+    vault = bootstrap.CredentialStore(config)
+    auth = vault.load()
+    auth['auth_url'] = 'http://other.example/v3'
+    vault.save(auth)
+    cloud.calls.clear()
+    with pytest.raises(ProviderError, match='identity_http_binding_changed'):
+        bootstrap.prepare_personal_identity(config, state, **kwargs)
+    assert cloud.calls == []
+
+
 def test_explicit_target_domain_is_resolved_without_adopting_default(setup):
     config, state, cloud, kwargs = setup
     answers = iter(['admin', 'Default', '', '', 'Other', 'service', ''])

@@ -313,15 +313,20 @@ def test_install_success_waits_for_server_control_verification():
         client.wait_control_ready(config, transport=lambda *a, **kw: {'status': 'attention'}, checker=lambda _: {}, sleeper=lambda _: None)
 
 
-def test_enroll_uses_identity_bootstrap_without_application_credential_prompt(local, monkeypatch):
+@pytest.mark.parametrize('scoped_http', [False, True])
+def test_enroll_uses_identity_bootstrap_without_application_credential_prompt(local, monkeypatch, scoped_http):
     from types import SimpleNamespace
     from client_setup import personal_identity
     auth = {'auth_url': 'https://keystone.example/v3', 'application_credential_id': 'generated',
             'application_credential_secret': 'secret'}
+    ownership = {'version': 1}
+    if scoped_http:
+        auth['auth_url'] = 'http://192.168.240.166/identity/v3'
+        ownership['test_openstack_http_url'] = auth['auth_url']
     identity_calls = []
     monkeypatch.setattr(personal_identity, 'prepare_personal_identity',
                         lambda *args, **kwargs: identity_calls.append((args, kwargs)) or
-                        {'auth': auth, 'project_id': 'project1', 'ownership': {'version': 1}})
+                        {'auth': auth, 'project_id': 'project1', 'ownership': ownership})
     original_require = client.require
     monkeypatch.setattr(client, 'require', lambda condition, code='CLIENT_INVALID':
                         None if code in ('ROOT_REQUIRED', 'CLIENT_INVALID') else original_require(condition, code))
@@ -355,6 +360,30 @@ def test_enroll_uses_identity_bootstrap_without_application_credential_prompt(lo
     assert identity_calls[0][0] == (client.CONFIG, client.STATE)
     assert identity_calls[0][1] == {'project_id': None, 'test_allow_http': False}
     assert requests[0][0][3]['project_id'] == 'project1'
+    assert requests[0][1]['test_allow_http'] is False
+    saved = json.loads(client.read_private(client.CONFIG / 'client.json'))
+    assert saved['api_url'] == 'https://example.test' and saved['test_allow_http'] is False
+    assert saved.get('test_openstack_http_url') == ownership.get('test_openstack_http_url')
+
+
+def test_saved_openstack_http_binding_survives_restart_without_weakening_api(local, monkeypatch):
+    from types import SimpleNamespace
+    endpoint = 'http://192.168.240.166/identity/v3'
+    config = {**configuration(), 'project_id': 'project1', 'test_openstack_http_url': endpoint}
+    client.CredentialStore(client.CONFIG).save({'auth_url': endpoint})
+    client.save_config(config)
+    calls = []
+    def cli(auth):
+        calls.append(auth)
+        return SimpleNamespace(run=lambda argv: [])
+    reloaded = json.loads(client.read_private(client.CONFIG / 'client.json'))
+    assert client.checks(reloaded, runner=lambda _: '', cli_factory=cli)['openstack'] is True
+    assert calls == [{'auth_url': endpoint}]
+    client.CredentialStore(client.CONFIG).save({'auth_url': 'http://other.example/v3'})
+    assert client.checks(reloaded, runner=lambda _: '', cli_factory=cli)['openstack'] is False
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match='HTTPS_REQUIRED'):
+        client.api('http://example.test', '/api/v1/test', 'secret', test_allow_http=reloaded.get('test_allow_http') is True)
 
 
 def prepare_cli_owned(monkeypatch):
@@ -587,7 +616,8 @@ def test_canonical_installer_owns_personal_mode_and_legacy_wrapper_delegates():
 
 
 
-def test_cli_account_commands_allow_slow_account_database_writes(local, monkeypatch):
+@pytest.mark.parametrize('scoped_http', [False, True])
+def test_cli_account_commands_allow_slow_account_database_writes(local, monkeypatch, scoped_http):
     from types import SimpleNamespace
     home = local / 'account-home'
     monkeypatch.setattr(client, 'CLI_HOME', home)
@@ -602,13 +632,17 @@ def test_cli_account_commands_allow_slow_account_database_writes(local, monkeypa
     monkeypatch.setattr(client.os, 'chown', lambda *args: None)
     calls = []
     monkeypatch.setattr(client, 'run', lambda argv, **kwargs: calls.append((argv, kwargs)) or '')
-    client.CredentialStore(client.CONFIG).save({'auth_url': 'https://example.test', 'application_credential_id': 'test'})
+    endpoint = ('http' if scoped_http else 'https') + '://example.test/v3'
+    client.CredentialStore(client.CONFIG).save({'auth_url': endpoint, 'application_credential_id': 'test'})
     config = {**configuration(), 'project_id': 'project1'}
+    if scoped_http:
+        config['test_openstack_http_url'] = endpoint
     client.install_cli_account(config)
     assert [argv[0] for argv, kwargs in calls] == ['useradd', 'usermod']
     assert all(kwargs == {'timeout': 180} for argv, kwargs in calls)
     assert json.loads((client.CONFIG / 'cli-account.json').read_text()) == {'user': client.CLI_USER, 'uid': account.pw_uid, 'gid': account.pw_gid}
     assert json.loads((home / 'control.json').read_text())['target_id'] == config['target_id']
+    assert json.loads((home / 'control.json').read_text()).get('test_openstack_http_url') == config.get('test_openstack_http_url')
 
 
 def test_existing_cli_account_without_marker_is_never_adopted(local, monkeypatch):
@@ -636,7 +670,7 @@ def test_all_in_one_waits_for_server_permission_verification(local, monkeypatch)
     config = {**configuration(), 'project_id': 'project1'}
     runtime = {'resource_id': 'server1', 'private_ipv4': '10.0.0.17', 'management_network': 'private',
                'placement': 'nova', 'architecture': 'amd64', 'initialization': 'preconfigured'}
-    monkeypatch.setattr(client, 'CredentialStore', lambda _: SimpleNamespace(load=lambda: {}))
+    monkeypatch.setattr(client, 'CredentialStore', lambda _: SimpleNamespace(load=lambda: {'auth_url': 'https://example.test/v3'}))
     monkeypatch.setattr(client, 'OpenStackCLI', lambda _: object())
     def prepared(*args, **kwargs):
         kwargs['progress']('client_selection')

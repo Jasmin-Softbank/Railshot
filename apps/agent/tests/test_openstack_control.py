@@ -16,6 +16,26 @@ AUTH = {'auth_url': 'https://keystone.example/v3', 'application_credential_id': 
         'application_credential_secret': 'highly-secret-value'}
 
 
+@pytest.mark.parametrize('endpoint, approved, allowed', [
+    ('http://cloud.example/v3', 'http://cloud.example/v3', True),
+    ('http://other.example/v3', 'http://cloud.example/v3', False),
+    ('http://cloud.example/v3', None, False),
+])
+def test_control_credentials_remain_bound_to_approved_http_endpoint(tmp_path, endpoint, approved, allowed):
+    tmp_path.chmod(0o700)
+    configuration = dict(CONFIG)
+    if approved is not None:
+        configuration['test_openstack_http_url'] = approved
+    calls = []
+    def cli(auth):
+        calls.append(auth)
+        return FakeCloud()
+    result = control.execute_raw(json.dumps(request(['server', 'list'])).encode(), control.COMMAND,
+        lambda: {**AUTH, 'auth_url': endpoint}, configuration, cli_factory=cli, home=tmp_path)
+    assert result['ok'] is allowed
+    assert bool(calls) is allowed
+
+
 def request(argv, job='job1', **params):
     return {'version': 1, 'job_id': job, 'action': 'openstack.execute', 'params': {'argv': argv, **params}}
 

@@ -174,10 +174,12 @@ def create_vm(cli, config, plan, directory, runner=native):
                          ]]}
     cloud_path = directory / 'runtime-cloud-init.json'
     atomic_private_write(cloud_path, ('#cloud-config\n' + json.dumps(cloud)).encode())
+    # A config drive delivers the selected SSH key and console host-key marker
+    # even when the customer's network has no working metadata service.
     server = create_once(cli, directory, 'server', ['server', 'create', '--image', plan['image_id'], '--flavor', plan['flavor_id'],
             '--network', plan['network_id'], '--key-name', prefix, '--security-group', group_id,
             '--property', 'railshot.target=' + config['target_id'], '--property', 'railshot.generation=' + str(config['generation']),
-            '--user-data', str(cloud_path), identifier(plan['name'])])
+            '--config-drive', 'True', '--user-data', str(cloud_path), identifier(plan['name'])])
     return identifier(server['id']), str(key)
 
 

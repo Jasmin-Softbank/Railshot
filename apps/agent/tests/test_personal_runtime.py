@@ -180,14 +180,20 @@ def test_console_without_matching_marker_never_falls_back_to_unverified_key():
         runtime.console_host_key(cli, 'server1', config(), timeout=0)
 
 
-def test_new_vm_uses_only_explicit_project_resources_and_minimal_cloud_init(private, monkeypatch):
+@pytest.mark.parametrize('network', [
+    {'project_id': 'project1', 'shared': False},
+    # Neutron reports targeted access_as_shared as true to the target project,
+    # while the original network owner remains unchanged.
+    {'project_id': 'network-owner', 'shared': True},
+])
+def test_new_vm_uses_only_explicit_project_resources_and_minimal_cloud_init(private, monkeypatch, network):
     public = public_key()
     def runner(argv, **kwargs):
         path = Path(argv[-1]); path.write_text('private test key'); path.chmod(0o600)
         path.with_suffix('.pub').write_text(public)
         return ''
     def cloud(argv):
-        if argv[:2] == ['network', 'show']: return {'project_id': 'project1'}
+        if argv[:2] == ['network', 'show']: return network
         if argv[:2] == ['image', 'show']: return {'status': 'active', 'visibility': 'public'}
         if argv[:2] == ['flavor', 'show']: return {'vcpus': 2, 'ram': 4096, 'disk': 40}
         if argv[:2] == ['keypair', 'show']: return {'public_key': public}
@@ -205,6 +211,23 @@ def test_new_vm_uses_only_explicit_project_resources_and_minimal_cloud_init(priv
     assert document['users'][0]['ssh_authorized_keys'] == [public]
     assert set(document) == {'users', 'ssh_pwauth', 'disable_root', 'runcmd'}
     assert 'k3s' not in json.dumps(document) and 'RAILSHOT_VM_HOST_KEY:' in json.dumps(document)
+    server = next(argv for stage, argv in changes if stage == 'server')
+    assert server[server.index('--config-drive') + 1] == 'True'
+    assert server[server.index('--user-data') + 1] == str(private / 'runtime-cloud-init.json')
     ingress = [argv for stage, argv in changes if stage.startswith('ingress-')]
     assert [argv[argv.index('--dst-port') + 1] for argv in ingress] == ['22', '6443']
     assert all(argv[argv.index('--remote-ip') + 1] == '10.0.0.1/32' for argv in ingress)
+
+
+@pytest.mark.parametrize('shared', [False, None, 'False', 'True'])
+def test_new_vm_rejects_foreign_network_without_verified_sharing(private, shared):
+    calls = []
+    def cloud(argv):
+        calls.append(argv)
+        assert argv == ['network', 'show', 'network1']
+        return {'project_id': 'network-owner', 'shared': shared}
+    with pytest.raises(ValueError, match='RUNTIME_NETWORK_PROJECT_MISMATCH'):
+        runtime.create_vm(SimpleNamespace(run=cloud), config(), {'network_id': 'network1'}, private,
+                          runner=lambda *args, **kwargs: pytest.fail('No local changes before network verification'))
+    assert calls == [['network', 'show', 'network1']]
+    assert not list(private.iterdir())

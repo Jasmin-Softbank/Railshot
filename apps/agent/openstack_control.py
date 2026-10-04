@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / 'deployment/bootstrap'))
 from apps.agent.protocol import MAX_REQUEST_BYTES, ProtocolError, _unique_object, success_response, error_response
 from apps.agent.runner import _read_bounded
 from client_setup.credentials import CredentialStore
+from client_setup.personal_identity import validate_auth_policy
 from client_setup.state import private_directory, read_private, atomic_private_write
 from infrastructure.providers.openstack.cli import OpenStackCLI, ProviderError
 
@@ -277,6 +278,7 @@ def execute_raw(raw, original_command, credential_loader, config, cli_factory=Op
         request = decode(raw)
         auth = credential_loader()
         require(isinstance(auth, dict))
+        validate_auth_policy(auth['auth_url'], config, test_allow_http=config.get('test_allow_http') is True)
         secrets = tuple(v for k, v in auth.items() if any(word in k for word in ('secret', 'password', 'token')) and isinstance(v, str))
         result = execute(request, config, cli_factory(auth), home, secrets)
         return success_response(request, result)
