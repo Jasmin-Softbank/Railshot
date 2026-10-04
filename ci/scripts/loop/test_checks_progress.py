@@ -75,7 +75,7 @@ class ChecksProgressTest(unittest.TestCase):
 
     def test_loop_budget_is_optional_bounded_and_survives_check_restore(self):
         self.assertNotIn('agent_budget', progress.row(event('loop.started')))
-        for limit in (0, 1, 2, 3):
+        for limit in (0, 1, 2, 3, 4):
             budget = {'enabled': limit > 0, 'max_invocations': limit}
             for name in ('loop.started', 'loop.completed'):
                 with self.subTest(limit=limit, event=name):
@@ -84,7 +84,7 @@ class ChecksProgressTest(unittest.TestCase):
                     self.assertIsNone(row['sdk_invocations'])
                     row['sequence'] = 1
                     self.assertEqual(progress.restored_row(row), row)
-        for budget in (None, {}, {'enabled': True, 'max_invocations': 4},
+        for budget in (None, {}, {'enabled': True, 'max_invocations': 5},
                        {'enabled': True, 'max_invocations': 0}, {'enabled': False, 'max_invocations': 2},
                        {'enabled': 1, 'max_invocations': 1}, {'enabled': True, 'max_invocations': True},
                        {'enabled': True, 'max_invocations': 2, 'token': 'sentinel'}):
@@ -92,7 +92,7 @@ class ChecksProgressTest(unittest.TestCase):
                 progress.row(event('loop.started', agent_budget=budget))
 
     def test_real_loop_emits_declared_budget_and_confirmed_zero_without_sdk(self):
-        for repair, packaging, limit in ((0, 1, 0), (1, 0, 1), (1, 1, 2), (2, 1, 3)):
+        for repair, packaging, limit in ((0, 2, 0), (1, 0, 1), (1, 1, 2), (2, 1, 3), (1, 2, 3), (2, 2, 4)):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); upload = root / 'upload'; run = root / 'run'
                 upload.mkdir(); (upload / 'app.py').write_text('print(1)')

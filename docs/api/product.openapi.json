@@ -8309,7 +8309,7 @@
           "max_invocations": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 3
+            "maximum": 4
           }
         },
         "required": [
@@ -8317,7 +8317,7 @@
           "max_invocations"
         ],
         "additionalProperties": false,
-        "description": "Executor-declared total SDK invocation budget, up to one initial packaging call and two repair calls. This is an allowance, not actual usage. enabled must equal max_invocations > 0. Older limits of 0, 1 and 2 remain valid; missing metadata stays null."
+        "description": "Executor-declared total SDK invocation budget, up to two initial packaging calls and two repair calls. This is an allowance, not actual usage. enabled must equal max_invocations > 0. Older limits of 0, 1, 2 and 3 remain valid; missing metadata stays null."
       },
       "CiProgress": {
         "type": "object",

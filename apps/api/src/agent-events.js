@@ -57,7 +57,7 @@ function validateItem(item) {
     requireValid(exact(item, [...common, 'phase', 'outcome', 'sdk_invocations'], ['agent_budget']) && item.phase === 'loop'
       && outcomes.includes(item.outcome) && (item.sdk_invocations === null || integer(item.sdk_invocations)));
     if (Object.hasOwn(item, 'agent_budget')) requireValid(exact(item.agent_budget, ['enabled', 'max_invocations'])
-      && [0, 1, 2, 3].includes(item.agent_budget.max_invocations)
+      && [0, 1, 2, 3, 4].includes(item.agent_budget.max_invocations)
       && item.agent_budget.enabled === (item.agent_budget.max_invocations > 0));
   } else if (item.event_name === 'agent.repair') {
     const repair = item.repair;

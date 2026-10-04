@@ -191,35 +191,35 @@ test('real events HTTP route binds ownership before GitHub reads, rejects contro
 test('declared optional agent budget is bounded and preserved without fabricating SDK usage', async () => {
   const f = fixture();
   const started = { sequence: 1, occurred_at: f.envelope.updated_at, event_name: 'loop.started', native_run_id: 'native:123',
-    phase: 'loop', outcome: 'RUNNING', sdk_invocations: 0, agent_budget: { enabled: true, max_invocations: 3 } };
+    phase: 'loop', outcome: 'RUNNING', sdk_invocations: 0, agent_budget: { enabled: true, max_invocations: 4 } };
   f.envelope.items = [started]; f.save();
   const observed = await f.read();
   assert.equal(observed.state, 'live');
   const summary = summarizeAgentEvents(observed);
   assert.deepEqual(summary.agent_budget, started.agent_budget);
   assert.equal(summary.sdk_invocations, 0);
-  for (const budget of [{ enabled: true, max_invocations: 4 }, { enabled: false, max_invocations: 3 },
+  for (const budget of [{ enabled: true, max_invocations: 5 }, { enabled: false, max_invocations: 4 },
     { enabled: true, max_invocations: '2' }, { enabled: true, max_invocations: 2, command: 'raw-secret-canary' }]) {
     const bad = fixture(); bad.envelope.items = [{ ...started, agent_budget: budget }]; bad.save();
     assert.equal((await bad.read()).reason, 'invalid_payload');
   }
-  for (const limit of [0, 1, 2]) {
+  for (const limit of [0, 1, 2, 3]) {
     const older = fixture();
     older.envelope.items = [{ ...started, agent_budget: { enabled: limit > 0, max_invocations: limit } }]; older.save();
     assert.equal((await older.read()).state, 'live', 'older and disabled budgets remain compatible');
   }
   const completed = fixture();
-  completed.envelope.items = [{ ...started, event_name: 'loop.completed', outcome: 'PASS', sdk_invocations: 3 }]; completed.save();
+  completed.envelope.items = [{ ...started, event_name: 'loop.completed', outcome: 'PASS', sdk_invocations: 4 }]; completed.save();
   const final = await completed.read();
   assert.equal(final.state, 'live');
-  assert.equal(summarizeAgentEvents(final).sdk_invocations, 3);
+  assert.equal(summarizeAgentEvents(final).sdk_invocations, 4);
 });
 
 test('summary retains only the current attempt budget and distinguishes heartbeat from final usage', () => {
   const f = fixture(), timeline = { items: [{ correlation: { github_run_id: '123', github_run_attempt: 1 },
-    attributes: { agent_budget: { enabled: true, max_invocations: 3 } } }] };
+    attributes: { agent_budget: { enabled: true, max_invocations: 4 } } }] };
   const summary = summarizeAgentEvents(f.envelope, timeline);
-  assert.equal(summary.agent_budget.max_invocations, 3);
+  assert.equal(summary.agent_budget.max_invocations, 4);
   assert.equal(summary.sdk_invocations, null);
   assert.equal(summary.latest.progress.sdk_event_count, 4);
   assert.equal(summarizeAgentEvents({ ...f.envelope, run_attempt: 2 }, timeline).agent_budget, null);
