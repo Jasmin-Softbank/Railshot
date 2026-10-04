@@ -1,4 +1,6 @@
 import { createServer } from 'node:http';
+import { createTrafficObserver } from './traffic.js';
+import { createInsightsService } from './insights.js';
 import { lstatSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -25,6 +27,8 @@ const assets = new Map([
   ['/src/api.js', ['src/api.js', 'text/javascript; charset=utf-8']],
   ['/src/openstack-installer.js', ['src/openstack-installer.js', 'text/javascript; charset=utf-8']],
   ['/src/deployment-history.js', ['src/deployment-history.js', 'text/javascript; charset=utf-8']],
+  ['/src/insights.js', ['src/insights.js', 'text/javascript; charset=utf-8']],
+  ['/src/insights-view.js', ['src/insights-view.js', 'text/javascript; charset=utf-8']],
   ['/src/recovery.js', ['src/recovery.js', 'text/javascript; charset=utf-8']],
   ['/src/lifecycle.js', ['src/lifecycle.js', 'text/javascript; charset=utf-8']],
   ['/contracts/application.mjs', ['../../contracts/application.mjs', 'text/javascript; charset=utf-8']],
@@ -60,7 +64,7 @@ function configuredDeploymentService(env = process.env) {
 export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
   service = configuredDeploymentService(),
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
-  deployPublished, environmentAdapter, applicationAdapter, personalAdapter, observeMetrics, observeLogs, classifyFailure, product, pollInterval,
+  deployPublished, environmentAdapter, applicationAdapter, personalAdapter, observeMetrics, observeLogs, observeTraffic, classifyFailure, product, pollInterval,
   maxConcurrentDeployments = Number(process.env.RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS ?? 16),
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets, releaseLeaseMs = 120_000,
 } = {}) {
@@ -95,6 +99,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
+  const traffic = observeTraffic || createTrafficObserver({ configPath: process.env.RAILSHOT_OBSERVER_PRODUCT_FILE || process.env.RAILSHOT_OBSERVER_CONFIG });
   let activeRequests = 0, release = null, draining = null, releaseTimer, productClosing, shuttingDown = false;
   const closeProduct = () => productClosing ||= productReady.then((value) => value?.close?.());
   const server = createServer(async (request, response) => {
@@ -196,12 +201,12 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         if (session?.token) response.setHeader('Set-Cookie', sessionCookie(session.token, access.remote));
         response.setHeader('Vary', 'Cookie');
         if (versioned) {
+          const method = (allowed) => { if (!allowed.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = allowed.join(', '); throw error; } };
           const claimRoute = /^\/api\/v1\/enrollments\/([A-Za-z0-9._-]+)\/claims$/.exec(url.pathname);
           const personalRoute = /^\/api\/v1\/targets(?:\/([A-Za-z0-9._-]+))?(?:\/(enrollments|heartbeats|receipts|runtimes|applications|instances|plans|operations|reconciliations))?$/.exec(url.pathname);
           const ownerRoute = /^\/api\/v1\/(owners|recoveries)$/.exec(url.pathname);
           const personalHandled = claimRoute || ownerRoute || personalRoute && (personalRoute[2] || personalRoute[1] || request.method === 'POST' || url.searchParams.has('scope') || url.searchParams.has('provider'));
           if (personalHandled) {
-            const method = (allowed) => { if (!allowed.includes(request.method)) { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = allowed.join(', '); throw error; } };
             if (request.method !== 'GET' && !clientRoute && request.headers['x-railshot-request'] !== 'dashboard') throw new ServiceError('개인 환경 변경 요청 헤더가 필요합니다.', 403);
             if ([...url.searchParams].length && !(personalRoute && !personalRoute[1] && request.method === 'GET')) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
             if (ownerRoute) {
@@ -297,6 +302,19 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             response.writeHead(200, { 'content-type': 'application/zip', 'content-length': bytes.length,
               'content-disposition': `attachment; filename="railshot-${sourceRoute[1]}-${variant}.zip"`,
               'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); response.end(bytes); return;
+          }
+          const insightRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/(insights|evidence)$/.exec(url.pathname);
+          if (insightRoute) {
+            method(['GET']);
+            const [, id, kind] = insightRoute, key = kind === 'insights' ? 'minutes' : 'area';
+            if ([...url.searchParams.keys()].some(name => name !== key) || url.searchParams.getAll(key).length > 1)
+              throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            const value = url.searchParams.get(key) ?? (key === 'minutes' ? '15' : 'deploy');
+            if (!(key === 'minutes' ? ['15', '60'] : ['build', 'deploy', 'runtime']).includes(value))
+              throw new ServiceError('조회 범위가 잘못되었습니다.', 422);
+            const insights = createInsightsService(products, traffic);
+            json(response, 200, key === 'minutes' ? await insights.overview(id, sessionId, Number(value)) : await insights.evidence(id, sessionId, value));
+            return;
           }
           const diagnosticRoute = /^\/api\/v1\/deployments\/([A-Za-z0-9._-]+)\/(diagnostics|classifications)$/.exec(url.pathname);
           if (diagnosticRoute) {

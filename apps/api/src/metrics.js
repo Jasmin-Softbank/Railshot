@@ -11,7 +11,7 @@ function safeUrl(value) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('Invalid observer URL');
   return url;
 }
-function configuration(path) {
+export function observerConfiguration(path) {
   const info = lstatSync(path);
   if (!path.startsWith('/') || !info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.size > 131072) throw new Error('Private observer configuration required');
   const config = JSON.parse(readFileSync(path, 'utf8'));
@@ -25,6 +25,7 @@ function configuration(path) {
       if (!APP_NAME.test(target.app) || !dns.test(target.namespace || '') || !instance.test(target.cluster_instance || '')) throw new Error('Invalid app observer binding');
       safeUrl(target.probe_url);
     } else if (target.namespace != null || target.probe_url != null) throw new Error('App identity required for app observations');
+    if (target.traffic_instance != null && (!target.app || !instance.test(target.traffic_instance))) throw new Error('App traffic binding required');
     if (target.healthz_url != null) {
       const url = safeUrl(target.healthz_url);
       if (url.protocol !== 'https:' || url.pathname !== '/healthz') throw new Error('Native runtime health endpoint required');
@@ -72,22 +73,27 @@ function queries(target) {
     }) },
   ].filter(({ names: [name] }) => name === 'runtime_healthz' ? Boolean(target.healthz_url) : target.app || !['pods', 'http'].includes(name));
 }
-async function query(url, expression, fetchImpl) {
-  const endpoint = new URL(`${url.replace(/\/$/, '')}/api/v1/query`);
-  endpoint.searchParams.set('query', expression);
-  endpoint.searchParams.set('timeout', '4s');
+// Both instant health and bounded traffic history use the same transport limits.
+export async function prometheusQuery(url, parameters, fetchImpl = fetch, range = false) {
+  const endpoint = new URL(`${url.replace(/\/$/, '')}/api/v1/${range ? 'query_range' : 'query'}`);
+  for (const [key, value] of Object.entries({ ...parameters, timeout: '4s' })) endpoint.searchParams.set(key, value);
   const response = await fetchImpl(endpoint, { signal: AbortSignal.timeout(5000), redirect: 'error' });
   if (!response.ok) throw new Error('Observer request failed');
   const chunks = []; let size = 0;
   for await (const chunk of response.body) {
     size += chunk.length;
-    if (size > 65536) throw new Error('Observer response too large');
+    if (size > (range ? 262144 : 65536)) throw new Error('Observer response too large');
     chunks.push(chunk);
   }
   const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  if (result.status !== 'success' || result.data?.resultType !== 'vector' || !Array.isArray(result.data.result)) throw new Error('Invalid observer response');
+  if (result.status !== 'success' || result.data?.resultType !== (range ? 'matrix' : 'vector') || !Array.isArray(result.data.result))
+    throw new Error('Invalid observer response');
+  return result.data.result;
+}
+async function query(url, expression, fetchImpl) {
+  const rows = await prometheusQuery(url, { query: expression }, fetchImpl);
   const values = new Map();
-  for (const row of result.data.result) {
+  for (const row of rows) {
     const name = row.metric?.railshot_metric, value = Number(row.value?.[1]);
     if (typeof name !== 'string' || values.has(name) || typeof row.value?.[1] !== 'string' || !row.value[1].trim()) throw new Error('Ambiguous observer sample');
     // Undefined arithmetic (for example a zero-sized filesystem) does not erase sibling metrics.
@@ -106,7 +112,7 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
       metrics: Object.fromEntries(Object.keys(scopes).map((name) => [name, metric(name, 'not_configured')])) };
     if (!configPath) return result;
     let config;
-    try { config = configuration(configPath); }
+    try { config = observerConfiguration(configPath); }
     catch { for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable'); return result; }
     if (config.collector) {
       result.collector = config.collector;

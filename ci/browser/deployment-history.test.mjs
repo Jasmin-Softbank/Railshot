@@ -51,7 +51,7 @@ test('history preview: stage navigation, conditional inputs, one submission, key
   const server = createServer(async (req, res) => {
     try {
       const path = new URL(req.url, 'http://localhost').pathname;
-      if (!/^\/(preview\/history\.(html|js)|src\/(deployment-history|recovery)\.js|styles\.css)$/.test(path)) { res.writeHead(404).end(); return; }
+      if (!/^\/(preview\/history\.(html|js)|src\/(deployment-history|recovery|insights|insights-view)\.js|styles\.css)$/.test(path)) { res.writeHead(404).end(); return; }
       const data = await readFile(new URL(path.slice(1), root));
       res.writeHead(200, { 'Content-Type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html' }).end(data);
     } catch { res.writeHead(500).end(); }
@@ -156,7 +156,7 @@ test('agent card opens on successful history, polls independently and preserves 
     const path = new URL(req.url, 'http://localhost').pathname;
     try {
       if (path === '/') { res.setHeader('Content-Type', 'text/html'); res.end('<html lang="ko"><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><main class="content"><section id="history-view"><div id="detail"></div></section></main></body></html>'); return; }
-      if (!['/src/recovery.js', '/src/deployment-history.js', '/styles.css'].includes(path)) { res.writeHead(404).end(); return; }
+      if (!['/src/recovery.js', '/src/deployment-history.js', '/src/insights.js', '/src/insights-view.js', '/styles.css'].includes(path)) { res.writeHead(404).end(); return; }
       res.setHeader('Content-Type', path.endsWith('.js') ? 'text/javascript' : 'text/css');
       res.end(await readFile(new URL(path.slice(1), root)));
     } catch { res.writeHead(500).end(); }

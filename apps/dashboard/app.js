@@ -1,3 +1,4 @@
+import { openInsights } from './src/insights.js';
 import { createHistoryDetail, filterHistory } from './src/deployment-history.js';
 import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from '../../contracts/application.mjs';
 import { request, requests } from './src/api.js';
@@ -2038,3 +2039,7 @@ async function initializeDashboard() {
   }
 }
 initializeDashboard();
+
+// Shared MCP fallback link; the existing API still checks the browser session.
+const insightsId = new URLSearchParams(window.location.search).get('insights');
+if (insightsId && /^[A-Za-z0-9._-]{1,128}$/.test(insightsId)) openInsights({ id: insightsId }, request);

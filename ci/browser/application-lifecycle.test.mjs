@@ -72,6 +72,8 @@ async function fixture(t) {
     }
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'],
       '/src/api.js': ['src/api.js', 'text/javascript'], '/src/openstack-installer.js': ['src/openstack-installer.js', 'text/javascript'],
+      '/src/insights.js': ['src/insights.js', 'text/javascript'],
+      '/src/insights-view.js': ['src/insights-view.js', 'text/javascript'],
       '/src/deployment-history.js': ['src/deployment-history.js', 'text/javascript'],
       '/src/recovery.js': ['src/recovery.js', 'text/javascript'],
       '/src/lifecycle.js': ['src/lifecycle.js', 'text/javascript'],
