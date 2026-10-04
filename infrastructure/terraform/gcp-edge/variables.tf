@@ -46,13 +46,20 @@ variable "health_path" {
   }
 }
 
+variable "application_certificate" {
+  description = "An already ACTIVE shared wildcard certificate for new platform app routes. Existing routes retain their certificates."
+  type        = object({ id = string, domain = string })
+  default     = null
+}
+
 variable "routes" {
   description = "Additional application bindings on the existing VM and shared public load balancer, keyed by application ID."
   type = map(object({
-    hostname    = string
-    node_port   = number
-    health_path = string
-    enabled     = optional(bool, true)
+    hostname       = string
+    node_port      = number
+    health_path    = string
+    enabled        = optional(bool, true)
+    certificate_id = optional(string)
   }))
   default  = {}
   nullable = false

@@ -451,13 +451,14 @@ test('browser update crosses real preview/start/source HTTP routes and reuses th
   assert.deepEqual(errors, []);
 });
 
-async function queuedBrowser(t, { unknownFirst = false } = {}) {
+async function queuedBrowser(t, { unknownFirst = false, provider = 'aws' } = {}) {
+  const targetId = `runtime-${provider}`;
   const submissions = [], deliveries = [], publications = new Map();
   let release, active = 0, maximumActive = 0;
   const held = new Promise((resolve) => { release = resolve; });
   // Release before start() closes its product worker, including on assertion failure.
   t.after(() => release());
-  const service = { targetId: 'runtime-aws', targetIds: [], allowTarget() {},
+  const service = { targetId, targetIds: [], allowTarget() {},
     async deploy(input) {
       submissions.push(input);
       const run = String(submissions.length), sha = String(submissions.length).repeat(40);
@@ -467,8 +468,8 @@ async function queuedBrowser(t, { unknownFirst = false } = {}) {
     },
     status: async (id) => ({ state: 'published', publication: publications.get(id) }),
     sourceFiles: async (publication) => submissions[Number(publication.run_id) - 1].files };
-  const applicationAdapter = { targets: { 'runtime-aws': { provider: 'aws', automaticDelivery: true } },
-    describe: (environment, app) => ({ id: `app-${app}`, app, target_id: `app-${app}`, environment_target_id: environment, provider: 'aws' }),
+  const applicationAdapter = { targets: { [targetId]: { provider, automaticDelivery: true } },
+    describe: (environment, app) => ({ id: `app-${app}`, app, target_id: `app-${app}`, environment_target_id: environment, provider }),
     register: async () => ({ status: 'ready' }),
     async deployPublished(_application, args) {
       maximumActive = Math.max(maximumActive, ++active);
@@ -483,11 +484,13 @@ async function queuedBrowser(t, { unknownFirst = false } = {}) {
           public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: `https://${args.app}.example.test/` } };
       } finally { active--; }
     } };
-  const fixture = await start(t, { service, applicationAdapter, target: { id: 'runtime-aws', provider: 'aws' },
+  const fixture = await start(t, { service, applicationAdapter, target: { id: targetId, provider },
     sourceLoader: async (repository) => ({ source: { type: 'github', repository, sha: 'a'.repeat(40) },
       files: [{ path: 'app.js', content: Buffer.from(repository) }] }) });
   const { page, origin } = fixture;
   await page.goto(origin);
+  await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+  await page.locator('#cloud-provider').selectOption(provider);
   await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('URL 확인'));
   async function submit() {
     await page.locator('#deploy-form button[type="submit"]').click();
@@ -517,6 +520,25 @@ async function queuedBrowser(t, { unknownFirst = false } = {}) {
   }
   return { ...fixture, submissions, deliveries, release, submit, read, until, maximumActive: () => maximumActive };
 }
+
+test('new cloud apps keep selection review separate from deployment start and show the verified link', { timeout: 45000 }, async (t) => {
+  for (const provider of ['aws', 'gcp']) await t.test(provider, async (t) => {
+    const f = await queuedBrowser(t, { provider }), { page } = f;
+    const app = `new-${provider}-app`;
+    await page.locator('#repository-url').fill(`https://github.com/example/${app}`);
+    await page.locator('#deploy-form button[type="submit"]').click();
+    await page.locator('#review-panel').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#review-app').innerText(), app);
+    assert.equal(f.submissions.length, 0, 'review must not start CI');
+    await page.locator('#deploy-button').click();
+    await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+    await page.locator('#application-link').waitFor({ state: 'visible' });
+    assert.equal(await page.locator('#application-link').getAttribute('href'), `https://${app}.example.test/`);
+    assert.equal(f.submissions.length, 1);
+    assert.equal(f.deliveries.length, 1);
+    assert.deepEqual(f.errors, []);
+  });
+});
 
 test('a second session resolves an app name collision through the optional name without changing the source or owner', { timeout: 45000 }, async (t) => {
   const f = await queuedBrowser(t);

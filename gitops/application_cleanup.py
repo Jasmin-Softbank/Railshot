@@ -114,7 +114,7 @@ def addresses(provider, key, route, values, action):
     suffix = ('.app[' if provider == 'aws' else '.routes[') + json.dumps(key) + ']'
     result = {kind + suffix for kind in kinds} if active or action == 'start' else set()
     if provider == 'gcp' and action == 'delete':
-        result |= {kind + suffix for kind in gcp_routes.KINDS[4:]}
+        result |= {kind + suffix for kind in gcp_routes.resource_kinds(route)[4:]}
     if provider == 'aws':
         pair = route['target_security_group_id'] + ':' + str(route['node_port'])
         if (active or action == 'start') and not any(k != key and r.get('enabled', True) and

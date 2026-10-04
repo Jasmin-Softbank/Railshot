@@ -945,9 +945,10 @@ export async function createProductService({ service, directory, target, provide
     executeOpenStack: (targetId, request, ownerSessionId) => personal.execute(targetId, request, ownerSessionId),
     registrations: store.registrations,
     createUpdate, startUpdate,
-    resolveApplication({ environment, provider, app }, sessionId = null) {
+    resolveApplication({ environment, provider, app, target_id }, sessionId = null) {
       if (typeof app !== 'string' || !APP_NAME.test(app)) throw invalid('앱 이름을 확인하세요.');
-      const selected = resolveSelection({ deployment_selection: { environment, provider }, source_name: app });
+      const selected = resolveSelection({ deployment_selection: { environment, provider,
+        ...(target_id !== undefined ? { target_id } : {}) }, source_name: app }, sessionId);
       const state = store.read();
       const identity = applicationAdapter?.targets?.[selected.target_id]
         ? applicationAdapter.describe(selected.target_id, selected.app) : null;

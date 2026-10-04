@@ -110,6 +110,25 @@ def checked_request(request):
     return {k: request[k] for k in ('hostname', 'node_port', 'health_path')}
 
 
+def application_route(request, values):
+    route = checked_request(request)
+    certificate = values.get('application_certificate')
+    if certificate is not None:
+        require(isinstance(certificate, dict) and set(certificate) == {'id', 'domain'} and
+                isinstance(certificate['domain'], str) and isinstance(certificate['id'], str) and
+                re.fullmatch(r'[a-z0-9-]+\.' + re.escape(certificate['domain']), route['hostname']) and
+                re.fullmatch(r'projects/' + re.escape(values['project_id']) +
+                             r'/locations/global/certificates/[a-z0-9-]+', certificate['id']),
+                'shared certificate must match the project and direct child hostname')
+        route['certificate_id'] = certificate['id']
+    return route
+
+
+def resource_kinds(route):
+    # A platform certificate is shared infrastructure, never app-owned cleanup.
+    return (*KINDS[:4], KINDS[-1]) if route.get('certificate_id') else KINDS
+
+
 def additions(before, after):
     old, new = Counter(map(encoded, before or [])), Counter(map(encoded, after or []))
     require(not old - new and sum((new - old).values()) == 1, 'existing route blocks must be preserved exactly')
@@ -175,19 +194,22 @@ def validate_plan(plan, request, values):
         require(actions.get(address) == ['no-op'] or representation_only,
                 'reconcile writable refresh drift before route writes')
     key = request['application_id']
-    expected = copy.deepcopy({**values, 'routes': {**values.get('routes', {}), key: checked_request(request)}})
+    route = application_route(request, values)
+    expected = copy.deepcopy({**values, 'routes': {**values.get('routes', {}), key: route}})
     actual = copy.deepcopy({k: plan.get('variables', {}).get(k, {}).get('value') for k in expected})
     for collection in (actual, expected):
         for route in (collection.get('routes') or {}).values():
             if route.get('enabled') is True:
                 route.pop('enabled')
+            if route.get('certificate_id') is None:
+                route.pop('certificate_id', None)
     require(actual == expected,
             'saved plan variables differ from bound candidate')
     provider = plan.get('configuration', {}).get('provider_config', {}).get('google', {})
     require(provider.get('full_name') == 'registry.terraform.io/hashicorp/google' and
             provider.get('expressions', {}).get('project', {}).get('references') == ['var.project_id'],
             'provider project must reference the bound project input')
-    creates = {kind + '.routes[' + json.dumps(key) + ']' for kind in KINDS}
+    creates = {kind + '.routes[' + json.dumps(key) + ']' for kind in resource_kinds(application_route(request, values))}
     name = values.get('name', 'railshot-gcp-edge') + '-' + hashlib.sha256(key.encode()).hexdigest()[:16]
     seen = set()
     for item in plan.get('resource_changes', []):
@@ -224,6 +246,8 @@ def validate_plan(plan, request, values):
                         'certificate hostname mismatch')
             if kind == 'google_certificate_manager_certificate_map_entry':
                 expected.update(hostname=request['hostname'], map=values.get('name', 'railshot-gcp-edge'))
+                if values.get('application_certificate'):
+                    expected['certificates'] = [values['application_certificate']['id']]
             require(all(after.get(k) == v for k, v in expected.items()), 'new resource differs from registered route')
             continue
         require(address in UPDATES and actions == ['update'], 'unrelated create, update, delete or replacement forbidden')
@@ -259,7 +283,7 @@ def validate_plan(plan, request, values):
                 require(backend is not None or ('path_matcher', index, 'default_service') in
                         set(unknown_paths(change.get('after_unknown', {}))), 'unresolved backend must be provider-computed')
         require(set(unknown_paths(change.get('after_unknown', {}))) <= allowed_unknown, 'unreviewable existing edge change')
-    require(seen == creates | UPDATES, 'exact seven creates and three additive updates required')
+    require(seen == creates | UPDATES, 'exact application resources and three additive updates required')
     return creates
 
 
@@ -275,6 +299,9 @@ def output_route(state, request, values):
                 'application output does not match configured binding')
         require(ipaddress.IPv4Address(row['frontend_ip']).is_global, 'public GCP frontend required')
         record = row['dns_authorization_record']
+        if values['routes'][key].get('certificate_id'):
+            require(record is None, 'shared certificate must not allocate per-app authorization')
+            continue
         require(isinstance(record, dict) and record.get('type') == 'CNAME' and
                 isinstance(record.get('name'), str) and isinstance(record.get('data'), str) and
                 re.fullmatch(r'_acme-challenge(?:_[a-z0-9-]+)?\.' + re.escape(row['hostname']) + r'\.?', record['name']) and
@@ -301,7 +328,7 @@ def recover(config_path, config, journal):
                     for name in ('main.tf', 'variables.tf', '.terraform.lock.hcl')}) == row['module_sha256'],
             'original route module required')
     candidate = read_private(work / 'candidate.json')
-    require(candidate == {**values, 'routes': {**values.get('routes', {}), request['application_id']: checked_request(request)}},
+    require(candidate == {**values, 'routes': {**values.get('routes', {}), request['application_id']: application_route(request, values)}},
             'original route candidate required')
     command = lambda *args: native(['terraform', '-chdir=' + str(work), *args])
     plan = json.loads(command('show', '-json', str(work / 'plan')))
@@ -357,15 +384,15 @@ def _ensure(config_path, request, *, dns_config_path=None):
         key = request['application_id']
         if key in routes:
             require(routes[key].get('enabled', True) and
-                    {k: v for k, v in routes[key].items() if k != 'enabled'} == route,
+                    {k: routes[key][k] for k in ('hostname', 'node_port', 'health_path')} == route,
                     'existing application route changes require separate approval')
             return output_route(state, request, values)
-        if not isinstance(dns_config_path, str) or not Path(dns_config_path).is_absolute():
+        if not values.get('application_certificate') and (not isinstance(dns_config_path, str) or not Path(dns_config_path).is_absolute()):
             raise RouteError('GCP_CERTIFICATE_DNS_NOT_CONFIGURED')
         require(all(route['hostname'] != r['hostname'] and route['node_port'] != r['node_port'] for r in
                     [{**values, 'node_port': values.get('node_port', 30080)}, *routes.values()]),
                 'hostname or NodePort already allocated')
-        candidate = copy.deepcopy(values); candidate.setdefault('routes', {})[key] = route
+        candidate = copy.deepcopy(values); candidate.setdefault('routes', {})[key] = application_route(request, values)
         files = {name: (SOURCE / name).read_bytes() for name in ('main.tf', 'variables.tf', '.terraform.lock.hcl')}
         module_sha = digest({name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()})
         work = Path(tempfile.mkdtemp(prefix='gcp-route-' + key + '-', dir=root))
@@ -392,7 +419,7 @@ def _ensure(config_path, request, *, dns_config_path=None):
             # Native GCP URL map/firewall operations routinely exceed 110 seconds.
             # Keep this below the route executor's 30-minute deadline.
             native(['terraform', '-chdir=' + str(work), 'apply', '-input=false', str(work / 'plan')], timeout=900,
-                   env={'RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG': dns_config_path,
+                   env={'RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG': dns_config_path or '',
                         'PYTHONPATH': str(Path(__file__).resolve().parent)})
             after = read_private(config['state_file']); identities = owned(after)
             require(after['lineage'] == config['state_lineage'] and set(identities) == set(config['owned_resources']) | creates and

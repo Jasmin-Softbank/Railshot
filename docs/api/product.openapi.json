@@ -3531,7 +3531,7 @@
       "get": {
         "operationId": "resolveApplication",
         "summary": "Resolve the submitted app name to an existing session-owned application",
-        "description": "Read-only lookup before source upload. Uses the same provider-to-environment and app identity mapping as new deployment, independent of app inventory pagination. Same-owner successful applications use the existing update preview/start flow. Does not transfer ownership, register an app, or dispatch CI.",
+        "description": "Read-only lookup before source upload. Uses the same provider-to-environment and app identity mapping as new deployment, independent of app inventory pagination. Same-owner successful applications use the existing update preview/start flow. Does not transfer ownership, register an app, or dispatch CI. Optional target_id selects a session-owned personal OpenStack target. The deployed dashboard alias targetId is also accepted (literal null is ignored for cloud selection), together with registerNew=false; duplicate fields and both target aliases together are rejected.",
         "parameters": [
           {
             "name": "environment",
