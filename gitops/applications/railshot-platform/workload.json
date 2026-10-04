@@ -601,6 +601,10 @@
                   {
                     "name": "RAILSHOT_POD_TEMPLATE_ID",
                     "value": "7af14f1bc87d3630ba51b0591d3df62dc4135da49d5d25221647274eb39622c3"
+                  },
+                  {
+                    "name": "RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS",
+                    "value": "3"
                   }
                 ],
                 "resources": {
