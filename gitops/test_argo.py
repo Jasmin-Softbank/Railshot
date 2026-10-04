@@ -33,13 +33,15 @@ class ArgoTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.prepare()
 
-    def prepare(self, database=False, image_digest='c' * 64, migration_command=None):
+    def prepare(self, database=False, image_digest='c' * 64, migration_command=None, storage=False):
         published = self.root / 'published'; published.mkdir(exist_ok=True)
         spec = {'apiVersion': 'railshot/v0', 'app': 'demo', 'services': [
             {'name': 'web', 'build': {'dockerfile': 'Dockerfile'}, 'port': 8080, 'route': '/health', 'health': '/health'}]}
         if database:
             spec['resources'] = {'postgres': {'size': 'small'}}
             spec['services'][0].update(migrate={'command': migration_command or ['python', 'migrate.py']}, secrets=['DATABASE_URL'])
+        if storage:
+            spec['services'][0]['storage'] = {'mountPath': '/var/opt/memos', 'sizeGi': 1}
         verdict = {'release_eligible': True, 'ok': True, 'status': 'PASS', 'source_sha256': 'a' * 64,
                    'layers': [{'layer': layer, 'ok': True} for layer in GATE_ORDER],
                    'images': {'web': 'local/web:test'}, 'image_ids': {'web': 'sha256:' + 'b' * 64}}
@@ -171,6 +173,19 @@ class ArgoTest(unittest.TestCase):
             elif field == 'aggregate_health': bad['status']['health']['status'] = 'Degraded'
             else: bad['status']['sync']['status'] = 'OutOfSync'
             with self.subTest(field=field): self.assertFalse(argo.observe(self.review, bad)['deployed'])
+
+    def test_storage_project_roundtrip_and_stateless_app_in_storage_capable_project(self):
+        stateless = copy.deepcopy(self.review)
+        self.prepare(storage=True)
+        loaded = argo.load_review(self.directory)
+        project = argo.projects([loaded])['items'][0]
+        self.assertIn(argo.PVC_KIND, project['spec']['namespaceResourceWhitelist'])
+        argo.validate_project(project, loaded['application'], loaded['workload'])
+        argo.validate_project(project, stateless['application'], stateless['workload'])
+        self.assertTrue(argo.observe(loaded, self.healthy())['deployed'])
+        project['spec']['namespaceResourceWhitelist'].remove(argo.PVC_KIND)
+        with self.assertRaisesRegex(ValueError, 'restrict resources'):
+            argo.validate_project(project, loaded['application'], loaded['workload'])
 
     def test_actual_rendered_review_hash_and_project_contract(self):
         loaded = argo.load_review(self.directory)

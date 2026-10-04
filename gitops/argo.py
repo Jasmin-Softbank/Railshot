@@ -181,8 +181,9 @@ def projects(reviews):
             project['spec']['sourceRepos'].append(spec['source']['repoURL'])
         if spec['destination'] not in project['spec']['destinations']:
             project['spec']['destinations'].append(copy.deepcopy(spec['destination']))
-        if JOB_KIND in workload_kinds(review['workload']) and JOB_KIND not in project['spec']['namespaceResourceWhitelist']:
-            project['spec']['namespaceResourceWhitelist'].append(copy.deepcopy(JOB_KIND))
+        for kind in workload_kinds(review['workload']):
+            if kind not in project['spec']['namespaceResourceWhitelist']:
+                project['spec']['namespaceResourceWhitelist'].append(copy.deepcopy(kind))
     return {'apiVersion': 'v1', 'kind': 'List', 'items': list(result.values())}
 
 
@@ -193,7 +194,9 @@ def validate_project(project, app, workload=None):
     permitted = sorted(spec.get('namespaceResourceWhitelist', []), key=lambda x: x['kind'])
     expected = workload_kinds(workload) if workload else KINDS
     require(spec.get('clusterResourceWhitelist', []) == [] and
-            permitted in [sorted(kinds, key=lambda x: x['kind']) for kinds in (expected, KINDS + [JOB_KIND])] and
+            permitted in [sorted(KINDS + extra, key=lambda x: x['kind'])
+                          for extra in ([], [JOB_KIND], [PVC_KIND], [JOB_KIND, PVC_KIND])] and
+            all(kind in permitted for kind in expected) and
             not spec.get('namespaceResourceBlacklist'), 'project must restrict resources to the reviewed workload kinds')
     require(isinstance(spec.get('sourceRepos'), list) and desired['source']['repoURL'] in spec['sourceRepos'],
             'project does not allow this repository')
