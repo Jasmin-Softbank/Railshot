@@ -14,7 +14,9 @@
             "name": "scope",
             "in": "query",
             "required": true,
-            "schema": { "const": "personal" }
+            "schema": {
+              "const": "personal"
+            }
           }
         ],
         "responses": {
@@ -22,12 +24,18 @@
             "description": "Configuration-only readiness; external credentials and connectivity are verified during registration",
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PersonalReadiness" }
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalReadiness"
+                }
               }
             }
           },
-          "422": { "$ref": "./product.openapi.json#/components/responses/Error422" },
-          "503": { "$ref": "./product.openapi.json#/components/responses/Error503" }
+          "422": {
+            "$ref": "./product.openapi.json#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "./product.openapi.json#/components/responses/Error503"
+          }
         }
       }
     },
@@ -1294,7 +1302,7 @@
     "/api/v1/targets/{id}/reconciliations": {
       "post": {
         "operationId": "reconcilePersonalRemoval",
-        "summary": "Request read-only inspection of an uncertain client removal",
+        "summary": "Request read-only reconciliation of runtime preparation or an uncertain removal",
         "parameters": [
           {
             "name": "id",
@@ -1343,7 +1351,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PersonalOperation"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/PersonalOperation"
+                    },
+                    {
+                      "$ref": "#/components/schemas/PersonalRuntime"
+                    }
+                  ]
                 }
               }
             }
@@ -1400,24 +1415,46 @@
       "PersonalReadiness": {
         "type": "object",
         "properties": {
-          "scope": { "const": "personal" },
-          "ready": { "type": "boolean" },
-          "verification_scope": { "const": "configuration_only" },
-          "message": { "type": "string" },
+          "scope": {
+            "const": "personal"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "verification_scope": {
+            "const": "configuration_only"
+          },
+          "message": {
+            "type": "string"
+          },
           "blockers": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,95}$" },
-                "message": { "type": "string" }
+                "code": {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9_]{0,95}$"
+                },
+                "message": {
+                  "type": "string"
+                }
               },
-              "required": ["code", "message"],
+              "required": [
+                "code",
+                "message"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["scope", "ready", "verification_scope", "message", "blockers"],
+        "required": [
+          "scope",
+          "ready",
+          "verification_scope",
+          "message",
+          "blockers"
+        ],
         "additionalProperties": false
       },
       "PersonalOwner": {
@@ -2232,6 +2269,10 @@
           },
           "client_reported_ready": {
             "type": "boolean"
+          },
+          "resumable": {
+            "type": "boolean",
+            "description": "Read-only reconciliation verified a safe explicit preparation retry."
           }
         },
         "required": [
@@ -2345,6 +2386,9 @@
                   "ssh_host_key"
                 ],
                 "additionalProperties": false
+              },
+              "action": {
+                "const": "resume"
               }
             },
             "required": [
@@ -2396,6 +2440,23 @@
               "progress"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "generation": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "action": {
+                "const": "reconcile"
+              }
+            },
+            "required": [
+              "generation",
+              "action"
+            ],
+            "additionalProperties": false
           }
         ]
       },
@@ -2430,17 +2491,33 @@
         "additionalProperties": false
       },
       "PersonalReconciliationInput": {
-        "type": "object",
-        "properties": {
-          "operation_id": {
-            "type": "string",
-            "format": "uuid"
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "operation_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "required": [
+              "operation_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "const": "runtime"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
           }
-        },
-        "required": [
-          "operation_id"
-        ],
-        "additionalProperties": false
+        ]
       },
       "PersonalReconciliation": {
         "type": "object",
@@ -2469,6 +2546,9 @@
             "items": {
               "type": "string"
             }
+          },
+          "phase": {
+            "const": "services"
           }
         },
         "required": [

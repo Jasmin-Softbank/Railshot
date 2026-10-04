@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 import { readFile, lstat, writeFile, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { request as httpRequest } from 'node:http';
 import { privateJson, privateDirectory, savePrivate, runEnvironmentCommand } from './environments.js';
 import { createApplicationAdapter } from './applications.js';
 
@@ -42,6 +43,9 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
   }
   if (!/^[a-f0-9]{64}$/.test(config.artifact_sha256 || '')) throw new Error('Pinned personal artifact required');
   if (config.gateway.command && !config.gateway.command.startsWith('/')) throw new Error('Absolute privileged gateway wrapper required');
+  if (config.gateway.socket_path !== undefined || config.gateway.token_file !== undefined) {
+    if (config.gateway.command || !config.gateway.socket_path?.startsWith('/') || !config.gateway.token_file?.startsWith('/')) throw new Error('Invalid gateway socket configuration');
+  }
   if (config.runtime && (Object.keys(config.runtime).length !== 1 || !config.runtime.config_path?.startsWith('/'))) throw new Error('Invalid runtime operator configuration');
   const accessKeys = new Map();
   const dynamicApplications = new Map();
@@ -53,7 +57,7 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
       return selected.describe(id, app);
     },
   };
-  for (const method of ['register', 'deployPublished', 'observeLogs', 'planPendingDeletion', 'planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle']) {
+  for (const method of ['register', 'deployPublished', 'observeLogs', 'planPendingDeletion', 'planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle', 'reconcileLifecycle', 'resumeLifecycle']) {
     application[method] = (app, ...args) => {
       const selected = dynamicApplications.get(app.environment_target_id) || base;
       if (!selected?.[method]) throw new Error('Application environment is not registered');
@@ -69,9 +73,14 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
     RUNTIME_EDGE_REGISTRATION_UNSUPPORTED: 'OpenStack 실행환경별 공개 경로 등록 기능을 사용할 수 없습니다.',
     RUNTIME_TUNNEL_TEMPLATE_INVALID: '터널 기본 설정을 확인해야 합니다.',
     RUNTIME_DNS_CONFIGURATION_INVALID: '공개 DNS 운영 설정을 확인해야 합니다.',
+    PERSONAL_GATEWAY_UNAVAILABLE: '개인 환경 연결 게이트웨이의 준비 상태를 확인해야 합니다.',
   };
   async function readiness() {
     const codes = [];
+    if (config.gateway.socket_path) {
+      try { if ((await gateway('health')).status !== 'ready') codes.push('PERSONAL_GATEWAY_UNAVAILABLE'); }
+      catch { codes.push('PERSONAL_GATEWAY_UNAVAILABLE'); }
+    }
     if (!config.runtime) codes.push('RUNTIME_OPERATOR_NOT_CONFIGURED');
     if (!service?.identity || typeof service.publishedFiles !== 'function') codes.push('APPLICATION_CI_NOT_CONFIGURED');
     if (config.runtime) {
@@ -91,6 +100,27 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
       blockers: unique.map((code) => ({ code, message: blockerMessage[code] || '개인 환경 운영 설정을 확인해야 합니다.' })) };
   }
   async function gateway(action, target) {
+    if (config.gateway.socket_path) {
+      const tokenPath = config.gateway.token_file, info = await lstat(tokenPath);
+      if (!info.isFile() || info.size > 513 || info.uid !== process.getuid() || info.mode & 0o077) throw new Error('Private gateway token required');
+      const token = (await readFile(tokenPath, 'utf8')).trim();
+      if (!/^[A-Za-z0-9._~-]{32,512}$/.test(token)) throw new Error('Invalid gateway token');
+      const body = action === 'health' ? '' : JSON.stringify({ action, target_id: target.id, generation: target.generation, public_key: target.public_key });
+      return new Promise((resolve, reject) => {
+        const request = httpRequest({ socketPath: config.gateway.socket_path, path: action === 'health' ? '/healthz' : '/requests', method: action === 'health' ? 'GET' : 'POST',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, (response) => {
+          let raw = '';
+          response.on('data', (chunk) => { raw += chunk.toString(); if (Buffer.byteLength(raw) > 16384) request.destroy(new Error('Gateway response too large')); });
+          response.on('error', reject);
+          response.on('end', () => {
+            try { if (response.statusCode !== 200) throw new Error('Gateway request failed'); resolve(JSON.parse(raw)); }
+            catch { reject(new Error('Gateway response invalid')); }
+          });
+        });
+        request.setTimeout(60000, () => request.destroy(new Error('Gateway request timed out')));
+        request.on('error', reject); request.end(body);
+      });
+    }
     const folder = join(stateDirectory, 'gateway'); await privateDirectory(folder);
     const request = join(folder, `${target.id}-${target.generation}-${action}.json`);
     await savePrivate(request, { action, target_id: target.id, generation: target.generation, public_key: target.public_key });
@@ -137,12 +167,26 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
     if (normalized.id !== evidence.resource_id || (normalized.project_id ?? normalized.tenant_id) !== target.project_id || normalized.status !== 'ACTIVE') return blocked('RUNTIME_RESOURCE_MISMATCH');
     const ports = await execute(target, { argv: ['port', 'list'] });
     if (!ports.ok || !Array.isArray(ports.result)) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
-    const rows = ports.result.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.toLowerCase().replaceAll(' ', '_'), value])));
+    const normalize = (row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.toLowerCase().replaceAll(' ', '_'), value]));
     const fixedAddress = (value) => Array.isArray(value) && value.some((item) => typeof item === 'string'
       ? item === evidence.private_ipv4 : item?.ip_address === evidence.private_ipv4 || item?.address === evidence.private_ipv4);
+    const rows = [];
+    // The CLI list is a summary: it omits device_id and security groups. Read
+    // each project-bound detail instead of treating summary columns as evidence.
+    const identifiers = [...new Set(ports.result.map(normalize).filter((row) => fixedAddress(row.fixed_ips ?? row.fixed_ip_addresses)).map((row) => row.id))];
+    if (!identifiers.length || identifiers.length > 100 || identifiers.some((id) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id || ''))) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
+    for (const id of identifiers) {
+      const detail = await execute(target, { argv: ['port', 'show', id] });
+      if (!detail.ok || !detail.result || Array.isArray(detail.result)) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
+      const row = normalize(detail.result);
+      if (row.id !== id || (row.project_id ?? row.tenant_id) !== target.project_id) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
+      rows.push(row);
+    }
     const selectedPorts = rows.filter((row) => row.device_id === evidence.resource_id && fixedAddress(row.fixed_ips));
     if (selectedPorts.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(selectedPorts[0].id || '')) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
-    const groups = (selectedPorts[0].security_groups || []).map((item) => typeof item === 'string' ? item : item?.id).filter(Boolean);
+    const groupValues = selectedPorts[0].security_group_ids ?? selectedPorts[0].security_groups;
+    if (!Array.isArray(groupValues)) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
+    const groups = groupValues.map((item) => typeof item === 'string' ? item : item?.id).filter(Boolean);
     if (groups.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(groups[0])) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
     const address = target.tunnel.address.split('/')[0], knownHosts = join(folder, 'runtime_known_hosts');
     // Existing Ansible transport pins HostKeyAlias to the selected VM's private IP.
@@ -156,13 +200,14 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
       address, identity_file: join(folder, 'runtime_ed25519'), known_hosts_file: knownHosts,
       evidence: { ...nativeEvidence, provider_binding: { port_id: selectedPorts[0].id,
         security_group_id: groups[0] }, server: observed.result } });
-    const result = await runner(python, [runtimeScript, '--config', config.runtime.config_path, '--request', request], { mutation: action !== 'verify', timeout: action === 'verify' ? 180_000 : 1_800_000 });
+    const result = await runner(python, [runtimeScript, '--config', config.runtime.config_path, '--request', request], { mutation: !['verify', 'reconcile', 'inspect-delete'].includes(action), timeout: ['verify', 'reconcile', 'inspect-delete'].includes(action) ? 180_000 : 1_800_000 });
     if (result.target_id !== target.id || result.generation !== target.generation || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw new Error('Runtime response binding invalid');
     const blockers = (result.blockers || []).map((item) => typeof item === 'string' ? item : item?.code).filter((item) => /^[A-Z][A-Z0-9_]{0,95}$/.test(item || ''));
     if (result.status !== 'succeeded') { dynamicApplications.delete(target.id); return { status: result.status,
       stage: /^[a-z_]{1,48}$/.test(result.stage || '') ? result.stage : 'verification', cluster_verified: result.cluster_verified === true,
+      resumable: ['reconcile', 'inspect-delete'].includes(action) && result.resumable === true,
       blockers: blockers.length ? blockers : ['RUNTIME_VERIFICATION_FAILED'] }; }
-    if (action === 'delete') {
+    if (['delete', 'inspect-delete', 'resume-delete'].includes(action)) {
       if (result.revocation_verified !== true || !Array.isArray(result.residuals) || result.residuals.length) throw new Error('Runtime revocation unverified');
       dynamicApplications.delete(target.id);
       return { status: 'succeeded', residuals: [], revocation_verified: true };
@@ -181,8 +226,20 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
     readiness,
     prepareRuntime: (target, evidence) => runtime('prepare', target, evidence),
     verifyRuntime: (target, evidence) => runtime('verify', target, evidence),
+    reconcileRuntime: (target, evidence) => runtime('reconcile', target, evidence),
     removeRuntime: (target) => runtime('delete', target, target.runtime_evidence),
+    inspectRuntimeRemoval: (target) => runtime('inspect-delete', target, target.runtime_evidence),
+    resumeRuntimeRemoval: (target) => runtime('resume-delete', target, target.runtime_evidence),
     deploymentReady: (target) => dynamicApplications.has(target.id),
+    async restoreApplications(target) {
+      if (dynamicApplications.has(target.id)) return;
+      if (!target.runtime_binding || !config.runtime || !service?.identity) throw new Error('Registered runtime binding required');
+      const common = await privateJson(config.runtime.config_path);
+      const selected = await applicationFactory({ configPath: join(common.state_dir, target.id, 'applications.json'),
+        ciIdentity: service.identity, loadPublished: service.publishedFiles, python, runner });
+      if (Object.keys(selected.targets).length !== 1 || selected.targets[target.id]?.automaticDelivery !== true) throw new Error('Application binding invalid');
+      dynamicApplications.set(target.id, selected);
+    },
     runtimeAccess: (target) => accessKeys.get(target.id),
     async prepare(target) {
       const folder = join(stateDirectory, target.id); await privateDirectory(folder);
@@ -190,7 +247,7 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
       const address = target.tunnel?.address?.split('/')[0];
       if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(address || '')) throw new Error('Gateway address invalid');
       const identity = join(folder, 'runtime_ed25519'), knownHosts = join(folder, 'known_hosts');
-      try { const info = await lstat(identity); if (!info.isFile() || info.uid !== process.getuid() || info.mode & 0o077) throw new Error('Private management identity invalid'); }
+      try { const info = await lstat(identity); if (!info.isFile() || info.size > 513 || info.uid !== process.getuid() || info.mode & 0o077) throw new Error('Private management identity invalid'); }
       catch (error) {
         if (error.code !== 'ENOENT') throw error;
         await run('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', `railshot:${target.id}`, '-f', identity]);

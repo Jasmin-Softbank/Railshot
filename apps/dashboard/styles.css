@@ -102,6 +102,7 @@ button { cursor: pointer; }
 .brand { color: var(--color-ink); font-size: 23px; font-weight: 800; letter-spacing: -.04em; text-decoration: none; }
 .brand-dot { color: var(--color-accent); }
 .navigation { display: grid; gap: 7px; margin-top: 32px; }
+.nav-divider { height: 1px; margin: 9px 8px 3px; background: var(--color-border); }
 .nav-item { border: 0; border-radius: 9px; background: transparent; padding: 13px 15px; text-align: left; font-size: 14px; color: #65748b; }
 .nav-item:hover { background: #f4f8f7; color: var(--color-accent); }
 .nav-item.active { background: var(--color-accent-soft); color: var(--color-accent); font-weight: 700; }
@@ -129,7 +130,7 @@ h2 { letter-spacing: -.025em; }
 .source-divider { display: flex; align-items: center; gap: 12px; color: var(--color-soft); font-size: 12px; }
 .source-divider::before, .source-divider::after { content: ""; height: 1px; flex: 1; background: #e4eaf0; }
 .field-label { color: #68788d; font-size: 12px; font-weight: 600; }
-input[type="url"], input[type="text"], input[type="password"], select { width: 100%; min-height: 46px; border: 1px solid #e0e7ed; border-radius: 8px; background: var(--color-surface); padding: 11px 13px; color: var(--color-ink); font-size: 13px; }
+input[type="url"], input[type="text"], input[type="password"], input:not([type]), select { width: 100%; min-height: 46px; border: 1px solid #e0e7ed; border-radius: 8px; background: var(--color-surface); padding: 11px 13px; color: var(--color-ink); font-size: 13px; }
 input[type="url"]::placeholder { color: #98a5b5; }
 input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid #8bd4bd; outline-offset: 2px; }
 .selection { margin: 0; overflow-wrap: anywhere; color: var(--color-accent); font-size: 12px; font-weight: 600; }

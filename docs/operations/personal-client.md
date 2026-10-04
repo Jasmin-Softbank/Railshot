@@ -8,13 +8,14 @@
 
 설치기는 실행 사용자의 안전한 로컬 설정과 환경변수에서 Keystone v3 인증 주소를 찾습니다. 후보가 없거나 여러 개면 주소를 확인받고, 관리자 ID·도메인·인증 프로젝트와 암호를 입력받습니다. 관리자 암호는 저장하지 않습니다. 이름이 `railshot`인 프로젝트를 조회해 재사용하거나 없으면 만들고, 전용 서비스 사용자·제한된 프로젝트 역할·응용 자격 증명을 생성합니다. 응용 자격 증명 ID나 비밀값을 사용자에게 입력받지 않습니다. 프로젝트와 생성 자원의 소유 기록은 로컬에 남으며, 서버에는 인증정보를 보내지 않습니다. 기존 암호화 저장소가 있으면 실제 토큰 프로젝트와 `server list` 권한을 다시 검증하고, 소유 기록이 없는 기존 자격 증명을 새로 만든 자원으로 간주하지 않습니다.
 
-운영자는 검토한 리비전에서 다음 명령으로 재현 가능한 설치 배포본을 만듭니다. 출력 파일은 자동 게시하거나 덮어쓰지 않습니다.
+운영자는 검토한 리비전에서 다음 명령으로 재현 가능한 설치 배포본을 만듭니다. 첫 명령은 단일 압축파일 점검용이고, 두 번째 명령은 운영 대시보드 이미지가 게시하는 고정 해시 디렉터리와 manifest를 만듭니다. 출력은 기존 경로를 덮어쓰지 않습니다.
 
 ```bash
 python3 deployment/scripts/package-personal-client.py --output /tmp/railshot-personal.tgz
+python3 deployment/scripts/package-personal-release.py --output /tmp/railshot-personal-release
 ```
 
-출력의 SHA256 검증값, 배포본 HTTPS 주소 및 `deployment/bootstrap/install.sh`의 변경 불가능한 HTTPS 주소를 서버 설정에 넣습니다. 설치 압축파일에는 기존 설치·진단·VM 검증·제거 명령과 개인 등록 모듈을 함께 넣으며, 심볼릭 링크·특수파일·상위 경로를 허용하지 않습니다. 화면의 설치 명령은 스크립트 다운로드와 다음 실행을 한 번에 제공합니다.
+운영 대시보드 이미지는 `/personal/manifest.json`과 `/personal/<artifact-sha256>/{install.sh,personal-client.tgz}`를 함께 제공합니다. 서버 설정의 두 URL과 SHA256은 이 manifest와 일치해야 하며 배포 사전검사가 실제 HTTPS 응답과 바이트 해시를 다시 확인합니다. 설치 압축파일에는 기존 설치·진단·VM 검증·제거 명령과 개인 등록 모듈을 함께 넣으며, 심볼릭 링크·특수파일·상위 경로를 허용하지 않습니다. 화면의 설치 명령은 스크립트 다운로드와 다음 실행을 한 번에 제공합니다.
 
 ```bash
 sudo bash install.sh --personal-registration \

@@ -27,6 +27,7 @@ async function fixture(t) {
     execute: async (target, input) => { calls.execute.push({ target_id: target.id, input }); return {ok:true,result:[{id:'server-one',name:'customer VM',status:'ACTIVE'}]}; },
     prepare: async () => false,
     prepareRuntime: async (target) => { calls.runtime.push(target.id); targets[target.id] = { provider: 'openstack', automaticDelivery: true }; return { status: 'succeeded', blockers: [], binding_sha256: 'a'.repeat(64), verified_at: new Date().toISOString() }; },
+    reconcileRuntime: async () => ({ status: 'succeeded', blockers: [], binding_sha256: 'a'.repeat(64), verified_at: new Date().toISOString() }),
     verifyRuntime: async () => ({ status: 'succeeded', blockers: [], binding_sha256: 'a'.repeat(64), verified_at: new Date().toISOString() }),
     deploymentReady: (target) => Boolean(targets[target.id]),
     removeRuntime: async (target) => { calls.revoke.push(target.id); return { status: 'succeeded', residuals: [], revocation_verified: true }; },
@@ -71,7 +72,7 @@ async function fixture(t) {
     assert.equal(response.status, 202);
     await until(client, `/api/v1/targets/${row.id}`, (r) => r.runtime_preparation.status === 'succeeded');
   }
-  return { directory, calls, client, target, heartbeat, until, runtime, evidence, personalAdapter, product: () => server.productReady, get base() { return base; }, restart: async () => { await stop(); await start(); } };
+  return { directory, calls, client, target, heartbeat, until, runtime, evidence, personalAdapter, appAdapter, product: () => server.productReady, get base() { return base; }, restart: async () => { await stop(); await start(); } };
 }
 
 test('current browser owns registration immediately and can query instances as soon as the client is ready without recovery', async (t) => {
@@ -354,6 +355,7 @@ test('owner explicitly reconciles intact client and resumes same deletion with a
   assert.equal((await other.request(path+'/reconciliations',{operation_id:operation.id})).status,404);
   assert.equal((await owner.request(path+'/reconciliations',{operation_id:operation.id},{headers:{'X-Railshot-Request':''}})).status,403);
   const check=await owner.request(path+'/reconciliations',{operation_id:operation.id});assert.equal(check.status,202);
+  assert.equal(check.headers.get('location'), `/api/v1/operations/${operation.id}`);
   assert.equal(check.body.reconciliation.status,'pending');
   const probe=(await f.heartbeat(owner,row)).body.command;assert.equal(probe.kind,'environment.inspect');
   assert.equal(probe.previous_attempt_id,operation.active_attempt_id);
@@ -485,6 +487,28 @@ test('modular upload preserves personal ownership and the reviewed target precon
   assert.equal(f.calls.deploy.length, 1);
 });
 
+test('application resolution binds snake_case personal target selection to its current owner', async (t) => {
+  const f = await fixture(t), owner = f.client(), stranger = f.client(), row = await f.target(owner);
+  await f.runtime(owner, row);
+  const query = new URLSearchParams({ environment: 'onprem', provider: 'openstack', app: 'resolved-app', target_id: row.id });
+  const resolved = await owner.request(`/api/v1/applications/resolve?${query}`);
+  assert.equal(resolved.status, 200);
+  assert.deepEqual(resolved.body, { app: 'resolved-app', environment_target_id: row.id, application: null });
+  assert.equal((await stranger.request(`/api/v1/applications/resolve?${query}`)).status, 404);
+  const camelCase = new URLSearchParams({ environment: 'onprem', provider: 'openstack', app: 'resolved-app', targetId: row.id });
+  assert.equal((await owner.request(`/api/v1/applications/resolve?${camelCase}`)).status, 422);
+});
+
+test('owner runtime reconciliation points to the readable target resource', async (t) => {
+  const f = await fixture(t), owner = f.client(), row = await f.target(owner);
+  await f.runtime(owner, row);
+  const reconciled = await owner.request(`/api/v1/targets/${row.id}/reconciliations`, { scope: 'runtime' });
+  assert.equal(reconciled.status, 202);
+  assert.equal(reconciled.body.target_id, row.id);
+  assert.equal(reconciled.headers.get('location'), `/api/v1/targets/${row.id}`);
+  assert.equal(reconciled.headers.get('retry-after'), '2');
+});
+
 test('queued personal deployment rechecks connectivity before registration or CI dispatch', async (t) => {
   const f = await fixture(t), owner = f.client(), row = await f.target(owner);
   await f.runtime(owner, row);
@@ -523,4 +547,87 @@ test('owner dashboard preferences and upstream registration tokens coexist acros
   assert.equal((await oldBrowser.request('/api/v1/preferences')).body.view, 'deploy');
   assert.equal(restarted.registrations.claim(registration.linkage_token).registration_id, registration.id);
   assert.equal(restarted.registrations.claim(registration.linkage_token), null);
+});
+
+
+test('owner runtime reconciliation recovers a completed unknown binding without preparing again', async (t) => {
+  const f = await fixture(t), owner = f.client(), foreign = f.client(), row = await f.target(owner);
+  const path = `/api/v1/targets/${row.id}`, auth = { headers: { Authorization: `Bearer ${row.claim.body.client_token}` } };
+  await f.heartbeat(owner, row);
+  const prepare = f.personalAdapter.prepareRuntime;
+  f.personalAdapter.prepareRuntime = async (target) => { await prepare(target); return { status: 'unknown', blockers: ['RUNTIME_PREPARATION_UNVERIFIED'] }; };
+  await owner.request(path + '/runtimes', { generation: 1, evidence: f.evidence }, auth);
+  await f.until(owner, path, (r) => r.runtime_preparation.status === 'unknown');
+  await f.restart();
+  let inspected = 0;
+  f.personalAdapter.reconcileRuntime = async () => { inspected++; return f.personalAdapter.verifyRuntime(); };
+  await foreign.request('/api/v1/owners', {});
+  assert.equal((await foreign.request(path + '/reconciliations', { scope: 'runtime' })).status, 404);
+  const accepted = await owner.request(path + '/reconciliations', { scope: 'runtime' });
+  assert.equal(accepted.status, 202); assert.equal(accepted.body.target_id, row.id);
+  await f.until(owner, path, (r) => r.runtime_preparation.status === 'succeeded');
+  assert.equal(inspected, 1); assert.equal(f.calls.runtime.length, 1);
+});
+
+test('client resumes preparation only after read-only reconciliation proves it safe', async (t) => {
+  const f = await fixture(t), owner = f.client(), row = await f.target(owner);
+  const path = `/api/v1/targets/${row.id}`, auth = { headers: { Authorization: `Bearer ${row.claim.body.client_token}` } };
+  await f.heartbeat(owner, row);
+  const prepare = f.personalAdapter.prepareRuntime;
+  f.personalAdapter.prepareRuntime = async () => ({ status: 'unknown', blockers: ['RUNTIME_PREPARATION_UNVERIFIED'] });
+  await owner.request(path + '/runtimes', { generation: 1, evidence: f.evidence }, auth);
+  await f.until(owner, path, (r) => r.runtime_preparation.status === 'unknown');
+  assert.equal((await owner.request(path + '/runtimes', { generation: 1, action: 'resume', evidence: f.evidence }, auth)).status, 409);
+  f.personalAdapter.reconcileRuntime = async () => ({ status: 'blocked', stage: 'registration', blockers: [], resumable: true });
+  await owner.request(path + '/runtimes', { generation: 1, action: 'reconcile' }, auth);
+  await f.until(owner, path, (r) => r.runtime_preparation.resumable === true);
+  f.personalAdapter.prepareRuntime = prepare;
+  assert.equal((await owner.request(path + '/runtimes', { generation: 1, action: 'resume', evidence: f.evidence }, auth)).status, 202);
+  await f.until(owner, path, (r) => r.runtime_preparation.status === 'succeeded');
+  assert.equal(f.calls.runtime.length, 1);
+});
+
+test('initial runtime deletion failure reconciles and resumes before issuing client removal', async (t) => {
+  const f = await fixture(t), owner = f.client(), row = await f.target(owner); await f.runtime(owner, row);
+  const path = `/api/v1/targets/${row.id}`;
+  let removed = 0, resumed = 0, inspected = 0;
+  f.personalAdapter.removeRuntime = async () => { removed++; return { status: 'unknown', residuals: [{ kind: 'Role' }] }; };
+  f.personalAdapter.inspectRuntimeRemoval = async () => { inspected++; return { status: 'blocked', resumable: true }; };
+  f.personalAdapter.resumeRuntimeRemoval = async () => { resumed++; return { status: 'succeeded', residuals: [], revocation_verified: true }; };
+  const plan = (await owner.request(path + '/plans', { action: 'delete', delete_data: true })).body;
+  const operation = (await owner.request(path + '/operations', { action: 'delete', delete_data: true, plan_id: plan.id, plan_hash: plan.plan_hash, confirmation: row.created.body.label }, { headers: { 'Idempotency-Key': 'partial-runtime' } })).body;
+  await f.until(owner, `/api/v1/operations/${operation.id}`, (r) => r.status === 'unknown');
+  await f.restart();
+  assert.equal((await f.heartbeat(owner, row)).body.command, null);
+  assert.equal((await owner.request(path + '/reconciliations', { operation_id: operation.id })).status, 202);
+  const checked = (await f.until(owner, `/api/v1/operations/${operation.id}`, (r) => r.reconciliation?.status === 'ready')).body;
+  assert.equal(inspected, 1); assert.equal(resumed, 0); assert.equal(checked.reconciliation.phase, 'services');
+  assert.equal('children' in checked.reconciliation, false);
+  const input = { action: 'resume', operation_id: operation.id, reconciliation_id: checked.reconciliation.id, confirmation: row.created.body.label, delete_data: true };
+  assert.equal((await owner.request(path + '/operations', input, { headers: { 'Idempotency-Key': 'resume-runtime' } })).status, 202);
+  await f.until(owner, `/api/v1/operations/${operation.id}`, (r) => r.stage === 'client');
+  assert.equal(removed, 1); assert.equal(resumed, 1);
+});
+
+test('partial application deletion is read back then resumed while unresolved ownership stays blocked', async (t) => {
+  const f = await fixture(t), owner = f.client(), row = await f.target(owner); await f.runtime(owner, row);
+  const deployment = await owner.request('/api/v1/deployments', undefined, { method: 'POST', body: selectedPersonalSource(row.id, row.id), headers: { 'Idempotency-Key': 'app-to-remove' } });
+  await f.until(owner, `/api/v1/deployments/${deployment.body.resource_id}`, (r) => r.status === 'succeeded');
+  const path = `/api/v1/targets/${row.id}`;
+  f.appAdapter.applyLifecycle = async () => ({ status: 'unknown', residuals: [{ kind: 'Namespace' }] });
+  let resumable = false, resumed = 0;
+  f.appAdapter.reconcileLifecycle = async () => ({ status: 'blocked', resumable, resume_mode: 'existing', residuals: [{ kind: 'Namespace' }] });
+  f.appAdapter.resumeLifecycle = async () => { resumed++; return { status: 'succeeded', residuals: [], steps: [] }; };
+  const plan = (await owner.request(path + '/plans', { action: 'delete', delete_data: true })).body;
+  const operation = (await owner.request(path + '/operations', { action: 'delete', delete_data: true, plan_id: plan.id, plan_hash: plan.plan_hash, confirmation: row.created.body.label }, { headers: { 'Idempotency-Key': 'partial-app' } })).body;
+  await f.until(owner, `/api/v1/operations/${operation.id}`, (r) => r.status === 'unknown');
+  await owner.request(path + '/reconciliations', { operation_id: operation.id });
+  await f.until(owner, `/api/v1/operations/${operation.id}`, (r) => r.reconciliation?.status === 'blocked');
+  assert.equal(resumed, 0); assert.equal(f.calls.revoke.length, 0);
+  resumable = true;
+  await owner.request(path + '/reconciliations', { operation_id: operation.id });
+  const checked = (await f.until(owner, `/api/v1/operations/${operation.id}`, (r) => r.reconciliation?.status === 'ready')).body;
+  await owner.request(path + '/operations', { action: 'resume', operation_id: operation.id, reconciliation_id: checked.reconciliation.id, confirmation: row.created.body.label, delete_data: true }, { headers: { 'Idempotency-Key': 'resume-app' } });
+  await f.until(owner, `/api/v1/operations/${operation.id}`, (r) => r.stage === 'client');
+  assert.equal(resumed, 1); assert.equal(f.calls.revoke.length, 1);
 });

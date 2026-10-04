@@ -140,6 +140,8 @@ class PlatformTests(unittest.TestCase):
         mcp = next(item for item in with_mcp['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-mcp')
         self.assertEqual(mcp['spec']['template']['spec']['containers'][0]['image'], f"ghcr.io/jasmin-softbank/railshot-mcp@sha256:{'b' * 64}")
         api = next(item for item in output["items"] if item["kind"] == "Deployment" and item["metadata"]["name"] == "railshot-api")
+        self.assertFalse(any(item['name'] == 'personal-gateway' for item in api['spec']['template']['spec']['initContainers']))
+        self.assertFalse(any(item['metadata']['name'].startswith('railshot-personal-') for item in output['items']))
         container = api["spec"]["template"]["spec"]["containers"][0]
         for item in output['items']:
             if item['kind'] == 'Deployment':
@@ -182,6 +184,30 @@ class PlatformTests(unittest.TestCase):
                 module.render({**images, "api": bad}, "k3s-aws")
         with self.assertRaises(ValueError):
             module.render(images, "../target")
+
+    def test_personal_gateway_is_explicit_and_keeps_api_unprivileged(self):
+        images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + 'a' * 64
+                  for name in ('dashboard', 'api', 'personal-gateway')}
+        output = module.render(images, 'k3s-aws', personal=True)
+        api = next(item for item in output['items'] if item['kind'] == 'Deployment'
+                   and item['metadata']['name'] == 'railshot-api')
+        pod = api['spec']['template']['spec']
+        gateway = next(item for item in pod['initContainers'] if item['name'] == 'personal-gateway')
+        application = pod['containers'][0]
+        self.assertEqual(gateway['securityContext']['capabilities'], {'drop': ['ALL'], 'add': ['NET_ADMIN']})
+        self.assertEqual(gateway['securityContext']['runAsUser'], 0)
+        self.assertEqual(gateway['securityContext']['runAsGroup'], 1000)
+        self.assertEqual(application['securityContext']['capabilities'], {'drop': ['ALL']})
+        self.assertEqual(application['securityContext']['allowPrivilegeEscalation'], False)
+        self.assertNotIn('personal-gateway-key', {item['name'] for item in application['volumeMounts']})
+        private_config = next(item for item in pod['initContainers'] if item['name'] == 'private-config')
+        self.assertIn('personal-gateway-ipc', {item['name'] for item in private_config['volumeMounts']})
+        self.assertIn('railshot-personal-gateway', {item['metadata']['name'] for item in output['items']
+                                                    if item['kind'] == 'PersistentVolumeClaim'})
+        policy = next(item for item in output['items'] if item['kind'] == 'NetworkPolicy'
+                      and item['metadata']['name'] == 'railshot-api-private')
+        self.assertTrue(any({'port': 51820, 'protocol': 'UDP'} in row.get('ports', [])
+                            for row in policy['spec']['ingress']))
 
     def test_api_preparation_uses_incoming_image_on_the_existing_api_node_without_state_mounts(self):
         images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + 'a' * 64 for name in ('dashboard', 'api')}

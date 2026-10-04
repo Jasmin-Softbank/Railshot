@@ -272,3 +272,75 @@ def test_corrupt_ledger_blocks_restore_before_native_changes(prepared):
     with pytest.raises(ValueError, match='GATEWAY_LEDGER_INVALID'):
         gateway.restore(config, native)
     assert not native.calls
+
+
+def test_verified_tombstone_address_reuse_preserves_late_request_and_restore_isolation(prepared):
+    config, native, _ = prepared
+    old = gateway.execute(config, request(), native)
+    gateway.execute(config, request('remove'), native)
+    new = gateway.execute(config, request(target='personal-two', public=OTHER), native)
+    assert new['tunnel']['address'] == old['tunnel']['address']
+    before = dict(native.peers), dict(native.routes)
+    # A late old remove rebuilds the ledger, but cannot remove the reused route.
+    gateway.execute(config, request('remove'), native)
+    assert (native.peers, native.routes) == before
+    for stale in (request(), request('verify')):
+        with pytest.raises(ValueError, match='GATEWAY_PEER_REVOKED|GATEWAY_PEER_UNKNOWN'):
+            gateway.execute(config, stale, native)
+    with pytest.raises(ValueError, match='GATEWAY_PEER_CONFLICT'):
+        gateway.execute(config, request('remove', public=OTHER), native)
+    with pytest.raises(ValueError, match='GATEWAY_KEY_REUSED'):
+        gateway.execute(config, request(target='personal-three'), native)
+    ledger = json.loads(Path(config['ledger_path']).read_text())
+    assert ledger['personal-one:1']['removed'] is True
+    assert ledger['personal-two:1']['removed'] is False
+    # Sorted ledger order cannot make a tombstone delete an active route.
+    gateway.save(config['ledger_path'], json.dumps(dict(reversed(list(ledger.items())))))
+    restarted = Native(config)
+    gateway.restore(config, restarted)
+    assert (restarted.peers, restarted.routes) == before
+
+
+@pytest.mark.parametrize('residual', ['peer', 'route'])
+def test_unverified_removal_never_reassigns_an_address(prepared, residual):
+    config, native, _ = prepared
+    original = gateway.execute(config, request(), native)
+    def interrupted(*args):
+        if residual == 'route':
+            native.peers.clear()
+        raise ValueError('LOST_REMOVAL_RESPONSE')
+    with pytest.raises(ValueError, match='LOST_REMOVAL_RESPONSE'):
+        gateway.execute(config, request('remove'), native, interrupted)
+    before = Path(config['ledger_path']).read_bytes(), dict(native.peers), dict(native.routes)
+    native.calls.clear()
+    with pytest.raises(ValueError, match='GATEWAY_PEERS_UNVERIFIED|GATEWAY_ROUTES_UNVERIFIED'):
+        gateway.execute(config, request(target='personal-two', public=OTHER), native)
+    assert not writes(native)
+    assert (Path(config['ledger_path']).read_bytes(), native.peers, native.routes) == before
+    # Explicit removal readback succeeds before the old address becomes free.
+    gateway.execute(config, request('remove'), native)
+    assert gateway.execute(config, request(target='personal-two', public=OTHER), native)['tunnel']['address'] == original['tunnel']['address']
+
+
+@pytest.mark.parametrize('prefix, cycles', [(28, 30), (24, 260)])
+def test_normal_registration_removal_cycles_exceed_pool_capacity_without_erasing_history(prepared, prefix, cycles):
+    config, native, _ = prepared
+    config['address_pool'] = f'10.253.240.0/{prefix}'
+    for index in range(cycles):
+        public = base64.b64encode((index + 1000).to_bytes(32, 'big')).decode()
+        body = request(target='personal-cycle', public=public)
+        body['generation'] = index + 1
+        result = gateway.execute(config, body, native)
+        assert result['tunnel']['address'] == '10.253.240.2/32'
+        gateway.execute(config, {**body, 'action': 'remove'}, native)
+    ledger = json.loads(Path(config['ledger_path']).read_text())
+    assert len(ledger) == cycles and all(peer['removed'] for peer in ledger.values())
+    assert native.peers == {} and native.routes == {}
+
+
+def test_ledger_still_rejects_two_active_owners_for_one_address(prepared):
+    config, _, _ = prepared
+    ledger = {'personal-one:1': {'public_key': CLIENT, 'address': '10.253.240.2/32', 'removed': False},
+              'personal-two:1': {'public_key': OTHER, 'address': '10.253.240.2/32', 'removed': False}}
+    with pytest.raises(ValueError, match='GATEWAY_LEDGER_INVALID'):
+        gateway.validate_ledger(config, ledger)

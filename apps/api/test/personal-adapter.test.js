@@ -6,6 +6,7 @@ import { mkdtemp, readFile, rm, writeFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPersonalAdapter } from '../src/personal-adapter.js';
+import { createServer } from 'node:http';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'personal-native-'))); t.after(() => rm(root, { recursive:true, force:true }));
@@ -110,11 +111,14 @@ test('runtime binding requires authoritative cloud scope and a fresh native rece
   const config=JSON.parse(await readFile(f.options.configPath,'utf8'));
   await writeFile(common,JSON.stringify({state_dir:join(f.root,'bindings')}),{mode:0o600});
   await writeFile(f.options.configPath,JSON.stringify({...config,runtime:{config_path:common}}),{mode:0o600});
-  let project='project-one', nativeResult, lastRequest, factoryCalls=0, calls=0;
+  let project='project-one', portProject='project-one', portDevice='vm-one', nativeResult, lastRequest, factoryCalls=0, calls=0;
+  const cloudCalls=[];
   const evidence={resource_id:'vm-one',private_ipv4:'10.0.0.2',management_network:'private',placement:'nova',architecture:'amd64',initialization:'preconfigured',ssh_user:'railshot-runtime',ssh_port:2223,ssh_host_key:'ssh-ed25519 '+'B'.repeat(68),server:{project_id:'untrusted'}};
   const options={...f.options,service:{identity:{tenant:'demo',sourceRepository:'owner/source'},publishedFiles:async()=>[]},
     transport:async(_cmd,_args,options)=>{const q=JSON.parse(options.input), argv=q.params.argv;
-      const result=argv[0]==='port'?[{id:'port-one',device_id:'vm-one',fixed_ips:[{ip_address:'10.0.0.2'}],security_groups:['sg-one']}]
+      cloudCalls.push(argv);
+      const result=argv[0]==='port'?(argv[1]==='list'?[{ID:'port-one','Fixed IP Addresses':[{ip_address:'10.0.0.2'}]}]
+        :{id:'port-one',project_id:portProject,device_id:portDevice,fixed_ips:[{ip_address:'10.0.0.2'}],security_group_ids:['sg-one']})
         :{id:'vm-one',project_id:project,status:'ACTIVE',addresses:{private:['10.0.0.2']}};
       return JSON.stringify({version:1,job_id:q.job_id,action:q.action,ok:true,error:null,result});},
     runner:async(cmd,args,options)=>{if(!args[0]?.endsWith('/personal_runtime.py'))return f.options.runner(cmd,args,options);calls++;lastRequest=JSON.parse(await readFile(args.at(-1),'utf8'));return nativeResult;},
@@ -126,6 +130,7 @@ test('runtime binding requires authoritative cloud scope and a fresh native rece
   assert.equal((await adapter.prepareRuntime(f.target,evidence)).status,'succeeded');
   assert.equal(lastRequest.evidence.server.project_id,'project-one');assert.equal(lastRequest.evidence.ssh_host_key,undefined);
   assert.deepEqual(lastRequest.evidence.provider_binding,{port_id:'port-one',security_group_id:'sg-one'});
+  assert.ok(cloudCalls.some((argv)=>JSON.stringify(argv)==='["port","show","port-one"]'));
   assert.equal(await readFile(lastRequest.known_hosts_file,'utf8'),'10.0.0.2 '+evidence.ssh_host_key+'\n');
   assert.equal(adapter.deploymentReady(f.target),true);assert.deepEqual(await adapter.application.register({id:'app-one',environment_target_id:f.target.id}),{routed:'app-one'});
   nativeResult={...nativeResult,target_id:'foreign'};await assert.rejects(()=>adapter.verifyRuntime(f.target,evidence),/binding invalid/);
@@ -133,4 +138,38 @@ test('runtime binding requires authoritative cloud scope and a fresh native rece
   assert.equal(factoryCalls,1);
   nativeResult={target_id:f.target.id,generation:1,status:'blocked',stage:'permission_verification',cluster_verified:true,blockers:[{code:'RUNTIME_DEPLOYMENT_PERMISSION_MISMATCH'}]};
   assert.equal((await adapter.verifyRuntime(f.target,evidence)).cluster_verified,true);assert.equal(adapter.deploymentReady(f.target),false);
+  const before=calls;
+  portProject='foreign';assert.deepEqual((await adapter.prepareRuntime(f.target,evidence)).blockers,['RUNTIME_NETWORK_BINDING_UNVERIFIED']);
+  portProject='project-one';portDevice='other-vm';assert.deepEqual((await adapter.prepareRuntime(f.target,evidence)).blockers,['RUNTIME_NETWORK_BINDING_UNVERIFIED']);
+  assert.equal(calls,before,'summary never substitutes for project-bound detail');
+});
+
+test('isolated gateway socket authenticates bounded tokens and readiness is a read-only health request', async(t)=>{
+  const f=await fixture(t), folder=await realpath(await mkdtemp('/tmp/rs-gw-'));
+  t.after(()=>rm(folder,{recursive:true,force:true}));
+  const socket=join(folder,'gateway.sock'), tokenFile=join(f.root,'gateway-token'), requests=[];
+  let expectedToken;
+  const server=createServer(async(request,response)=>{
+    assert.equal(request.headers.authorization,'Bearer '+expectedToken);
+    let body='';for await(const chunk of request)body+=chunk;
+    requests.push({method:request.method,path:request.url,body});
+    response.setHeader('Content-Type','application/json');
+    response.end(JSON.stringify(request.url==='/healthz'?{status:'ready'}:{status:'succeeded'}));
+  });
+  await new Promise(resolve=>server.listen(socket,resolve));t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const original=JSON.parse(await readFile(f.options.configPath,'utf8'));
+  await writeFile(f.options.configPath,JSON.stringify({...original,gateway:{config_path:'/etc/railshot/gateway.json',socket_path:socket,token_file:tokenFile}}));
+  const adapter=await createPersonalAdapter(f.options);
+  for(const token of ['A'.repeat(32),'A'.repeat(508)+'._~-']){
+    expectedToken=token;await writeFile(tokenFile,token,{mode:0o600});
+    assert.equal((await adapter.register(f.target)).status,'succeeded');
+  }
+  const ready=await adapter.readiness();
+  assert.ok(!ready.blockers.some(row=>row.code==='PERSONAL_GATEWAY_UNAVAILABLE'));
+  assert.deepEqual(requests.at(-1),{method:'GET',path:'/healthz',body:''});
+  const count=requests.length;
+  for(const token of ['A'.repeat(31),'A'.repeat(513),'A'.repeat(32)+' secret']){
+    await writeFile(tokenFile,token);await assert.rejects(()=>adapter.register(f.target),/Invalid gateway token/);
+  }
+  assert.equal(requests.length,count);
 });

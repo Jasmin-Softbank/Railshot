@@ -869,3 +869,24 @@ def test_late_helper_cannot_overwrite_a_new_attempt_job(local, monkeypatch):
     assert json.loads(job.read_text()) == saved
     assert calls == [] and remove.UNIT.exists() and remove.PAYLOAD.exists()
     assert receipts[0]['attempt_id'] == 'old-attempt' and receipts[0]['status'] == 'unknown'
+
+
+def test_runtime_retry_reconciles_saved_evidence_before_resuming_without_reinstall(local, monkeypatch):
+    from types import SimpleNamespace
+    from apps.agent import personal_runtime
+    evidence = {'resource_id': 'server1', 'private_ipv4': '10.0.0.17'}
+    (client.CONFIG / 'runtime-evidence.json').write_text(json.dumps(evidence))
+    (client.CONFIG / 'runtime-evidence.json').chmod(0o600)
+    states = iter([
+        {'runtime_preparation': {'status': 'unknown', 'stage': 'reconciliation'}},
+        {'runtime_preparation': {'status': 'blocked', 'stage': 'registration', 'resumable': True}},
+        {'status': 'ready', 'deployable': True, 'runtime_preparation': {'status': 'succeeded'}}])
+    sent = []
+    def transport(*args, **kwargs):
+        if kwargs.get('method') == 'GET':
+            return next(states)
+        sent.append(args[3]); return {}
+    monkeypatch.setattr(client, 'api', transport)
+    monkeypatch.setattr(personal_runtime, 'prepare', lambda *a, **kw: pytest.fail('Saved evidence must not reinstall K3s'))
+    client.prepare_runtime({**configuration(), 'project_id': 'project1'}, SimpleNamespace())
+    assert sent == [{'generation': 1, 'action': 'reconcile'}, {'generation': 1, 'action': 'resume', 'evidence': evidence}]

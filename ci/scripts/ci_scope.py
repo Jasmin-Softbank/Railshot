@@ -9,7 +9,7 @@ import subprocess
 
 JOBS = ('contracts', 'openstack', 'database-ansible', 'api-browser', 'terraform',
         'runtime-smoke', 'observability', 'containers')
-COMPONENTS = ('dashboard', 'api', 'mcp', 'ci-runner')
+COMPONENTS = ('dashboard', 'api', 'mcp', 'personal-gateway', 'ci-runner')
 SHA = re.compile(r'[0-9a-f]{40}')
 # Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
 API_NATIVE_FILES = {
@@ -35,6 +35,8 @@ API_NATIVE_FILES = {
     'deployment/scripts/openstack_route_worker.py', 'deployment/scripts/application_lifecycle.py',
     'deployment/scripts/lifecycle_runtime.py',
     'deployment/scripts/personal_wireguard.py', 'deployment/scripts/personal_runtime.py',
+    'deployment/scripts/personal-production-preflight.py',
+    'deployment/manifests/personal/production-compose-prepare.py',
     'deployment/cloudflared/register.py', 'deployment/cloudflared/render.py',
     'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
@@ -56,9 +58,39 @@ API_NATIVE_PREFIXES = ('infrastructure/ansible/roles/', 'infrastructure/ansible/
                        'infrastructure/terraform/aws-edge/', 'infrastructure/terraform/gcp-edge/',
                        'deployment/bootstrap/client_setup/')
 
+PERSONAL_RELEASE_FILES = {
+    'ci/scripts/storage.py', 'contracts/ansible-request.schema.json',
+    'deployment/scripts/common.sh', 'deployment/scripts/lifecycle_runtime.py',
+    'deployment/scripts/package-personal-client.py', 'deployment/scripts/package-personal-release.py',
+    'deployment/cloudflared/render.py', 'deployment/airgap/versions.json',
+    'deployment/bootstrap/uninstall.sh', 'deployment/bootstrap/install_payload.py',
+    'deployment/bootstrap/revoke_personal_identity.py', 'deployment/bootstrap/requirements.lock',
+    'deployment/bootstrap/templates/agent-authorized-keys.README',
+    'deployment/bootstrap/install.sh', 'deployment/bootstrap/personal-install.sh',
+    'deployment/bootstrap/personal-registration.sh', 'deployment/bootstrap/preflight.sh',
+    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh',
+    'deployment/bootstrap/runtime-healthz.py', 'deployment/cilium/install.sh',
+    'deployment/cilium/preflight.py', 'deployment/cilium/health.sh',
+    'infrastructure/providers/openstack/templates/cloud-init.yaml.tmpl',
+    'infrastructure/ansible/run.py', 'infrastructure/ansible/transport.py',
+    'infrastructure/ansible/runtime.yml', 'infrastructure/ansible/guest.yml',
+    'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/tasks/guest-checks.yml',
+}
+PERSONAL_GATEWAY_FILES = {'deployment/scripts/personal_wireguard.py',
+                          'deployment/scripts/personal_gateway_service.py',
+                          'deployment/manifests/personal/gateway-service-entrypoint.sh'}
+
 
 def api_native_dependency(path):
     return path in API_NATIVE_FILES or path.startswith(API_NATIVE_PREFIXES)
+
+
+def personal_release_dependency(path):
+    file = PurePosixPath(path)
+    return (path in PERSONAL_RELEASE_FILES
+            or file.suffix == '.py' and not {'tests', '__pycache__', '.venv'} & set(file.parts)
+            and path.startswith(('apps/agent/', 'deployment/bootstrap/client_setup/',
+                                 'infrastructure/providers/openstack/')))
 
 
 def documentation(path):
@@ -86,6 +118,10 @@ def container_components(paths):
             continue
         if api_native_dependency(path):
             components.add('api')
+        if personal_release_dependency(path):
+            components.add('dashboard')
+        if path in PERSONAL_GATEWAY_FILES:
+            components.add('personal-gateway')
         if path.startswith(('.github/', 'contracts/')) or path in {
                 '.dockerignore', 'ci/scripts/container-smoke.py', 'ci/scripts/ci_scope.py'}:
             components.update(COMPONENTS)
@@ -93,7 +129,7 @@ def container_components(paths):
                       'apps/dashboard/package.json'}:
             components.update(('dashboard', 'api', 'mcp'))
         elif path == 'apps/api/Dockerfile':
-            components.update(('api', 'mcp'))
+            components.update(('api', 'mcp', 'personal-gateway'))
         elif path == 'apps/agent/package.json' or path.startswith(('apps/agent/src/', 'apps/agent/test/')):
             components.add('mcp')
         elif path.startswith('apps/dashboard/'):
@@ -109,7 +145,7 @@ def container_components(paths):
         elif path in {'deployment/compose.yaml', 'deployment/.env.example',
                       'deployment/manifests/platform.yaml',
                       'gitops/applications/railshot-platform.yaml'}:
-            components.update(('dashboard', 'api', 'mcp'))
+            components.update(('dashboard', 'api', 'mcp', 'personal-gateway'))
         elif (path.startswith(('apps/agent/', 'ci/', 'deployment/', 'infrastructure/ansible/',
                                'infrastructure/providers/openstack/',
                                'infrastructure/providers/terraform_tools/',

@@ -158,7 +158,9 @@ def delete_control(binding, kind, name, expected):
         return
     control = control_for(binding)
     obj = control('get', kind, name, '--ignore-not-found', '-o', 'json')
-    require(obj and identity(obj, spec='spec_sha256' in expected) == expected, 'CONTROL_IDENTITY_CHANGED')
+    if not obj:
+        return  # An approved object's observed absence never authorizes another deletion.
+    require(identity(obj, spec='spec_sha256' in expected) == expected, 'CONTROL_IDENTITY_CHANGED')
     require(not obj['metadata'].get('finalizers'), 'CONTROL_FINALIZER_UNSUPPORTED')
     if kind == 'application':
         require(not obj.get('operation') and obj.get('status', {}).get('operationState', {}).get('phase') not in ('Running', 'Terminating'), 'APPLICATION_SYNC_ACTIVE')
@@ -173,54 +175,61 @@ def delete_control(binding, kind, name, expected):
         time.sleep(1)
 
 
-def remove_renewal(binding, expected):
-    control = control_for(binding); selected = expected['renewal']
-    shared = expected.get('shared')
+def remove_renewal(binding, expected, *, inspect=False):
+    """Narrow only the saved app scope, including an interrupted scope transition."""
+    control = control_for(binding); selected = expected['renewal']; shared = expected.get('shared')
+    cm = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
+    current = runtime.credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    rows = [item for item in current['targets'] if item['target_id'] == binding['application_id']]
+    require(rows in ([], [selected]), 'RENEWAL_POLICY_CHANGED')
+    policy = {**current, 'targets': [item for item in current['targets'] if item['target_id'] != binding['application_id']]}
+    secret = None
     if shared:
-        cm, policy, environment, secret, _, _ = runtime.shared_cluster_snapshot(
-            binding['cd'], binding['registered'], binding['environment_id'])
-        require(environment == shared['renewal'] and identity(secret) == shared['secret'], 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
-        namespaces = [value for value in environment['namespaces'] if value != binding['application_id']]
-        require(binding['application_id'] in environment['namespaces'] and environment['service_account']['namespace'] in namespaces,
+        previous = shared['renewal']
+        namespaces = [value for value in previous['namespaces'] if value != binding['application_id']]
+        require(binding['application_id'] in previous['namespaces'] and previous['service_account']['namespace'] in namespaces,
                 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
-        updated = {**environment, 'namespaces': namespaces}
-        transition = {**policy, 'targets': [
-            {**updated, 'previous_scope': {key: environment[key] for key in ('project', 'namespaces')}}
-            if item == environment else item for item in policy['targets']]}
-        policy = {**policy, 'targets': [updated if item == environment else item for item in policy['targets']]}
-    else:
-        cm = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
-        policy = runtime.credentials.validate_policy(json.loads(cm['data']['policy.json']))
-    require([item for item in policy['targets'] if item['target_id'] == binding['application_id']] == [selected], 'RENEWAL_POLICY_CHANGED')
-    policy['targets'] = [item for item in policy['targets'] if item != selected]
-    runtime.credentials.validate_policy(policy)
+        updated = {**previous, 'namespaces': namespaces}
+        transition_row = {**updated, 'previous_scope': {key: previous[key] for key in ('project', 'namespaces')}}
+        environment = next((item for item in current['targets'] if item['target_id'] == binding['environment_id']), None)
+        require(environment in (previous, transition_row, updated), 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+        secret = control('get', 'secret', previous['secret'], '-o', 'json')
+        require(identity(secret) == shared['secret'], 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+        observed_namespaces = base64.b64decode(secret['data']['namespaces'], validate=True).decode().split(',')
+        require(observed_namespaces in (previous['namespaces'], namespaces), 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+        # Validate all other credential properties against one exact approved scope.
+        credential_policy = previous if observed_namespaces == previous['namespaces'] else updated
+        runtime.credentials.registration(secret, credential_policy, time.time())
+        policy['targets'] = [updated if item['target_id'] == binding['environment_id'] else item for item in policy['targets']]
     role = control('get', 'role', 'railshot-credentials', '-o', 'json')
     rules = role.get('rules') or []
-    require(len(rules) == 1 and rules[0].get('apiGroups') == [''] and rules[0].get('resources') == ['secrets']
-            and rules[0].get('verbs') == ['get', 'patch'] and selected['secret'] in rules[0].get('resourceNames', []), 'RENEWAL_ROLE_CHANGED')
-    names = [name for name in rules[0]['resourceNames'] if name != selected['secret']]
-    # An empty resourceNames list grants every name. Remove the rule instead.
-    role['rules'] = [{**rules[0], 'resourceNames': names}] if names else []
-    if shared:
-        # Both exact scopes remain renewable if a write fails between the two objects.
+    require(len(rules) <= 1 and (not rules or rules[0].get('apiGroups') == [''] and rules[0].get('resources') == ['secrets']
+            and rules[0].get('verbs') == ['get', 'patch'] and rules[0].get('resourceNames')), 'RENEWAL_ROLE_CHANGED')
+    names = [name for name in rules[0]['resourceNames'] if name != selected['secret']] if rules else []
+    desired_rules = [{**rules[0], 'resourceNames': names}] if names else []
+    runtime.credentials.validate_policy(policy)
+    if inspect:
+        return
+    if shared and observed_namespaces != namespaces:
+        transition = {**current, 'targets': [transition_row if item['target_id'] == binding['environment_id'] else item for item in current['targets']]}
         runtime.credentials.validate_policy(transition)
         cm['data']['policy.json'] = json.dumps(transition)
         control('replace', '-f', '-', '-o', 'json', document=cm)
-        observed = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
-        require(observed['metadata']['uid'] == cm['metadata']['uid'] and
-                json.loads(observed['data']['policy.json']) == transition, 'SHARED_CREDENTIAL_TRANSITION_UNVERIFIED')
-        cm = observed
-        encoded = base64.b64encode(','.join(namespaces).encode()).decode()
+        cm = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
+        require(json.loads(cm['data']['policy.json']) == transition, 'SHARED_CREDENTIAL_TRANSITION_UNVERIFIED')
         patch = [{'op': 'test', 'path': '/metadata/uid', 'value': secret['metadata']['uid']},
                  {'op': 'test', 'path': '/metadata/resourceVersion', 'value': secret['metadata']['resourceVersion']},
-                 {'op': 'replace', 'path': '/data/namespaces', 'value': encoded}]
-        control('patch', 'secret', environment['secret'], '--type=json', '--patch-file=/dev/stdin', '-o', 'json', document=patch)
-    cm['data']['policy.json'] = json.dumps(policy)
-    control('replace', '-f', '-', '-o', 'json', document=cm)
-    control('replace', '-f', '-', '-o', 'json', document=role)
+                 {'op': 'replace', 'path': '/data/namespaces', 'value': base64.b64encode(','.join(namespaces).encode()).decode()}]
+        control('patch', 'secret', previous['secret'], '--type=json', '--patch-file=/dev/stdin', '-o', 'json', document=patch)
+    if json.loads(cm['data']['policy.json']) != policy:
+        cm['data']['policy.json'] = json.dumps(policy)
+        control('replace', '-f', '-', '-o', 'json', document=cm)
+    if rules != desired_rules:
+        role['rules'] = desired_rules
+        control('replace', '-f', '-', '-o', 'json', document=role)
     observed = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
     require(json.loads(observed['data']['policy.json']) == policy
-            and (control('get', 'role', 'railshot-credentials', '-o', 'json').get('rules') or []) == role['rules'], 'RENEWAL_REMOVAL_UNVERIFIED')
+            and (control('get', 'role', 'railshot-credentials', '-o', 'json').get('rules') or []) == desired_rules, 'RENEWAL_REMOVAL_UNVERIFIED')
     if shared:
         _, _, observed, canonical, _, _ = runtime.shared_cluster_snapshot(binding['cd'], binding['registered'], binding['environment_id'])
         require(observed == updated and identity(canonical) == shared['secret'], 'SHARED_CREDENTIAL_REMOVAL_UNVERIFIED')
@@ -304,13 +313,15 @@ def collect(kube, binding, profile, action, approved_edge=None, *, allow_active=
 def validate_request(request):
     common = {'version', 'phase', 'application_id', 'environment_id', 'app', 'action', 'operation_id'}
     require(isinstance(request, dict) and common <= set(request) and request['version'] == 1
-            and type(request['version']) is int and request['phase'] in ('plan', 'apply')
+            and type(request['version']) is int and request['phase'] in ('plan', 'apply', 'reconcile', 'resume')
             and request['action'] in ('stop', 'start', 'delete'), 'LIFECYCLE_REQUEST_INVALID')
-    extra = {'plan_id', 'plan_hash', 'delete_data'} if request['phase'] == 'apply' else set()
+    execution = request['phase'] in ('apply', 'reconcile', 'resume')
+    require(request['phase'] not in ('reconcile', 'resume') or request['action'] == 'delete', 'LIFECYCLE_REQUEST_INVALID')
+    extra = {'plan_id', 'plan_hash', 'delete_data'} if execution else set()
     require(set(request) <= common | extra, 'LIFECYCLE_REQUEST_INVALID')
-    for key in ('operation_id', *(['plan_id'] if request['phase'] == 'apply' else [])):
+    for key in ('operation_id', *(['plan_id'] if execution else [])):
         require(isinstance(request.get(key), str) and str(uuid.UUID(request[key])) == request[key], 'LIFECYCLE_REQUEST_INVALID')
-    if request['phase'] == 'apply':
+    if execution:
         require(isinstance(request.get('plan_hash'), str) and re.fullmatch(r'[a-f0-9]{64}', request['plan_hash']), 'LIFECYCLE_REQUEST_INVALID')
         require(request.get('delete_data') is True if request['action'] == 'delete' else request.get('delete_data') in (None, False), 'DELETE_DATA_CONFIRMATION_REQUIRED')
 
@@ -332,11 +343,18 @@ def never_registered(config, request, home):
     operations = applications.private_directory(directory / 'operations')
     state_path = home / 'lifecycle.json'
     journal = operations / (request['operation_id'] + '.json')
-    request_sha = applications.digest(request)
-    if request['phase'] == 'apply' and journal.exists():
+    recovery = request['phase'] in ('reconcile', 'resume')
+    request_sha = applications.digest({**request, 'phase': 'apply'} if recovery else request)
+    if (request['phase'] == 'apply' or recovery) and journal.exists():
         saved = runtime.read_private(journal)
         require(saved['request_sha256'] == request_sha, 'LIFECYCLE_OPERATION_CONFLICT')
+        if recovery:
+            require(saved['result']['status'] == 'succeeded', 'APPLICATION_LIFECYCLE_BLOCKED')
         return saved['result']
+    if recovery:
+        require(request['phase'] == 'reconcile' and not state_path.exists(), 'APPLICATION_LIFECYCLE_BLOCKED')
+        return {'status': 'blocked', 'application_id': request['application_id'], 'action': 'delete',
+                'resumable': True, 'resume_mode': 'fresh', 'steps': [], 'residuals': []}
     require(not state_path.exists(), 'APPLICATION_LIFECYCLE_BLOCKED')
     retained = [reference('SharedRuntime', request['environment_id']), reference('AuditRecord', request['application_id']),
                 reference('BuildArtifacts', request['application_id'])]
@@ -375,6 +393,34 @@ def verify_public_health(binding, plan):
         time.sleep(2)
 
 
+def inspect_deletion(kube, binding, profile, snapshot):
+    """Re-observe every remaining destructive target against the approved IDs."""
+    expected = snapshot['control']; control = control_for(binding)
+    ci_binding(profile, binding)
+    for kind, name, saved in [('application', expected['application_name'], expected['application']),
+                              ('appproject', binding['application_id'], expected['project']),
+                              ('secret', expected['renewal']['secret'], expected['secret'])]:
+        observed = control('get', kind, name, '--ignore-not-found', '-o', 'json')
+        if observed:
+            require(saved and identity(observed, spec='spec_sha256' in saved) == saved
+                    and not observed['metadata'].get('finalizers'), 'CONTROL_IDENTITY_CHANGED')
+            if kind == 'application':
+                require(not observed.get('operation') and observed.get('status', {}).get('operationState', {}).get('phase')
+                        not in ('Running', 'Terminating'), 'APPLICATION_SYNC_ACTIVE')
+    remove_renewal(binding, expected, inspect=True)
+    edge.inspect_execution(binding, 'delete', snapshot['edge'])
+    if not workloads.deleted(kube, binding['application_id'], snapshot['runtime']):
+        shared = {'shared_renewal': expected['shared']['renewal']} if expected.get('shared') else {}
+        observed = workloads.inventory(kube, binding, expected['renewal'], 'delete', **shared)
+        require(workloads.comparable(observed) == workloads.comparable(snapshot['runtime']), 'APPLICATION_RUNTIME_PLAN_STALE')
+
+
+def remove_runtime(kube, binding, snapshot):
+    if workloads.deleted(kube, binding['application_id'], snapshot):
+        return {'status': 'succeeded', 'residuals': []}
+    return workloads.execute(kube, binding, 'delete', snapshot)
+
+
 def lifecycle(config_path, request):
     validate_request(request)
     config = applications.load_config(config_path)
@@ -395,11 +441,19 @@ def lifecycle(config_path, request):
         state_path = home / 'lifecycle.json'
         state = runtime.read_private(state_path) if state_path.exists() else {'status': 'ready'}
         action = request['action']; phase = request['phase']
+        recovery = phase in ('reconcile', 'resume')
         directory = applications.private_directory(home / 'lifecycle')
         plans = applications.private_directory(directory / 'plans')
         operations = applications.private_directory(directory / 'operations')
         journal = operations / (request['operation_id'] + '.json')
-        fingerprint = applications.digest(request)
+        fingerprint = applications.digest({**request, 'phase': 'apply'} if recovery else request)
+        saved = runtime.read_private(journal) if journal.exists() else None
+        if recovery and not saved:
+            require(phase == 'reconcile' and state['status'] in ('ready', 'stopped'), 'APPLICATION_LIFECYCLE_BLOCKED')
+            return {'status': 'blocked', 'application_id': request['application_id'], 'action': 'delete',
+                    'resumable': True, 'resume_mode': 'fresh', 'steps': [], 'residuals': []}
+        if recovery:
+            require(saved['request_sha256'] == fingerprint, 'LIFECYCLE_OPERATION_CONFLICT')
         if phase == 'apply' and journal.exists():
             saved = runtime.read_private(journal)
             require(saved['request_sha256'] == fingerprint, 'LIFECYCLE_OPERATION_CONFLICT')
@@ -407,17 +461,25 @@ def lifecycle(config_path, request):
             if result['status'] == 'running':
                 result = {**result, 'status': 'unknown', 'error': {'code': 'LIFECYCLE_RECONCILE_REQUIRED', 'retryable': False, 'outcome_unknown': True}}
             return result
-        require(state['status'] in (('stopped',) if action == 'start' else ('ready',) if action == 'stop' else ('ready', 'stopped')), 'APPLICATION_LIFECYCLE_BLOCKED')
+        require(recovery or state['status'] in (('stopped',) if action == 'start' else ('ready',) if action == 'stop' else ('ready', 'stopped')), 'APPLICATION_LIFECYCLE_BLOCKED')
         with runtime.runtime_kubectl(native) as kube:
             selected = {key: request[key] for key in ('application_id', 'environment_id', 'app', 'action')}
             plan = None
-            if phase == 'apply':
+            if phase == 'apply' or recovery:
                 plan = runtime.read_private(plans / (request['plan_id'] + '.json'))
                 require(applications.digest(plan) == request['plan_hash'] and all(plan.get(k) == v for k, v in selected.items())
-                        and plan.get('binding_sha256') == binding_sha and plan.get('state_sha256') == applications.digest(state), 'LIFECYCLE_PLAN_CHANGED')
-                require(datetime.fromisoformat(plan['expires_at'].replace('Z', '+00:00')).timestamp() > time.time(), 'LIFECYCLE_PLAN_EXPIRED')
-            snapshot = collect(kube, binding, profile, action, plan['snapshot']['edge'] if plan else None,
-                               allow_active=phase == 'plan' and action == 'delete')
+                        and plan.get('binding_sha256') == binding_sha and (recovery or plan.get('state_sha256') == applications.digest(state)), 'LIFECYCLE_PLAN_CHANGED')
+                require(recovery or datetime.fromisoformat(plan['expires_at'].replace('Z', '+00:00')).timestamp() > time.time(), 'LIFECYCLE_PLAN_EXPIRED')
+            if recovery:
+                snapshot = plan['snapshot']
+                inspect_deletion(kube, binding, profile, snapshot)
+                if phase == 'reconcile' or saved['result']['status'] == 'succeeded':
+                    return {'status': 'succeeded' if saved['result']['status'] == 'succeeded' else 'blocked',
+                            'application_id': binding['application_id'], 'action': action, 'resumable': True,
+                            'resume_mode': 'existing', 'steps': saved['result']['steps'], 'residuals': saved['result']['residuals']}
+            else:
+                snapshot = collect(kube, binding, profile, action, plan['snapshot']['edge'] if plan else None,
+                                   allow_active=phase == 'plan' and action == 'delete')
             if phase == 'plan':
                 plan_id = request['operation_id']
                 expires = datetime.fromtimestamp(time.time() + TTL, timezone.utc).isoformat().replace('+00:00', 'Z')
@@ -455,7 +517,8 @@ def lifecycle(config_path, request):
                     step('remove-route', lambda: edge.execute(binding, action, snapshot['edge']))
                     if action == 'delete':
                         step('remove-renewal', lambda: remove_renewal(binding, expected))
-                    step('runtime-cleanup', lambda: workloads.execute(kube, binding, action, snapshot['runtime']))
+                    step('runtime-cleanup', lambda: remove_runtime(kube, binding, snapshot['runtime']) if action == 'delete' and recovery
+                         else workloads.execute(kube, binding, action, snapshot['runtime']))
                     if action == 'delete':
                         step('remove-credential', lambda: delete_control(binding, 'secret', expected['renewal']['secret'], expected['secret']))
                         step('remove-project', lambda: delete_control(binding, 'appproject', binding['application_id'], expected['project']))

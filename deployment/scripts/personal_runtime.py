@@ -256,7 +256,7 @@ def observed_server(raw, evidence, project):
 def validate_request(request):
     require(apps.exact(request, ('action', 'target_id', 'generation', 'project_id', 'profile_id', 'expected_resource_id',
                                  'address', 'identity_file', 'known_hosts_file', 'evidence')))
-    require(request['action'] in ('prepare', 'verify', 'delete') and re.fullmatch(r'personal-[a-f0-9-]{36}', request['target_id']))
+    require(request['action'] in ('prepare', 'verify', 'reconcile', 'delete', 'inspect-delete', 'resume-delete') and re.fullmatch(r'personal-[a-f0-9-]{36}', request['target_id']))
     require(type(request['generation']) is int and request['generation'] > 0)
     require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', request['project_id']))
     require(request['profile_id'] is None or isinstance(request['profile_id'], str)
@@ -364,7 +364,9 @@ def readback(kube, cd, registered, ident, private_ip, tunnel_config_path, *, req
 
 def delete_exact(call, namespace, kind, name, uid):
     obj = call(namespace, 'get', kind, name, '--ignore-not-found', '-o', 'json')
-    require(obj and obj['metadata']['uid'] == uid, 'RUNTIME_DELETE_IDENTITY_CHANGED')
+    if not obj:
+        return
+    require(obj['metadata']['uid'] == uid, 'RUNTIME_DELETE_IDENTITY_CHANGED')
     plural = {'serviceaccount': 'serviceaccounts', 'role': 'roles', 'rolebinding': 'rolebindings', 'secret': 'secrets',
               'configmap': 'configmaps', 'deployment': 'deployments', 'appproject': 'appprojects'}[kind]
     prefix = '/apis/rbac.authorization.k8s.io/v1' if kind in ('role', 'rolebinding') else '/apis/apps/v1' if kind == 'deployment' \
@@ -374,15 +376,40 @@ def delete_exact(call, namespace, kind, name, uid):
     require(not call(namespace, 'get', kind, name, '--ignore-not-found', '-o', 'json'), 'RUNTIME_DELETE_RESIDUAL')
 
 
-def remove_environment(kube, cd, registered, ident, binding, shared):
+def inspect_removal(kube, cd, registered, ident, binding, shared):
     control = lambda ns, *args, **kwargs: runtime.argo.kubectl(cd['context'], ns, *args, **kwargs)
     for path in shared.glob('app-*/registration.json'):
         registration = runtime.read_private(path)
         if registration.get('environment_id') == ident:
             lifecycle = path.parent / 'lifecycle.json'
             require(lifecycle.exists() and runtime.read_private(lifecycle).get('status') == 'deleted', 'RUNTIME_APPLICATIONS_REMAIN')
-    cm, policy, selected = runtime.shared_cluster_policy(cd, registered, ident)
-    require(selected['namespaces'] == [ident], 'RUNTIME_SHARED_NAMESPACES_REMAIN')
+    namespace = kube('default', 'get', 'namespace', ident, '-o', 'json')
+    require(namespace and namespace['metadata']['uid'] == binding['namespace_uid'], 'RUNTIME_DELETE_IDENTITY_CHANGED')
+    cm = control('argocd', 'get', 'configmap', 'railshot-credentials', '-o', 'json')
+    policy = runtime.credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    selected = [row for row in policy['targets'] if row['target_id'] == ident]
+    require(len(selected) <= 1 and (not selected or selected[0]['namespaces'] == [ident]
+            and selected[0]['service_account']['uid'] == binding['service_account_uid']
+            and selected[0]['server'] == registered['target']['cluster_server']), 'RUNTIME_SHARED_NAMESPACES_REMAIN')
+    require(not any(ident in row['namespaces'] for row in policy['targets'] if row['target_id'] != ident), 'RUNTIME_SHARED_NAMESPACES_REMAIN')
+    items = [*binding['route_objects'], *[{'namespace': ident, 'kind': key.split('/')[0], 'name': key.split('/')[1], 'uid': uid}
+                                        for key, uid in binding['objects'].items()]]
+    for call, entries in [(kube, items), (control, [
+            {'namespace': 'argocd', 'kind': 'secret', 'name': 'railshot-' + ident, 'uid': binding['secret_uid']},
+            {'namespace': 'argocd', 'kind': 'appproject', 'name': ident, 'uid': binding['project_uid']}])]:
+        for item in entries:
+            obj = call(item['namespace'], 'get', item['kind'], item['name'], '--ignore-not-found', '-o', 'json')
+            require(not obj or obj['metadata']['uid'] == item['uid'] and not obj['metadata'].get('ownerReferences')
+                    and not obj['metadata'].get('finalizers'), 'RUNTIME_DELETE_IDENTITY_CHANGED')
+            if obj and item['kind'] == 'configmap' and item['name'].endswith('-config'):
+                require(json.loads(obj['metadata'].get('annotations', {}).get(tunnel_registration.OWNERS, 'null')) == {},
+                        'RUNTIME_APPLICATION_ROUTES_REMAIN')
+    return cm, policy
+
+
+def remove_environment(kube, cd, registered, ident, binding, shared):
+    control = lambda ns, *args, **kwargs: runtime.argo.kubectl(cd['context'], ns, *args, **kwargs)
+    cm, policy = inspect_removal(kube, cd, registered, ident, binding, shared)
     for item in binding['route_objects']:
         delete_exact(kube, item['namespace'], item['kind'], item['name'], item['uid'])
     for key, uid in binding['objects'].items():
@@ -395,6 +422,7 @@ def remove_environment(kube, cd, registered, ident, binding, shared):
     renewal_role = control('argocd', 'get', 'role', 'railshot-credentials', '-o', 'json')
     for rule in renewal_role['rules']:
         rule['resourceNames'] = [name for name in rule.get('resourceNames', []) if name != 'railshot-' + ident]
+    renewal_role['rules'] = [rule for rule in renewal_role['rules'] if rule.get('resourceNames')]
     control('argocd', 'replace', '-f', '-', '-o', 'json', document=renewal_role)
     grants = {('argoproj.io', 'appprojects'): ident, ('', 'secrets'): 'railshot-' + ident}
     role = control('argocd', 'get', 'role', 'railshot-product-registrations', '-o', 'json')
@@ -425,6 +453,7 @@ def execute(config_path, request):
     answer = {'target_id': ident, 'generation': generation, 'status': 'blocked', 'stage': 'operator_configuration', 'blockers': [], 'cluster_verified': False}
     receipt_path = None
     started = False
+    recovering = False
     try:
         common, template, generic_profile, route_profiles = load_operator_config(config_path)
         answer['stage'] = 'resource_verification'
@@ -454,15 +483,27 @@ def execute(config_path, request):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             prior = runtime.read_private(receipt_path) if receipt_path.exists() else None
             require(not prior or prior['input_sha256'] == fingerprint, 'RUNTIME_BINDING_CONFLICT')
-            if prior and prior['status'] in ('running', 'unknown'):
+            recovering = bool(prior and prior['status'] in ('running', 'unknown'))
+            removal = request['action'] in ('delete', 'inspect-delete', 'resume-delete')
+            if recovering and request['action'] not in ('reconcile', 'inspect-delete', 'resume-delete'):
                 return {**answer, 'status': 'unknown', 'stage': 'reconciliation', 'blockers': [{'code': 'RUNTIME_PREPARATION_UNVERIFIED'}]}
             deletion_path = home / 'deletion.json'
-            if deletion_path.exists():
-                deleted = runtime.read_private(deletion_path)
-                if request['action'] == 'delete' and deleted.get('status') == 'succeeded':
+            deleted = runtime.read_private(deletion_path) if deletion_path.exists() else None
+            if deleted:
+                require(deleted.get('input_sha256') == fingerprint, 'RUNTIME_BINDING_CONFLICT')
+                if removal and deleted.get('status') == 'succeeded':
                     return {**answer, 'status': 'succeeded', 'stage': 'revoked', 'revocation_verified': True, 'residuals': []}
-                return {**answer, 'status': 'unknown', 'stage': 'reconciliation', 'blockers': [{'code': 'RUNTIME_REMOVAL_RECONCILE_REQUIRED'}]}
-            require(request['action'] not in ('verify', 'delete') or prior and prior['status'] == 'succeeded', 'RUNTIME_NOT_REGISTERED')
+                if request['action'] not in ('inspect-delete', 'resume-delete'):
+                    return {**answer, 'status': 'unknown', 'stage': 'reconciliation', 'blockers': [{'code': 'RUNTIME_REMOVAL_RECONCILE_REQUIRED'}]}
+                require(prior and deleted.get('binding') and (not prior.get('binding') or prior['binding'] == deleted['binding']),
+                        'RUNTIME_REMOVAL_BINDING_UNAVAILABLE')
+                prior = {**prior, 'binding': deleted['binding']}
+            if request['action'] == 'reconcile' and not prior:
+                # Registration intent is saved before any external mutation. Its
+                # absence proves a fresh prepare can be explicitly requested.
+                return {**answer, 'status': 'blocked', 'stage': 'registration', 'resumable': True,
+                        'blockers': [{'code': 'RUNTIME_NOT_REGISTERED'}]}
+            require(not (request['action'] == 'verify' or removal) or prior and (prior['status'] == 'succeeded' or deleted), 'RUNTIME_NOT_REGISTERED')
             for path, value in ((home / 'server.json', server),
                                 (home / 'registry.json', {'version': 1, 'targets': {ident: selected}})):
                 require(not prior or path.exists() and runtime.read_private(path) == value, 'RUNTIME_BINDING_CONFLICT')
@@ -495,7 +536,7 @@ def execute(config_path, request):
                 answer['stage'] = 'cluster_verification'
                 health(kube, evidence['private_ipv4'])
                 answer['cluster_verified'] = True
-                if request['action'] != 'delete':
+                if not removal and request['action'] not in ('verify', 'reconcile'):
                     if not prior:
                         answer['stage'] = 'registration'
                         runtime.preflight_renewal(cd, registered, ident)
@@ -527,10 +568,23 @@ def execute(config_path, request):
                         if not prior:
                             runtime.save(path, value)
                     route_binding(profile, request, application_config['registry_file'])
-                if request['action'] == 'delete':
-                    require(readback(kube, cd, registered, ident, evidence['private_ipv4'], home / 'tunnel.json',
-                                     require_empty_routes=True) == prior['binding'], 'RUNTIME_IDENTITY_REPLACED')
-                    runtime.save(deletion_path, {'status': 'unknown', 'input_sha256': fingerprint})
+                elif request['action'] in ('verify', 'reconcile'):
+                    # Readback must not call register_runtime/materialize_route.
+                    # In particular, an unknown journal is not permission to
+                    # repeat writes. Only a fully observed binding is recovered.
+                    application_config = runtime.read_private(home / 'applications.json')
+                    require(set(application_config['environments']) == {ident}, 'RUNTIME_APPLICATION_BINDING_INCOMPLETE')
+                    route_binding(application_config['environments'][ident], request, str(home / 'registry.json'))
+                if removal:
+                    if deleted:
+                        inspect_removal(kube, cd, registered, ident, prior['binding'], shared)
+                    else:
+                        require(readback(kube, cd, registered, ident, evidence['private_ipv4'], home / 'tunnel.json',
+                                         require_empty_routes=True) == prior['binding'], 'RUNTIME_IDENTITY_REPLACED')
+                    if request['action'] == 'inspect-delete':
+                        return {**answer, 'status': 'blocked', 'stage': 'removal', 'resumable': True,
+                                'blockers': [], 'residuals': [{'kind': 'RuntimeRegistration', 'name': ident}]}
+                    runtime.save(deletion_path, {'status': 'unknown', 'input_sha256': fingerprint, 'binding': prior['binding']})
                     started = True
                     released = openstack_routes.unregister_runtime(runtime.read_private(home / 'edge.json'))
                     require(isinstance(released, dict) and released.get('status') == 'unregistered'
@@ -547,18 +601,19 @@ def execute(config_path, request):
                     runtime.install_renewal(cd, renewal)
                 answer['stage'] = 'permission_verification'
                 binding = readback(kube, cd, registered, ident, evidence['private_ipv4'], home / 'tunnel.json')
-                require(not prior or prior['binding'] == binding, 'RUNTIME_IDENTITY_REPLACED')
+                require(not prior or 'binding' not in prior and request['action'] == 'reconcile'
+                        or prior['binding'] == binding, 'RUNTIME_IDENTITY_REPLACED')
                 receipt = {'status': 'succeeded', 'input_sha256': fingerprint, 'binding': binding}
-                if not prior:
+                if not prior or request['action'] == 'reconcile':
                     runtime.save(receipt_path, receipt)
                 return {**answer, 'status': 'succeeded', 'stage': 'complete', 'blockers': [],
                         'application_config_path': str(home / 'applications.json'), 'binding_sha256': digest(receipt),
                         'verified_at': datetime.now(timezone.utc).isoformat()}
     except Exception as error:
-        if started and receipt_path is not None:
+        if started and receipt_path is not None and request.get('action') not in ('delete', 'resume-delete'):
             runtime.save(receipt_path, {'status': 'unknown', 'input_sha256': fingerprint})
         code = str(error) if re.fullmatch(r'[A-Z][A-Z0-9_]{0,95}', str(error)) else 'RUNTIME_PREPARATION_UNVERIFIED' if started else 'RUNTIME_PREREQUISITE_UNAVAILABLE'
-        return {**answer, 'status': 'unknown' if started else 'blocked', 'blockers': [{'code': code}]}
+        return {**answer, 'status': 'unknown' if started or recovering else 'blocked', 'blockers': [{'code': code}]}
 
 
 def main():

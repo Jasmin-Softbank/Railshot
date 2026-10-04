@@ -161,7 +161,9 @@ def verify_applied(config, ledger, runner):
     require(peers == expected, 'GATEWAY_PEERS_UNVERIFIED')
     routes = json.loads(runner(['ip', '-j', '-4', 'route', 'show', 'dev', interface]))
     destinations = {str(ipaddress.ip_network(route['dst'])) for route in routes if route.get('dst') != 'default' and 'dst' in route}
-    require(set(expected.values()) <= destinations and not any(peer['address'] in destinations for peer in ledger.values() if peer['removed']),
+    active_addresses = set(expected.values())
+    retired_addresses = {peer['address'] for peer in ledger.values() if peer['removed']} - active_addresses
+    require(active_addresses <= destinations and not retired_addresses.intersection(destinations),
             'GATEWAY_ROUTES_UNVERIFIED')
     verify_forwarding(config, runner)
 
@@ -202,9 +204,15 @@ def apply(config, ledger, runner):
         with os.fdopen(fd, 'w') as stream:
             stream.write(stripped)
         runner(['wg', 'syncconf', interface, tmp])
+        active_addresses = {peer['address'] for peer in ledger.values() if not peer['removed']}
+        retired_routes = set()
         for peer in ledger.values():
             route = ['ip', '-4', 'route']
             if peer.get('removed'):
+                # A historical removal must not remove the new owner's route.
+                if peer['address'] in active_addresses or peer['address'] in retired_routes:
+                    continue
+                retired_routes.add(peer['address'])
                 existing = runner([*route, 'show', peer['address'], 'dev', interface])
                 if existing:
                     runner([*route, 'del', peer['address'], 'dev', interface])
@@ -228,9 +236,12 @@ def validate_ledger(config, ledger):
         address = ipaddress.ip_interface(peer['address'])
         require(address.version == 4 and address.network.prefixlen == 32 and address.ip in pool
                 and address.ip not in (server_ip, pool.network_address, pool.broadcast_address)
-                and str(address) == peer['address'] and peer['address'] not in addresses, 'GATEWAY_LEDGER_INVALID')
+                and str(address) == peer['address']
+                and (peer['removed'] or peer['address'] not in addresses), 'GATEWAY_LEDGER_INVALID')
         require(key(peer['public_key']) not in keys, 'GATEWAY_LEDGER_INVALID')
-        addresses.add(peer['address']); keys.add(peer['public_key'])
+        if not peer['removed']:
+            addresses.add(peer['address'])
+        keys.add(peer['public_key'])
     return ledger
 
 
@@ -275,9 +286,14 @@ def execute(config, request, runner=run, apply_fn=apply, now=time.time):
             require(not peer or not peer.get('removed'), 'GATEWAY_PEER_REVOKED')
             require(not any(k != ident and p['public_key'] == public_key for k, p in ledger.items()), 'GATEWAY_KEY_REUSED')
             if not peer:
-                used = {p['address'] for p in ledger.values()}  # tombstones are never reused
+                used = {p['address'] for p in ledger.values() if not p['removed']}
                 address = next((str(ip) + '/32' for ip in pool.hosts() if ip != server_ip and str(ip) + '/32' not in used), None)
                 require(address, 'GATEWAY_POOL_EXHAUSTED')
+                if any(p['address'] == address for p in ledger.values()):
+                    # Removed is a durable intent, not proof of peer removal.
+                    # Reclaim only after native readback confirms old peers and
+                    # unused routes are absent, while holding the ledger lock.
+                    verify_applied(config, ledger, runner)
                 peer = {'public_key': public_key, 'address': address, 'removed': False}
                 ledger[ident] = peer
                 save(ledger_path, json.dumps(ledger, sort_keys=True))
