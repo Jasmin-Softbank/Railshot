@@ -91,14 +91,14 @@ jobs:
           progress_token="$RAILSHOT_PROGRESS_TOKEN"
           unset RAILSHOT_PROGRESS_TOKEN
           MAX_REPAIR_ATTEMPTS=${RAILSHOT_MAX_REPAIR_ATTEMPTS:-2}
-          [[ "$MAX_REPAIR_ATTEMPTS" =~ ^[0-3]$ ]] || { echo "RAILSHOT_MAX_REPAIR_ATTEMPTS must be 0, 1, 2 or 3"; exit 1; }
-          # Explicit opt-in preserves existing total budgets and baseline-only runs.
+          [[ "$MAX_REPAIR_ATTEMPTS" =~ ^[0-2]$ ]] || { echo "RAILSHOT_MAX_REPAIR_ATTEMPTS must be 0, 1 or 2 (combined adapter/fixer limit)"; exit 1; }
+          # Legacy packaging is a sublimit of the combined budget, not an extra call.
           MAX_PACKAGING_ATTEMPTS=${RAILSHOT_MAX_PACKAGING_ATTEMPTS:-0}
           [[ "$MAX_PACKAGING_ATTEMPTS" =~ ^[01]$ ]] || { echo "RAILSHOT_MAX_PACKAGING_ATTEMPTS must be 0 or 1"; exit 1; }
           [[ "$PROVIDER" = codex || "$PROVIDER" = claude ]] || { echo "AGENT_PROVIDER must be claude or codex"; exit 1; }
           test -f .railshot/ci/scripts/loop/checks_progress.py || { echo 'PLATFORM_REF must support isolated progress publishing'; exit 1; }
           python -c 'import os; from pathlib import Path; p=Path.cwd().resolve()/"apps"/os.environ["TENANT"]/os.environ["APP"]; assert p.is_dir() and p.resolve()==p, "app directory must stay within checkout; symlinks forbidden"'
-          if (( MAX_REPAIR_ATTEMPTS + MAX_PACKAGING_ATTEMPTS > 0 )); then
+          if (( MAX_REPAIR_ATTEMPTS > 0 )); then
             case "$RAILSHOT_AUTH_MODE:$PROVIDER" in
               subscription:codex)
                 test -n "$RAILSHOT_CODEX_HOME" && test -f "$RAILSHOT_CODEX_HOME/auth.json"

@@ -47,6 +47,14 @@ def row(event):
         if event.get('phase') != 'loop' or event.get('outcome') not in OUTCOMES or not (count is None or integer(count)):
             raise ValueError('invalid loop observation')
         result.update(phase='loop', outcome=event['outcome'], sdk_invocations=count)
+        if 'agent_budget' in attributes:
+            budget = attributes['agent_budget']
+            if (not isinstance(budget, dict) or set(budget) != {'enabled', 'max_invocations'}
+                    or type(budget['enabled']) is not bool or type(budget['max_invocations']) is not int
+                    or not 0 <= budget['max_invocations'] <= 2
+                    or budget['enabled'] != (budget['max_invocations'] > 0)):
+                raise ValueError('invalid agent budget')
+            result['agent_budget'] = dict(budget)
     elif name.startswith('gate.layer.'):
         if (not identifier(event.get('attempt_id')) or event.get('phase') not in {'L0', 'L1', 'Q', 'L2', 'L4', 'L3'}
                 or event.get('outcome') not in OUTCOMES

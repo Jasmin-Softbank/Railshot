@@ -39,7 +39,7 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, code)
 
     def cli(self, resume=False, *extra):
-        args = ['loop', str(self.upload), str(self.run), '--max-attempts', '3', *extra]
+        args = ['loop', str(self.upload), str(self.run), '--max-attempts', '2', *extra]
         if resume:
             args.append('--resume')
         with patch.object(sys, 'argv', args):
@@ -191,7 +191,7 @@ s.step('agent:1', lambda: os._exit(9))
             self.assertEqual(self.cli(True), 0)
             packaging.assert_called_once()
 
-    def test_preparation_does_not_consume_separate_repair_budget(self):
+    def test_preparation_and_repair_share_two_calls_and_completed_resume_does_not_replay(self):
         verdicts = [
             {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1', 'class': 'F5', 'signature': 'missing-spec'}},
             {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L3', 'class': 'F4', 'signature': 'runtime'}},
@@ -203,13 +203,50 @@ s.step('agent:1', lambda: os._exit(9))
         record = {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
                   'meta': {'sdk_status': 'completed', 'duration_ms': 1}}
         with patch.object(loop, 'gate', side_effect=gate), self.agent_result(record) as agent:
-            self.assertEqual(self.cli(False, '--max-attempts', '1', '--max-packaging-attempts', '1'), 0)
+            self.assertEqual(self.cli(False, '--max-attempts', '2', '--max-packaging-attempts', '1'), 0)
             self.assertEqual([call.args[0] for call in agent.call_args_list], ['adapter', 'fixer'])
         evidence = json.loads((self.run / 'evidence.json').read_text())
         self.assertEqual(evidence['budget_used'], {'packaging': 1, 'repair': 1})
+        self.assertEqual(evidence['agent_budget'], {'enabled': True, 'max_invocations': 2})
+        self.assertEqual(evidence['sdk_invocations'], 2)
         with patch.object(loop, 'agent') as agent, patch.object(loop, 'gate') as gate:
-            self.assertEqual(self.cli(True, '--max-attempts', '1', '--max-packaging-attempts', '1'), 0)
+            self.assertEqual(self.cli(True, '--max-attempts', '2', '--max-packaging-attempts', '1'), 0)
             agent.assert_not_called(); gate.assert_not_called()
+
+    def test_legacy_packaging_cannot_add_a_third_call_or_override_zero(self):
+        for limit in (0, 1, 2):
+            with self.subTest(limit=limit):
+                self.run = self.root / f'combined-{limit}'
+                def gate(ws, run, attempt, *args, **kwargs):
+                    target = run / f'gate-{attempt}'; target.mkdir()
+                    verdict = {'ok': False, 'status': 'FAIL', 'failure': {
+                        'layer': 'L1' if not attempt else 'L3', 'class': 'F5' if not attempt else 'F4',
+                        'signature': f'new-failure-{attempt}'}}
+                    (target / 'verdict.json').write_text(json.dumps(verdict))
+                    return verdict
+                record = {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
+                          'meta': {'sdk_status': 'completed'}}
+                with patch.object(loop, 'gate', side_effect=gate), self.agent_result(record) as agent:
+                    self.assertEqual(self.cli(False, '--max-attempts', str(limit), '--max-packaging-attempts', '1'), 1)
+                    self.assertEqual(agent.call_count, limit)
+                    self.assertTrue(all(call.args[5] == limit for call in agent.call_args_list))
+                evidence = json.loads((self.run / 'evidence.json').read_text())
+                self.assertEqual(evidence['sdk_invocations'], limit)
+                self.assertFalse(evidence['passed'])
+                with patch.object(loop, 'agent') as agent, patch.object(loop, 'gate') as gate:
+                    self.assertEqual(self.cli(True, '--max-attempts', str(limit), '--max-packaging-attempts', '1'), 1)
+                    agent.assert_not_called(); gate.assert_not_called()
+
+    def test_resume_cannot_widen_a_completed_one_call_budget(self):
+        fail = {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1', 'class': 'F5', 'signature': 'missing'}}
+        record = {'output': {'status': 'proposed'}, 'written': [], 'meta': {'sdk_status': 'completed'}}
+        with self.gate_result(fail), self.agent_result(record) as agent:
+            self.assertEqual(self.cli(False, '--max-attempts', '1'), 1)
+            self.assertEqual(agent.call_count, 1)
+        with patch.object(loop, 'agent') as agent, patch.object(loop, 'gate') as gate, redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.cli(True, '--max-attempts', '2'), 1)
+        self.assertEqual(json.loads(output.getvalue())['error']['code'], 'STATE_BINDING_MISMATCH')
+        agent.assert_not_called(); gate.assert_not_called()
 
     def test_resume_after_agent_checkpoint_skips_agent_and_baseline(self):
         fail = {'ok': False, 'status': 'FAIL', 'failure': {'class': 'F1', 'layer': 'L1', 'signature': 'missing'}}
@@ -241,8 +278,8 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual(ev['attempts'][1]['role'], 'adapter')
         self.assertEqual(ev['attempts'][1]['repair_scope'], 'packaging')
 
-    def test_two_or_three_attempt_budget_preserves_gate_first_and_scoped_repairs(self):
-        for budget, failure_count in ((2, 0), (2, 2), (2, 3), (3, 3)):
+    def test_zero_one_two_budget_preserves_gate_first_and_scoped_repairs(self):
+        for budget, failure_count in ((0, 1), (1, 2), (2, 0), (2, 2), (2, 3)):
             with self.subTest(budget=budget, failure_count=failure_count):
                 self.run = self.root / f'budget-{budget}-failures-{failure_count}'
                 sequence, scopes = [], []
