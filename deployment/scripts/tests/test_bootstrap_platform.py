@@ -318,6 +318,33 @@ class BootstrapTests(unittest.TestCase):
                 self.assertTrue(bootstrap.import_state(data)['verified'])
             self.assertEqual(pods[0]['spec']['securityContext']['fsGroupChangePolicy'], 'OnRootMismatch')
 
+    def test_argo_reconciliation_restarts_consumers_once_and_preserves_other_configuration(self):
+        workloads = [{'kind': kind, 'metadata': {'name': name, 'uid': name},
+                      'spec': {'template': {'spec': {'containers': [{'image': 'argocd:pinned'}]}}}}
+                     for kind, name in [('Deployment', 'argocd-repo-server'), ('StatefulSet', 'argocd-application-controller')]]
+        actual = {w['metadata']['name']: copy.deepcopy(w) for w in workloads}
+        config = {'metadata': {'uid': 'config', 'resourceVersion': '1'}, 'data': {'resource.respectRBAC': 'strict'}}
+        def get(kind, name, *_):
+            return copy.deepcopy(config if kind == 'configmap' else actual[name])
+        def mutate(*args, document):
+            if args[1] == 'configmap':
+                config['data'].update(document['data']); config['metadata']['resourceVersion'] = '2'
+            else:
+                actual[args[2]]['spec']['template']['metadata'] = copy.deepcopy(document['spec']['template']['metadata'])
+        with patch.object(bootstrap, 'kube_get', side_effect=get), patch.object(bootstrap, 'kube', side_effect=mutate) as writes, \
+                patch.object(bootstrap, 'native') as native:
+            bootstrap.argo_reconciliation(workloads)
+            self.assertEqual(writes.call_count, 3)
+            self.assertEqual(native.call_count, 2)
+            self.assertEqual(config['data'], {'resource.respectRBAC': 'strict', 'timeout.reconciliation': '30s',
+                                              'timeout.reconciliation.jitter': '5s'})
+            writes.reset_mock()
+            bootstrap.argo_reconciliation(workloads)
+            writes.assert_not_called()
+            actual['argocd-repo-server']['metadata']['uid'] = 'replaced'
+            with self.assertRaisesRegex(bootstrap.Blocked, 'ARGO_IDENTITY_CHANGED'):
+                bootstrap.argo_reconciliation(workloads)
+
     def test_argo_health_rollout_recovers_after_config_patch_and_checks_identity(self):
         controller = {'kind': 'StatefulSet', 'metadata': {'name': 'argocd-application-controller', 'uid': 'same-controller'},
                       'spec': {'template': {'spec': {'containers': [{'name': 'controller', 'image': 'argocd:pinned'}]}}}}
