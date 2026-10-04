@@ -1,4 +1,6 @@
 # Operator-applied demo observation resources, separate from Argo's app workload.
+# Apply only after the existing app ingress policy is present and the app is healthy.
+# This policy supplements the app port allowance; it must not be the only ingress policy.
 # Replace every ${...}; choose an unused NodePort. Restrict cloud/host firewalls too.
 apiVersion: v1
 kind: Service

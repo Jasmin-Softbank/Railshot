@@ -21,6 +21,7 @@ export function observerConfiguration(path) {
     const key = `${target.target_id}:${target.app ?? ''}`;
     if (!TARGET_ID.test(target.target_id || '') || !instance.test(target.node_instance || '') || seen.has(key) ||
         target.cluster_instance != null && !instance.test(target.cluster_instance)) throw new Error('Invalid observer binding');
+    if (target.application_id != null && (!target.app || typeof target.application_id !== 'string' || !TARGET_ID.test(target.application_id))) throw new Error('App identity required for application binding');
     if (target.app != null) {
       if (!APP_NAME.test(target.app) || !dns.test(target.namespace || '') || !instance.test(target.cluster_instance || '')) throw new Error('Invalid app observer binding');
       safeUrl(target.probe_url);
@@ -44,6 +45,19 @@ export function observerConfiguration(path) {
     collector = { id, role: 'shared_observer', lifecycle, expires_at };
   }
   return { targets: config.targets, collector };
+}
+// Runtime registrations keep their physical target ID. An explicit application ID
+// binds a product app to that runtime; app names alone never cross tenant boundaries.
+export function appObserverBinding(targets, record) {
+  if (!record.app) return null;
+  const matches = targets.filter((item) => item.app === record.app && (
+    item.application_id != null
+      ? item.application_id === record.target_id && item.target_id === record.environment_target_id
+      : item.target_id === record.target_id
+  ));
+  if (matches.length > 1) throw new Error('Ambiguous app observer binding');
+  const binding = matches[0];
+  return binding ? { ...binding, target_id: binding.application_id ?? binding.target_id } : null;
 }
 const selector = (job, address) => `{job=${JSON.stringify(job)},instance=${JSON.stringify(address)}}`;
 const named = (name, expression) => `label_replace((${expression}), "railshot_metric", "${name}", "", "")`;
@@ -122,7 +136,10 @@ export function createMetricsObserver({ configPath, fetchImpl = fetch, now = Dat
       }
     }
     const registered = config.targets.filter((item) => item.target_id === record.target_id);
-    const exact = record.app ? registered.filter((item) => item.app === record.app) : registered;
+    let appBinding;
+    try { appBinding = appObserverBinding(config.targets, record); }
+    catch { for (const name of Object.keys(scopes)) result.metrics[name] = metric(name, 'unavailable'); return result; }
+    const exact = record.app ? (appBinding ? [appBinding] : []) : registered;
     const nodeId = record.environment_target_id ?? record.target_id;
     const bindings = exact.length ? exact : config.targets.filter((item) => item.target_id === nodeId && item.app == null);
     // A node-only request cannot choose an arbitrary app or an ambiguous physical target.

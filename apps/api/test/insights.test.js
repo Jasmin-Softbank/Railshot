@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { appObserverBinding } from "../src/metrics.js";
 import { createTrafficObserver } from "../src/traffic.js";
 import { createAppServer } from "../src/server.js";
 import { ProductError } from "../src/product.js";
@@ -126,6 +127,39 @@ test("traffic is exact-app bound, bounded and never treats missing/stale samples
   rangeFailure = false;
   failure = true;
   assert.equal((await observe(record)).state, "unavailable");
+});
+
+test("runtime app bindings require both environment and application identity, preserving legacy bindings", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "railshot-runtime-traffic-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "observer.json");
+  const row = { target_id: "k3s-aws", application_id: "app-one", app: "demo-app",
+    namespace: "app-one", node_instance: "10.0.0.1:31490", cluster_instance: "10.0.0.1:31491",
+    probe_url: "https://app.example/health", prometheus_url: "http://prometheus.internal:9090",
+    traffic_instance: "10.0.0.1:30940" };
+  const record = { target_id: "app-one", environment_target_id: "k3s-aws", app: "demo-app" };
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [row] }), { mode: 0o600 });
+  let calls = 0;
+  const observe = createTrafficObserver({ configPath, now: () => now, fetchImpl: async (url) => {
+    calls++;
+    assert.match(url.searchParams.get("query"), /target_id="app-one"/);
+    return Response.json({ status: "success", data: { resultType: "vector", result: [] } });
+  } });
+  assert.equal((await observe(record)).state, "no_data");
+  assert.equal(calls, 1);
+  for (const changed of [{ target_id: "app-other" }, { environment_target_id: "k3s-gcp" },
+    { environment_target_id: undefined }, { app: "other-app" }]) {
+    assert.equal((await observe({ ...record, ...changed })).state, "unsupported");
+  }
+  assert.equal(calls, 1);
+  assert.equal(appObserverBinding([row], record).target_id, "app-one");
+  const legacy = { ...row, target_id: "app-one" }; delete legacy.application_id;
+  assert.equal(appObserverBinding([legacy], record).target_id, "app-one");
+  // Two competing bindings must not silently choose a different collection endpoint.
+  assert.throws(() => appObserverBinding([legacy, row], record), /Ambiguous/);
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [legacy, row] }), { mode: 0o600 });
+  assert.equal((await observe(record)).state, "unavailable");
+  assert.equal(calls, 1);
 });
 
 test("insights HTTP routes authorize first, reject writes, preserve partial data and never dispatch work", async (t) => {

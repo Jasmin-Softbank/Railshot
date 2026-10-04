@@ -168,6 +168,17 @@ test('target node metrics preserve partial data, real zero, timestamps and node-
   assert.equal(calls, beforeUnregisteredEnvironment);
   await writeFile(configPath, JSON.stringify({ version: 1, targets: [nodeOnly, { ...binding, target_id: application.target_id }] }));
   assert.equal((await observe(application)).metrics.pods.value, 1, 'exact application observation still takes precedence');
+  // A runtime-owned registration can explicitly bind the product application.
+  await writeFile(configPath, JSON.stringify({ version: 1, targets: [nodeOnly,
+    { ...binding, application_id: application.target_id, namespace: application.target_id }] }));
+  result = await observe(application);
+  assert.equal(result.metrics.pods.value, 1);
+  assert.equal(result.metrics.http.value, 0);
+  assert.equal(result.metrics.node_up.state, 'ready');
+  result = await observe({ ...application, target_id: 'app-other' });
+  assert.equal(result.metrics.node_up.state, 'ready', 'other apps retain environment node observations');
+  assert.equal(result.metrics.pods.state, 'unsupported');
+  assert.equal(result.metrics.http.state, 'unsupported');
   await writeFile(configPath, JSON.stringify({ version: 1, targets: [{ ...nodeOnly, probe_url: binding.probe_url }] }));
   const beforeInvalid = calls;
   assert.equal((await observe(record)).metrics.node_up.state, 'unavailable');

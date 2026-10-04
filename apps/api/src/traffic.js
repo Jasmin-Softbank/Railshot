@@ -1,4 +1,4 @@
-import { observerConfiguration, prometheusQuery } from "./metrics.js";
+import { appObserverBinding, observerConfiguration, prometheusQuery } from "./metrics.js";
 
 const named = (name, expression) =>
   `label_replace((${expression}), "railshot_metric", "${name}", "", "")`;
@@ -49,10 +49,7 @@ export function createTrafficObserver({
       const config = observerConfiguration(configPath);
       if (config.collector && Date.parse(config.collector.expires_at) <= now())
         return empty("unavailable");
-      const target = config.targets.find(
-        (item) =>
-          item.target_id === record.target_id && item.app === record.app,
-      );
+      const target = appObserverBinding(config.targets, record);
       if (!target?.traffic_instance) return empty("unsupported");
       const labels = `job="app_traffic",instance=${JSON.stringify(target.traffic_instance)},app=${JSON.stringify(record.app)},target_id=${JSON.stringify(record.target_id)}`;
       const counter = `railshot_http_requests_total{${labels}}`,
