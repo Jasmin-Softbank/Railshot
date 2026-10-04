@@ -108,10 +108,14 @@ test('personal target resolution and owner recovery cross two isolated browser c
   const resolveQuery = new URLSearchParams({ environment: 'onprem', provider: 'openstack', app: 'actual-app', target_id: targetId });
   response = await contextA.request.get(origin + `/api/v1/applications/resolve?${resolveQuery}`);
   assert.equal(response.status(), 200, await response.text());
-  assert.deepEqual(await response.json(), { app: 'actual-app', environment_target_id: targetId, application: null });
+  const resolution = await response.json();
+  assert.deepEqual(resolution, { app: 'actual-app', environment_target_id: targetId, application: null });
   assert.equal((await contextB.request.get(origin + `/api/v1/applications/resolve?${resolveQuery}`)).status(), 404);
-  const camelCase = new URLSearchParams({ environment: 'onprem', provider: 'openstack', app: 'actual-app', targetId });
-  assert.equal((await contextA.request.get(origin + `/api/v1/applications/resolve?${camelCase}`)).status(), 422);
+  const dashboardCompatible = new URLSearchParams({ environment: 'onprem', provider: 'openstack', app: 'actual-app', targetId, registerNew: 'false' });
+  response = await contextA.request.get(origin + `/api/v1/applications/resolve?${dashboardCompatible}`);
+  assert.equal(response.status(), 200, await response.text());
+  assert.deepEqual(await response.json(), resolution);
+  assert.equal((await contextB.request.get(origin + `/api/v1/applications/resolve?${dashboardCompatible}`)).status(), 404);
 
   await pageA.getByRole('button', { name: '목록 새로고침' }).click();
   await pageA.getByRole('button', { name: '실제 API OpenStack' }).waitFor();
