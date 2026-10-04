@@ -1235,7 +1235,10 @@ export async function createProductService({ service, directory, target, provide
             || expected.provider !== application.provider) {
           throw new ProductError(409, 'RESUME_BINDING_MISMATCH', '원래 앱·환경·CI 실행과 연결이 일치하지 않습니다.');
         }
-        checkFree(state, sessionId, id);
+        // Match fresh app admission; writeInfrastructure still serializes shared writes.
+        const conflicts = Object.fromEntries(Object.entries(state.operations).filter(([, row]) =>
+          !row.application_id || row.application_id === operation.application_id));
+        checkFree({ operations: conflicts }, sessionId, id);
         checkUncertainResource(state, operation, id);
         if (operation.queue) { delete operation.queue.released_at; delete operation.queue.release_reason; }
         Object.assign(operation, { status: 'running', error: null, resumed_at: new Date().toISOString(),
