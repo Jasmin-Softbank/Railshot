@@ -174,7 +174,7 @@ def register(config_path, request):
             require(record.get('input_sha256') == fingerprint, 'APPLICATION_BINDING_CHANGED')
             if record.get('status') == 'succeeded':
                 require(record.get('binding_sha256') == hashlib.sha256(runtime.read_private(home / 'binding.json', raw=True)).hexdigest(), 'APPLICATION_BINDING_CHANGED')
-                if 'cluster_registration' not in record:
+                if 'cluster_registration' not in record or record.get('runtime_permissions_version') != 2:
                     # Upgrade an already registered app without rebuilding, rebinding or
                     # replaying its original registration/CD side effects.
                     binding = runtime.read_private(home / 'binding.json')
@@ -185,6 +185,11 @@ def register(config_path, request):
                     try:
                         runtime.grant_control_objects(cd, registered, app_id, environment_id=env_id)
                         with runtime.runtime_kubectl(native) as kube:
+                            role = next(d for d in runtime.runtime_documents(registered['target'], app_id, pull, None) if d['kind'] == 'Role')
+                            runtime.owned_apply(kube, role)
+                            control = lambda ns, *args, **kwargs: runtime.argo.kubectl(cd['context'], ns, *args, **kwargs)
+                            runtime.owned_apply(control, runtime.application_project(registered, app_id))
+                            record['runtime_permissions_version'] = 2
                             record['cluster_registration'] = runtime.share_application_cluster(kube, cd, registered, env_id)
                         record['steps'].append('cluster')
                         record.update(status='succeeded', stage='registered')
@@ -260,7 +265,7 @@ def register(config_path, request):
                     record['cluster_registration'] = step('cluster', lambda: runtime.share_application_cluster(kube, cd, registered, env_id))
                     step('ci', lambda: runtime.bind_ci(profile, registered, app_id))
                     runtime.save(home / 'binding.json', binding)
-                    record.update(status='succeeded', stage='registered', credentials={'renewal': 'configured', 'expires_at': expiry},
+                    record.update(status='succeeded', stage='registered', runtime_permissions_version=2, credentials={'renewal': 'configured', 'expires_at': expiry},
                                   binding_sha256=hashlib.sha256(runtime.read_private(home / 'binding.json', raw=True)).hexdigest())
                     runtime.save(receipt, record)
                 except Exception:

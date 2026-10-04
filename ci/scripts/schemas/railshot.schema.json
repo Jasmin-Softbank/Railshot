@@ -10,7 +10,10 @@
   ],
   "properties": {
     "apiVersion": {
-      "enum": ["railshot/v0", "jasmin/v0"]
+      "enum": [
+        "railshot/v0",
+        "jasmin/v0"
+      ]
     },
     "app": {
       "type": "string",
@@ -166,7 +169,27 @@
           "minimum": 1,
           "maximum": 3
         },
-        "autoscaling": false
+        "autoscaling": false,
+        "storage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mountPath",
+            "sizeGi"
+          ],
+          "properties": {
+            "mountPath": {
+              "type": "string",
+              "maxLength": 180,
+              "pattern": "^/(data(?:/[A-Za-z0-9_-]+)*|var/(lib|opt)/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)$"
+            },
+            "sizeGi": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            }
+          }
+        }
       }
     }
   },
