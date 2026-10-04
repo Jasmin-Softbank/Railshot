@@ -102,6 +102,7 @@
       "Effect": "Allow",
       "Action": [
         "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroup",
         "elasticloadbalancing:ModifyTargetGroupAttributes",
         "elasticloadbalancing:RegisterTargets",
         "elasticloadbalancing:DeregisterTargets",
@@ -205,6 +206,7 @@
       "Sid": "PreserveBootstrapTargets",
       "Effect": "Deny",
       "Action": [
+        "elasticloadbalancing:ModifyTargetGroup",
         "elasticloadbalancing:ModifyTargetGroupAttributes",
         "elasticloadbalancing:RegisterTargets",
         "elasticloadbalancing:DeregisterTargets",
