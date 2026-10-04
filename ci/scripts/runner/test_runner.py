@@ -45,6 +45,21 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(run_agent.path_ok(rel, [pattern], []), expected)
         self.assertFalse(run_agent.path_ok('src/tests/a.py', ['**/*.py'], ['**/tests/**']))
 
+    def test_forbidden_proposal_reports_rule_location_without_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            files = [{"path": "first.txt", "content": "safe"},
+                     {"path": "Dockerfile", "content": "FROM scratch\nRUN private-canary || true\n"}]
+            with self.assertRaises(run_agent.ProposalPolicyError) as caught:
+                run_agent.apply_files(workspace, files, ["*"], [])
+            receipt = run_agent.proposal_rejection(caught.exception)
+            self.assertEqual("files[1].content", receipt["field"])
+            self.assertEqual(2, receipt["line"])
+            self.assertEqual("BYPASS_FORBIDDEN", receipt["reason"])
+            self.assertEqual(64, len(receipt["rule_sha256"]))
+            self.assertNotIn("private-canary", json.dumps(receipt))
+            self.assertEqual([], list(workspace.iterdir()))
+
     def test_patch_is_validated_before_any_write(self):
         with tempfile.TemporaryDirectory() as d:
             ws = Path(d) / 'work'; ws.mkdir()

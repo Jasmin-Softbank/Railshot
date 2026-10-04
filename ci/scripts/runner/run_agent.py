@@ -623,6 +623,22 @@ def _run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=N
             return output, meta
 
 
+class ProposalPolicyError(ValueError):
+    """Identify a rejected rule without retaining proposed source or secret values."""
+
+    def __init__(self, file_index, line, pattern):
+        super().__init__("proposal contains a forbidden bypass pattern")
+        self.rejection = {
+            "reason": "BYPASS_FORBIDDEN",
+            "guidance": "Remove the forbidden construct without weakening checks.",
+            "field": f"files[{file_index}].content",
+            "line": line,
+            "policy": "contract/paths.yaml:forbidden_patterns",
+            "rule": pattern,
+            "rule_sha256": hashlib.sha256(pattern.encode()).hexdigest(),
+        }
+
+
 def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope="packaging"):
     """Validate the whole proposal before writing any file, including symlink parents."""
     workspace = workspace.resolve()
@@ -631,7 +647,7 @@ def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope=
     targets = []
     policies = load_yaml(PLATFORM / "contract/paths.yaml")
     patch_bytes = sum(len(f["content"].encode()) for f in files)
-    for f in files:
+    for file_index, f in enumerate(files):
         rel = f["path"]
         dest = workspace / rel
         if (not path_ok(rel, allow, protect) or dest.resolve().is_relative_to(workspace) is False
@@ -654,8 +670,10 @@ def apply_files(workspace, files, allow, protect, *, applied=None, repair_scope=
             continue
         if repair_scope == "source":
             source_change_allowed(rel, f["content"], dest.read_text() if dest.exists() else None)
-        if any(re.search(pattern, f["content"], re.M) for pattern in policies["forbidden_patterns"]):
-            raise ValueError("proposal contains a forbidden bypass pattern")
+        for pattern in policies["forbidden_patterns"]:
+            match = re.search(pattern, f["content"], re.M)
+            if match:
+                raise ProposalPolicyError(file_index, f["content"].count("\n", 0, match.start()) + 1, pattern)
         targets.append((rel, f["content"]))
     applied = [] if applied is None else applied
     if not targets:
@@ -731,7 +749,7 @@ def record_plan(run, role, output, gate_order=GATE_ORDER, *, workspace=None, rep
 
 def proposal_rejection(exc):
     """Only registered guidance enters the next prompt; never echo invalid output."""
-    if isinstance(exc, repair_evidence.ProposalEvidenceError):
+    if isinstance(exc, (ProposalPolicyError, repair_evidence.ProposalEvidenceError)):
         return exc.rejection
     # Host evidence drift cannot be repaired by generating a different proposal.
     if isinstance(exc, repair_evidence.EvidenceStateError):
