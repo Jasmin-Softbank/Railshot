@@ -1314,6 +1314,26 @@ test('published CD failure can resume after cluster permissions are repaired wit
   assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 2);
 });
 
+test('published app resume is not blocked by an unrelated app awaiting registration reconciliation', async (t) => {
+  const f = await interruptedApplication(t);
+  await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction(state => {
+    state.operations.other = { id: 'other', kind: 'deployments', app: 'other-app',
+      application_id: 'app-other', environment_target_id: 'runtime-aws', status: 'unknown', stage: 'registration' };
+  });
+  await store.close();
+  f.adapter.deployPublished = f.deliver;
+  const product = await createProductService(f.options);
+  try {
+    await product.resumeDeployment(f.created.id, f.owner);
+    const done = await settle(() => product.getDeployment(f.created.id, f.owner));
+    assert.equal(done.status, 'succeeded'); assert.equal(done.ci.run_id, f.original.ci.run_id);
+    assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1);
+    assert.equal(diskState(f.directory).operations.other.status, 'unknown');
+  } finally { await product.close(); }
+});
+
 test('resume checks exact session ownership before any CI or CD observation', async (t) => {
   const f = await interruptedApplication(t);
   f.service.status = async () => assert.fail('Unauthorized resume must not read CI');
@@ -1383,6 +1403,8 @@ test('resume rejects altered registration or run bindings, lifecycle actions and
     unpublished: (_state, record) => { record.ci.state = 'running'; },
     cancelled: (_state, record) => { record.status = 'cancelled'; },
     busy: (state) => { state.operations.other = { id: 'other', kind: 'deployments', status: 'unknown' }; },
+    same_application_busy: (state, record) => { state.operations.other = { id: 'other', kind: 'deployments',
+      application_id: record.application_id, app: record.app, status: 'running', stage: 'cd' }; },
   };
   for (const [name, change] of Object.entries(changes)) await t.test(name, async (t) => {
     const f = await interruptedApplication(t);
