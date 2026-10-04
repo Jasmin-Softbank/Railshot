@@ -7,7 +7,7 @@ const records = [['shop-api', 'succeeded'], ['blog-web', 'running'], ['chat-serv
   source_commit: 'a1b2c3d4e5f6', ci: { state: 'published', images: { [app]: 'sha256:4c5b6a7' }, steps: [{ name: '컨테이너 이미지 빌드', conclusion: 'success' }] },
   environment: { status: 'succeeded' }, cd: { state: status === 'succeeded' ? 'deployed' : status, deployed: status === 'succeeded' },
   ...(status === 'failed' ? { error: { message: '필수 배포 입력이 없어 컨테이너가 시작되지 않았습니다.' } } : {}),
-  telemetry: { items: [{ event_name: 'agent.completed', phase: 'agent', outcome: 'PASS', occurred_at: timestamp(index * 8) },
+  telemetry: { items: [...(index < 4 ? [{ event_name: 'agent.completed', phase: 'agent', outcome: 'PASS', occurred_at: timestamp(index * 8) }] : []),
     { event_name: 'controller.observed', phase: 'controller', outcome: status === 'failed' ? 'FAIL' : 'RUNNING', occurred_at: timestamp(index * 8) }] },
 }));
 // A completed repair stays inspectable even when deployment has succeeded.

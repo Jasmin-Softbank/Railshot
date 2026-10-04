@@ -72,6 +72,14 @@ test('session history pages and live environment states remain truthful across n
   await page.waitForFunction(() => document.querySelector('#history-list').getAttribute('aria-busy') === 'false');
   assert.equal(await rows.count(), 10); assert.match(await rows.first().innerText(), /app-deployment-23/);
   assert.match(await rows.nth(1).innerText(), /실행 실패/);
+  await rows.first().getByRole('button', { name: 'app-deployment-23 실행 상세·작업 로그' }).click();
+  await page.getByRole('button', { name: /배포 진행 현황 보기/ }).click();
+  await page.getByRole('heading', { name: '배포 · 기록 없음', exact: true }).waitFor();
+  assert.equal(await page.locator('.dh-step').count(), 3, 'successful deployments with no agent activity expose progress');
+  assert.equal(await page.locator('.dh-recovery, .dh-cause').count(), 0);
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await page.getByRole('heading', { name: '배포 · 기록 없음', exact: true }).waitFor();
+  await page.getByRole('button', { name: '‹ 배포 내역', exact: true }).click();
   await rows.nth(1).getByRole('button', { name: 'app-deployment-22 실행 상세·작업 로그' }).click();
   await page.locator('#deployment-history-detail h2').waitFor();
   assert.equal(await page.locator('#deployment-history-detail h2').innerText(), 'app-deployment-22');
