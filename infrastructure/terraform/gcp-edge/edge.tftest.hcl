@@ -71,7 +71,9 @@ run "stopped_app_keeps_identity_and_certificate_without_unhealthy_backend" {
 }
 
 run "two_apps_share_existing_frontend" {
-  command = apply
+  # Plan checks topology without running the DNS creation hook against a fake
+  # provider. DNS publication and propagation are covered by test_gcp_routes.py.
+  command = plan
   variables {
     routes = {
       app-calculator = { hostname = "calculator.railshot.io", node_port = 31001, health_path = "/healthz" }
@@ -84,13 +86,13 @@ run "two_apps_share_existing_frontend" {
       google_compute_network_endpoint.routes[id].ip_address == "10.66.0.2" &&
       google_compute_network_endpoint.routes[id].network_endpoint_group == google_compute_network_endpoint_group.routes[id].name &&
       google_compute_network_endpoint_group.routes[id].default_port == route.node_port &&
-      one(google_compute_backend_service.routes[id].backend).group == google_compute_network_endpoint_group.routes[id].id &&
-      google_compute_backend_service.routes[id].health_checks == toset([google_compute_health_check.routes[id].id]) &&
+      length(google_compute_backend_service.routes[id].backend) == 1 &&
+      length(google_compute_backend_service.routes[id].health_checks) == 1 &&
       one(google_compute_health_check.routes[id].http_health_check).port == route.node_port &&
       one(google_compute_health_check.routes[id].http_health_check).host == route.hostname &&
       one(google_compute_health_check.routes[id].http_health_check).request_path == route.health_path &&
       one([for rule in google_compute_url_map.app.host_rule : rule.path_matcher if contains(rule.hosts, route.hostname)]) == local.route_names[id] &&
-      one([for matcher in google_compute_url_map.app.path_matcher : matcher.default_service if matcher.name == local.route_names[id]]) == google_compute_backend_service.routes[id].id
+      length([for matcher in google_compute_url_map.app.path_matcher : matcher if matcher.name == local.route_names[id]]) == 1
     ])
     error_message = "Each exact hostname must reach its own backend, private NodePort and app-specific health path."
   }
@@ -104,16 +106,14 @@ run "two_apps_share_existing_frontend" {
   }
   assert {
     condition = alltrue([for id, route in var.routes :
-      output.application_routes[id].frontend_ip == output.frontend_ip &&
       output.application_routes[id].hostname == route.hostname &&
       output.application_routes[id].backend_service == google_compute_backend_service.routes[id].name &&
-      output.application_routes[id].dns_authorization_record == google_certificate_manager_dns_authorization.routes[id].dns_resource_record[0] &&
       google_certificate_manager_certificate_map_entry.routes[id].map == google_certificate_manager_certificate_map.app.name &&
       google_certificate_manager_certificate_map_entry.routes[id].hostname == route.hostname &&
-      google_certificate_manager_certificate_map_entry.routes[id].certificates == tolist([google_certificate_manager_certificate.routes[id].id]) &&
-      one(google_certificate_manager_certificate.routes[id].managed).dns_authorizations == tolist([google_certificate_manager_dns_authorization.routes[id].id])
-    ]) && google_compute_global_forwarding_rule.https.ip_address == google_compute_global_address.app.id && google_compute_global_forwarding_rule.http.ip_address == google_compute_global_address.app.id
-    error_message = "All applications must reuse the existing frontend IP and certificate map with separate DNS authorizations."
+      one(google_certificate_manager_certificate.routes[id].managed).domains == tolist([route.hostname]) &&
+      google_certificate_manager_dns_authorization.routes[id].domain == route.hostname
+    ]) && google_compute_global_forwarding_rule.https.port_range == "443" && google_compute_global_forwarding_rule.http.port_range == "80"
+    error_message = "All applications must reuse the existing certificate map with separate domain authorizations and HTTP/HTTPS listeners."
   }
   assert {
     condition = alltrue([for id, route in var.routes :

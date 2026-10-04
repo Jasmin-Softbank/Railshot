@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Add one registered application to an existing, state-bound GCP edge. No DNS writer."""
+"""Add one registered application to a state-bound GCP edge using the shared DNS writer."""
 import argparse
 from collections import Counter
 import copy
 import hashlib
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 from edge import encoded, digest, read_private, locked, durable_write, native, require, http_path, lifecycle_ready
 
@@ -25,6 +29,34 @@ class RouteError(ValueError):
     def __init__(self, code, *, unknown=False):
         super().__init__(code)
         self.code, self.unknown = code, unknown
+
+
+def certificate_dns():
+    """Terraform creation hook: publish the owned CNAME before issuing its cert."""
+    import dns
+    request = json.loads(os.environ['RAILSHOT_GCP_CERTIFICATE_DNS_REQUEST'])
+    try:
+        dns.require(request.get('purpose') == 'certificate', 'DNS_REQUEST_INVALID')
+        receipt = dns.ensure(os.environ['RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG'], request)
+        # API readback alone does not prove that Google's resolver sees the CNAME.
+        query = 'https://dns.google/resolve?' + urlencode({'name': request['hostname'], 'type': 'CNAME'})
+        for attempt in range(30):
+            try:
+                with urlopen(query, timeout=5) as response:
+                    answer = json.loads(response.read(65_537))
+                if isinstance(answer, dict) and answer.get('Status') == 0 and any(isinstance(row, dict) and row.get('type') == 5 and
+                        row.get('name', '').rstrip('.').lower() == request['hostname'] and
+                        row.get('data', '').rstrip('.').lower() == request['content']
+                        for row in (answer.get('Answer') or [])):
+                    return receipt
+            except (OSError, ValueError):
+                pass
+            if attempt < 29:
+                time.sleep(2)
+        raise dns.DNSError('DNS_CERTIFICATE_PROPAGATION_PENDING', 'UNKNOWN')
+    except dns.DNSError as error:
+        durable_write(Path.cwd() / 'certificate-dns-error.json', encoded({'code': error.code}))
+        raise
 
 
 def owned(state):
@@ -299,16 +331,16 @@ def recover(config_path, config, journal):
     return updated_config
 
 
-def ensure(config_path, request):
+def ensure(config_path, request, *, dns_config_path=None):
     try:
-        return _ensure(config_path, request)
+        return _ensure(config_path, request, dns_config_path=dns_config_path)
     except RouteError:
         raise
     except (ValueError, OSError, RuntimeError) as error:
         raise RouteError('GCP_ROUTE_PREPARATION_FAILED') from error
 
 
-def _ensure(config_path, request):
+def _ensure(config_path, request, *, dns_config_path=None):
     route, config = checked_request(request), config_at(config_path)
     with locked(config) as root:
         lifecycle_ready(root)
@@ -328,6 +360,8 @@ def _ensure(config_path, request):
                     {k: v for k, v in routes[key].items() if k != 'enabled'} == route,
                     'existing application route changes require separate approval')
             return output_route(state, request, values)
+        if not isinstance(dns_config_path, str) or not Path(dns_config_path).is_absolute():
+            raise RouteError('GCP_CERTIFICATE_DNS_NOT_CONFIGURED')
         require(all(route['hostname'] != r['hostname'] and route['node_port'] != r['node_port'] for r in
                     [{**values, 'node_port': values.get('node_port', 30080)}, *routes.values()]),
                 'hostname or NodePort already allocated')
@@ -357,7 +391,9 @@ def _ensure(config_path, request):
                     'saved plan or copied module changed before apply')
             # Native GCP URL map/firewall operations routinely exceed 110 seconds.
             # Keep this below the route executor's 30-minute deadline.
-            native(['terraform', '-chdir=' + str(work), 'apply', '-input=false', str(work / 'plan')], timeout=900)
+            native(['terraform', '-chdir=' + str(work), 'apply', '-input=false', str(work / 'plan')], timeout=900,
+                   env={'RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG': dns_config_path,
+                        'PYTHONPATH': str(Path(__file__).resolve().parent)})
             after = read_private(config['state_file']); identities = owned(after)
             require(after['lineage'] == config['state_lineage'] and set(identities) == set(config['owned_resources']) | creates and
                     all(identities[k] == v for k, v in config['owned_resources'].items()), 'applied state ownership mismatch')
@@ -371,6 +407,8 @@ def _ensure(config_path, request):
         except Exception as error:
             timed_out = isinstance(error.__cause__, subprocess.TimeoutExpired)
             code = 'GCP_ROUTE_APPLY_TIMEOUT' if timed_out else 'GCP_ROUTE_APPLY_INCOMPLETE'
+            if (work / 'certificate-dns-error.json').exists():
+                code = 'GCP_CERTIFICATE_DNS_FAILED'
             durable_write(journal, encoded({**row, 'phase': 'unknown', 'error': {'code': code}}))
             raise RouteError(code, unknown=True) from error
 
@@ -380,5 +418,6 @@ execute = ensure
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(); parser.add_argument('--config', required=True); parser.add_argument('--request', required=True)
+    parser.add_argument('--dns-config')
     args = parser.parse_args()
-    print(json.dumps(ensure(args.config, read_private(args.request))))
+    print(json.dumps(ensure(args.config, read_private(args.request), dns_config_path=args.dns_config)))

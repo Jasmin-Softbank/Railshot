@@ -26,6 +26,8 @@ const deliveryMessages = {
   GCP_ROUTE_APPLY_TIMEOUT: 'GCP 로드밸런서 구성 시간이 초과됐습니다. 일부 자원이 생성됐을 수 있으며 현재 상태 확인 후 게시된 이미지로 이어갈 수 있습니다.',
   GCP_ROUTE_APPLY_INCOMPLETE: 'GCP 로드밸런서 구성이 끝나지 않았습니다. 방화벽·경로·인증서 적용 결과를 확인해야 합니다.',
   GCP_ROUTE_RECONCILE_REQUIRED: '이전 GCP 로드밸런서 구성이 일부만 완료돼 배포가 멈췄습니다. 남은 자원을 복구한 뒤 게시된 이미지로 이어갈 수 있습니다.',
+  GCP_CERTIFICATE_DNS_NOT_CONFIGURED: 'GCP 인증용 DNS 설정이 연결되지 않았습니다. 환경의 DNS 설정을 확인해야 합니다.',
+  GCP_CERTIFICATE_DNS_FAILED: 'GCP 인증용 DNS 등록 또는 공개 전파 확인에 실패해 인증서 생성을 진행하지 않았습니다. DNS 설정을 복구한 뒤 게시된 이미지로 이어갈 수 있습니다.',
 };
 const operationError = (code = 'UPSTREAM_FAILURE', unknown = true) => ({ code, request_id: randomUUID(), message: deliveryMessages[code] || (unknown ? '외부 실행 결과를 확인할 수 없습니다. 자동으로 재실행하지 않습니다.' : '실행이 완료되지 않았습니다.'), retryable: false, outcome_unknown: unknown });
 function ciObservation(build, previous = {}) {

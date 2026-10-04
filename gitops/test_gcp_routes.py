@@ -1,11 +1,14 @@
 import copy
 import hashlib
+import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
+import dns
 import gcp_routes as routes
 
 
@@ -126,6 +129,8 @@ class GcpRoutesTest(unittest.TestCase):
             return json.dumps(self.plans[argv[-1]])
         self.assertEqual(command, 'apply')
         self.assertEqual(kwargs.get('timeout'), 900)
+        self.assertEqual(kwargs['env']['RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG'], str(self.root / 'dns.json'))
+        self.assertEqual(kwargs['env']['PYTHONPATH'], str(Path(routes.__file__).resolve().parent))
         self.assertEqual(routes.read_private(Path(self.config['state_dir']) / ('gcp-route-' + key + '.json'))['phase'], 'applying')
         if self.interrupt:
             raise RuntimeError('synthetic uncertain apply')
@@ -148,12 +153,65 @@ class GcpRoutesTest(unittest.TestCase):
             raise RuntimeError('synthetic lost apply reply')
         return ''
 
+    def test_new_route_requires_dns_authority_before_any_cloud_mutation(self):
+        with patch('gcp_routes.native') as native, self.assertRaisesRegex(routes.RouteError, 'GCP_CERTIFICATE_DNS_NOT_CONFIGURED'):
+            routes.ensure(self.config_path, app())
+        native.assert_not_called()
+
+    def test_certificate_dns_failure_keeps_partial_route_unknown_and_specific_reason(self):
+        def native(argv, **kwargs):
+            if argv[2] == 'apply':
+                work = Path(argv[1].split('=', 1)[1])
+                self.write(work / 'certificate-dns-error.json', {'code': 'DNS_CERTIFICATE_PROPAGATION_PENDING'})
+                raise ValueError('provisioner failed')
+            return self.native(argv, **kwargs)
+        with patch('gcp_routes.native', side_effect=native), self.assertRaises(routes.RouteError) as error:
+            routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
+        self.assertEqual(error.exception.code, 'GCP_CERTIFICATE_DNS_FAILED')
+        self.assertTrue(error.exception.unknown)
+        journal = routes.read_private(Path(self.config['state_dir']) / ('gcp-route-' + app()['application_id'] + '.json'))
+        self.assertEqual(journal['phase'], 'unknown')
+        self.assertEqual(journal['error']['code'], 'GCP_CERTIFICATE_DNS_FAILED')
+
+    def test_certificate_hook_publishes_then_waits_for_matching_public_cname(self):
+        request = {'application_id': app()['application_id'], 'purpose': 'certificate',
+                   'application_hostname': app()['hostname'], 'hostname': '_acme-challenge.test.railshot.io',
+                   'type': 'CNAME', 'content': 'token.authorize.certificatemanager.goog'}
+        env = {'RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG': str(self.root / 'dns.json'),
+               'RAILSHOT_GCP_CERTIFICATE_DNS_REQUEST': json.dumps(request)}
+        receipt = {'status': 'verified'}
+        responses = [io.BytesIO(json.dumps({'Status': 0, 'Answer': [{'type': 5, 'name': request['hostname'] + '.',
+                     'data': target + '.'}]}).encode()) for target in ('foreign.authorize.certificatemanager.goog', request['content'])]
+        def resolve(*args, **kwargs):
+            publish.assert_called_once_with(env['RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG'], request)
+            return responses.pop(0)
+        with patch.dict(os.environ, env), patch.object(dns, 'ensure', return_value=receipt) as publish, \
+                patch('gcp_routes.urlopen', side_effect=resolve) as lookup, patch('gcp_routes.time.sleep') as sleep:
+            self.assertEqual(routes.certificate_dns(), receipt)
+        self.assertEqual(lookup.call_count, 2)
+        sleep.assert_called_once_with(2)
+
+    def test_certificate_hook_fails_before_issuance_when_dns_write_or_propagation_fails(self):
+        request = {'purpose': 'certificate', 'hostname': 'app1.railshot.io', 'content': 'token.authorize.certificatemanager.goog'}
+        env = {'RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG': str(self.root / 'dns.json'),
+               'RAILSHOT_GCP_CERTIFICATE_DNS_REQUEST': json.dumps(request)}
+        for write_error in (True, False):
+            with self.subTest(write_error=write_error), patch.dict(os.environ, env), \
+                    patch.object(dns, 'ensure', side_effect=dns.DNSError('DNS_RECORD_CONFLICT') if write_error else None), \
+                    patch('gcp_routes.urlopen', side_effect=OSError('unreachable')) as lookup, \
+                    patch('gcp_routes.time.sleep'), patch('gcp_routes.Path.cwd', return_value=self.root):
+                code = 'DNS_RECORD_CONFLICT' if write_error else 'DNS_CERTIFICATE_PROPAGATION_PENDING'
+                with self.assertRaisesRegex(dns.DNSError, code):
+                    routes.certificate_dns()
+                self.assertEqual(lookup.call_count, 0 if write_error else 30)
+                self.assertEqual(routes.read_private(self.root / 'certificate-dns-error.json'), {'code': code})
+
     def test_two_apps_preserve_existing_ids_routes_defaults_and_replay_reads_only(self):
         with patch('gcp_routes.native', side_effect=self.native):
-            first = routes.ensure(self.config_path, app())
-            second = routes.execute(self.config_path, app(2))
+            first = routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
+            second = routes.execute(self.config_path, app(2), dns_config_path=str(self.root / 'dns.json'))
             count = len(self.calls)
-            self.assertEqual(routes.ensure(self.config_path, app()), first)
+            self.assertEqual(routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json')), first)
             self.assertEqual(len(self.calls), count)
         self.assertEqual(second['public_route_state'], 'pending_verification')
         self.assertEqual(first['frontend_ip'], second['frontend_ip'])
@@ -170,21 +228,21 @@ class GcpRoutesTest(unittest.TestCase):
         self.interrupt = True
         with patch('gcp_routes.native', side_effect=self.native):
             with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_APPLY_INCOMPLETE'):
-                routes.ensure(self.config_path, app())
+                routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
             count = len(self.calls)
             for request in (app(), app(2)):
                 with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_RECONCILE_REQUIRED'):
-                    routes.ensure(self.config_path, request)
+                    routes.ensure(self.config_path, request, dns_config_path=str(self.root / 'dns.json'))
             self.assertFalse(any(c[2] == 'apply' for c in self.calls[count:]))
         self.assertEqual(routes.read_private(self.config['variables_file']), self.values)
 
     def test_post_apply_output_mismatch_is_unknown_and_does_not_commit_authority(self):
         self.corrupt_output = True
         with patch('gcp_routes.native', side_effect=self.native), self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_APPLY_INCOMPLETE'):
-            routes.ensure(self.config_path, app())
+            routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
         self.assertEqual(routes.read_private(self.config_path), self.config)
         with patch('gcp_routes.native', side_effect=self.native), self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_RECONCILE_REQUIRED'):
-            routes.ensure(self.config_path, app())
+            routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
         self.assertEqual(sum(c[2] == 'apply' for c in self.calls), 1)
 
     def test_storage_failure_after_apply_keeps_unknown_without_second_apply(self):
@@ -194,26 +252,26 @@ class GcpRoutesTest(unittest.TestCase):
                 raise OSError('synthetic authority commit interruption')
             return write(path, data, *args, **kwargs)
         with patch('gcp_routes.native', side_effect=self.native), patch('gcp_routes.durable_write', side_effect=failing_write):
-            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app())
+            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
         self.assertEqual(sum(command[2] == 'apply' for command in self.calls), 1)
         with patch('gcp_routes.native', side_effect=self.native):
-            self.assertEqual(routes.ensure(self.config_path, app())['phase'], 'applied')
+            self.assertEqual(routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))['phase'], 'applied')
         self.assertEqual(sum(c[2] == 'apply' for c in self.calls), 1)
 
     def test_completed_apply_recovers_by_observation_without_second_apply(self):
         self.interrupt_after = True
         with patch('gcp_routes.native', side_effect=self.native):
-            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app())
-            self.assertEqual(routes.ensure(self.config_path, app())['phase'], 'applied')
+            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
+            self.assertEqual(routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))['phase'], 'applied')
         self.assertEqual(sum(c[2] == 'apply' for c in self.calls), 1)
 
     def test_partial_cloud_apply_is_not_adopted_or_replayed(self):
         self.interrupt_after = True
         self.drift = True
         with patch('gcp_routes.native', side_effect=self.native):
-            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app())
+            with self.assertRaises(routes.RouteError): routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
             with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_RECONCILE_REQUIRED'):
-                routes.ensure(self.config_path, app(2))
+                routes.ensure(self.config_path, app(2), dns_config_path=str(self.root / 'dns.json'))
         self.assertEqual(sum(c[2] == 'apply' for c in self.calls), 1)
         self.assertEqual(routes.read_private(self.config_path), self.config)
 
@@ -226,7 +284,7 @@ class GcpRoutesTest(unittest.TestCase):
                     plan.write_bytes(b'tampered plan')
             return result
         with patch('gcp_routes.native', side_effect=self.native), patch('gcp_routes.durable_write', side_effect=tamper):
-            with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_APPLY_INCOMPLETE'): routes.ensure(self.config_path, app())
+            with self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_APPLY_INCOMPLETE'): routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
         self.assertFalse(any(command[2] == 'apply' for command in self.calls))
 
     def test_plan_rejection_never_applies_or_changes_authority(self):
@@ -237,16 +295,16 @@ class GcpRoutesTest(unittest.TestCase):
                 return json.dumps(plan)
             return self.native(argv)
         with patch('gcp_routes.native', side_effect=native), self.assertRaises(ValueError):
-            routes.ensure(self.config_path, app())
+            routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
         self.assertFalse(any(command[2] == 'apply' for command in self.calls))
         self.assertEqual(routes.read_private(self.config_path), self.config)
         self.assertEqual(routes.read_private(self.config['variables_file']), self.values)
 
     def test_failed_preflight_can_retry_with_new_workspace_without_replaying_apply(self):
         with patch('gcp_routes.native', side_effect=RuntimeError('synthetic init failure')), self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_PREPARATION_FAILED'):
-            routes.ensure(self.config_path, app())
+            routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
         with patch('gcp_routes.native', side_effect=self.native):
-            self.assertEqual(routes.ensure(self.config_path, app())['phase'], 'applied')
+            self.assertEqual(routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))['phase'], 'applied')
         self.assertEqual(sum(command[2] == 'apply' for command in self.calls), 1)
         self.assertEqual(len([p for p in Path(self.config['state_dir']).iterdir() if p.is_dir()]), 2)
 
@@ -257,14 +315,14 @@ class GcpRoutesTest(unittest.TestCase):
             else: changed['resources'][0]['instances'][0]['attributes']['id'] = 'foreign'
             self.write(self.config['state_file'], changed)
             with patch('gcp_routes.native') as native, self.assertRaisesRegex(routes.RouteError, 'GCP_ROUTE_PREPARATION_FAILED'):
-                routes.ensure(self.config_path, app())
+                routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
             native.assert_not_called()
 
     def test_existing_app_mutation_and_collision_rejected(self):
-        with patch('gcp_routes.native', side_effect=self.native): routes.ensure(self.config_path, app())
+        with patch('gcp_routes.native', side_effect=self.native): routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
         for request in ({**app(), 'health_path': '/different'}, {**app(2), 'node_port': app()['node_port']},
                         {**app(2), 'hostname': self.values['hostname']}):
-            with patch('gcp_routes.native') as native, self.assertRaises(ValueError): routes.ensure(self.config_path, request)
+            with patch('gcp_routes.native') as native, self.assertRaises(ValueError): routes.ensure(self.config_path, request, dns_config_path=str(self.root / 'dns.json'))
             native.assert_not_called()
 
     def test_strict_request_and_exact_seven_creates(self):

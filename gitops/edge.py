@@ -172,8 +172,8 @@ def load(reference):
     return config, row
 
 
-def native(args, *, timeout=110):
-    environment = {key: value for key, value in os.environ.items()
+def native(args, *, timeout=110, env=None):
+    environment = {key: value for key, value in {**os.environ, **(env or {})}.items()
                    if not key.startswith(('TF_CLI_ARGS', 'TF_VAR_')) and key not in ('TF_DATA_DIR', 'TF_WORKSPACE')}
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False,
