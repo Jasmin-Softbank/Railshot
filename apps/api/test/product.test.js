@@ -654,6 +654,8 @@ test('UI environment selection preserves the source app identity and rejects mis
     [(value) => value.set('app', 'foreign-app'), 422],
     [(value) => value.set('plan_id', 'foreign-plan'), 422],
     [(value) => value.append('provider', 'proxmox'), 422],
+    [(value) => value.set('expected_target_id', 'foreign'), 409],
+    [(value) => value.set('expected_target_id', '../foreign'), 422],
     [(value) => value.set('source_name', 'x'.repeat(256)), 422],
     [(value) => value.set('source_name', 'different-source'), 422],
     [(value) => value.delete('source_name'), 422],
@@ -722,11 +724,13 @@ test('HTTP provider selection rejects other source apps before fetching or dispa
     const post = () => {
       const body = form(); body.delete('app'); body.delete('target_id');
       body.set('provider', provider); body.set('environment', environment); body.set('source_name', app.toUpperCase());
+      body.set('expected_target_id', id);
       return fetch(`${base}/api/v1/deployments`, { method: 'POST', body, headers: { 'Idempotency-Key': `multi-${provider}` } });
     };
     const accepted = await post(); assert.equal(accepted.status, 202, await accepted.text());
     const completed = await settle(async () => (await fetch(`${base}${accepted.headers.get('location')}`)).json());
     assert.equal(completed.status, 'succeeded'); assert.equal(completed.target_id, id); assert.equal(completed.app, app);
+    assert.deepEqual(completed.deployment_selection, { environment, provider });
     assert.equal(completed.url, `https://${id}.example.test`);
     const replay = await post(); assert.equal(replay.status, 200); assert.equal((await replay.json()).id, completed.id);
   }

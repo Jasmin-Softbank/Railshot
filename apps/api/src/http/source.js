@@ -1,7 +1,7 @@
 import yazl from 'yazl';
 import { ServiceError } from '../github.js';
 import { archiveLimits, inspectArchive, validateFiles } from '../archive.js';
-import { APP_NAME, APP_NAME_MESSAGE } from '../contract.js';
+import { APP_NAME, APP_NAME_MESSAGE, TARGET_ID } from '../contract.js';
 import { readLimited } from './request.js';
 
 function normalizedRepository(value) {
@@ -22,7 +22,7 @@ export async function uploadedSource(request, strict = false, allowSelection = f
   const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
   const allowed = new Set(['app', 'target_id', 'plan_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
   if (sourceOnly) for (const name of ['app', 'target_id', 'plan_id']) allowed.delete(name);
-  if (allowSelection) for (const name of ['environment', 'provider', 'source_name']) allowed.add(name);
+  if (allowSelection) for (const name of ['environment', 'provider', 'source_name', 'expected_target_id']) allowed.add(name);
   for (const key of form.keys()) {
     if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
     if (key !== 'files' && form.getAll(key).length !== 1) fail('단일 입력 필드를 중복해서 보낼 수 없습니다.');
@@ -42,8 +42,10 @@ export async function uploadedSource(request, strict = false, allowSelection = f
     if (!(environment === 'cloud' && ['aws', 'gcp'].includes(provider) || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
     const source_name = form.has('source_name') ? form.get('source_name') : undefined;
     if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
-    selected = { deployment_selection: { environment, provider }, source_name };
-  } else if (form.has('source_name')) fail('소스 이름은 환경 선택과 함께 입력하세요.');
+    const expected = form.has('expected_target_id') ? form.get('expected_target_id') : undefined;
+    if (expected !== undefined && (typeof expected !== 'string' || !TARGET_ID.test(expected))) fail('검토한 배포 대상 ID가 잘못되었습니다.');
+    selected = { deployment_selection: { environment, provider }, source_name, ...(expected !== undefined ? { expected_target_id: expected } : {}) };
+  } else if (form.has('source_name') || form.has('expected_target_id')) fail('소스 이름과 검토 대상은 환경 선택과 함께 입력하세요.');
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
   if (supplied.length !== 1) fail('배포 소스 하나만 입력하세요.');
