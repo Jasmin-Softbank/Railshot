@@ -302,13 +302,26 @@ def binding(a):
             'harness_sha256': hashlib.sha256(json.dumps({str(p.relative_to(PLATFORM)): digest(p) for p in sorted(files)}, sort_keys=True).encode()).hexdigest()}
 
 
+def agent_budget(a):
+    """The operator limit covers adapter and fixer together, including replans."""
+    limit = a.max_attempts
+    if (type(limit) is not int or not 0 <= limit <= 2
+            or type(getattr(a, 'max_packaging_attempts', 0)) is not int
+            or getattr(a, 'max_packaging_attempts', 0) not in (0, 1)):
+        raise StateError('STATE_USAGE_INVALID', component='loop', phase='config', retry_policy='after_configuration')
+    return {'enabled': limit > 0, 'max_invocations': limit}
+
+
 def execute(a, run, state, progress_sink=None):
+    allowance = agent_budget(a)
+    total_limit = allowance['max_invocations']
     ws = run / 'work'
     if 'final' in state.data:
         return finish(run, json.loads((run / state.data['final']).read_text()), state.data['started'], finalized=True)
     app_id = getattr(a, 'app_id', None)
     ev = {'run_id': state.data['run_id'], 'provider': a.provider, 'repair_scope': a.repair_scope, 'app_id': app_id,
-          'max_attempts': a.max_attempts, 'max_packaging_attempts': getattr(a, 'max_packaging_attempts', 0), 'attempts': [], 'started': int(state.data['started'])}
+          'max_attempts': a.max_attempts, 'max_packaging_attempts': getattr(a, 'max_packaging_attempts', 0),
+          'agent_budget': allowance, 'attempts': [], 'started': int(state.data['started'])}
 
     def intake_step():
         rc, result, err = run_json(PY + [str(PLATFORM / 'poc/intake.py'), a.upload, str(ws), str(run)], phase='intake')
@@ -340,13 +353,13 @@ def execute(a, run, state, progress_sink=None):
     budget = {'packaging': packaging_limit, 'repair': a.max_attempts}
     used = {'packaging': 0, 'repair': 0}
     ev['budget_used'] = used
-    for attempt in range(sum(budget.values()) + 1):
+    for attempt in range(total_limit + 1):
         os.environ['RAILSHOT_RUN_ID'] = state.data['run_id']
         os.environ['RAILSHOT_ATTEMPT_ID'] = f"{state.data['run_id']}:{attempt}"
         rec, report, attempt_scope = {}, None, 'packaging'
         if attempt:
-            # Preparation gets its own budget only when explicitly configured.
-            # Legacy callers retain the original shared attempt limit.
+            # A legacy preparation allowance is a sublimit, never extra calls.
+            # Completed checkpoints consume the same slots again on replay.
             budget_kind = 'packaging' if role == 'adapter' and packaging_limit else 'repair'
             if used[budget_kind] >= budget[budget_kind]:
                 break
@@ -354,7 +367,7 @@ def execute(a, run, state, progress_sink=None):
             attempt_scope = a.repair_scope if stage_contract(current_failure.get('layer'))['repair'] == 'configured_scope' else 'packaging'
 
             def agent_step():
-                arguments = (role, a.provider, ws, run, attempt, sum(budget.values()), a.request, attempt_scope, app_id)
+                arguments = (role, a.provider, ws, run, attempt, total_limit, a.request, attempt_scope, app_id)
                 kwargs = {}
                 if progress_sink is not None:
                     kwargs['progress_sink'] = progress_sink
@@ -397,7 +410,7 @@ def execute(a, run, state, progress_sink=None):
                         and meta.get('sdk_status') == 'completed' and meta.get('status') == 'failed'
                         and rejection.get('safe_to_replan') is True)
                 rejection_signature = 'PROPOSAL:' + error.get('code', '') + ':' + rejection.get('reason', '')
-                if safe and used[budget_kind] < budget[budget_kind] and rejection_signature not in seen:
+                if safe and attempt < total_limit and used[budget_kind] < budget[budget_kind] and rejection_signature not in seen:
                     def replan_step():
                         guidance = rejection['guidance']
                         detail = {'attempt': attempt, 'signature': rejection_signature, 'source_changed': False, **rejection}
@@ -484,7 +497,7 @@ def execute(a, run, state, progress_sink=None):
         role = 'fixer' if attempt or ev['intake'].get('has_spec') else 'adapter'
         current_failure = f
     ev['result'] = ('baseline failed: ' + str(f.get('excerpt') or f.get('signature') or 'see gate verdict')
-                    if not sum(budget.values()) else 'stop: attempt limit reached')
+                    if not total_limit else 'stop: attempt limit reached')
     ev['error'] = verdict.get('error')
     ev['status'] = verdict.get('status', 'FAIL')
     return finish(run, ev, state.data['started'], state)
@@ -497,9 +510,10 @@ def main():
     ap.add_argument("upload", nargs="?")
     ap.add_argument("run", nargs="?")
     ap.add_argument("--provider", choices=["codex", "claude"], default="codex")
-    ap.add_argument("--max-attempts", type=int, choices=range(0, 4), default=2)
+    ap.add_argument("--max-attempts", type=int, choices=range(0, 3), default=2,
+                    help="combined adapter/fixer invocation limit; 0 disables SDK calls, default 2")
     ap.add_argument("--max-packaging-attempts", type=int, choices=range(0, 2), default=0,
-                    help="separate initial packaging allowance; zero preserves the shared legacy budget")
+                    help="legacy packaging sublimit within --max-attempts; never adds invocations")
     ap.add_argument("--layers", default=','.join(GATE_ORDER))
     ap.add_argument("--quality-network")
     ap.add_argument("--selected-root", help="Trusted relative build root for repository discovery")
@@ -515,6 +529,7 @@ def main():
     progress_sink = progress_from_environment(progress_token, a.app_id)
     progress_token = None
     native_run_id = None
+    allowance = agent_budget(a)
     try:
         if not a.upload or not a.run:
             raise StateError('STATE_USAGE_INVALID', component='loop', phase='config', retry_policy='after_configuration')
@@ -527,7 +542,7 @@ def main():
             native_run_id = state.data['run_id']
             if progress_sink is not None:
                 progress_sink.emit(event_record('loop.started', component='loop', phase='loop', outcome='RUNNING',
-                    run_id=native_run_id, attributes={'sdk_invocations': None}))
+                    run_id=native_run_id, attributes={'sdk_invocations': None, 'agent_budget': allowance}))
             result = execute(a, run, state, progress_sink)
             if progress_sink is not None:
                 # A successful execute has durably finalized this evidence; it is not provider output.
@@ -539,7 +554,7 @@ def main():
                     evidence = {'status': 'UNKNOWN'}
                 progress_sink.emit(event_record('loop.completed', component='loop', phase='loop',
                     outcome=evidence['status'], run_id=native_run_id,
-                    attributes={'sdk_invocations': evidence.get('sdk_invocations')}), final=True)
+                    attributes={'sdk_invocations': evidence.get('sdk_invocations'), 'agent_budget': allowance}), final=True)
             return result
     except StateError as exc:
         error = exc
@@ -552,7 +567,7 @@ def main():
     detail = error.as_dict()
     if progress_sink is not None and native_run_id is not None:
         progress_sink.emit(event_record('loop.completed', component='loop', phase='loop', outcome=error.outcome,
-            run_id=native_run_id, attributes={'sdk_invocations': None}), final=True)
+            run_id=native_run_id, attributes={'sdk_invocations': None, 'agent_budget': allowance}), final=True)
     print(json.dumps({'result': detail['summary'], 'passed': False, 'status': error.outcome, 'error': detail}))
     return 1
 

@@ -76,7 +76,7 @@ class WorkflowPolicyTest(unittest.TestCase):
                         self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
                         self.assertEqual(Path(tmp, 'output').read_text(), f'passed={str(loop_exit == 0).lower()}\n')
 
-    def test_default_allows_two_repairs_with_configured_provider(self):
+    def test_default_allows_two_combined_calls_with_configured_provider(self):
         for attempts in (None, ''):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, attempts, credentials=True)
@@ -86,7 +86,7 @@ class WorkflowPolicyTest(unittest.TestCase):
                 self.assertIn('CODEX_API_KEY', invocation['model_env'])
 
     def test_nonzero_repair_requires_explicit_budget_and_provider_auth(self):
-        for attempts in ('1', '2', '3'):
+        for attempts in ('1', '2'):
             for provider, sdk in (('codex', 'openai-codex==0.159.3'), ('claude', 'claude-agent-sdk==0.2.158')):
                 for credentials in (False, True):
                     with self.subTest(attempts=attempts, provider=provider, credentials=credentials), tempfile.TemporaryDirectory() as tmp:
@@ -103,7 +103,7 @@ class WorkflowPolicyTest(unittest.TestCase):
                                          [f'install -q {sdk}', 'install -q pyyaml jsonschema'])
 
     def test_repair_attempts_reject_noncanonical_values_before_install_or_loop(self):
-        for attempts in ('-1', '4', '00', '03', '1.0', 'true', ' 0', '0 ', '0\n', '1; true', '$(true)'):
+        for attempts in ('-1', '3', '4', '00', '03', '1.0', 'true', ' 0', '0 ', '0\n', '1; true', '$(true)'):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, attempts, credentials=True)
                 self.assertNotEqual(result.returncode, 0)
@@ -153,7 +153,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(len(steps), 1)
         step = steps[0]
         self.assertEqual(step['env']['RAILSHOT_PROGRESS_TOKEN'], '${{ github.token }}')
-        for attempts in ('0', '3'):
+        for attempts in ('0', '2'):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as directory:
                 env = {**os.environ, 'RAILSHOT_PROGRESS_TOKEN': 'sentinel-progress-token', 'RAILSHOT_AUTH_MODE': 'api-key',
                        'RAILSHOT_MAX_REPAIR_ATTEMPTS': attempts,
@@ -326,7 +326,7 @@ class WorkflowPolicyTest(unittest.TestCase):
             env['DOCKER_CONFIG'] = str(root / 'railshot-registry-123-2')
             self.assertEqual(Path(env['DOCKER_CONFIG']).stat().st_mode & 0o777, 0o700)
 
-    def test_packaging_budget_is_explicit_and_can_prepare_without_repairs(self):
+    def test_zero_disables_sdk_even_with_legacy_packaging_enabled(self):
         for packaging in ('0', '1', '2', '-1'):
             with self.subTest(packaging=packaging), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, '0', packaging=packaging, credentials=True)
@@ -338,7 +338,8 @@ class WorkflowPolicyTest(unittest.TestCase):
                 invocation = json.loads(Path(tmp, 'invocation.json').read_text())
                 args = invocation['args']
                 self.assertEqual(args[args.index('--max-packaging-attempts') + 1], packaging)
-                self.assertEqual('CODEX_API_KEY' in invocation['model_env'], packaging == '1')
+                self.assertEqual(invocation['model_env'], [])
+                self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
 
     def test_pull_credentials_reach_only_trusted_release_validation(self):
         jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']
