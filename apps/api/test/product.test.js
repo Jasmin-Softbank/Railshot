@@ -390,7 +390,7 @@ test('v1 HTTP contract has accepted/error headers, strict fields, preserved lega
     const body = await response.json(); assert.equal(body.error.code, 'INVALID_INPUT'); assert.equal(body.error.request_id, response.headers.get('x-request-id'));
     assert.ok(!JSON.stringify(body).includes('secret'));
   }
-  const method = await fetch(`${base}/api/v1/targets`, { method: 'POST' }); assert.equal(method.status, 405); assert.equal(method.headers.get('allow'), 'GET');
+  const method = await fetch(`${base}/api/v1/profiles`, { method: 'POST' }); assert.equal(method.status, 405); assert.equal(method.headers.get('allow'), 'GET');
   assert.equal((await fetch(`${base}/api/v1/targets?limit=20&limit=2`)).status, 422);
   assert.equal((await fetch(`${base}/api/v1/targets?unexpected=1`)).status, 422);
   assert.equal((await fetch(`${base}/api/v1/deployments`, { method: 'POST', body: form() })).status, 422);

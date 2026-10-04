@@ -636,6 +636,178 @@ class RouteWorkerTests(unittest.TestCase):
         self.assertEqual(len(self.cli.network_mutations()), 1)
 
 
+class RuntimeRegistrationTests(unittest.TestCase):
+    def setUp(self):
+        RouteWorkerTests.setUp(self)
+        self.enterContext(patch.object(worker, 'ENVIRONMENTS', Path(self.temporary.name).resolve() / 'environments'))
+        self.enterContext(patch.object(worker, 'CONTROLLER_STATE', Path(self.temporary.name).resolve() / 'controller-state'))
+        self.ident = 'personal-' + str(uuid.UUID(int=100))
+        self.runtime = {'project_id': self.config['network']['runtime_project_id'],
+            'server_id': str(uuid.UUID(int=41)), 'port_id': str(uuid.UUID(int=42)),
+            'security_group_id': str(uuid.UUID(int=43)), 'private_address': '10.0.0.18'}
+        self.base = worker.operator_base(self.config)
+        self.binding = worker.registration_binding(self.base, self.ident, 1, self.runtime)
+        self.envelope = {'operation': 'register-runtime', 'binding': self.binding, 'runtime': self.runtime}
+        self.project = {'id': self.runtime['project_id'], 'name': 'railshot', 'enabled': True}
+        self.server = {'id': self.runtime['server_id'], 'tenant_id': self.runtime['project_id'], 'status': 'ACTIVE',
+            'properties': {'railshot.target': self.ident, 'railshot.generation': '1'}}
+        self.port = {'id': self.runtime['port_id'], 'device_id': self.runtime['server_id'],
+            'project_id': self.runtime['project_id'], 'device_owner': 'compute:nova',
+            'fixed_ips': [{'ip_address': self.runtime['private_address'], 'subnet_id': self.base['member_subnet_id']}],
+            'network_id': str(uuid.UUID(int=30)), 'security_group_ids': [self.runtime['security_group_id']]}
+        self.group = {'id': self.runtime['security_group_id'], 'project_id': self.runtime['project_id']}
+        self.reads = []
+
+    def call(self, arguments, service=('loadbalancer',)):
+        self.reads.append((arguments, service))
+        if not service:
+            if arguments[:2] == ['project', 'show']:
+                return copy.deepcopy(self.project)
+            if arguments[:2] == ['server', 'show']:
+                return copy.deepcopy(self.server)
+            if arguments[:2] == ['port', 'list']:
+                return [{'ID': self.runtime['port_id']}]
+            if arguments[:3] == ['port', 'show', self.runtime['port_id']]:
+                return copy.deepcopy(self.port)
+            if arguments[:4] == ['security', 'group', 'show', self.runtime['security_group_id']]:
+                return copy.deepcopy(self.group)
+        return self.cli(arguments, service)
+
+    def register(self):
+        return worker.dispatch(self.config, self.envelope, self.call)
+
+    def test_new_runtime_uses_fixed_base_without_changing_old_config(self):
+        before = copy.deepcopy(self.config)
+        first = self.register()
+        self.assertEqual(first['binding'], self.binding)
+        self.assertEqual(self.register(), first)
+        self.assertEqual(self.config, before)
+        selected = worker.environment_config(self.config, self.binding)
+        self.assertEqual(selected['runtime_private_address'], '10.0.0.18')
+        self.assertEqual(selected['network']['runtime_server_id'], self.runtime['server_id'])
+        self.assertEqual(selected['loadbalancer_id'], self.config['loadbalancer_id'])
+        self.assertEqual(Path(selected['state_dir']), worker.ENVIRONMENTS / self.ident / 'routes')
+        self.assertFalse(any(action in args for args, _ in self.reads for action in ('create', 'set', 'delete')))
+
+    def test_readiness_verifies_provider_without_creating_local_state(self):
+        result = worker.dispatch(self.config, {**self.envelope, 'operation': 'verify-runtime'}, self.call)
+        self.assertEqual(result['status'], 'verified')
+        self.assertFalse(worker.ENVIRONMENTS.exists())
+
+    def test_fresh_controller_base_requires_no_placeholder_old_runtime(self):
+        self.assertEqual(worker.dispatch(self.base, self.envelope, self.call)['status'], 'registered')
+        result = worker.dispatch(self.base, {'operation': 'unregister-runtime', 'binding': self.binding}, self.call)
+        self.assertEqual(result['status'], 'unregistered')
+
+    def test_existing_untagged_vm_can_be_claimed_but_foreign_tag_cannot(self):
+        self.server['properties'] = {}
+        self.register()
+        self.server['properties'] = {'railshot.target': 'other', 'railshot.generation': '1'}
+        with self.assertRaisesRegex(worker.RouteError, 'owner_mismatch'):
+            self.register()
+
+    def test_cross_environment_runtime_and_changed_generation_rejected(self):
+        self.register()
+        other = worker.registration_binding(self.base, 'personal-' + str(uuid.UUID(int=101)), 1, self.runtime)
+        with self.assertRaisesRegex(worker.RouteError, 'already_registered'):
+            worker.dispatch(self.config, {**self.envelope, 'binding': other}, self.call)
+        changed = worker.registration_binding(self.base, self.ident, 2, self.runtime)
+        with self.assertRaisesRegex(worker.RouteError, 'immutable'):
+            worker.dispatch(self.config, {**self.envelope, 'binding': changed}, self.call)
+
+    def test_mismatched_base_is_blocked_without_provider_calls(self):
+        changed = {**self.base, 'listener_id': str(uuid.UUID(int=99))}
+        other = worker.registration_binding(changed, self.ident, 1, self.runtime)
+        with self.assertRaisesRegex(worker.RouteError, 'base_or_binding_changed'):
+            worker.dispatch(self.config, {**self.envelope, 'binding': other}, self.call)
+        self.assertEqual(self.reads, [])
+
+    def test_provider_identity_mismatches_leave_no_binding(self):
+        changes = [(self.project, 'name', 'admin'), (self.server, 'tenant_id', '0' * 32),
+                   (self.port, 'device_id', str(uuid.UUID(int=99))),
+                   (self.port, 'security_group_ids', [self.runtime['security_group_id'], str(uuid.UUID(int=99))]),
+                   (self.group, 'project_id', '0' * 32)]
+        for document, key, value in changes:
+            with self.subTest(key=key):
+                before = document[key]
+                document[key] = value
+                with self.assertRaises(worker.RouteError):
+                    self.register()
+                self.assertFalse((worker.ENVIRONMENTS / self.ident / 'binding.json').exists())
+                document[key] = before
+
+    def test_group_attached_to_another_vm_is_not_registered(self):
+        original = self.call
+        other_id = str(uuid.UUID(int=999))
+        def shared(arguments, service=('loadbalancer',)):
+            if arguments[:2] == ['port', 'list']:
+                return [{'ID': self.runtime['port_id']}, {'ID': other_id}]
+            if arguments[:3] == ['port', 'show', other_id]:
+                return {**self.port, 'id': other_id, 'device_id': str(uuid.UUID(int=998))}
+            return original(arguments, service)
+        with self.assertRaisesRegex(worker.RouteError, 'security_group_shared'):
+            worker.register_runtime(self.config, self.envelope, shared)
+        self.assertFalse((worker.ENVIRONMENTS / self.ident / 'binding.json').exists())
+
+    def test_unknown_readback_retry_is_safe_and_does_not_create_cloud_objects(self):
+        with self.assertRaises(worker.RouteError):
+            worker.register_runtime(self.config, self.envelope,
+                lambda *args, **kwargs: (_ for _ in ()).throw(worker.RouteError('unknown', 'unknown')))
+        self.assertFalse((worker.ENVIRONMENTS / self.ident / 'binding.json').exists())
+        self.assertEqual(self.register()['status'], 'registered')
+
+    def test_unregister_is_bound_idempotent_and_blocks_routes(self):
+        self.register()
+        request = {'operation': 'unregister-runtime', 'binding': self.binding}
+        result = worker.dispatch(self.config, request, self.call)
+        self.assertEqual(result['status'], 'unregistered')
+        self.assertEqual(worker.dispatch(self.config, request, self.call), result)
+        with self.assertRaisesRegex(worker.RouteError, 'environment_binding_mismatch'):
+            worker.environment_config(self.config, self.binding)
+        with self.assertRaisesRegex(worker.RouteError, 'immutable'):
+            self.register()
+        record = worker.read_private(worker.ENVIRONMENTS / self.ident / 'binding.json')
+        self.assertEqual(record['status'], 'released')
+
+    def test_unregister_refuses_active_or_unknown_application(self):
+        self.register()
+        selected = worker.environment_config(self.config, self.binding)
+        worker.save(Path(selected['state_dir']) / ('app-' + 'a' * 24 + '.json'), {'status': 'configured'})
+        with self.assertRaisesRegex(worker.RouteError, 'routes_still_present'):
+            worker.dispatch(self.config, {'operation': 'unregister-runtime', 'binding': self.binding}, self.call)
+        self.assertEqual(worker.environment_config(self.config, self.binding), selected)
+
+    def test_environment_route_dispatch_cannot_select_arbitrary_path(self):
+        self.register()
+        request = {**self.request, 'private_address': self.runtime['private_address']}
+        with patch.object(worker, 'configure', return_value={'status': 'configured'}) as configure:
+            worker.dispatch(self.config, {'operation': 'environment-route', 'binding': self.binding, 'request': request}, self.call)
+            self.assertEqual(configure.call_args.args[0]['network']['runtime_server_id'], self.runtime['server_id'])
+        bad = {**self.binding, 'environment_id': '../old-config'}
+        with self.assertRaises(worker.RouteError):
+            worker.dispatch(self.config, {'operation': 'environment-route', 'binding': bad, 'request': request}, self.call)
+
+    def test_registered_environment_route_delete_and_release_keep_legacy_state(self):
+        self.register()
+        selected = worker.environment_config(self.config, self.binding)
+        cloud = OctaviaCLI(selected)
+        request = {**self.request, 'private_address': self.runtime['private_address']}
+        created = worker.dispatch(self.config, {'operation': 'environment-route',
+            'binding': self.binding, 'request': request}, cloud)
+        self.assertEqual(created['status'], 'configured')
+        self.assertFalse((Path(self.config['state_dir']) / (request['application_id'] + '.json')).exists())
+        lifecycle = {'operation': 'lifecycle-plan', 'action': 'delete', 'request': {
+            key: request[key] for key in ('application_id', 'hostname', 'node_port')}}
+        envelope = {'operation': 'environment-lifecycle', 'binding': self.binding, 'request': lifecycle}
+        plan = worker.dispatch(self.config, envelope, cloud)
+        envelope['request'] = {**lifecycle, 'operation': 'lifecycle-execute', 'expected': plan['expected']}
+        self.assertEqual(worker.dispatch(self.config, envelope, cloud)['status'], 'succeeded')
+        released = worker.dispatch(self.config, {'operation': 'unregister-runtime', 'binding': self.binding}, cloud)
+        self.assertEqual(released['status'], 'unregistered')
+        self.assertTrue(all(not objects for objects in cloud.objects.values()))
+        self.assertFalse(cloud.network_rules)
+
+
 class CertificateTests(unittest.TestCase):
     def test_fixed_public_certificate_and_ca_only(self):
         reference = str(uuid.UUID(int=9))

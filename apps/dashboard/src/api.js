@@ -11,6 +11,10 @@ function retryDelay(signal) {
 
 export async function request(path, options = {}, controller = new AbortController()) {
   requests.add(controller);
+  const headers = new Headers(options.headers || {});
+  if (/^\/api\/v1\/(?:owners(?:[/?]|$)|recoveries(?:[/?]|$)|operations(?:[/?]|$)|targets(?:[/?]|$))/.test(path)) {
+    headers.set('X-Railshot-Request', 'dashboard');
+  }
   const asynchronousPlan = path.endsWith('/plans') && options.headers?.Prefer === 'respond-async';
   const timeout = setTimeout(() => controller.abort(), asynchronousPlan ? 15000 : options.method === 'POST' ? (path.endsWith('/plans') ? 600000 : 120000) : path.endsWith('/logs') ? 60000 : 15000);
   const safeReplay = !options.method || options.method === 'GET' || asynchronousPlan
@@ -19,7 +23,7 @@ export async function request(path, options = {}, controller = new AbortControll
   try {
     for (let attempt = 0; ; attempt++) {
       let response;
-      try { response = await fetch(path, { credentials: 'same-origin', ...options, signal: controller.signal, redirect: 'error' }); }
+      try { response = await fetch(path, { credentials: 'same-origin', ...options, headers, signal: controller.signal, redirect: 'error' }); }
       catch (error) {
         if (!safeReplay || attempt >= 20 || controller.signal.aborted) throw error;
         await retryDelay(controller.signal); continue;

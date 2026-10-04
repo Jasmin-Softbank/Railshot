@@ -59,3 +59,8 @@ MCP 이미지는 `docker run --rm -i ... railshot-mcp` 또는 Compose의 `run --
 [API 계약](docs/interface.md), [소스 형식](docs/source-formats.md), [CI→CD 경계](../../docs/api/ci-publication.md)를 함께 참고한다.
 
 Legacy `JASMIN_TENANT` and `JASMIN_API_URL` remain fallback aliases; `RAILSHOT_*` values take precedence. The server accepts `x-jasmin-request` for older clients. The CLI sends both request headers with the same value for existing servers. Historical `jasmin.yaml` artifacts keep their original hashes. See [naming compatibility](../../docs/api/naming-compatibility.md).
+
+개인 OpenStack 환경의 장기 소유권·등록·상태·동적 대상 배포·삭제 계약은
+[개인 환경 API](../../docs/api/personal-environments.md)를 참조하세요.
+`RAILSHOT_PERSONAL_CONFIG`는 비공개 운영자 설정 파일을 가리킵니다.
+무구성 상태에서는 등록 기록과 복구키를 관리할 수 있지만, 실제 설치 자격·배포는 준비되지 않았다고 응답합니다.

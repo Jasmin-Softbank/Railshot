@@ -1,9 +1,156 @@
 #!/usr/bin/env bash
 set +x
 set -euo pipefail
-# 폐기한 등록 키를 하위 프로세스에 전달하지 않습니다.
+PERSONAL_REGISTRATION_MODE=false
+PERSONAL_ENROLLMENT_SECRET=''
+if [[ ${1:-} == '--personal-registration' ]]; then
+    PERSONAL_REGISTRATION_MODE=true
+    shift
+    PERSONAL_ENROLLMENT_SECRET="${RAILSHOT_ENROLLMENT_TOKEN:-}"
+fi
 unset RAILSHOT_ENROLLMENT_TOKEN JASMIN_ENROLLMENT_TOKEN
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+personal_registration() {
+    local enrollment_secret="$1"
+    shift
+    local api_url='' artifact_url='' artifact_sha256='' source_root='' test_allow_http=0
+    local -a forwarded=("$@")
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --api-url|--artifact-url|--artifact-sha256|--source-root)
+                [[ $# -ge 2 ]] || { echo '개인 환경 등록 인자 값이 필요합니다.' >&2; return 1; }
+                case "$1" in
+                    --api-url) api_url="$2" ;;
+                    --artifact-url) artifact_url="$2" ;;
+                    --artifact-sha256) artifact_sha256="$2" ;;
+                    --source-root) source_root="$2" ;;
+                esac
+                shift 2 ;;
+            --enrollment-id|--profile-id|--project-id|--runtime-config)
+                [[ $# -ge 2 ]] || { echo '개인 환경 등록 인자 값이 필요합니다.' >&2; return 1; }
+                shift 2 ;;
+            --test-allow-http) test_allow_http=1; shift ;;
+            --help|-h)
+                echo 'Ubuntu 24.04/26.04: sudo bash install.sh --personal-registration --api-url HTTPS_URL --enrollment-id ID --artifact-url HTTPS_TGZ --artifact-sha256 SHA256 [--profile-id ID] [--test-allow-http]'
+                return 0 ;;
+            *) echo '지원하지 않는 개인 환경 등록 인자입니다.' >&2; return 1 ;;
+        esac
+    done
+    [[ -n "$api_url" ]] || { echo '--api-url이 필요합니다.' >&2; return 1; }
+    if [[ -z "$source_root" ]]; then
+        [[ -n "$artifact_url" && "$artifact_sha256" =~ ^[a-fA-F0-9]{64}$ ]] || {
+            echo '고정 배포본 주소와 SHA256 검증값이 필요합니다.' >&2; return 1;
+        }
+    fi
+
+    # This public-server check must pass before package installation or cloud/account mutation.
+    python3 - "$api_url" "$test_allow_http" "$artifact_url" "$source_root" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+base = sys.argv[1]
+allow_http = sys.argv[2] == '1'
+parsed = urllib.parse.urlsplit(base)
+schemes = ('https', 'http') if allow_http else ('https',)
+if (parsed.scheme not in schemes or not parsed.hostname or parsed.username or parsed.password
+        or parsed.query or parsed.fragment or any(ch.isspace() for ch in base)):
+    raise SystemExit('인증정보 및 질의문자열 없는 HTTPS API 주소가 필요합니다.')
+if not sys.argv[4]:
+    artifact = urllib.parse.urlsplit(sys.argv[3])
+    if (artifact.scheme not in schemes or not artifact.hostname or artifact.username or artifact.password
+            or artifact.query or artifact.fragment or any(ch.isspace() for ch in sys.argv[3])):
+        raise SystemExit('인증정보 및 질의문자열 없는 HTTPS 배포본 주소가 필요합니다.')
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise RuntimeError('redirect rejected')
+
+url = base.rstrip('/') + '/api/v1/readiness?scope=personal'
+request = urllib.request.Request(url, method='GET', headers={'Accept': 'application/json'})
+try:
+    with urllib.request.build_opener(NoRedirect).open(request, timeout=30) as response:
+        raw = response.read(1048577)
+        if response.status != 200 or len(raw) > 1048576:
+            raise RuntimeError('invalid readiness response')
+except Exception as exc:
+    raise SystemExit('RailShot 서버 선행조건을 확인하지 못했습니다: ' + type(exc).__name__) from None
+try:
+    document = json.loads(raw)
+    result = document.get('data', document)
+    if not isinstance(result, dict) or result.get('scope') != 'personal' or result.get('ready') is not True:
+        blockers = result.get('blockers', []) if isinstance(result, dict) else []
+        details = []
+        for row in blockers[:8]:
+            if not isinstance(row, dict) or not isinstance(row.get('code'), str):
+                continue
+            message = ' '.join(row.get('message', '').split())[:256] if isinstance(row.get('message'), str) else ''
+            details.append(row['code'] + (': ' + message if message else ''))
+        raise RuntimeError('; '.join(details) or 'SERVER_NOT_READY')
+except Exception as exc:
+    detail = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
+    raise SystemExit('RailShot 서버 선행조건이 충족되지 않았습니다: ' + detail) from None
+PY
+
+    local work_dir=''
+    if [[ -z "$source_root" ]]; then
+        command -v curl >/dev/null || { echo '배포본 다운로드에 curl이 필요합니다.' >&2; return 1; }
+        work_dir="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/railshot-personal-bootstrap.XXXXXXXX")"
+        local curl_protocols='=https'
+        [[ "$test_allow_http" == 0 ]] || curl_protocols='=http,https'
+        local status
+        status="$(curl --disable --fail --silent --show-error --proto "$curl_protocols" --max-redirs 0 \
+            --connect-timeout 15 --max-time 300 --output "$work_dir/payload.tgz" --write-out '%{http_code}' "$artifact_url")" || {
+            rm -rf -- "$work_dir"; echo '개인 환경 배포본 다운로드에 실패했습니다.' >&2; return 1;
+        }
+        [[ "$status" == 200 ]] || { rm -rf -- "$work_dir"; echo '개인 환경 배포본 응답 오류입니다.' >&2; return 1; }
+        if ! python3 - "$work_dir" "$artifact_sha256" <<'PY'
+import hashlib
+import sys
+import tarfile
+from pathlib import Path
+root = Path(sys.argv[1])
+archive = root / 'payload.tgz'
+if hashlib.sha256(archive.read_bytes()).hexdigest() != sys.argv[2].lower():
+    raise SystemExit('개인 환경 배포본 검증값이 일치하지 않습니다.')
+with tarfile.open(archive) as source:
+    members = source.getmembers()
+    if any(member.issym() or member.islnk() or member.isdev()
+           or not (member.isfile() or member.isdir()) or member.name.startswith('/')
+           or '..' in Path(member.name).parts for member in members):
+        raise SystemExit('안전하지 않은 개인 환경 배포본입니다.')
+    source.extractall(root / 'source', filter='data')
+PY
+        then
+            rm -rf -- "$work_dir"
+            echo '개인 환경 배포본 검증 또는 압축 해제에 실패했습니다.' >&2
+            return 1
+        fi
+        source_root="$work_dir/source"
+        forwarded+=(--source-root "$source_root")
+    fi
+    local helper="$source_root/deployment/bootstrap/personal-registration.sh"
+    [[ -f "$helper" && ! -L "$helper" ]] || {
+        [[ -z "$work_dir" ]] || rm -rf -- "$work_dir"
+        echo '개인 환경 등록 구현 파일이 없습니다.' >&2
+        return 1
+    }
+    local result=0
+    RAILSHOT_ENROLLMENT_TOKEN="$enrollment_secret" bash "$helper" "${forwarded[@]}" || result=$?
+    [[ -z "$work_dir" ]] || rm -rf -- "$work_dir"
+    return "$result"
+}
+
+if [[ "$PERSONAL_REGISTRATION_MODE" == true ]]; then
+    personal_registration "$PERSONAL_ENROLLMENT_SECRET" "$@"
+    unset PERSONAL_ENROLLMENT_SECRET
+    exit 0
+fi
+
+# 폐기한 등록 키를 하위 프로세스에 전달하지 않습니다. 개인 등록 모드만 셸 변수로 제한적으로 보존합니다.
 SOURCE_RUN=false
 INSTALL_DEPS=false
 DOWNLOAD_BASE_URL="${JASMIN_DOWNLOAD_BASE_URL:-}"

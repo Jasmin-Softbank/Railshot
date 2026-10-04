@@ -1,6 +1,7 @@
 # Build API and agent MCP as separate images from the repository root.
 # Build from the repository root. Registry index digest verified on 2026-10-02.
 ARG NODE_IMAGE=node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+ARG PYTHON_IMAGE=python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
 FROM ${NODE_IMAGE} AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -25,6 +26,34 @@ COPY apps/api/src/ ./src/
 COPY contracts/application.mjs /app/contracts/application.mjs
 COPY ci/scripts/contract/telemetry.json ci/scripts/contract/stages.json /app/ci/scripts/contract/
 USER 1000:1000
+
+# Local ARM64 control-plane image used only by the credential-renewal CronJob.
+# It deliberately omits the API runtime and its amd64-only provisioning tools.
+FROM ${PYTHON_IMAGE} AS local-renewal
+ARG TARGETARCH
+USER root
+RUN test "$TARGETARCH" = arm64 \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --disable-pip-version-check --no-cache-dir PyYAML==6.0.3 jsonschema==4.23.0
+RUN curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      https://dl.k8s.io/release/v1.34.11/bin/linux/arm64/kubectl -o /tmp/kubectl \
+    && echo '5b045a4712674c88a56fd98eef4285689738b7fbe8735e1b9ee3509521af5cb4  /tmp/kubectl' | sha256sum --check --strict \
+    && install -m 0755 /tmp/kubectl /usr/local/bin/kubectl \
+    && rm /tmp/kubectl \
+    && kubectl version --client=true --output=json >/dev/null
+WORKDIR /app
+COPY gitops/credentials.py gitops/argo.py gitops/handoff.py /app/gitops/
+COPY ci/scripts/execution.py ci/scripts/observability.py ci/scripts/process.py ci/scripts/publication.py ci/scripts/storage.py /app/ci/scripts/
+COPY ci/scripts/gate/bundle.py /app/ci/scripts/gate/
+COPY ci/scripts/runner/runtime_boundary.py /app/ci/scripts/runner/
+COPY ci/scripts/schemas/railshot.schema.json /app/ci/scripts/schemas/
+ENV PYTHONDONTWRITEBYTECODE=1
+RUN cd /app/gitops && python3 -c 'import credentials' \
+    && test "$(stat -c %a /app/gitops/credentials.py)" = 644
+USER 1000:1000
+ENTRYPOINT ["python3", "/app/gitops/credentials.py"]
 
 FROM base AS api
 USER root
@@ -61,7 +90,8 @@ COPY contracts/ansible-request.schema.json contracts/ansible-job.schema.json /ap
 COPY deployment/scripts/common.sh deployment/scripts/environment.py /app/deployment/scripts/
 COPY deployment/scripts/applications.py deployment/scripts/application_release.py deployment/scripts/application_routes.py /app/deployment/scripts/
 COPY deployment/scripts/application_lifecycle.py deployment/scripts/lifecycle_runtime.py /app/deployment/scripts/
-COPY deployment/scripts/openstack_route_worker.py /app/deployment/scripts/
+COPY deployment/scripts/openstack_route_worker.py deployment/scripts/personal_wireguard.py /app/deployment/scripts/
+COPY deployment/scripts/personal_runtime.py /app/deployment/scripts/
 COPY deployment/cloudflared/register.py deployment/cloudflared/render.py /app/deployment/cloudflared/
 COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh deployment/bootstrap/runtime-healthz.py /app/deployment/bootstrap/
 COPY deployment/cilium/install.sh deployment/cilium/preflight.py deployment/cilium/health.sh /app/deployment/cilium/

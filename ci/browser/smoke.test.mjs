@@ -706,8 +706,9 @@ test('original dashboard cards submit three source types through backend selecti
   await page.waitForFunction(() => document.querySelector('#connection-status').textContent.includes('URL 확인'));
   assert.equal(await page.locator('#target, #operation, #app-name, #environment-panel').count(), 0, 'backend internals do not replace the original UI');
   await page.getByRole('radio', { name: /온프레미스/ }).check();
-  await page.locator('#provider').selectOption('openstack');
-  assert.match(await page.locator('#connection-status').innerText(), /OpenStack.*앱 배포 설정.*준비되지/);
+  await page.waitForFunction(() => document.querySelector('#provider option[value="__new_openstack__"]'));
+  await page.locator('#provider').selectOption('__new_openstack__');
+  assert.match(await page.locator('#connection-status').innerText(), /등록한 뒤 배포/);
   await page.getByRole('radio', { name: /클라우드/ }).check();
   assert.equal(await page.locator('#provider-field').isVisible(), false);
   const review = () => page.locator('#deploy-form button[type="submit"]').click();
@@ -718,9 +719,9 @@ test('original dashboard cards submit three source types through backend selecti
   assert.equal(await page.locator('#review-app').innerText(), 'browser-demo');
   await page.getByRole('radio', { name: /온프레미스/ }).check();
   assert.equal(await page.locator('#review-panel').isVisible(), false, 'changing environment invalidates the reviewed request');
-  await page.locator('#provider').selectOption('proxmox');
+  await page.locator('#provider').selectOption('__new_openstack__');
   await review();
-  assert.match(await page.locator('#form-error').innerText(), /Proxmox.*앱 배포 설정.*준비되지/);
+  assert.match(await page.locator('#form-error').innerText(), /새 OpenStack 환경을 등록한 뒤 배포/);
   assert.equal(submitted.length, 0);
   await page.getByRole('radio', { name: /클라우드/ }).check();
   const output = process.env.CI_OUTPUT_DIR;
@@ -847,8 +848,8 @@ test('anonymous browser sessions persist their selected view separately', { time
   assert.deepEqual(errors, []);
 });
 
-test('each provider selection keeps the assigned CI and CD target through reload', { timeout: 90000 }, async (t) => {
-  for (const provider of ['aws', 'gcp', 'openstack']) await t.test(provider, async (t) => {
+test('each cloud provider keeps the assigned CI and CD target through reload', { timeout: 90000 }, async (t) => {
+  for (const provider of ['aws', 'gcp']) await t.test(provider, async (t) => {
     const targetId = `assigned-${provider}`, app = `${provider}-app`, commit = 'a'.repeat(40);
     const submissions = [], deliveries = [];
     const publication = { run_id: 1, target_id: targetId, app, tenant: 'demo', source_commit: commit, artifact_id: 2, producer_attempt: 1 };
@@ -867,13 +868,10 @@ test('each provider selection keeps the assigned CI and CD target through reload
     await page.goto(origin);
     await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
     const saved = page.waitForResponse((res) => res.url().endsWith('/api/v1/preferences') && res.request().method() === 'PUT');
-    if (provider === 'openstack') {
-      await page.getByRole('radio', { name: /온프레미스/ }).check();
-      await page.locator('#provider').selectOption(provider);
-    } else await page.locator('#cloud-provider').selectOption(provider);
+    await page.locator('#cloud-provider').selectOption(provider);
     await saved; await page.reload();
     await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
-    assert.equal(await page.locator(provider === 'openstack' ? '#provider' : '#cloud-provider').inputValue(), provider);
+    assert.equal(await page.locator('#cloud-provider').inputValue(), provider);
     await page.locator('#repository-url').fill('https://github.com/example/provider-fixture');
     await page.locator('#deploy-form button[type="submit"]').click();
     await page.locator('#review-panel').waitFor({ state: 'visible' });

@@ -51,6 +51,17 @@ CREATE TABLE IF NOT EXISTS connections (
   updated_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS connections_session ON connections(session_id);
+CREATE TABLE IF NOT EXISTS owners (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  recovery_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS personal_state (
+  id TEXT PRIMARY KEY,
+  record TEXT NOT NULL CHECK(json_valid(record))
+) STRICT;
 CREATE TABLE IF NOT EXISTS registrations (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL REFERENCES sessions(id),

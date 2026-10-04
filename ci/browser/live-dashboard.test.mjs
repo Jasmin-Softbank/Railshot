@@ -148,9 +148,10 @@ test('session history pages and live environment states remain truthful across n
   await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
   await page.locator('[data-view="deploy"]').click();
   await page.getByRole('radio', { name: /온프레미스/ }).check();
-  await page.locator('#provider').selectOption('openstack');
-  await page.waitForFunction(() => document.querySelector('#runtime-connection-status').textContent.includes('런타임 연결 정상'));
-  assert.match(await page.locator('#connection-status').innerText(), /앱 배포 설정.*준비되지/, 'deployment settings are independent from a connected runtime');
+  await page.waitForFunction(() => document.querySelector('#provider option[value="__new_openstack__"]'));
+  assert.equal(await page.locator('#provider option[value="openstack"]').count(), 0, 'static OpenStack targets are not personal deployment choices');
+  await page.locator('#provider').selectOption('__new_openstack__');
+  assert.match(await page.locator('#connection-status').innerText(), /등록한 뒤 배포/, 'an unregistered OpenStack target cannot start deployment');
   await page.locator('[data-view="monitor"]').click();
   await page.waitForFunction(() => document.querySelector('#environment-message').textContent.includes('마지막 조회'));
   await page.locator('#environment-detail summary').first().click();

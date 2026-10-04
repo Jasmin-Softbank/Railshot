@@ -15,6 +15,8 @@
           <button class="nav-item active" type="button" data-view="deploy" aria-current="page">새 배포</button>
           <button class="nav-item" type="button" data-view="monitor">환경 모니터링</button>
           <button class="nav-item" type="button" data-view="history">배포 내역</button>
+          <div class="nav-divider" role="separator"></div>
+          <button class="nav-item" type="button" data-view="personal">개인 배포환경 관리</button>
         </nav>
         <div class="sidebar-footer"><p id="session-note" role="status">브라우저 세션을 준비하고 있습니다.</p>One Action, Infinite Clouds</div>
       </aside>
@@ -103,42 +105,14 @@
               <div class="provider-field" id="provider-field" hidden>
                 <label class="field-label" for="provider">인프라 종류</label>
                 <select id="provider" name="provider">
-                  <option value="" selected>선택하세요</option>
-                  <option value="openstack">OpenStack</option>
-                  <option value="proxmox">Proxmox</option>
+                  <option value="" selected>등록 환경을 불러오는 중입니다</option>
                 </select>
-                <p class="field-note">등록된 인프라 연결 상태를 확인한 뒤 배포합니다.</p>
+                <p class="field-note" id="onprem-target-note">등록된 OpenStack 환경을 확인한 뒤 배포합니다.</p>
+                <div class="onprem-registration-guide" id="onprem-registration-guide" hidden>
+                  <p>새 OpenStack 환경을 등록한 뒤 이 화면으로 돌아와 배포를 계속할 수 있습니다. 선택한 소스와 앱 이름은 이 페이지 안에서 유지됩니다.</p>
+                  <button class="secondary-button" id="open-environment-management" type="button">개인 배포환경 관리로 이동</button>
+                </div>
               </div>
-              <details class="provider-field" id="openstack-install-field" hidden>
-                <summary id="openstack-install-heading">OpenStack 환경 등록</summary>
-                <p class="field-note">새 환경을 연결할 때만 등록하세요. 등록 요청과 토큰 접수 후에도 실행 환경과 공개 주소 연결을 확인해야 앱을 배포할 수 있습니다. OpenStack 프로젝트·인증 정보는 고객 노드에서 직접 설정합니다.</p>
-                <button class="secondary-button" id="prepare-openstack-install" type="button">등록하고 설치 명령 받기</button>
-                <div id="openstack-pending-registration" hidden>
-                  <label class="field-label" for="openstack-registration-select">기존 미완료 등록</label>
-                  <select id="openstack-registration-select"></select>
-                  <button class="secondary-button" id="reissue-openstack-token" type="button">만료된 토큰 재발급</button>
-                </div>
-                <p class="field-note" id="openstack-install-status" role="status"></p>
-                <div class="installer-result" id="openstack-installer-result" hidden>
-                  <label class="field-label" for="openstack-install-command">설치 파일 다운로드 명령</label>
-                  <textarea id="openstack-install-command" class="installer-code" readonly spellcheck="false" rows="2"></textarea>
-                  <button class="secondary-button" id="copy-openstack-command" type="button">명령 복사</button>
-                  <p class="field-note">고객 노드에서 실행하면 install.sh 파일을 내려받습니다. 설치 실행에는 아래 필수 파일 묶음과 설정 JSON이 별도로 필요합니다.</p>
-                  <label class="field-label" for="openstack-linkage-token">일회성 연계 토큰</label>
-                  <textarea id="openstack-linkage-token" class="installer-code" readonly spellcheck="false" rows="2"></textarea>
-                  <button class="secondary-button" id="copy-openstack-token" type="button">토큰 복사</button>
-                  <p class="field-note" id="openstack-token-expires"></p>
-                  <p class="field-note">고객 노드에서 아래 토큰 접수 파일을 실행하고 이 토큰을 입력하세요.</p>
-                  <a class="secondary-button" id="openstack-token-client-download" download="claim_token.py">토큰 접수 파일 다운로드</a>
-                  <p class="field-note">단독 파일 실행: <code>python3 claim_token.py --service-url https://서비스-주소</code>. ZIP에서는 <code>deployment/bootstrap/claim_token.py</code> 경로를 사용하세요.</p>
-                  <a class="secondary-button" id="openstack-script-download" download="install.sh">install.sh 파일 다운로드</a>
-                  <a class="secondary-button" id="openstack-bundle-download" download="railshot-openstack-installer.zip">필수 파일 묶음 다운로드</a>
-                  <p class="field-note">실행에는 필수 파일 묶음과 고객 노드에서 작성한 설치 설정 JSON이 필요합니다. 아래 install.sh 코드만 복사한 경우에도 동반 파일을 준비하세요.</p>
-                  <label class="field-label" for="openstack-install-script">install.sh 코드</label>
-                  <textarea id="openstack-install-script" class="installer-code" readonly spellcheck="false" rows="12"></textarea>
-                  <button class="secondary-button" id="copy-openstack-script" type="button">코드 복사</button>
-                </div>
-              </details>
               <div id="deployment-database-field" class="provider-field" hidden>
                 <label class="field-label" for="deployment-database">데이터베이스</label>
                 <select id="deployment-database"><option value="none">DB 없음</option><option value="patroni">PostgreSQL HA 포함</option></select>
@@ -246,6 +220,77 @@
           <section id="deployment-history-detail" aria-label="배포 상세" hidden></section>
         </section>
 
+        <section class="view" id="personal-view" aria-labelledby="environments-title" hidden>
+          <header class="page-header"><span class="eyebrow">PERSONAL ENVIRONMENTS</span><h1 id="environments-title">개인 배포환경 관리</h1></header>
+          <section class="panel environment-management-intro">
+            <h2>내 OpenStack 환경</h2>
+            <p class="field-note">RailShot으로 배포한 서비스와 RailShot 관리 클라이언트만 관리합니다. 고객이 별도로 운영하는 서비스, 기반 가상 머신, 공유 데이터는 삭제하지 않습니다.</p>
+            <p id="environment-owner-note" class="field-note" role="status"></p>
+            <section id="environment-recovery-key" class="enrollment-card" hidden aria-labelledby="environment-recovery-key-title">
+              <h3 id="environment-recovery-key-title">복구 키를 안전한 곳에 저장하세요</h3>
+              <p class="field-note">이 키는 이 브라우저를 잃었을 때 개인 환경 관리권을 복구하는 데 필요합니다. 다시 표시할 수 없습니다.</p>
+              <pre id="environment-recovery-key-value"></pre>
+              <div class="source-buttons"><button id="environment-copy-recovery-key" class="secondary-button" type="button">복구 키 복사</button></div>
+              <p id="environment-recovery-key-message" class="field-note" role="status"></p>
+            </section>
+            <details class="environment-recovery-form">
+              <summary>복구 키로 관리권 복구</summary>
+              <p class="field-note">이전에 저장한 복구 키를 입력하면 이 브라우저에서 환경 관리권을 복구하고, 새 복구 키를 한 번만 표시합니다.</p>
+              <form id="environment-recover-form" class="inline-form"><label class="field-label" for="environment-recovery-input">복구 키</label><input id="environment-recovery-input" autocomplete="off" required /><button id="environment-recover-submit" class="secondary-button" type="submit">관리권 복구</button></form>
+              <p id="environment-recover-message" class="field-note" role="status"></p>
+            </details>
+          </section>
+          <section class="panel environment-register" aria-labelledby="environment-register-title">
+            <div class="review-heading"><div><h2 id="environment-register-title">OpenStack 환경 새 등록</h2><p class="field-note">환경을 등록하면 현재 브라우저에 관리 권한이 연결됩니다. 설치 명령은 OpenStack 제어 연결을 확인한 뒤 앱을 실행할 별도 가상 머신을 선택하거나 새로 만들도록 안내합니다. 선택한 가상 머신에 정상 K3s(가벼운 쿠버네티스)가 있으면 재사용하고, 없으면 기존 Ansible 자동 설치로 준비합니다. 중앙 서버가 배포 연결까지 검증해야 앱을 배포할 수 있습니다. OpenStack 비밀번호는 이 화면이나 명령에 넣지 않습니다.</p></div></div>
+            <form id="environment-register-form" class="inline-form">
+              <label class="field-label" for="environment-label">환경 이름</label>
+              <input id="environment-label" maxlength="80" required placeholder="예: 연구실 OpenStack" />
+              <button id="environment-register-submit" class="primary-button" type="submit">등록 시작</button>
+            </form>
+            <p id="environment-register-message" role="status"></p>
+            <section id="environment-enrollment" class="enrollment-card" hidden aria-labelledby="environment-enrollment-title">
+              <h3 id="environment-enrollment-title">관리 호스트 설치</h3>
+              <p id="environment-enrollment-expiry" class="field-note"></p>
+              <p id="environment-enrollment-command-state" class="field-note" role="status"></p>
+              <pre id="environment-install-command" hidden></pre>
+              <div class="source-buttons"><button id="environment-copy-command" class="secondary-button" type="button">설치 명령 복사</button><button id="environment-regenerate-command" class="text-button" type="button">설치 명령 재발급</button></div>
+              <p class="field-note">명령 실행 중 앱 배포용 OpenStack 가상 머신을 선택하거나 새로 만들 수 있습니다. 관리 호스트 자체는 앱 실행 서버로 사용하지 않습니다.</p>
+              <p id="environment-enrollment-message" class="field-note" role="status"></p>
+            </section>
+          </section>
+          <section class="environment-management-grid">
+            <section id="environment-owned-list-panel" class="panel environment-owned-list" aria-labelledby="environment-owned-title" tabindex="-1">
+              <div class="review-heading"><h2 id="environment-owned-title">등록한 환경</h2><button id="environment-owned-refresh" class="secondary-button" type="button">목록 새로고침</button></div>
+              <p id="environment-owned-message" class="field-note" role="status"></p>
+              <ul id="environment-owned-items" class="saved-list"></ul>
+            </section>
+            <section class="panel environment-owned-detail" aria-labelledby="environment-detail-title">
+              <h2 id="environment-detail-title">환경 상세</h2>
+              <p id="environment-detail-message" class="field-note" role="status">목록에서 환경을 선택하세요.</p>
+              <div id="environment-detail-content" hidden>
+                <dl id="environment-detail-facts" class="environment-facts"></dl>
+                <section id="environment-runtime-preparation" aria-labelledby="environment-runtime-preparation-title">
+                  <h3 id="environment-runtime-preparation-title">서버 배포 준비</h3>
+                  <p id="environment-runtime-preparation-state" class="field-note" role="status"></p>
+                  <ul id="environment-runtime-preparation-blockers" class="saved-list"></ul>
+                </section>
+                <section><h3>RailShot 서비스</h3><p id="environment-applications-message" class="field-note"></p><ul id="environment-applications-list" class="saved-list"></ul></section>
+                <section><h3>관리 호스트 지표</h3><dl id="environment-observations" class="metric-details"></dl></section>
+                <section id="environment-delete-operation" hidden aria-labelledby="environment-delete-operation-title">
+                  <h3 id="environment-delete-operation-title">환경 삭제 작업</h3>
+                  <p id="environment-delete-operation-state" class="field-note" role="status" aria-live="polite"></p>
+                  <p id="environment-delete-operation-message" class="field-note"></p>
+                  <h4>확인 단계</h4><ol id="environment-delete-operation-steps"></ol>
+                  <h4>남은 항목</h4>
+                  <ul id="environment-delete-operation-residuals" class="saved-list"></ul>
+                  <div class="source-buttons"><button id="environment-delete-operation-refresh" class="secondary-button" type="button">삭제 상태 다시 조회</button><button id="environment-delete-reconcile" class="secondary-button" type="button" hidden>삭제 재개 가능 여부 확인</button><button id="environment-delete-resume" class="primary-button danger-button" type="button" hidden>환경 삭제 재개</button></div>
+                </section>
+                <div class="history-actions"><button id="environment-continue-deploy" class="secondary-button" type="button">이 환경으로 배포 계속하기</button><button id="environment-delete" class="text-button danger-button" type="button">환경 삭제</button></div>
+              </div>
+            </section>
+          </section>
+        </section>
+
         <section class="view" id="monitor-view" aria-labelledby="monitor-title" hidden>
           <header class="page-header"><span class="eyebrow">ENVIRONMENT</span><h1 id="monitor-title">환경 모니터링</h1></header>
           <section class="panel environment-panel" aria-labelledby="environment-heading">
@@ -310,6 +355,18 @@
         <p id="lifecycle-error" class="form-error" role="alert" hidden></p>
         </div>
         <div class="lifecycle-dialog-actions"><button id="lifecycle-retry" class="secondary-button" type="button" hidden>계획 다시 확인</button><button id="lifecycle-cancel" class="secondary-button" type="button" autofocus>취소</button><button id="lifecycle-confirm" class="primary-button" type="submit" disabled>계획 확인 중</button></div>
+      </form>
+    </dialog>
+    <dialog id="environment-delete-dialog" aria-labelledby="environment-delete-title" aria-describedby="environment-delete-description">
+      <form id="environment-delete-form">
+        <h2 id="environment-delete-title">환경 삭제 계획</h2>
+        <p id="environment-delete-description"></p><p id="environment-delete-expiry" class="field-note"></p>
+        <div class="lifecycle-preview"><section><h3>삭제할 RailShot 리소스</h3><ul id="environment-delete-resources"></ul></section><section><h3>보존할 리소스</h3><ul id="environment-delete-retained"></ul></section></div>
+        <label class="delete-confirmation"><span id="environment-delete-confirmation-label"></span><input id="environment-delete-confirmation" autocomplete="off" /></label>
+        <p id="environment-delete-data-note" class="field-note">이 확인은 RailShot 서비스와 앱 전용 데이터를 삭제하는 명시 동의입니다. 고객이 별도로 운영하는 서비스, 기반 가상 머신, 공유 데이터는 보존합니다.</p>
+        <label class="delete-confirmation"><span><input id="environment-delete-data-consent" type="checkbox" /> 앱 전용 데이터 삭제 영향에 동의합니다.</span></label>
+        <p id="environment-delete-error" class="form-error" role="alert" hidden></p>
+        <div class="lifecycle-dialog-actions"><button id="environment-delete-cancel" class="secondary-button" type="button" autofocus>취소</button><button id="environment-delete-confirm" class="primary-button danger-button" type="submit" disabled>삭제 시작</button></div>
       </form>
     </dialog>
   </body>

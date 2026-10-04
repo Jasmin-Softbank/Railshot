@@ -98,6 +98,7 @@ export async function createProductStore(directory) {
     }
     if (state.version !== 1 || !state.operations || !state.keys || !state.bindings || !state.plans) throw new Error('Invalid workspace state');
     state.applications ||= {};
+    state.personal = JSON.parse(db.prepare("SELECT record FROM personal_state WHERE id = 'personal'").get()?.record || '{"targets":{},"enrollments":{}}');
     for (const app of Object.values(state.applications)) if (['registering', 'stopping', 'starting', 'deleting'].includes(app.status)) app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
       for (const item of Object.values(operation.classifications || {})) if (item.state === 'running') {
@@ -124,6 +125,10 @@ export async function createProductStore(directory) {
         }
       }
     }
+    for (const target of Object.values(state.personal.targets)) {
+      if (target.status === 'deleting') target.status = 'attention';
+      if (target.status === 'ready') target.status = 'connecting';
+    }
     persist(state);
     dashboard = await createDashboardData(db, root);
     registrations = createRegistrations(db);
@@ -144,6 +149,7 @@ export async function createProductStore(directory) {
       for (const [id, value] of Object.entries(next.bindings)) binding.run(id, value.operation_id, JSON.stringify(value));
       const key = db.prepare('INSERT INTO idempotency VALUES (?, ?)');
       for (const [id, value] of Object.entries(next.keys)) key.run(id, value);
+      db.prepare("INSERT INTO personal_state VALUES ('personal', ?) ON CONFLICT(id) DO UPDATE SET record=excluded.record").run(JSON.stringify(next.personal || { targets: {}, enrollments: {} }));
       db.exec('PRAGMA user_version=2; COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
@@ -154,7 +160,7 @@ export async function createProductStore(directory) {
     read: () => structuredClone(state),
     operationPage(kind, sessionId, { limit, marker }) {
       if (!['builds', 'deployments', 'environments'].includes(kind)) throw new Error('Invalid operation kind');
-      const where = `kind = ?${sessionId ? ' AND session_id = ?' : ''}${kind === 'builds' ? " AND json_extract(record, '$.ci.run_id') IS NOT NULL" : ''}`;
+      const where = `kind = ?${sessionId ? ' AND session_id = ?' : ' AND (session_id IS NULL OR session_id NOT IN (SELECT session_id FROM owners))'}${kind === 'builds' ? " AND json_extract(record, '$.ci.run_id') IS NOT NULL" : ''}`;
       const args = sessionId ? [kind, sessionId] : [kind];
       const publicId = kind === 'builds' ? "CAST(json_extract(record, '$.ci.run_id') AS TEXT)" : 'id';
       const anchor = marker === null ? null : db.prepare(`SELECT id, COALESCE(created_at, '') AS created FROM operations WHERE ${where} AND ${publicId} = ?`).get(...args, marker);

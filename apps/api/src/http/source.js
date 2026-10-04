@@ -38,13 +38,14 @@ export async function uploadedSource(request, strict = false, allowSelection = f
   let selected = {};
   if (selecting) {
     const environment = form.get('environment'), provider = form.get('provider');
-    if (form.has('app') || form.has('target_id') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
+    if (form.has('app') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
     if (!(environment === 'cloud' && ['aws', 'gcp'].includes(provider) || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
     const source_name = form.has('source_name') ? form.get('source_name') : undefined;
     if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
     const expected = form.has('expected_target_id') ? form.get('expected_target_id') : undefined;
     if (expected !== undefined && (typeof expected !== 'string' || !TARGET_ID.test(expected))) fail('검토한 배포 대상 ID가 잘못되었습니다.');
-    selected = { deployment_selection: { environment, provider }, source_name, ...(expected !== undefined ? { expected_target_id: expected } : {}) };
+    if (target_id !== undefined && !(environment === 'onprem' && provider === 'openstack')) fail('개인 환경은 OpenStack에서만 선택하세요.');
+    selected = { target_id: undefined, deployment_selection: { environment, provider, ...(target_id !== undefined ? { target_id } : {}) }, source_name, ...(expected !== undefined ? { expected_target_id: expected } : {}) };
   } else if (form.has('source_name') || form.has('expected_target_id')) fail('소스 이름과 검토 대상은 환경 선택과 함께 입력하세요.');
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);

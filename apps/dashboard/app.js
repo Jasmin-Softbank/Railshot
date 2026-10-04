@@ -1,13 +1,13 @@
 import { createHistoryDetail, filterHistory } from './src/deployment-history.js';
 import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from '../../contracts/application.mjs';
 import { request, requests } from './src/api.js';
-import { initializeOpenStackInstaller } from './src/openstack-installer.js';
 import { applicationLabel, createLifecycleController } from './src/lifecycle.js';
 
 const views = {
   deploy: document.querySelector('#deploy-view'),
   history: document.querySelector('#history-view'),
   monitor: document.querySelector('#monitor-view'),
+  personal: document.querySelector('#personal-view'),
 };
 
 // Navigation and source selection.
@@ -26,6 +26,8 @@ function showView(name) {
   if (sessionReady && name === 'history') { loadHistory(); loadApplications(); }
   if (sessionReady && ['monitor', 'deploy'].includes(name)) loadEnvironments();
   else stopEnvironmentPolling();
+  if (sessionReady && name === 'personal') { loadOwnerInfo(); loadOwnedTargets(); }
+  else stopOwnedTargetPolling();
   if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
   if (sessionReady && name === 'monitor' && consoleTab === 'work') refreshEvents();
 }
@@ -49,7 +51,6 @@ const error = document.querySelector('#form-error');
 const provider = document.querySelector('#provider');
 const providerField = document.querySelector('#provider-field');
 const cloudProvider = document.querySelector('#cloud-provider');
-const openstackInstallField = document.querySelector('#openstack-install-field');
 const deploymentDatabase = document.querySelector('#deployment-database');
 const deployButton = document.querySelector('#deploy-button');
 const requestError = document.querySelector('#request-error');
@@ -76,6 +77,12 @@ if (Array.isArray(savedHistory?.markers) && savedHistory.markers.length <= 100 &
     && savedHistory.markers.slice(1).every((value) => typeof value === 'string' && value.length <= 1024)) historyMarkers = savedHistory.markers;
 document.querySelector('#history-kind').value = historyKind;
 let targets = [], observations = new Map(), environmentController, environmentTimer;
+let ownedTargets = [], ownedTargetError = null, ownedTargetController, ownedTargetTimer, selectedOwnedTarget = null;
+let selectedOwnedDetail = null, ownedObservation = null, ownedApplications = [], enrollmentTargetId = null, environmentDeleteDraft = null;
+let environmentDeleteOperation = null, environmentDeletePlanController = null, environmentDeleteReconciliationTimer;
+let enrollmentRequestGeneration = 0, ownedTargetSelectionGeneration = 0;
+let environmentRegistrationTargetId = null;
+let ownerRecoveryConfigured = false, ownerInfoGeneration = 0;
 
 let preferences = { view: 'deploy', environment: 'cloud', provider: '' };
 // The cookie is HttpOnly; no session token, credential, or execution locator enters localStorage.
@@ -167,10 +174,13 @@ function environmentLabel(row) {
 function activeRun() { return current && (current.status === 'unknown' || !terminal.has(current.status)); }
 function deploymentSelection() {
   const environment = document.querySelector('[name="environment"]:checked').value;
-  return { environment, provider: environment === 'cloud' ? cloudProvider.value : provider.value };
+  const targetId = environment === 'onprem' && provider.value && provider.value !== '__new_openstack__' ? provider.value : null;
+  return { environment, provider: environment === 'cloud' ? cloudProvider.value : 'openstack', targetId,
+    registerNew: environment === 'onprem' && provider.value === '__new_openstack__' };
 }
 function selectedOption() {
   const selected = deploymentSelection();
+  if (selected.environment === 'onprem') return selected.targetId ? ownedTargets.find((item) => item.id === selected.targetId) : null;
   return deploymentOptions.find((item) => item.environment === selected.environment && item.provider === selected.provider);
 }
 function selectedProfiles() {
@@ -198,28 +208,30 @@ function databaseChoice(select, profile, reset = false) {
 function updateSelection() {
   const selected = deploymentSelection();
   providerField.hidden = selected.environment !== 'onprem';
-  openstackInstallField.hidden = selected.environment !== 'onprem' || selected.provider !== 'openstack';
-  const existingOpenStack = selectedOption()?.available === true;
-  // Keep registration separate from deploying to the existing operator-bound runtime.
-  // Repeated observations must not undo a visitor's disclosure choice.
-  if (!openstackInstallField.hidden && openstackInstallField.dataset.available !== String(existingOpenStack)) {
-    openstackInstallField.open = !existingOpenStack;
-    openstackInstallField.dataset.available = String(existingOpenStack);
-    document.querySelector('#openstack-install-heading').textContent = existingOpenStack
-      ? '다른 OpenStack 환경 등록' : 'OpenStack 환경 등록';
-  }
   document.querySelector('#cloud-provider-field').hidden = selected.environment !== 'cloud';
+  document.querySelector('#onprem-registration-guide').hidden = !selected.registerNew;
   const profile = selectedProfile();
   document.querySelector('#deployment-database-field').hidden = !profile?.database;
   databaseChoice(deploymentDatabase, profile);
   document.querySelector('#deployment-database-note').textContent = databaseSummary(profile, deploymentDatabase.value);
-  document.querySelector('#connection-status').textContent = connectionError || (selectedProfiles().length > 1
-    ? '사용할 배포 사양을 운영자가 하나로 지정해야 합니다.'
-    : profile ? (profile.supported ? '새 실행 환경과 앱을 함께 준비합니다. 선택 내용을 확인하면 비용과 실행 계획을 표시합니다.' : '환경 생성 사양을 아직 실행할 수 없습니다.')
-    : selectedOption()?.message || (selected.environment === 'onprem' && !selected.provider ? '온프레미스 인프라 종류를 선택하세요.' : '앱 배포 설정을 확인하고 있습니다.'));
+  const target = selectedOption();
+  const targetReady = target?.status === 'ready' && target.deployable === true;
+  let connectionStatus;
+  if (selected.registerNew) connectionStatus = '새 OpenStack 환경을 등록한 뒤 배포할 수 있습니다.';
+  else if (ownedTargetError && selected.environment === 'onprem') connectionStatus = `등록 환경 조회 실패: ${ownedTargetError}`;
+  else if (selected.environment === 'onprem' && selected.targetId) connectionStatus = targetReady
+    ? `${target.label || target.id} 환경에 배포합니다.`
+    : `${target?.label || selected.targetId} 환경은 ${targetStatusLabel(target?.status)} 상태라 아직 배포할 수 없습니다.`;
+  else if (connectionError) connectionStatus = connectionError;
+  else if (selectedProfiles().length > 1) connectionStatus = '사용할 배포 사양을 운영자가 하나로 지정해야 합니다.';
+  else if (profile) connectionStatus = profile.supported
+    ? '새 실행 환경과 앱을 함께 준비합니다. 선택 내용을 확인하면 비용과 실행 계획을 표시합니다.'
+    : '환경 생성 사양을 아직 실행할 수 없습니다.';
+  else connectionStatus = selectedOption()?.message || (selected.environment === 'onprem' && !selected.targetId ? '등록할 OpenStack 환경을 선택하세요.' : '앱 배포 설정을 확인하고 있습니다.');
+  document.querySelector('#connection-status').textContent = connectionStatus;
   renderRuntimeConnection();
   invalidateReview();
-  savePreferences(selected);
+  savePreferences({ environment: selected.environment, provider: selected.environment === 'cloud' ? selected.provider : '' });
 }
 function editSelection() { selectionEdited = true; updateSelection(); }
 document.querySelectorAll('[name="environment"]').forEach((input) => input.addEventListener('change', editSelection));
@@ -227,7 +239,6 @@ provider.addEventListener('change', editSelection);
 cloudProvider.addEventListener('change', editSelection);
 deploymentDatabase.addEventListener('change', updateSelection);
 
-initializeOpenStackInstaller();
 
 // Deployment input, review, and submission.
 async function checkConnection() {
@@ -510,8 +521,11 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   if (!selectedSource) error.textContent = '배포할 소스를 선택하세요.';
   else if (selectedSource.kind === 'repository' && !/^https:\/\/github\.com\/[^/\s]+\/[^/\s?#]+\/?$/.test(selectedSource.label)) error.textContent = '공개 GitHub 저장소 URL을 입력하세요.';
   else if (selectedSource.kind === 'archive' && !archive.files[0].name.toLowerCase().endsWith('.zip')) error.textContent = 'ZIP 파일만 업로드할 수 있습니다.';
-  else if (selected.environment === 'onprem' && !selected.provider) error.textContent = '온프레미스 인프라 종류를 선택하세요.';
-  else if (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available)) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
+  else if (selected.environment === 'onprem' && selected.registerNew) error.textContent = '새 OpenStack 환경을 등록한 뒤 배포할 수 있습니다.';
+  else if (selected.environment === 'onprem' && !selected.targetId) error.textContent = '배포할 등록 OpenStack 환경을 선택하세요.';
+  else if (selected.environment === 'onprem' && (ownedTargetError || option?.status !== 'ready' || option?.deployable !== true)) error.textContent = document.querySelector('#connection-status').textContent;
+  else if (selected.environment === 'cloud' && (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available))) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
+  else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
     invalidateReview();
     const generation = reviewGeneration, source = selectedSource;
@@ -557,10 +571,10 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
       return;
     } finally { reviewing = false; reviewButton.disabled = false; }
     reviewed = { ...selected, source, app, kind: 'deployments', key: crypto.randomUUID(), plan, environmentTargetId,
-      targetId: plan?.runtime_target_id || profile?.target_id };
+      targetId: selected.targetId || plan?.runtime_target_id || profile?.target_id };
     document.querySelector('#review-source').textContent = source.label;
     document.querySelector('#review-app').textContent = app;
-    document.querySelector('#review-target').textContent = profile ? `클라우드 · ${profile.label || profile.id} · ${databaseSummary(profile, plan.database.mode)}` : option.label;
+    document.querySelector('#review-target').textContent = selected.environment === 'onprem' ? `온프레미스 · ${option.label || option.id}` : profile ? `클라우드 · ${profile.label || profile.id} · ${databaseSummary(profile, plan.database.mode)}` : option.label;
     document.querySelector('#review-note').textContent = plan
       ? `앱 ${plan.name}: 환경을 준비하고 ${plan.database.mode === 'patroni' ? 'DB 준비, ' : ''}소스 검사, 이미지 게시, 앱 적용과 공개 URL 확인을 시작합니다. 계획 유효 시각: ${new Date(plan.expires_at).toLocaleTimeString('ko-KR')}.${planCost(plan)}`
       : option.message;
@@ -749,6 +763,9 @@ deployButton.addEventListener('click', async () => {
     const payload = new FormData();
     if (draft.plan) {
       payload.set('app', draft.plan.name); payload.set('target_id', draft.targetId); payload.set('plan_id', draft.plan.id);
+    } else if (draft.environment === 'onprem') {
+      payload.set('target_id', draft.targetId);
+      payload.set('environment', 'onprem'); payload.set('provider', 'openstack');
     } else {
       payload.set('environment', draft.environment); payload.set('provider', draft.provider);
       payload.set('expected_target_id', draft.environmentTargetId);
@@ -1431,6 +1448,555 @@ async function loadEnvironments() {
 document.querySelector('#monitor-provider').addEventListener('change', () => { document.querySelector('#monitor-target').value = ''; loadEnvironments(); });
 document.querySelector('#monitor-target').addEventListener('change', loadEnvironments);
 document.querySelector('#monitor-refresh').addEventListener('click', loadEnvironments);
+
+const targetStatuses = {
+  pending: '등록 대기', installing: '설치 중', connecting: '연결 확인 중', preparing: '서버 배포 준비 중', ready: '배포 준비 완료', offline: '연결 끊김',
+  queued: '접수됨', running: '진행 중', succeeded: '완료', blocked: '진행 차단', deleting: '삭제 중', attention: '확인 필요', deleted: '삭제 완료', failed: '등록 실패', unknown: '상태 확인 필요',
+};
+const connectionStatuses = { connecting: '확인 중', ready: '연결됨', offline: '연결 끊김' };
+const runtimePreparationStatuses = { not_started: '시작 전', queued: '접수됨', running: '진행 중', succeeded: '완료', blocked: '진행 차단', failed: '실패', unknown: '결과 확인 필요', revoked: '연결 해제됨' };
+const runtimePreparationStages = { client: '서버 배포 준비 시작 전', client_selection: '배포 서버 가상 머신 선택 또는 생성', client_installation: 'K3s 확인 또는 Ansible 자동 설치', client_verification: '배포 서버 검증', registration: '중앙 서버 등록', configuration: '중앙 배포 설정 확인', permission_verification: '배포 권한 확인', verification: '최종 검증', reconciliation: '결과 확인 필요', complete: '준비 완료' };
+const runtimePreparationBlockers = {
+  RUNTIME_OPERATOR_NOT_CONFIGURED: '중앙 서버에 OpenStack 배포 준비 설정이 없습니다. 운영자 설정이 필요합니다.',
+  APPLICATION_CI_NOT_CONFIGURED: '중앙 서버에 앱 빌드·배포 설정이 없습니다. 운영자 설정이 필요합니다.',
+  RUNTIME_APPLICATION_BINDING_INCOMPLETE: '중앙 서버의 앱 배포 연결 설정이 완료되지 않았습니다.',
+  RUNTIME_DEPLOYMENT_PERMISSION_MISMATCH: '배포 서버 권한이 중앙 서버 설정과 일치하지 않습니다.',
+  RUNTIME_RESOURCE_UNVERIFIED: '선택한 OpenStack 가상 머신을 확인하지 못했습니다.',
+  RUNTIME_RESOURCE_MISMATCH: '확인한 OpenStack 가상 머신이 선택한 대상과 일치하지 않습니다.',
+  RUNTIME_HOST_IDENTITY_CHANGED: '배포 서버의 신원이 이전 확인 결과와 달라 운영자 확인이 필요합니다.',
+  RUNTIME_READBACK_FAILED: '중앙 서버가 배포 서버 상태를 다시 확인하지 못했습니다.',
+  RUNTIME_PREPARATION_INTERRUPTED: '서버 배포 준비가 중단되어 결과 확인이 필요합니다.',
+  RUNTIME_PREPARATION_UNVERIFIED: '서버 배포 준비 결과를 확인하지 못했습니다. 자동으로 다시 실행하지 않습니다.',
+  RUNTIME_VERIFICATION_FAILED: '서버 배포 준비의 최종 검증에 실패했습니다.',
+  RUNTIME_CLIENT_PREPARATION_FAILED: '관리 호스트에서 배포 서버 준비에 실패했습니다.',
+  RUNTIME_PRIOR_OUTCOME_UNKNOWN: '이전 준비 작업의 결과가 불명확하여 다시 실행할 수 없습니다.',
+  RUNTIME_EXISTING_CLUSTER_UNHEALTHY: '선택한 가상 머신의 기존 K3s 상태가 정상이 아닙니다.',
+  RUNTIME_ANSIBLE_NOT_READY: 'Ansible 자동 설치 후 K3s 준비 상태를 확인하지 못했습니다.',
+};
+const registrationStages = { gateway: '보안 연결 구성 중', openstack: 'OpenStack 제어 연결 확인 중', checks: '연결 점검 중', runtime: '서버 배포 준비 중', created: '등록 요청 생성', enrollment: '설치 명령 실행 대기', installing: '클라이언트 설치 중', connecting: '연결 확인 중', failed: '등록 확인 필요' };
+const deleteBlockers = { ACTIVE_DEPLOYMENT: '진행 중인 배포가 있어 먼저 상태 확인이 필요합니다.', DATA_CONSENT_REQUIRED: '앱 전용 데이터 삭제 동의가 필요합니다.', TARGET_UNAVAILABLE: '환경 연결 상태를 확인한 뒤 다시 시도하세요.' };
+function targetStatusLabel(status) { return targetStatuses[status] || '확인 필요'; }
+function connectionStatusLabel(status) { return connectionStatuses[status] || '확인 필요'; }
+function runtimePreparationStatusLabel(status) { return runtimePreparationStatuses[status] || '확인 필요'; }
+function runtimePreparationStageLabel(stage) { return runtimePreparationStages[stage] || `기타 단계 (${stage || '정보 없음'})`; }
+function runtimePreparationBlockerLabel(blocker) { return runtimePreparationBlockers[blocker] || `확인 필요 (${blocker || '알 수 없는 사유'})`; }
+function registrationStageLabel(stage, target) {
+  if (['ready', 'complete'].includes(stage)) return target?.deployable === true && target.runtime_preparation?.status === 'succeeded'
+    ? '등록·배포 준비 완료' : 'OpenStack 등록 완료';
+  return registrationStages[stage] || '확인 필요';
+}
+function deletionBlockerLabel(blocker) { return deleteBlockers[blocker] || '삭제 전 확인이 필요합니다.'; }
+function appendListItems(list, items, fallback) {
+  list.replaceChildren(...(items.length ? items.map((item) => element('li', typeof item === 'string' ? item : item.label || item.name || item.id || '세부 정보 없음')) : [element('li', fallback, 'field-note')]));
+}
+const environmentDeleteStages = { queued: '접수', services: 'RailShot 서비스 삭제', runtime: '서버 배포 권한 회수', client: '관리 클라이언트 제거', gateway: '보안 연결 제거', reconciliation: '남은 항목 확인 필요', complete: '완료' };
+const environmentDeleteSteps = { 'runtime:revoke': '서버 배포 권한 회수', client: '관리 클라이언트 제거', gateway: '보안 연결 제거' };
+const environmentDeleteResiduals = { RemovalVerification: '클라이언트·보안 연결 제거 확인', RailShotClient: 'RailShot 관리 클라이언트', GatewayRegistration: 'RailShot 보안 연결 등록', CustomerServices: '고객 별도 서비스', Infrastructure: '기반 인프라' };
+const environmentReconciliationBlockers = {
+  RECONCILIATION_IN_PROGRESS: '기존 삭제 결과를 확인하고 있습니다.', CLIENT_STILL_ACTIVE: '관리 클라이언트가 아직 연결되어 있습니다.',
+  RESIDUALS_REMAIN: '삭제되지 않은 RailShot 관리 항목이 남아 있습니다.', OPERATION_NOT_RESUMABLE: '현재 작업은 안전하게 재개할 수 없습니다.',
+  REMOVAL_STILL_RUNNING: '이전 관리 클라이언트 제거 작업이 아직 실행 중입니다.',
+  CLIENT_INSTALLATION_NOT_INTACT: '관리 클라이언트 설치 상태가 안전 재개 조건과 일치하지 않습니다.',
+};
+function environmentDeleteStepLabel(name) {
+  if (environmentDeleteSteps[name]) return environmentDeleteSteps[name];
+  if (name?.startsWith('application:')) return `RailShot 서비스 ${name.slice('application:'.length)} 삭제`;
+  return `기타 단계 (${name || '이름 없음'})`;
+}
+function renderEnvironmentDeleteOperation() {
+  const operation = environmentDeleteOperation;
+  const panel = document.querySelector('#environment-delete-operation'); panel.hidden = !operation;
+  if (!operation) return;
+  const state = ({ queued: '접수됨', running: '진행 중', succeeded: '삭제 완료', failed: '실패', blocked: '진행 차단', unknown: '결과 확인 필요' })[operation.status] || '결과 확인 필요';
+  const stage = operation.stage ? environmentDeleteStages[operation.stage] || `기타 단계 (${operation.stage})` : '';
+  document.querySelector('#environment-delete-operation-state').textContent = `작업 ${operation.id} · ${state}${stage ? ` · ${stage}` : ''}`;
+  const reconciliation = operation.reconciliation;
+  const reconciliationUsable = reconciliation?.status === 'ready' && reconciliation.resumable === true && Date.parse(reconciliation.expires_at) > Date.now();
+  const reconciliationMessage = operation.reconciliationError ? operation.reconciliationError
+    : reconciliation?.status === 'pending' ? '기존 삭제 결과와 남은 관리 항목을 확인하고 있습니다.'
+    : reconciliationUsable ? '안전 확인을 마쳤습니다. 환경 이름과 데이터 삭제 동의를 다시 확인한 뒤 기존 작업을 재개할 수 있습니다.'
+    : reconciliation?.status === 'ready' && reconciliation.resumable === true ? '삭제 재개 안전 확인의 유효 시간이 지났습니다. 가능 여부를 다시 확인하세요.'
+    : reconciliation?.status === 'blocked' ? (reconciliation.blockers || []).map((code) => environmentReconciliationBlockers[code] || `재개 확인 필요 (${code})`).join(' ') : '';
+  document.querySelector('#environment-delete-operation-message').textContent = operation.readError || reconciliationMessage || operation.error?.message
+    || (operation.status === 'succeeded' ? '서버가 환경 삭제 완료를 확인했습니다.' : ['queued', 'running'].includes(operation.status)
+      ? '삭제 작업이 진행 중입니다. 상태를 다시 조회하면 최신 결과를 확인할 수 있습니다.' : '삭제 완료를 확인하지 못했습니다. 자동으로 다시 실행하지 않습니다. 남은 항목을 확인하세요.');
+  const residuals = Array.isArray(operation.residuals) ? operation.residuals : [];
+  const steps = Array.isArray(operation.steps) ? operation.steps : [];
+  document.querySelector('#environment-delete-operation-steps').replaceChildren(...(steps.length
+    ? steps.map((item) => element('li', `${environmentDeleteStepLabel(item.name)} · ${targetStatusLabel(item.status)}`))
+    : [element('li', '서버가 단계별 결과를 제공하지 않았습니다.', 'field-note')]));
+  document.querySelector('#environment-delete-operation-residuals').replaceChildren(...(residuals.length
+    ? residuals.map((item) => element('li', `${environmentDeleteResiduals[item.kind] || `기타 확인 항목 (${item.kind || '종류 없음'})`} · ${item.name || item.id || '세부 정보 없음'}`))
+    : [element('li', operation.status === 'succeeded' ? '남은 항목 없음' : '서버가 남은 항목 목록을 제공하지 않았습니다.', 'field-note')]));
+  const reconcile = document.querySelector('#environment-delete-reconcile'), resume = document.querySelector('#environment-delete-resume');
+  const uncertain = ['unknown', 'failed', 'blocked'].includes(operation.status);
+  reconcile.hidden = !uncertain || reconciliationUsable;
+  reconcile.disabled = reconciliation?.status === 'pending';
+  reconcile.textContent = reconciliation?.status === 'pending' ? '삭제 재개 가능 여부 확인 중' : reconciliation?.status === 'blocked' ? '삭제 재개 가능 여부 다시 확인' : '삭제 재개 가능 여부 확인';
+  resume.hidden = !(uncertain && reconciliationUsable);
+}
+function stopEnvironmentDeleteReconciliationPolling() { clearTimeout(environmentDeleteReconciliationTimer); environmentDeleteReconciliationTimer = undefined; }
+function scheduleEnvironmentDeleteReconciliation(target, operation) {
+  stopEnvironmentDeleteReconciliationPolling();
+  if (operation?.reconciliation?.status === 'pending' && selectedOwnedDetail?.id === target.id) {
+    environmentDeleteReconciliationTimer = setTimeout(() => loadEnvironmentDeleteOperation(target), 2000);
+  }
+}
+async function loadEnvironmentDeleteOperation(target = selectedOwnedDetail) {
+  const id = target?.deletion_operation_id;
+  if (!id) { environmentDeleteOperation = null; renderEnvironmentDeleteOperation(); return null; }
+  document.querySelector('#environment-delete-operation-refresh').disabled = true;
+  try {
+    const { data } = await request(`/api/v1/operations/${encodeURIComponent(id)}`);
+    if (!data?.id || data.id !== id || data.target_id !== target.id || data.kind !== 'target-lifecycle') throw new Error('환경 삭제 작업 상태 응답을 확인하지 못했습니다.');
+    if (selectedOwnedDetail?.id !== target.id) return null;
+    environmentDeleteOperation = data; renderEnvironmentDeleteOperation(); scheduleEnvironmentDeleteReconciliation(target, data);
+    if (data.status === 'succeeded') {
+      clearEnvironmentRegistrationFeedback(target.id);
+      await loadOwnedTargets({ preserveDetail: false, removedMessage: '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.' });
+    }
+    return data;
+  } catch (cause) {
+    if (selectedOwnedDetail?.id !== target.id) return null;
+    environmentDeleteOperation = { id, status: 'unknown', readError: `삭제 작업 상태 조회 실패: ${cause.message}` };
+    renderEnvironmentDeleteOperation(); return null;
+  } finally { document.querySelector('#environment-delete-operation-refresh').disabled = false; }
+}
+function renderOwnedTargetOptions() {
+  const selected = provider.value || provider.dataset.restoreTarget || '';
+  const deployable = ownedTargets.filter((target) => target.status !== 'deleting' && target.status !== 'deleted');
+  provider.replaceChildren(new Option(ownedTargetError ? '등록 환경을 다시 불러오세요' : '등록 환경을 선택하세요', ''),
+    ...deployable.map((target) => new Option(`${target.label || target.id} · ${targetStatusLabel(target.status)}`, target.id)),
+    new Option('신규 OpenStack환경 추가', '__new_openstack__'));
+  if ([...provider.options].some((option) => option.value === selected)) { provider.value = selected; delete provider.dataset.restoreTarget; }
+}
+function renderOwnedTargetList() {
+  const list = document.querySelector('#environment-owned-items');
+  const message = document.querySelector('#environment-owned-message');
+  if (ownedTargetError) {
+    message.textContent = `목록 조회 실패: ${ownedTargetError} 등록된 환경이 없다는 뜻이 아닙니다. 현재 화면에는 마지막으로 확인했거나 방금 등록한 환경을 표시합니다.`;
+  }
+  if (!ownedTargets.length) {
+    if (!ownedTargetError) message.textContent = '아직 등록한 OpenStack 환경이 없습니다.';
+    list.replaceChildren();
+    return;
+  }
+  if (!ownedTargetError) message.textContent = `${ownedTargets.length}개 환경 · 상태와 마지막 응답 시각은 새로고침할 때 갱신됩니다.`;
+  list.replaceChildren(...ownedTargets.map((target) => {
+    const item = document.createElement('li'), button = element('button', target.label || target.id, 'text-button');
+    button.type = 'button'; button.classList.toggle('active', target.id === selectedOwnedTarget);
+    button.addEventListener('click', () => selectOwnedTarget(target.id));
+    const project = target.project_id ? ` · 프로젝트 ${target.project_id}` : '';
+    const runtime = target.runtime_preparation || { status: 'not_started' };
+    item.append(button, element('small', `OpenStack${project} · 전체 ${targetStatusLabel(target.status)} · 제어 연결 ${connectionStatusLabel(target.connection_status)} · 서버 준비 ${runtimePreparationStatusLabel(runtime.status)} · 마지막 응답 ${formatTime(target.last_seen_at)} · RailShot 서비스 ${Number.isFinite(target.application_count) ? target.application_count : '확인 중'}개`));
+    return item;
+  }));
+}
+function renderOwnedTargetDetail() {
+  const message = document.querySelector('#environment-detail-message'), content = document.querySelector('#environment-detail-content');
+  if (!selectedOwnedDetail) { content.hidden = true; message.textContent = selectedOwnedTarget ? '환경 상세를 불러오지 못했습니다.' : '목록에서 환경을 선택하세요.'; return; }
+  content.hidden = false;
+  const target = selectedOwnedDetail;
+  message.textContent = `${target.label || target.id} · ${targetStatusLabel(target.status)}`;
+  const runtime = target.runtime_preparation || { status: 'not_started', stage: 'client', blockers: [], verified_at: null };
+  const facts = [['전체 상태', targetStatusLabel(target.status)], ['OpenStack 제어 연결', connectionStatusLabel(target.connection_status)], ['서버 배포 준비', runtimePreparationStatusLabel(runtime.status)], ['등록 단계', registrationStageLabel(target.registration_stage, target)],
+    ['배포 가능', target.deployable === true ? '가능' : '아직 불가'], ['클라이언트', target.client_version || '상태 보고 대기'],
+    ['마지막 응답', formatTime(target.last_seen_at)], ['OpenStack 프로젝트', target.project_id || '정보 없음']];
+  document.querySelector('#environment-detail-facts').replaceChildren(...facts.map(([name, value]) => {
+    const row = document.createElement('div'); row.append(element('dt', name), element('dd', value)); return row;
+  }));
+  document.querySelector('#environment-runtime-preparation-state').textContent = `${runtimePreparationStatusLabel(runtime.status)} · ${runtimePreparationStageLabel(runtime.stage)}${runtime.verified_at ? ` · 최종 확인 ${formatTime(runtime.verified_at)}` : ''}`;
+  const runtimeBlockers = Array.isArray(runtime.blockers) ? runtime.blockers : [];
+  const runtimeNote = runtime.status === 'succeeded' ? '중앙 서버가 앱 배포 연결까지 확인했습니다.'
+    : runtime.status === 'not_started' ? '관리 호스트 설치 명령에서 별도 OpenStack 가상 머신을 선택하거나 새로 만들어 준비합니다.'
+    : ['queued', 'running'].includes(runtime.status) ? '기존 K3s를 확인해 재사용하거나, 없으면 Ansible 자동 설치 후 중앙 서버가 검증합니다.'
+    : runtime.status === 'unknown' ? '준비 결과가 불명확합니다. 자동으로 다시 실행하지 않으며 운영자 확인이 필요합니다.'
+    : runtime.status === 'blocked' || runtime.status === 'failed' ? '아래 사유를 해결한 뒤 서버 배포 준비를 다시 확인해야 합니다.' : '서버 배포 준비 상태를 확인하고 있습니다.';
+  document.querySelector('#environment-runtime-preparation-blockers').replaceChildren(...(runtimeBlockers.length
+    ? runtimeBlockers.map((blocker) => element('li', runtimePreparationBlockerLabel(blocker))) : [element('li', runtimeNote, 'field-note')]));
+  const appMessage = document.querySelector('#environment-applications-message');
+  appMessage.textContent = Array.isArray(ownedApplications) ? (ownedApplications.length ? `RailShot으로 배포한 서비스 ${ownedApplications.length}개` : 'RailShot으로 배포한 서비스가 없습니다.') : '서비스 목록을 불러오지 못했습니다.';
+  const appList = document.querySelector('#environment-applications-list');
+  appList.replaceChildren(...(Array.isArray(ownedApplications) && ownedApplications.length ? ownedApplications.map((app) => element('li', `${app.name || app.app || app.id || '이름 미제공'} · ${app.status || '상태 정보 없음'} · 마지막 배포 ${formatTime(app.deployed_at || app.updated_at)}${app.public_url || app.url ? ` · ${app.public_url || app.url}` : ''}`)) : []));
+  const observationList = document.querySelector('#environment-observations');
+  const metrics = ownedObservation?.metrics;
+  if (!metrics || ownedObservation.failed) observationList.replaceChildren(element('div', ownedObservation?.failed ? '지표 조회 실패' : '아직 수집된 지표가 없습니다.'));
+  else observationList.replaceChildren(...['cpu_percent', 'memory_percent', 'disk_percent', 'network_receive_bytes_per_second', 'network_transmit_bytes_per_second'].map((name) => {
+    const cell = document.createElement('div'), metric = metrics[name];
+    cell.append(element('dt', metricNames[name] || name), element('dd', `${metricText(name, ownedObservation)} · ${formatTime(metric?.observed_at)}`)); return cell;
+  }));
+  document.querySelector('#environment-continue-deploy').disabled = !(target.status === 'ready' && target.deployable === true);
+  const deleteButton = document.querySelector('#environment-delete');
+  deleteButton.textContent = target.deletion_operation_id ? '삭제 상태 확인' : '환경 삭제';
+  deleteButton.disabled = target.status === 'deleted';
+}
+function clearEnrollment() {
+  enrollmentRequestGeneration += 1;
+  enrollmentTargetId = null;
+  const panel = document.querySelector('#environment-enrollment');
+  panel.hidden = true;
+  document.querySelector('#environment-enrollment-expiry').textContent = '';
+  document.querySelector('#environment-enrollment-command-state').textContent = '';
+  const command = document.querySelector('#environment-install-command');
+  command.textContent = ''; command.hidden = true;
+  const copy = document.querySelector('#environment-copy-command');
+  copy.disabled = true; copy.onclick = null;
+  document.querySelector('#environment-regenerate-command').disabled = true;
+  document.querySelector('#environment-enrollment-message').textContent = '';
+}
+function clearEnvironmentRegistrationFeedback(targetId) {
+  if (enrollmentTargetId === targetId) clearEnrollment();
+  if (environmentRegistrationTargetId === targetId) {
+    environmentRegistrationTargetId = null;
+    document.querySelector('#environment-register-message').textContent = '';
+  }
+}
+function showEnrollmentState(id, commandState, message, { retry = true } = {}) {
+  enrollmentTargetId = id;
+  document.querySelector('#environment-enrollment').hidden = false;
+  document.querySelector('#environment-enrollment-expiry').textContent = '';
+  document.querySelector('#environment-enrollment-command-state').textContent = commandState;
+  const command = document.querySelector('#environment-install-command');
+  command.textContent = ''; command.hidden = true;
+  const copy = document.querySelector('#environment-copy-command');
+  copy.disabled = true; copy.onclick = null;
+  document.querySelector('#environment-regenerate-command').disabled = !retry;
+  document.querySelector('#environment-enrollment-message').textContent = message;
+}
+function canIssueEnrollment(target) {
+  return target?.status === 'pending' || target?.registration_stage === 'enrollment';
+}
+function resetOwnedEnvironmentSelection() {
+  stopEnvironmentDeleteReconciliationPolling();
+  clearEnrollment();
+  ownedTargetSelectionGeneration += 1;
+  selectedOwnedTarget = null; selectedOwnedDetail = null; ownedObservation = null; ownedApplications = [];
+  ownedTargets = []; ownedTargetError = null;
+  provider.value = ''; delete provider.dataset.restoreTarget;
+  renderOwnedTargetOptions(); renderOwnedTargetList(); renderOwnedTargetDetail(); updateSelection();
+}
+function emphasizeOwnedTargets() {
+  const panel = document.querySelector('#environment-owned-list-panel');
+  panel.classList.add('recovery-highlight');
+  panel.focus({ preventScroll: true });
+  panel.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'nearest' });
+}
+function stopOwnedTargetPolling() { clearTimeout(ownedTargetTimer); ownedTargetTimer = undefined; ownedTargetController?.abort(); ownedTargetController = null; }
+async function loadOwnedTargets({ preserveDetail = true, removedMessage = '' } = {}) {
+  stopOwnedTargetPolling();
+  const controller = new AbortController(); ownedTargetController = controller;
+  try {
+    const { data } = await request('/api/v1/targets?provider=openstack&scope=owned', {}, controller);
+    if (!Array.isArray(data.items) || data.next_marker) throw new Error('개인 환경 목록을 모두 확인하지 못했습니다.');
+    ownedTargets = data.items.filter((target) => target.provider === 'openstack' && target.status !== 'deleted'); ownedTargetError = null;
+    const selectedRemoved = selectedOwnedTarget && !ownedTargets.some((target) => target.id === selectedOwnedTarget);
+    if (selectedRemoved) {
+      clearEnvironmentRegistrationFeedback(selectedOwnedTarget);
+      stopEnvironmentDeleteReconciliationPolling(); selectedOwnedTarget = null; selectedOwnedDetail = null; ownedObservation = null; ownedApplications = []; environmentDeleteOperation = null;
+    }
+    renderOwnedTargetOptions(); renderOwnedTargetList(); updateSelection();
+    if (selectedRemoved) { renderOwnedTargetDetail(); renderEnvironmentDeleteOperation(); if (removedMessage) document.querySelector('#environment-detail-message').textContent = removedMessage; }
+    if (selectedOwnedTarget && (!preserveDetail || !views.personal.hidden)) await selectOwnedTarget(selectedOwnedTarget, false);
+    return ownedTargets;
+  } catch (cause) {
+    if (controller.signal.aborted) return;
+    ownedTargetError = cause.name === 'AbortError' ? '조회 시간이 초과되었습니다.' : cause.message;
+    renderOwnedTargetOptions(); renderOwnedTargetList(); updateSelection();
+    return null;
+  } finally {
+    if (ownedTargetController === controller) {
+      ownedTargetController = null;
+      if (!views.personal.hidden) ownedTargetTimer = setTimeout(() => loadOwnedTargets(), 30000);
+    }
+  }
+}
+async function selectOwnedTarget(id, refreshList = true) {
+  const target = ownedTargets.find((item) => item.id === id); if (!target) return;
+  if (selectedOwnedTarget !== id) clearEnrollment();
+  const selectionGeneration = ++ownedTargetSelectionGeneration;
+  selectedOwnedTarget = id; selectedOwnedDetail = target; ownedObservation = null; ownedApplications = [];
+  stopEnvironmentDeleteReconciliationPolling(); environmentDeleteOperation = null; renderEnvironmentDeleteOperation();
+  renderOwnedTargetList(); renderOwnedTargetDetail();
+  if (canIssueEnrollment(target) && enrollmentTargetId !== id) showEnrollmentState(id, '설치 명령이 아직 발급되지 않았습니다.', '등록 대기 환경입니다. 설치 명령을 다시 발급할 수 있습니다.');
+  document.querySelector('#environment-detail-message').textContent = '환경 상세와 서비스·지표를 조회하고 있습니다.';
+  try {
+    const [detail, observationsResponse, applicationsResponse] = await Promise.allSettled([
+      request(`/api/v1/targets/${encodeURIComponent(id)}`), request(`/api/v1/targets/${encodeURIComponent(id)}/observations`), request(`/api/v1/targets/${encodeURIComponent(id)}/applications`),
+    ]);
+    if (selectedOwnedTarget !== id || ownedTargetSelectionGeneration !== selectionGeneration) return;
+    if (detail.status === 'fulfilled') selectedOwnedDetail = detail.value.data;
+    else throw detail.reason;
+    ownedObservation = observationsResponse.status === 'fulfilled' ? observationsResponse.value.data : { failed: true };
+    ownedApplications = applicationsResponse.status === 'fulfilled' && Array.isArray(applicationsResponse.value.data.items) ? applicationsResponse.value.data.items : null;
+    renderOwnedTargetDetail();
+    if (selectedOwnedDetail.deletion_operation_id) await loadEnvironmentDeleteOperation(selectedOwnedDetail);
+  } catch (cause) {
+    if (selectedOwnedTarget !== id || ownedTargetSelectionGeneration !== selectionGeneration) return;
+    selectedOwnedDetail = null; renderOwnedTargetDetail();
+    document.querySelector('#environment-detail-message').textContent = `환경 상세 조회 실패: ${cause.message}`;
+  }
+  if (refreshList) loadOwnedTargets();
+}
+async function copyText(value, message) {
+  try { await navigator.clipboard.writeText(value); message.textContent = '복사했습니다. 안전한 곳에 보관하세요.'; }
+  catch { message.textContent = '자동 복사에 실패했습니다. 내용을 직접 복사하세요.'; }
+}
+function showRecoveryKey(key) {
+  if (typeof key !== 'string' || !key) return;
+  document.querySelector('#environment-recovery-key').hidden = false;
+  document.querySelector('#environment-recovery-key-value').textContent = key;
+  document.querySelector('#environment-copy-recovery-key').onclick = () => copyText(key, document.querySelector('#environment-recovery-key-message'));
+}
+async function ensureEnvironmentOwner() {
+  if (ownerRecoveryConfigured) { renderOwnerNote(); return; }
+  const { data } = await request('/api/v1/owners', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  if (!data?.id) throw new Error('개인 환경 소유권을 확인하지 못했습니다.');
+  const issuedRecoveryKey = typeof data.recovery_key === 'string' && data.recovery_key.length > 0;
+  if (issuedRecoveryKey && data.recovery_key_once !== true) throw new Error('개인 환경 소유권 복구 키를 발급하지 못했습니다.');
+  if (!issuedRecoveryKey && data.recovery_configured !== true) throw new Error('개인 환경 소유권을 확인하지 못했습니다.');
+  ownerRecoveryConfigured = true; ownerInfoGeneration += 1; renderOwnerNote();
+  if (issuedRecoveryKey) showRecoveryKey(data.recovery_key);
+}
+async function checkPersonalReadiness() {
+  const { data } = await request('/api/v1/readiness?scope=personal');
+  if (data?.scope !== 'personal' || typeof data.ready !== 'boolean' || !Array.isArray(data.blockers))
+    throw new Error('개인 환경 설치 선행 조건 응답을 확인하지 못했습니다.');
+  if (!data.ready) {
+    const reason = data.blockers.map((row) => row?.message).filter(Boolean).join(' ');
+    throw new Error(reason || '개인 환경 운영 설정이 아직 준비되지 않았습니다.');
+  }
+}
+async function issueEnrollment(id, target = ownedTargets.find((item) => item.id === id)) {
+  if (!canIssueEnrollment(target)) {
+    showEnrollmentState(id, '설치 명령을 발급할 수 없습니다.', '현재 환경 상태에서는 설치 명령을 발급할 수 없습니다.', { retry: false });
+    return;
+  }
+  const requestGeneration = ++enrollmentRequestGeneration;
+  showEnrollmentState(id, '설치 명령을 발급하고 있습니다.', '설치 명령을 발급하고 있습니다.', { retry: false });
+  const message = document.querySelector('#environment-enrollment-message');
+  try {
+    const { data } = await request(`/api/v1/targets/${encodeURIComponent(id)}/enrollments`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (typeof data.install_command !== 'string' || !data.install_command || data.target_id !== id) throw new Error('설치 명령 응답을 확인하지 못했습니다.');
+    if (enrollmentTargetId !== id || enrollmentRequestGeneration !== requestGeneration) return;
+    document.querySelector('#environment-enrollment-command-state').textContent = '한 번만 실행할 설치 명령입니다.';
+    const command = document.querySelector('#environment-install-command');
+    command.textContent = data.install_command; command.hidden = false;
+    document.querySelector('#environment-enrollment-expiry').textContent = `한 번만 실행할 설치 명령 · 만료 ${formatTime(data.expires_at)}`;
+    const copy = document.querySelector('#environment-copy-command');
+    copy.disabled = false; copy.onclick = () => copyText(data.install_command, message);
+    document.querySelector('#environment-regenerate-command').disabled = false;
+    message.textContent = '명령을 복사해 OpenStack 관리망에 접근 가능한 관리 호스트에서 실행하세요. 이어서 앱 배포용 가상 머신을 선택하거나 새로 만들고, K3s 확인 또는 Ansible 자동 설치를 진행합니다.';
+  } catch (cause) {
+    if (enrollmentTargetId !== id || enrollmentRequestGeneration !== requestGeneration) return;
+    showEnrollmentState(id, '설치 명령을 발급하지 못했습니다.', `설치 명령 발급 실패: ${cause.message} 환경 등록 상태를 확인한 뒤 다시 시도하세요.`);
+  }
+}
+document.querySelector('#environment-register-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); const label = document.querySelector('#environment-label').value.trim(), message = document.querySelector('#environment-register-message');
+  if (!label) { message.textContent = '환경 이름을 입력하세요.'; return; }
+  const submit = document.querySelector('#environment-register-submit'); submit.disabled = true; environmentRegistrationTargetId = null; message.textContent = '개인 환경을 만들고 있습니다.';
+  clearEnrollment();
+  showEnrollmentState(null, '환경을 만들고 있습니다.', '환경 생성 후 설치 명령을 발급합니다.', { retry: false });
+  try {
+    await checkPersonalReadiness();
+    await ensureEnvironmentOwner();
+    const { data } = await request('/api/v1/targets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label, provider: 'openstack' }) });
+    if (typeof data.id !== 'string' || data.provider !== 'openstack') throw new Error('환경 등록 응답을 확인하지 못했습니다.');
+    ownedTargetError = null;
+    const index = ownedTargets.findIndex((target) => target.id === data.id);
+    if (index >= 0) ownedTargets.splice(index, 1, data); else ownedTargets.push(data);
+    selectedOwnedTarget = data.id; selectedOwnedDetail = data; ownedObservation = null; ownedApplications = [];
+    renderOwnedTargetOptions(); renderOwnedTargetList(); renderOwnedTargetDetail(); emphasizeOwnedTargets();
+    environmentRegistrationTargetId = data.id;
+    message.textContent = `${data.label || label} 환경을 만들었습니다. 현재 브라우저에 관리 권한이 연결되었습니다. 복구 키를 다시 입력할 필요가 없습니다. 설치 명령을 발급합니다.`;
+    const enrollment = issueEnrollment(data.id, data);
+    await loadOwnedTargets({ preserveDetail: false }); await selectOwnedTarget(data.id, false); await enrollment;
+  } catch (cause) {
+    message.textContent = `환경 등록 실패: ${cause.message}`;
+    showEnrollmentState(null, '환경 등록을 완료하지 못했습니다.', `설치 명령을 발급하지 못했습니다: ${cause.message}`, { retry: false });
+  }
+  finally { submit.disabled = false; }
+});
+document.querySelector('#environment-owned-refresh').addEventListener('click', () => loadOwnedTargets({ preserveDetail: false }));
+document.querySelector('#environment-regenerate-command').addEventListener('click', () => { if (enrollmentTargetId) issueEnrollment(enrollmentTargetId); });
+document.querySelector('#environment-continue-deploy').addEventListener('click', () => {
+  if (!selectedOwnedDetail || !(selectedOwnedDetail.status === 'ready' && selectedOwnedDetail.deployable === true)) return;
+  document.querySelector('[name="environment"][value="onprem"]').checked = true; renderOwnedTargetOptions(); provider.value = selectedOwnedDetail.id; updateSelection(); showView('deploy');
+});
+document.querySelector('#open-environment-management').addEventListener('click', () => showView('personal'));
+const environmentDeleteDialog = document.querySelector('#environment-delete-dialog');
+function renderEnvironmentDeleteLoading(target) {
+  environmentDeleteDraft = null;
+  document.querySelector('#environment-delete-title').textContent = '환경 삭제 계획';
+  document.querySelector('#environment-delete-description').textContent = `${target.label || target.id} 환경의 최신 삭제 계획을 확인하고 있습니다.`;
+  document.querySelector('#environment-delete-expiry').textContent = '';
+  appendListItems(document.querySelector('#environment-delete-resources'), [], '삭제할 RailShot 리소스를 확인하고 있습니다.');
+  appendListItems(document.querySelector('#environment-delete-retained'), [], '보존할 리소스를 확인하고 있습니다.');
+  document.querySelector('#environment-delete-confirmation-label').textContent = '계획 확인이 끝나면 환경 이름을 입력할 수 있습니다.';
+  const confirmation = document.querySelector('#environment-delete-confirmation'); confirmation.value = ''; confirmation.disabled = true;
+  const consent = document.querySelector('#environment-delete-data-consent'); consent.checked = false; consent.disabled = true;
+  document.querySelector('#environment-delete-confirm').textContent = '삭제 시작'; document.querySelector('#environment-delete-confirm').disabled = true;
+  const failure = document.querySelector('#environment-delete-error'); failure.textContent = ''; failure.hidden = true;
+}
+function renderEnvironmentDeleteResumeDraft(target, operation) {
+  const reconciliation = operation.reconciliation;
+  environmentDeleteDraft = { mode: 'resume', target, operation, key: crypto.randomUUID() };
+  document.querySelector('#environment-delete-title').textContent = '환경 삭제 재개';
+  document.querySelector('#environment-delete-description').textContent = `${target.label || target.id} 환경의 기존 삭제 작업을 안전 확인 결과에 따라 재개합니다.`;
+  document.querySelector('#environment-delete-expiry').textContent = `재개 확인 유효 시각: ${formatTime(reconciliation.expires_at)}`;
+  appendListItems(document.querySelector('#environment-delete-resources'), operation.residuals || [], '서버가 남은 RailShot 관리 항목을 다시 확인했습니다.');
+  appendListItems(document.querySelector('#environment-delete-retained'), ['고객 별도 서비스', '기반 가상 머신·네트워크·기존 K3s', '공유 데이터'], '고객 자원은 보존합니다.');
+  document.querySelector('#environment-delete-confirmation-label').textContent = `재개하려면 환경 이름 “${target.label || target.id}”을 입력하세요.`;
+  const confirmation = document.querySelector('#environment-delete-confirmation'); confirmation.value = ''; confirmation.disabled = false;
+  const consent = document.querySelector('#environment-delete-data-consent'); consent.checked = false; consent.disabled = false;
+  const submit = document.querySelector('#environment-delete-confirm'); submit.textContent = '삭제 재개 실행'; submit.disabled = true;
+  const failure = document.querySelector('#environment-delete-error'); failure.textContent = ''; failure.hidden = true;
+}
+function renderEnvironmentDeleteDraft() {
+  const draft = environmentDeleteDraft; if (!draft) return;
+  document.querySelector('#environment-delete-description').textContent = `${draft.target.label || draft.target.id} 환경에서 RailShot 서비스와 앱 전용 데이터를 삭제합니다.`;
+  document.querySelector('#environment-delete-expiry').textContent = `계획 유효 시각: ${formatTime(draft.plan.expires_at)}`;
+  appendListItems(document.querySelector('#environment-delete-resources'), draft.plan.resources || [], '삭제할 RailShot 리소스가 없습니다.');
+  appendListItems(document.querySelector('#environment-delete-retained'), draft.plan.retained || [], '보존 항목 정보가 없습니다.');
+  document.querySelector('#environment-delete-confirmation-label').textContent = `삭제를 진행하려면 환경 이름 “${draft.target.label || draft.target.id}”을 입력하세요.`;
+  document.querySelector('#environment-delete-confirmation').value = '';
+  document.querySelector('#environment-delete-confirmation').disabled = false;
+  document.querySelector('#environment-delete-data-consent').checked = false;
+  document.querySelector('#environment-delete-data-consent').disabled = false;
+  document.querySelector('#environment-delete-confirm').disabled = true;
+  document.querySelector('#environment-delete-confirm').textContent = '삭제 시작';
+  document.querySelector('#environment-delete-error').hidden = true;
+}
+function updateEnvironmentDeleteConfirmation() {
+  const draft = environmentDeleteDraft;
+  const typed = document.querySelector('#environment-delete-confirmation').value.trim();
+  const consent = document.querySelector('#environment-delete-data-consent').checked;
+  document.querySelector('#environment-delete-confirm').disabled = !draft || typed !== (draft.target.label || draft.target.id) || !consent;
+}
+document.querySelector('#environment-delete-confirmation').addEventListener('input', updateEnvironmentDeleteConfirmation);
+document.querySelector('#environment-delete-data-consent').addEventListener('change', updateEnvironmentDeleteConfirmation);
+document.querySelector('#environment-delete-cancel').addEventListener('click', () => {
+  environmentDeletePlanController?.abort(); environmentDeletePlanController = null; environmentDeleteDraft = null; environmentDeleteDialog.close();
+});
+document.querySelector('#environment-delete').addEventListener('click', async () => {
+  const target = selectedOwnedDetail; if (!target) return;
+  if (target.deletion_operation_id) {
+    document.querySelector('#environment-detail-message').textContent = '기존 환경 삭제 작업 상태를 조회하고 있습니다.';
+    const operation = await loadEnvironmentDeleteOperation(target);
+    document.querySelector('#environment-detail-message').textContent = operation
+      ? `${target.label || target.id} · ${targetStatusLabel(target.status)} · 삭제 작업 ${targetStatusLabel(operation.status)}`
+      : `${target.label || target.id} · ${targetStatusLabel(target.status)} · 삭제 작업 상태 조회 실패`;
+    document.querySelector('#environment-delete-operation').scrollIntoView({ block: 'nearest' }); return;
+  }
+  const message = document.querySelector('#environment-detail-message'); message.textContent = '삭제할 RailShot 리소스 계획을 계산하고 있습니다.';
+  document.querySelector('#environment-delete').disabled = true;
+  renderEnvironmentDeleteLoading(target); environmentDeleteDialog.showModal();
+  const controller = new AbortController(); environmentDeletePlanController = controller;
+  try {
+    const { data: plan } = await request(`/api/v1/targets/${encodeURIComponent(target.id)}/plans`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', delete_data: true }) }, controller);
+    if (!environmentDeleteDialog.open || environmentDeletePlanController !== controller) return;
+    if (!plan?.id || plan.target_id !== target.id || plan.action !== 'delete' || typeof plan.plan_hash !== 'string') throw new Error('환경 삭제 계획 응답을 확인하지 못했습니다.');
+    if (Array.isArray(plan.blockers) && plan.blockers.length) throw new Error(`삭제 전 확인이 필요합니다: ${plan.blockers.map(deletionBlockerLabel).join(' ')}`);
+    environmentDeleteDraft = { target, plan }; renderEnvironmentDeleteDraft();
+  } catch (cause) {
+    if (cause.name === 'AbortError' && !environmentDeleteDialog.open) return;
+    const failure = document.querySelector('#environment-delete-error'); failure.textContent = `환경 삭제 계획 조회 실패: ${cause.name === 'AbortError' ? '요청 시간이 초과되었습니다.' : cause.message}`; failure.hidden = false;
+    message.textContent = failure.textContent;
+  } finally {
+    if (environmentDeletePlanController === controller) environmentDeletePlanController = null;
+    document.querySelector('#environment-delete').disabled = target.status === 'deleted';
+  }
+});
+async function refreshEnvironmentDeleteOperation(id, targetId) {
+  const { data } = await request(`/api/v1/operations/${encodeURIComponent(id)}`);
+  if (!data?.id || data.id !== id || data.target_id !== targetId) throw new Error('환경 삭제 작업 상태 응답을 확인하지 못했습니다.');
+  if (selectedOwnedDetail?.id !== targetId) return;
+  environmentDeleteOperation = data; renderEnvironmentDeleteOperation();
+  document.querySelector('#environment-detail-message').textContent = `환경 삭제 ${targetStatusLabel(data.status)}${data.message ? ` · ${data.message}` : ''}`;
+  if (!['succeeded', 'failed', 'blocked', 'unknown', 'deleted'].includes(data.status)) setTimeout(() => refreshEnvironmentDeleteOperation(id, targetId).catch((cause) => {
+    document.querySelector('#environment-detail-message').textContent = `환경 삭제 상태 조회 실패: ${cause.message}`;
+  }), 5000);
+  else {
+    if (data.status === 'succeeded') clearEnvironmentRegistrationFeedback(targetId);
+    loadOwnedTargets({ preserveDetail: false, removedMessage: data.status === 'succeeded' ? '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.' : '' });
+  }
+}
+document.querySelector('#environment-delete-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); const draft = environmentDeleteDraft, failure = document.querySelector('#environment-delete-error');
+  if (!draft) return;
+  const expected = draft.target.label || draft.target.id;
+  if (document.querySelector('#environment-delete-confirmation').value.trim() !== expected || !document.querySelector('#environment-delete-data-consent').checked) return;
+  const button = document.querySelector('#environment-delete-confirm'); button.disabled = true;
+  try {
+    draft.key ||= crypto.randomUUID();
+    const body = draft.mode === 'resume'
+      ? { action: 'resume', operation_id: draft.operation.id, reconciliation_id: draft.operation.reconciliation.id, confirmation: expected, delete_data: true }
+      : { action: 'delete', plan_id: draft.plan.id, plan_hash: draft.plan.plan_hash, confirmation: expected, delete_data: true };
+    const { data, location, status } = await request(`/api/v1/targets/${encodeURIComponent(draft.target.id)}/operations`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': draft.key }, body: JSON.stringify(body) });
+    if (status !== 202 || !data?.id || location !== `/api/v1/operations/${encodeURIComponent(data.id)}`) throw new Error('환경 삭제 작업 접수 응답을 확인하지 못했습니다.');
+    if (draft.mode === 'resume' && data.id !== draft.operation.id) throw new Error('기존 환경 삭제 작업과 다른 응답을 받았습니다.');
+    environmentDeleteDialog.close(); environmentDeleteDraft = null;
+    document.querySelector('#environment-detail-message').textContent = draft.mode === 'resume' ? '기존 환경 삭제 작업을 재개했습니다. 완료 상태를 확인합니다.' : '환경 삭제 작업을 접수했습니다. RailShot 서비스와 앱 전용 데이터를 삭제하고 관리 클라이언트를 제거합니다.';
+    await refreshEnvironmentDeleteOperation(data.id, draft.target.id);
+  } catch (cause) { failure.textContent = `환경 삭제를 ${draft.mode === 'resume' ? '재개하지' : '시작하지'} 못했습니다: ${cause.message}`; failure.hidden = false; button.disabled = false; }
+});
+document.querySelector('#environment-delete-operation-refresh').addEventListener('click', () => loadEnvironmentDeleteOperation());
+document.querySelector('#environment-delete-reconcile').addEventListener('click', async () => {
+  const target = selectedOwnedDetail, operation = environmentDeleteOperation;
+  if (!target || !operation || !['unknown', 'failed', 'blocked'].includes(operation.status)) return;
+  const button = document.querySelector('#environment-delete-reconcile'); button.disabled = true;
+  try {
+    const { data, location, status } = await request(`/api/v1/targets/${encodeURIComponent(target.id)}/reconciliations`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ operation_id: operation.id }),
+    });
+    if (status !== 202 || data?.id !== operation.id || data.target_id !== target.id || location !== `/api/v1/operations/${encodeURIComponent(operation.id)}`) throw new Error('삭제 재개 확인 응답을 확인하지 못했습니다.');
+    if (selectedOwnedDetail?.id !== target.id) return;
+    environmentDeleteOperation = data; renderEnvironmentDeleteOperation(); scheduleEnvironmentDeleteReconciliation(target, data);
+  } catch (cause) {
+    if (selectedOwnedDetail?.id !== target.id) return;
+    environmentDeleteOperation = { ...operation, reconciliationError: `삭제 재개 가능 여부 확인 실패: ${cause.message}` }; renderEnvironmentDeleteOperation();
+  } finally { if (selectedOwnedDetail?.id === target.id) renderEnvironmentDeleteOperation(); }
+});
+document.querySelector('#environment-delete-resume').addEventListener('click', () => {
+  const target = selectedOwnedDetail, operation = environmentDeleteOperation;
+  if (!target || operation?.reconciliation?.status !== 'ready' || operation.reconciliation.resumable !== true || Date.parse(operation.reconciliation.expires_at) <= Date.now()) return;
+  renderEnvironmentDeleteResumeDraft(target, operation); environmentDeleteDialog.showModal();
+});
+async function loadOwnerInfo() {
+  const generation = ++ownerInfoGeneration;
+  try {
+    const { data } = await request('/api/v1/owners');
+    if (generation !== ownerInfoGeneration) return;
+    ownerRecoveryConfigured = data?.recovery_configured === true;
+    renderOwnerNote();
+  } catch (cause) { if (generation === ownerInfoGeneration) document.querySelector('#environment-owner-note').textContent = `소유권 상태 조회 실패: ${cause.message} 새 환경 등록 전 다시 확인합니다.`; }
+}
+function renderOwnerNote() {
+  document.querySelector('#environment-owner-note').textContent = ownerRecoveryConfigured
+    ? '현재 브라우저에 개인 환경 관리 권한이 연결되어 있습니다. 복구 키를 다시 입력할 필요가 없습니다.'
+    : '첫 환경 등록 시 한 번만 표시되는 복구 키를 발급합니다.';
+}
+document.querySelector('#environment-recover-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); const input = document.querySelector('#environment-recovery-input'), message = document.querySelector('#environment-recover-message');
+  const recoveryKey = input.value.trim(); if (!recoveryKey) { message.textContent = '복구 키를 입력하세요.'; return; }
+  const button = document.querySelector('#environment-recover-submit'); button.disabled = true; message.textContent = '관리권을 복구하고 있습니다.';
+  try {
+    const { data } = await request('/api/v1/recoveries', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recovery_key: recoveryKey }) });
+    if (!data?.id || typeof data.recovery_key !== 'string' || !data.recovery_key) throw new Error('복구 응답을 확인하지 못했습니다.');
+    input.value = ''; ownerRecoveryConfigured = true; ownerInfoGeneration += 1; renderOwnerNote(); showRecoveryKey(data.recovery_key);
+    stopOwnedTargetPolling(); resetOwnedEnvironmentSelection();
+    const restoredTargets = await loadOwnedTargets({ preserveDetail: false });
+    if (restoredTargets === null) {
+      message.textContent = '관리권은 복구했으나 환경 목록을 불러오지 못했습니다. 목록 새로고침으로 다시 확인하세요.';
+    } else {
+      if (restoredTargets.length) await selectOwnedTarget(restoredTargets[0].id, false);
+      message.textContent = `이 브라우저에서 관리권을 복구했습니다. 등록한 환경 ${restoredTargets.length}개를 불러왔습니다. 새 복구 키를 안전한 곳에 저장하세요.`;
+    }
+    emphasizeOwnedTargets();
+    loadOwnerInfo();
+  } catch (cause) { message.textContent = `관리권 복구 실패: ${cause.message}`; }
+  finally { button.disabled = false; }
+});
 // Session-owned controls live in focused modules and read current view state through callbacks.
 const lifecycle = createLifecycleController({
   getApplications: () => applications, getCurrent: () => current, getApplicationDetail: () => applicationDetail,
@@ -1451,7 +2017,7 @@ async function initializeDashboard() {
     if (!selectionEdited) {
       document.querySelector(`[name="environment"][value="${saved.environment}"]`).checked = true;
       cloudProvider.value = ['aws', 'gcp'].includes(saved.provider) ? saved.provider : 'aws';
-      provider.value = ['openstack', 'proxmox'].includes(saved.provider) ? saved.provider : '';
+      provider.dataset.restoreTarget = typeof saved.target_id === 'string' ? saved.target_id : '';
     }
     showView(saved.view);
     await checkConnection();
@@ -1459,8 +2025,9 @@ async function initializeDashboard() {
     sessionReady = true;
     if (selectionEdited) savePreferences(deploymentSelection());
     if (!Object.hasOwn(views, saved.view)) savePreferences({ view: 'deploy' });
-    await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError)]);
+    await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError), loadOwnedTargets()]);
     renderLifecycleOperation();
+    if (!views.personal.hidden) loadOwnerInfo();
     if (lifecycle.operation?.id || lifecycle.operation?.plan_id) refreshLifecycleOperation();
     if (history.length) { current = history[0]; ciSnapshot = null; ciReadError = false; renderRun(); refreshRun(); }
     if (!views.monitor.hidden || !views.deploy.hidden) loadEnvironments();

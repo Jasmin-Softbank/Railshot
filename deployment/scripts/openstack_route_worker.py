@@ -25,6 +25,8 @@ import uuid
 
 
 CONFIG = Path("/opt/railshot/octavia/route-config.json")
+ENVIRONMENTS = Path("/var/lib/railshot/octavia/environments")
+CONTROLLER_STATE = Path("/var/lib/railshot/octavia")
 CLI = "/opt/railshot/octavia/cloud-cli.py"
 ROOT_UID = 0
 KINDS = ("pool", "member", "monitor", "policy", "rule")
@@ -106,6 +108,259 @@ def checked_config(config):
     path = Path(config["state_dir"])
     require(path.is_absolute() and path == path.resolve(), "invalid_state_directory")
     return config
+
+
+def operator_base(config):
+    """Separate the operator's fixed ingress authority from any old runtime."""
+    keys = {'version', 'project_id', 'loadbalancer_id', 'listener_id', 'member_subnet_id', 'base_domain', 'network'}
+    if isinstance(config, dict) and 'runtime_private_address' in config:
+        checked_config(config)
+        config = {key: config[key] for key in keys}
+        config['network'] = {key: config['network'][key] for key in
+                             ('amphora_port_id', 'amphora_server_id', 'amphora_private_address')}
+    require(isinstance(config, dict) and set(config) == keys and type(config['version']) is int
+            and config['version'] == 1 and is_project(config['project_id']), 'invalid_operator_base')
+    require(all(is_uuid(config[key]) for key in ('loadbalancer_id', 'listener_id', 'member_subnet_id')),
+            'invalid_operator_base')
+    network = config['network']
+    require(isinstance(network, dict) and set(network) == {
+        'amphora_port_id', 'amphora_server_id', 'amphora_private_address'}
+        and all(is_uuid(network[key]) for key in ('amphora_port_id', 'amphora_server_id'))
+        and is_private_ipv4(network['amphora_private_address']), 'invalid_operator_base')
+    label = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+    require(isinstance(config['base_domain'], str) and len(config['base_domain']) <= 190
+            and re.fullmatch(rf'{label}(?:\.{label})+', config['base_domain']), 'invalid_operator_base')
+    return json.loads(json.dumps(config))
+
+
+def checked_worker_binding(binding):
+    require(isinstance(binding, dict) and set(binding) == {
+        'environment_id', 'generation', 'base_sha256', 'binding_sha256'}, 'invalid_worker_binding')
+    ident = binding['environment_id']
+    require(isinstance(ident, str) and ident.startswith('personal-') and is_uuid(ident[9:])
+            and type(binding['generation']) is int and binding['generation'] > 0, 'invalid_worker_binding')
+    require(all(isinstance(binding[key], str) and re.fullmatch(r'[a-f0-9]{64}', binding[key])
+                for key in ('base_sha256', 'binding_sha256')), 'invalid_worker_binding')
+    return dict(binding)
+
+
+def registration_binding(base, environment_id, generation, runtime):
+    base = operator_base(base)
+    require(isinstance(runtime, dict) and set(runtime) == {
+        'project_id', 'server_id', 'port_id', 'security_group_id', 'private_address'}, 'invalid_runtime_binding')
+    require(is_project(runtime['project_id']) and all(is_uuid(runtime[key]) for key in
+        ('server_id', 'port_id', 'security_group_id')) and is_private_ipv4(runtime['private_address'])
+        and runtime['private_address'] != base['network']['amphora_private_address'], 'invalid_runtime_binding')
+    binding = {'environment_id': environment_id, 'generation': generation, 'base_sha256': lifecycle_hash(base)}
+    binding['binding_sha256'] = lifecycle_hash({**binding, 'runtime': runtime})
+    return checked_worker_binding(binding)
+
+
+def verify_runtime_registration(base, binding, runtime, call):
+    """Read provider evidence again on the trusted controller; never modify it."""
+    def native(arguments):
+        return call([*arguments, '-f', 'json'], service=())
+    project = native(['project', 'show', runtime['project_id']])
+    require(project.get('id') == runtime['project_id'] and project.get('name') == 'railshot'
+            and project.get('enabled') is True, 'runtime_project_unverified')
+    raw_server = native(['server', 'show', runtime['server_id']])
+    server = {key.lower().replace(' ', '_'): value for key, value in raw_server.items()}
+    properties = server.get('properties', {})
+    require(server.get('id') == runtime['server_id']
+            and server.get('project_id', server.get('tenant_id')) == runtime['project_id']
+            and server.get('status') == 'ACTIVE' and isinstance(properties, dict), 'runtime_server_unverified')
+    if 'railshot.target' in properties or 'railshot.generation' in properties:
+        require(properties.get('railshot.target') == binding['environment_id']
+                and str(properties.get('railshot.generation')) == str(binding['generation']), 'runtime_server_owner_mismatch')
+    ports = []
+    for role, port_id, server_id, project_id, address in (
+        ('runtime', runtime['port_id'], runtime['server_id'], runtime['project_id'], runtime['private_address']),
+        ('amphora', base['network']['amphora_port_id'], base['network']['amphora_server_id'],
+         base['project_id'], base['network']['amphora_private_address'])):
+        port = native(['port', 'show', port_id])
+        require(port.get('id') == port_id and port.get('device_id') == server_id
+                and port.get('project_id') == project_id and port.get('device_owner') == 'compute:nova',
+                'runtime_port_unverified')
+        require(isinstance(port.get('fixed_ips'), list) and any(ip.get('ip_address') == address
+                and ip.get('subnet_id') == base['member_subnet_id'] for ip in port['fixed_ips']
+                if isinstance(ip, dict)), 'runtime_subnet_unverified')
+        ports.append(port)
+    require(is_uuid(ports[0].get('network_id')) and ports[0]['network_id'] == ports[1].get('network_id')
+            and ports[0].get('security_group_ids') == [runtime['security_group_id']], 'runtime_network_unverified')
+    group = native(['security', 'group', 'show', runtime['security_group_id']])
+    require(group.get('id') == runtime['security_group_id'] and group.get('project_id') == runtime['project_id']
+            and group.get('shared', False) is False,
+            'runtime_security_group_unverified')
+    # A NodePort rule applies to every port in the group. Refuse a group's reuse
+    # before adding any application rule that could expose an unrelated VM.
+    project_ports = native(['port', 'list', '--project', runtime['project_id'], '-c', 'ID'])
+    require(isinstance(project_ports, list) and all(isinstance(row, dict) and is_uuid(row.get('ID'))
+            for row in project_ports), 'runtime_group_membership_unverified')
+    require(sum(row['ID'] == runtime['port_id'] for row in project_ports) == 1,
+            'runtime_group_membership_unverified')
+    for row in project_ports:
+        if row['ID'] == runtime['port_id']:
+            continue
+        other = native(['port', 'show', row['ID']])
+        require(other.get('id') == row['ID'] and other.get('project_id') == runtime['project_id']
+                and isinstance(other.get('security_group_ids'), list)
+                and runtime['security_group_id'] not in other['security_group_ids'], 'runtime_security_group_shared')
+    lb = call(['show', base['loadbalancer_id'], '-f', 'json'])
+    listener = call(['listener', 'show', base['listener_id'], '-f', 'json'])
+    require(lb.get('id') == base['loadbalancer_id'] and lb.get('project_id') == base['project_id']
+            and lb.get('admin_state_up') is True and lb.get('provisioning_status') == 'ACTIVE'
+            and listener.get('id') == base['listener_id'] and listener.get('project_id') == base['project_id']
+            and listener.get('admin_state_up') is True and listener.get('provisioning_status') == 'ACTIVE'
+            and relation_ids(listener.get('loadbalancers')) == {base['loadbalancer_id']}
+            and listener.get('protocol') == 'TERMINATED_HTTPS' and listener.get('protocol_port') == 443,
+            'operator_ingress_unverified')
+
+
+def environment_directory():
+    require(ENVIRONMENTS.is_absolute() and ENVIRONMENTS.resolve() == ENVIRONMENTS, 'unsafe_environment_directory')
+    ENVIRONMENTS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    private_stat(ENVIRONMENTS.stat())
+    return ENVIRONMENTS
+
+
+def register_runtime(config, request, call=None):
+    call = run_cli if call is None else call
+    require(isinstance(request, dict) and set(request) == {'operation', 'binding', 'runtime'}
+            and request['operation'] == 'register-runtime', 'invalid_registration_request')
+    base = operator_base(config)
+    binding = checked_worker_binding(request['binding'])
+    runtime = request['runtime']
+    require(binding == registration_binding(base, binding['environment_id'], binding['generation'], runtime),
+            'operator_base_or_binding_changed')
+    directory = environment_directory()
+    fd = os.open(directory / 'registration.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        private_stat(os.fstat(fd))
+        require(stat.S_ISREG(os.fstat(fd).st_mode), 'invalid_registration_lock')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        target = directory / binding['environment_id']
+        path = target / 'binding.json'
+        if path.exists() or path.is_symlink():
+            prior = read_private(path)
+            require(prior.get('binding') == binding and prior.get('runtime') == runtime
+                    and prior.get('status') == 'active', 'environment_binding_immutable')
+        else:
+            # A global claim check also prevents two environment IDs from taking
+            # the same VM, network port, or member address on the same ingress.
+            for candidate in directory.glob('personal-*/binding.json'):
+                other = read_private(candidate)
+                if other.get('status') == 'released':
+                    continue
+                owned = other.get('runtime', {})
+                require(not any(owned.get(key) == runtime[key] for key in
+                        ('server_id', 'port_id', 'security_group_id', 'private_address')), 'runtime_already_registered')
+        verify_runtime_registration(base, binding, runtime, call)
+        target.mkdir(mode=0o700, exist_ok=True)
+        require(target.resolve() == target, 'unsafe_environment_directory')
+        private_stat(target.stat())
+        routes = target / 'routes'
+        routes.mkdir(mode=0o700, exist_ok=True)
+        require(routes.resolve() == routes, 'unsafe_environment_directory')
+        private_stat(routes.stat())
+        full = {**base, 'runtime_private_address': runtime['private_address'], 'state_dir': str(routes),
+                'network': {**base['network'], 'runtime_project_id': runtime['project_id'],
+                            'runtime_server_id': runtime['server_id'], 'runtime_port_id': runtime['port_id'],
+                            'runtime_security_group_id': runtime['security_group_id']}}
+        checked_config(full)
+        record = {'version': 1, 'status': 'active', 'binding': binding, 'runtime': runtime, 'config': full}
+        if path.exists():
+            require(read_private(path) == record, 'environment_binding_immutable')
+        else:
+            save(path, record)
+        return {'status': 'registered', 'https_verified': False, 'binding': binding}
+    finally:
+        os.close(fd)
+
+
+def environment_config(base_config, binding):
+    binding = checked_worker_binding(binding)
+    require(binding['base_sha256'] == lifecycle_hash(operator_base(base_config)), 'operator_base_changed')
+    record = read_private(ENVIRONMENTS / binding['environment_id'] / 'binding.json')
+    require(record.get('binding') == binding and record.get('version') == 1
+            and record.get('status') == 'active', 'environment_binding_mismatch')
+    config = checked_config(record['config'])
+    require(config['state_dir'] == str(ENVIRONMENTS / binding['environment_id'] / 'routes')
+            and operator_base(config) == operator_base(base_config)
+            and registration_binding(operator_base(config), binding['environment_id'], binding['generation'],
+                                     record['runtime']) == binding, 'environment_binding_mismatch')
+    return config
+
+
+def unregister_runtime(base_config, binding, call=None):
+    call = run_cli if call is None else call
+    binding = checked_worker_binding(binding)
+    directory = environment_directory()
+    fd = os.open(directory / 'registration.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        private_stat(os.fstat(fd))
+        require(stat.S_ISREG(os.fstat(fd).st_mode), 'invalid_registration_lock')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        path = directory / binding['environment_id'] / 'binding.json'
+        record = read_private(path)
+        require(record.get('binding') == binding, 'environment_binding_mismatch')
+        if record.get('status') != 'released':
+            config = environment_config(base_config, binding)
+            routes = Path(config['state_dir'])
+            lifecycle_ready(routes)
+            for app_path in routes.glob('app-*.json'):
+                app = read_private(app_path)
+                require(app.get('status') == 'deleted' and verified_deleted(config, app, routes),
+                        'environment_routes_still_present')
+                request = app['request']
+                snapshot = lifecycle_observe(config, {key: request[key] for key in
+                    ('application_id', 'hostname', 'node_port')}, routes, call)
+                require(not snapshot['resources'], 'environment_routes_still_present')
+            save(path, {**record, 'status': 'released'})
+        return {'status': 'unregistered', 'https_verified': False, 'binding': binding}
+    finally:
+        os.close(fd)
+
+
+def dispatch(config, request, call=None):
+    call = run_cli if call is None else call
+    operation = request.get('operation') if isinstance(request, dict) else None
+    if operation == 'verify-runtime':
+        require(set(request) == {'operation', 'binding', 'runtime'}, 'invalid_registration_request')
+        base = operator_base(config)
+        binding = checked_worker_binding(request['binding'])
+        require(binding == registration_binding(base, binding['environment_id'], binding['generation'], request['runtime']),
+                'operator_base_or_binding_changed')
+        verify_runtime_registration(base, binding, request['runtime'], call)
+        return {'status': 'verified', 'https_verified': False, 'binding': binding}
+    if operation == 'register-runtime':
+        return register_runtime(config, request, call)
+    if operation in ('environment-route', 'environment-lifecycle', 'unregister-runtime'):
+        expected = {'operation', 'binding'} | ({'request'} if operation != 'unregister-runtime' else set())
+        require(set(request) == expected, 'invalid_environment_request')
+        # Share the old ingress lock with legacy applications. Environment state
+        # is separate, but every operation touches the same listener authority.
+        if 'state_dir' in config:
+            directory = Path(checked_config(config)['state_dir'])
+        else:
+            operator_base(config)
+            directory = CONTROLLER_STATE
+        require(directory.resolve() == directory, 'unsafe_state_directory')
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        private_stat(directory.stat())
+        fd = os.open(directory / (config['loadbalancer_id'] + '.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            private_stat(os.fstat(fd))
+            require(stat.S_ISREG(os.fstat(fd).st_mode), 'invalid_lock_file')
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            if operation == 'unregister-runtime':
+                return unregister_runtime(config, request['binding'], call)
+            selected = environment_config(config, request['binding'])
+            if operation == 'environment-route':
+                return configure(selected, request['request'], call)
+            return lifecycle(selected, request['request'], call)
+        finally:
+            os.close(fd)
+    return lifecycle(config, request, call) if operation else configure(config, request, call)
 
 
 def private_stat(info):
@@ -680,14 +935,14 @@ def main():
         raw = sys.stdin.read(16385)
         require(len(raw) <= 16384, "request_too_large")
         request = json.loads(raw)
-        result = lifecycle(config, request) if isinstance(request, dict) and 'operation' in request else configure(config, request)
+        result = dispatch(config, request)
     except RouteError as error:
         result = {"status": error.status, "reason": str(error), "https_verified": False}
     except Exception:
         # Includes corrupt private state and native errors; no traceback/CLI data.
         result = {"status": "blocked", "reason": "invalid_local_state", "https_verified": False}
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] in ("configured", "succeeded") else 1
+    return 0 if result["status"] in ("configured", "succeeded", "verified", "registered", "unregistered") else 1
 
 
 if __name__ == "__main__":

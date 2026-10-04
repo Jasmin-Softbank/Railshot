@@ -2,7 +2,7 @@
 
 이 문서는 `apps/api/src/server.js`, `product.js`, `environments.js`, `product-store.js`에 구현한 제품 API를 설명한다. 기계 판독 계약은 [product.openapi.json](product.openapi.json)이다. 이 계약의 문서·로컬 검증은 `not_deployed`이며 실제 클라우드 E2E 결과와 별도로 기록한다.
 
-사용자 계정·로그인·팀원 allowlist는 없다. 익명 브라우저 세션별로 접수 기록·계획·화면 설정·연결 정보를 분리한다. 운영자 지정 공용 대상과 실행기의 동시 실행 한도는 공유한다. 세션·스키마·이관 계약은 [dashboard-sessions.md](dashboard-sessions.md)를 따른다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. 실행용 GitHub·Provider·SSH 자격은 서버 설정에만 둔다. 별도 OpenStack 연결 정보 저장은 실행용 자격을 바꾸지 않는다.
+사용자 계정·로그인·팀원 allowlist는 없다. 개인 환경은 별도 장기 소유자 쿠키와 복구키로 유지하며 [개인 OpenStack 환경 호출 규격](personal-environments.md)에 추가 경로·삭제 정책·지원 조건을 정리한다. 익명 브라우저 세션별로 접수 기록·계획·화면 설정·연결 정보를 분리한다. 운영자 지정 공용 대상과 실행기의 동시 실행 한도는 공유한다. 세션·스키마·이관 계약은 [dashboard-sessions.md](dashboard-sessions.md)를 따른다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. 실행용 GitHub·Provider·SSH 자격은 서버 설정에만 둔다. 별도 OpenStack 연결 정보 저장은 실행용 자격을 바꾸지 않는다.
 
 ### 실행 중 CI 관측
 
@@ -38,9 +38,9 @@
 
 등록·재발급·조회 API는 공개 데모 모드에서도 운영자 Bearer를 요구한다. 운영 Nginx는 서버에서만 읽는 `RAILSHOT_API_TOKEN_FILE`을 `/api/` 프록시에 주입하고, 브라우저에는 이 토큰을 전달하지 않는다. HttpOnly 세션 쿠키가 등록 요청의 범위를 구분하지만 사용자 신원을 증명하지는 않는다. 접수 API는 고객 노드가 운영자 Bearer 없이 호출하며, 10분 유효한 일회성 연계 토큰 자체로 접수를 제한한다. 운영 배포에서는 이 API에 HTTPS로 접속해야 한다.
 
-설치 파일 API는 저장소의 `deployment/bootstrap/install.sh`를 변경 없이 읽어 단독 파일과 복사 가능한 코드로 제공한다. UI는 현재 접속 origin으로 `curl -fsSL 'https://서비스-주소/onpremise/install.sh?token=…' -o install.sh` 명령을 만들고, 이 주소는 미사용·미만료 토큰을 확인해 같은 스크립트를 반환한다. 토큰이 URL에 있으므로 중간 프록시의 요청 URL 기록에 남지 않도록 운영 설정을 확인해야 한다. ZIP에는 현재 저장소의 동반 파일과 `deployment/bootstrap/claim_token.py`가 포함된다. 단독 `install.sh`만으로는 로컬 실행 시 필요한 동반 파일이 준비되지 않는다. 고객은 노드에서 `python3 claim_token.py --service-url https://서비스-주소`를 실행해 토큰을 숨겨 입력한다. 접수 결과는 등록 ID와 접수 시각만 반환하며 OpenStack 인증정보를 보내지 않는다. **현재 `install.sh`는 이 파일을 자동 호출하거나 새 WireGuard 터널을 만들지 않는다.** 따라서 발급·접수·파일 전달을 터널 연결 완료로 표시하지 않는다.
+설치 파일 API는 저장소의 현재 `deployment/bootstrap/install.sh` 바이트를 단독 파일과 복사 가능한 코드로 제공한다. UI는 현재 접속 origin으로 `curl -fsSL 'https://서비스-주소/onpremise/install.sh?token=…' -o install.sh` 명령을 만들고, 이 주소는 미사용·미만료 토큰을 확인해 같은 스크립트를 반환한다. 토큰이 URL에 있으므로 중간 프록시의 요청 URL 기록에 남지 않도록 운영 설정을 확인해야 한다. ZIP에는 현재 저장소의 동반 파일과 `deployment/bootstrap/claim_token.py`가 포함된다. 단독 `install.sh`만으로는 로컬 실행 시 필요한 동반 파일이 준비되지 않는다. 고객은 노드에서 `python3 claim_token.py --service-url https://서비스-주소`를 실행해 토큰을 숨겨 입력한다. 접수 결과는 등록 ID와 접수 시각만 반환하며 OpenStack 인증정보를 보내지 않는다. 이 기존 연계 토큰 흐름은 `install.sh`의 개인 환경용 `--personal-registration` 모드를 자동 선택하지 않고 새 WireGuard 터널도 만들지 않는다. 따라서 발급·접수·파일 전달을 터널 연결 완료로 표시하지 않는다.
 
-실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`만 받는다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
+실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`를 받는다. 개인 환경 목록에는 추가로 `scope=owned&provider=openstack`을 사용한다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
 
 ### 기존 앱 업데이트
 

@@ -5,7 +5,7 @@ import { jsonInput, page } from './request.js';
 
 export const isDashboardRoute = (path) => /^\/api\/v1\/(sessions|preferences|connections)(?:\/|$)/.test(path);
 
-export async function serveDashboard(request, response, url, products, session, requestId) {
+export async function serveDashboard(request, response, url, products, session, requestId, sessionId = session.id) {
   const route = /^\/api\/v1\/(sessions|preferences|connections)(?:\/([a-f0-9-]{36}))?$/.exec(url.pathname);
   if (!route) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
   const [, kind, id] = route;
@@ -21,7 +21,6 @@ export async function serveDashboard(request, response, url, products, session, 
     throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
   }
 
-  const sessionId = session.id;
   if (kind === 'sessions') {
     json(response, request.method === 'POST' && session.token ? 201 : 200,
       { expires_at: session.expires_at }, { 'X-Request-ID': requestId });
