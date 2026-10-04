@@ -105,6 +105,35 @@ test('personal target resolution and owner recovery cross two isolated browser c
   assert.equal(target.runtime_preparation.status, 'succeeded');
   assert.equal(target.deployable, true);
 
+  const selectionPage = await contextA.newPage();
+  selectionPage.setDefaultTimeout(10000);
+  let releasePreferences, signalPreferences;
+  const preferencesRequested = new Promise((resolve) => { signalPreferences = resolve; });
+  const preferencesRelease = new Promise((resolve) => { releasePreferences = resolve; });
+  await selectionPage.route('**/api/v1/preferences', async (route) => {
+    if (route.request().method() !== 'GET') { await route.continue(); return; }
+    signalPreferences(); await preferencesRelease;
+    await route.fulfill({ status: 200, contentType: 'application/json',
+      body: JSON.stringify({ view: 'deploy', environment: 'cloud', provider: 'aws' }) });
+  });
+  await selectionPage.goto(origin); await preferencesRequested;
+  await selectionPage.getByRole('radio', { name: /온프레미스/ }).check();
+  releasePreferences();
+  await selectionPage.waitForFunction((id) => document.querySelector('#session-note').textContent.includes('까지')
+    && [...document.querySelector('#provider').options].some((option) => option.value === id), targetId);
+  assert.equal(await selectionPage.locator('[name="environment"]:checked').inputValue(), 'onprem');
+  await selectionPage.locator('#provider').selectOption(targetId);
+  assert.equal(await selectionPage.locator('#provider').inputValue(), targetId);
+  const resolvedRequest = selectionPage.waitForRequest((request) => new URL(request.url()).pathname === '/api/v1/applications/resolve');
+  await selectionPage.locator('#repository-url').fill('https://github.com/example/preferences-race');
+  await selectionPage.locator('#deploy-form button[type="submit"]').click();
+  const resolvedUrl = new URL((await resolvedRequest).url());
+  assert.equal(resolvedUrl.searchParams.get('environment'), 'onprem');
+  assert.equal(resolvedUrl.searchParams.get('provider'), 'openstack');
+  assert.equal(resolvedUrl.searchParams.get('target_id'), targetId);
+  await selectionPage.locator('#review-panel').waitFor({ state: 'visible' });
+  await selectionPage.close();
+
   const resolveQuery = new URLSearchParams({ environment: 'onprem', provider: 'openstack', app: 'actual-app', target_id: targetId });
   response = await contextA.request.get(origin + `/api/v1/applications/resolve?${resolveQuery}`);
   assert.equal(response.status(), 200, await response.text());

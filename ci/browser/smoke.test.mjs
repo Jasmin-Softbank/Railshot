@@ -485,6 +485,7 @@ async function queuedBrowser(t, { unknownFirst = false, provider = 'aws' } = {})
       } finally { active--; }
     } };
   const fixture = await start(t, { service, applicationAdapter, target: { id: targetId, provider },
+    maxConcurrentDeployments: 1,
     sourceLoader: async (repository) => ({ source: { type: 'github', repository, sha: 'a'.repeat(40) },
       files: [{ path: 'app.js', content: Buffer.from(repository) }] }) });
   const { page, origin } = fixture;
@@ -916,11 +917,11 @@ test('each cloud provider keeps the assigned CI and CD target through reload', {
 });
 
 test('provider selection made before saved preferences arrive stays bound through submission', { timeout: 90000 }, async (t) => {
-  for (const [provider, sourceType] of [['gcp', 'github'], ['gcp', 'zip'], ['gcp', 'folder'], ['openstack', 'github']]) await t.test(`${provider}/${sourceType}`, async (t) => {
+  for (const [provider, sourceType] of [['gcp', 'github'], ['gcp', 'zip'], ['gcp', 'folder']]) await t.test(`${provider}/${sourceType}`, async (t) => {
     const targetId = `assigned-${provider}`, app = 'provider-race', commit = 'a'.repeat(40);
     const submissions = [], deliveries = [];
     const publication = { run_id: 1, target_id: targetId, app, tenant: 'demo', source_commit: commit, artifact_id: 2, producer_attempt: 1 };
-    const service = { targetId: 'assigned-aws', targetIds: ['assigned-aws', 'assigned-gcp', 'assigned-openstack'],
+    const service = { targetId: 'assigned-aws', targetIds: ['assigned-aws', 'assigned-gcp'],
       deploy: async (input) => { submissions.push(input); return { run_id: 1, source_commit: commit }; },
       status: async () => ({ state: 'published', status: 'completed', conclusion: 'success', source_commit: commit, publication }),
     };
@@ -930,7 +931,7 @@ test('provider selection made before saved preferences arrive stays bound throug
         public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: `https://${provider}.example.test/health` } };
     }, { targets: Object.fromEntries(service.targetIds.map((id) => [id, { applicationName: app, tenant: 'demo' }])) });
     const { page, origin, errors, stateDirectory } = await start(t, { service, target: { provider: 'aws' },
-      providerTargets: { gcp: 'assigned-gcp', openstack: 'assigned-openstack' }, deployPublished,
+      providerTargets: { gcp: 'assigned-gcp' }, deployPublished,
       sourceLoader: async () => ({ files: [{ path: 'index.js', content: Buffer.from('provider fixture') }] }),
     });
     let releasePreferences, preferencesRequested;
@@ -943,14 +944,11 @@ test('provider selection made before saved preferences arrive stays bound throug
         body: JSON.stringify({ view: 'deploy', environment: 'cloud', provider: 'aws' }) });
     });
     await page.goto(origin); await waiting;
-    if (provider === 'openstack') {
-      await page.getByRole('radio', { name: /온프레미스/ }).check();
-      await page.locator('#provider').selectOption(provider);
-    } else await page.locator('#cloud-provider').selectOption(provider);
+    await page.locator('#cloud-provider').selectOption(provider);
     releasePreferences();
     await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
-    assert.equal(await page.locator(provider === 'openstack' ? '#provider' : '#cloud-provider').inputValue(), provider);
-    assert.equal(await page.locator('[name="environment"]:checked').inputValue(), provider === 'openstack' ? 'onprem' : 'cloud');
+    assert.equal(await page.locator('#cloud-provider').inputValue(), provider);
+    assert.equal(await page.locator('[name="environment"]:checked').inputValue(), 'cloud');
     if (sourceType === 'github') await page.locator('#repository-url').fill(`https://github.com/example/${app}`);
     else {
       const source = join(stateDirectory, app);

@@ -527,7 +527,6 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else if (selected.environment === 'onprem' && !selected.targetId) error.textContent = '배포할 등록 OpenStack 환경을 선택하세요.';
   else if (selected.environment === 'onprem' && (ownedTargetError || option?.status !== 'ready' || option?.deployable !== true)) error.textContent = document.querySelector('#connection-status').textContent;
   else if (selected.environment === 'cloud' && (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available))) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
-  else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
     invalidateReview();
     const generation = reviewGeneration, source = selectedSource;
