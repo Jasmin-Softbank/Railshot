@@ -2,7 +2,10 @@ import { createHash, randomBytes, randomUUID, createCipheriv } from 'node:crypto
 import { lstat, open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export const SESSION_SECONDS = 7 * 24 * 60 * 60;
+// OAuth MCP bearer tokens are bound to product sessions. Keep both durable so
+// an established AI connection is not silently revoked by session expiry.
+export const SESSION_SECONDS = 2_147_483_647;
+export const SESSION_EXPIRES_AT = 8_640_000_000_000_000;
 export const SESSION_COOKIE = 'railshot_session';
 export const OWNER_COOKIE = 'railshot_owner';
 export function ownerCookie(token, secure) { return `${OWNER_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000${secure ? '; Secure' : ''}`; }
@@ -84,7 +87,7 @@ export async function createDashboardData(db, root) {
         return { id, expires_at: new Date(existing.expires_at).toISOString(), token: null };
       }
       if (db.prepare('SELECT count(*) AS count FROM sessions').get().count >= 10000) throw new DashboardError('세션 보관 한도에 도달했습니다.', 503, 'CAPACITY_EXCEEDED');
-      const fresh = randomBytes(32).toString('base64url'), freshId = hash(fresh), expires = now + SESSION_SECONDS * 1000;
+      const fresh = randomBytes(32).toString('base64url'), freshId = hash(fresh), expires = SESSION_EXPIRES_AT;
       db.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run(freshId, now, now, expires);
       return { id: freshId, expires_at: new Date(expires).toISOString(), token: fresh };
     },
