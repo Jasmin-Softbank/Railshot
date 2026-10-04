@@ -99,7 +99,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     return createProductService({ observeMetrics: observer, observeLogs: logs, classifyFailure: classifier, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, personalAdapter: personal, pollInterval, maxConcurrentDeployments });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
-  productReady.catch(() => {});
+  let productInitialized = false;
+  productReady.then(value => { productInitialized = Boolean(value); }, () => {});
   const traffic = observeTraffic || createTrafficObserver({ configPath: process.env.RAILSHOT_OBSERVER_PRODUCT_FILE || process.env.RAILSHOT_OBSERVER_CONFIG });
   let activeRequests = 0, release = null, draining = null, releaseTimer, productClosing, shuttingDown = false;
   const closeProduct = () => productClosing ||= productReady.then((value) => value?.close?.());
@@ -115,9 +116,22 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       versioned = url.pathname.startsWith('/api/v1');
       if (request.method === 'GET' && ['/healthz', '/readyz'].includes(url.pathname)) {
         // Liveness remains local; readiness also requires usable durable state and operator config.
-        const configured = !shuttingDown && Boolean(await productReady.catch(() => null))
+        const configured = !shuttingDown && productInitialized
           && Boolean(product || service?.targetId || environmentAdapter || process.env.RAILSHOT_PROFILES_FILE);
         json(response, url.pathname === '/readyz' && !configured ? 503 : 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
+      }
+      if (url.pathname === '/internal/deployments/replay-source' && request.method === 'POST') {
+        versioned = true;
+        if (!access.token || !allowsToken(request.headers.authorization, access.token))
+          throw new ServiceError('API authentication required', 401);
+        if (shuttingDown || release || draining) throw new ServiceError('Platform update in progress', 503);
+        const input = await jsonInput(request);
+        if (!input || !['environment_target_id,operation_id', 'environment_target_id,operation_id,packaging'].includes(Object.keys(input).sort().join(','))
+            || !/^[a-f0-9-]{36}$/.test(input.operation_id || '')
+            || !/^[A-Za-z0-9._-]{1,128}$/.test(input.environment_target_id || ''))
+          throw new ServiceError('Invalid source replay identity', 422);
+        activeRequests++; counted = true;
+        json(response, 202, await (await productReady).replaySubmittedSource(input.operation_id, input.environment_target_id, input.packaging)); return;
       }
       // Kept outside the public gateway's /api/ route. Always require the operator
       // token, including public-demo mode. The hook has no database/cloud mounts.

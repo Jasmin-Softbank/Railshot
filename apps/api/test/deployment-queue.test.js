@@ -330,3 +330,26 @@ test('restart completes the original GCP deployment only when native registratio
     }
   });
 });
+
+test('operator source replay is idempotent, preserves ownership and requires a known unsent request or successful cross-provider source', async t => {
+  const { SubmissionError } = await import('../src/github.js');
+  const f = await fixture(t), deploy = f.service.deploy;
+  f.service.deploy = async () => { throw new SubmissionError('source_ref', new TypeError('interrupted')); };
+  const original = await f.create('terminal');
+  await until(() => f.read(original.id));
+  f.service.deploy = deploy;
+  await assert.rejects(f.product.replaySubmittedSource(original.id, 'runtime-aws', { 'app.js': 'changed' }), { code: 'INVALID_INPUT' });
+  const packaging = { Dockerfile: 'FROM python:3.13-slim' };
+  const replay = await f.product.replaySubmittedSource(original.id, 'runtime-aws', packaging);
+  assert.notEqual(replay.id, original.id);
+  assert.equal((await f.product.replaySubmittedSource(original.id, 'runtime-aws', packaging)).id, replay.id);
+  assert.equal((await until(() => f.read(replay.id))).status, 'succeeded');
+  assert.equal((await f.read(original.id)).status, 'failed');
+  await assert.rejects(f.product.getDeployment(replay.id, 'another-session'), { code: 'NOT_FOUND' });
+  const gcp = await f.product.replaySubmittedSource(replay.id, 'runtime-gcp');
+  assert.equal((await until(() => f.read(gcp.id))).status, 'succeeded');
+  assert.deepEqual(f.submissions[0].files, f.submissions[1].files);
+  assert.equal(f.submissions[0].files.find(file => file.path === 'app.js').content.toString(), 'source for terminal');
+  await assert.rejects(f.product.replaySubmittedSource(replay.id, 'runtime-aws'), { code: 'SOURCE_REPLAY_REJECTED' });
+  await assert.rejects(f.product.replaySubmittedSource(original.id, 'runtime-gcp'), { code: 'SOURCE_REPLAY_REJECTED' });
+});

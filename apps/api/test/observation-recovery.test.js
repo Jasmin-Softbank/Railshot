@@ -140,6 +140,11 @@ test('unchanged source receives a request commit before dispatch and lookup reje
     assert.fail(`Unexpected GitHub path ${path}`);
   });
   await assert.rejects(service.deploy({ ...input, operation_id, onPrepared: async value => { assert.equal(value.source_commit, source_commit); prepared = true; } }), { code: 'CI_DISPATCH_UNCONFIRMED' });
+  await assert.rejects(service.deploy({ ...input, operation_id,
+    onPrepared: async () => { throw new Error('private checkpoint failure'); } }),
+  error => error.code === 'SOURCE_CHECKPOINT_FAILED' && error.phase === 'source_checkpoint'
+    && !error.message.includes('GitHub') && error.outcomeUnknown === false);
+  assert.equal(dispatches, 1, 'a failed local checkpoint must not dispatch CI');
   assert.match(commit.message, new RegExp(`Railshot-Request: ${operation_id}`));
   const binding = { operation_id, source_commit, app: input.app, target_id: input.target_id };
   assert.equal((await service.findDeployment(binding)).run_id, 123);
