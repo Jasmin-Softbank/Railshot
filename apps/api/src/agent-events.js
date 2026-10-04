@@ -56,7 +56,7 @@ function validateItem(item) {
     requireValid(exact(item, [...common, 'phase', 'outcome', 'sdk_invocations'], ['agent_budget']) && item.phase === 'loop'
       && outcomes.includes(item.outcome) && (item.sdk_invocations === null || integer(item.sdk_invocations)));
     if (Object.hasOwn(item, 'agent_budget')) requireValid(exact(item.agent_budget, ['enabled', 'max_invocations'])
-      && [0, 1, 2].includes(item.agent_budget.max_invocations)
+      && [0, 1, 2, 3].includes(item.agent_budget.max_invocations)
       && item.agent_budget.enabled === (item.agent_budget.max_invocations > 0));
   } else if (['gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat'].includes(item.event_name)) {
     requireValid(exact(item, [...common, 'attempt_id', 'phase', 'outcome', 'completed_steps', 'total_steps', 'duration_s'])
