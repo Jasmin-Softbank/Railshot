@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://railshot.io/">
+    <img src="docs/assets/readme/railshot-wordmark.svg" alt="RAILSHOT" width="480">
+  </a>
+</p>
+
 # RAILSHOT
 
 **One Action, Infinite Clouds — 한 번의 요청으로 배포하고, 관리·운영까지.**
@@ -15,6 +21,18 @@ RAILSHOT은 웹이나 자신의 AI 에이전트에서 프로젝트를 제출하�
 5. **배포 후에도 관리합니다.** 배포 이력, AI가 변경한 파일과 검사 결과, 환경 지표·앱 로그를 확인하고 앱을 업데이트하거나 중지·재개합니다.
 
 웹 배포는 [railshot.io](https://railshot.io/)에서 시작할 수 있습니다. 개인 OpenStack 환경을 연결하려면 [고객 설치 프로그램](docs/architecture/client-bootstrap.md)과 [개인 환경 관리 계약](docs/api/personal-environments.md)을 참고하세요.
+
+### 실제 배포·운영 화면
+
+**배포 완료와 공개 URL** — 검사와 배포가 끝나면 결과를 확인하고 앱을 열 수 있습니다.
+
+[![AWS 앱 배포 완료와 접속 링크 화면](docs/assets/readme/aws-deployment-complete.jpg)](docs/assets/readme/aws-deployment-complete.jpg)
+
+**앱 관리** — 검증된 서비스 상태와 최근 배포 시도를 구분하고, 업데이트·중지·재개 작업으로 이어집니다.
+
+[![OpenStack 앱의 검증된 서비스 주소와 관리 화면](docs/assets/readme/application-management.png)](docs/assets/readme/application-management.png)
+
+<sub>2026-10-04 실제 서비스 화면입니다. 이미지를 클릭하면 원본을 볼 수 있습니다. [이미지 출처](docs/assets/readme/README.md)</sub>
 
 ## AI가 수정하고, 검사가 판단합니다
 
