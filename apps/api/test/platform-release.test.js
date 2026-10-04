@@ -172,3 +172,21 @@ test('liveness responds during initialization while readiness is unavailable', a
   await f.server.productReady;
   assert.equal((await f.get('/readyz')).status, 200);
 });
+
+test('operator CD resume requires token and exact publication identity', async t => {
+  const calls = [], f = await fixture(t, {
+    resumePublishedOperation: async input => { calls.push(input); return { id: input.operation_id }; }, close() {},
+  });
+  const origin = `http://127.0.0.1:${f.server.address().port}`;
+  const path = '/internal/deployments/resume';
+  const input = { operation_id: randomUUID(), source_commit: 'a'.repeat(40), run_id: '123' };
+  const send = (body, auth = true) => fetch(origin + path, { method: 'POST', headers: {
+    'content-type': 'application/json', ...(auth ? { authorization: `Bearer ${'release-test-token-'.repeat(3)}` } : {}),
+  }, body: JSON.stringify(body) });
+  assert.equal((await send(input, false)).status, 401);
+  assert.equal((await send({ ...input, session_id: 'spoof' })).status, 422);
+  assert.equal((await send({ operation_id: input.operation_id })).status, 422);
+  assert.equal(calls.length, 0);
+  assert.equal((await send(input)).status, 202);
+  assert.deepEqual(calls, [input]);
+});

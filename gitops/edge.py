@@ -76,6 +76,10 @@ def free_number(seed, start, end, used):
     raise ValueError('edge allocation capacity exhausted')
 
 
+def without_health(value):
+    return {k: v for k, v in value.items() if k != 'health_path'}
+
+
 def prepare(config_path, request):
     """Only the environment registrar calls this with its private provider/profile snapshot."""
     config = config_at(config_path)
@@ -120,12 +124,27 @@ def prepare(config_path, request):
         ledger_path = root / 'allocations.json'
         ledger = read_private(ledger_path) if ledger_path.exists() else {}
         if key in ledger:
-            require(ledger[key]['request'] == request, 'service identity belongs to another target or contract')
             allocation = root / (key + '.json')
             if not allocation.exists():  # Recover a crash between reservation and writing its reference.
                 durable_write(allocation, encoded(ledger[key]))
-            return {**ledger[key], 'reference': {'config_path': str(config_path), 'allocation_path': str(root / (key + '.json')),
-                                                'config_sha256': config['_sha256']}}
+            reference = {'config_path': str(config_path), 'allocation_path': str(allocation),
+                         'config_sha256': config['_sha256']}
+            _, current = load(reference)
+            require(without_health(current['request']) == without_health(request),
+                    'service identity belongs to another target or contract')
+            if current['request'] != request:
+                require(current['phase'] == 'applied', 'observe unfinished route before changing health contract')
+                # The reservation remains immutable; one atomic journal write records
+                # the new desired health path and the previously applied route.
+                current = {**current, 'request': request, 'previous_route': current['route'],
+                           'route': {**current['route'], 'health_path': request['health_path']},
+                           'public_http': {**current['public_http'],
+                               'url': 'https://' + current['hostname'] + request['health_path']},
+                           'phase': 'reserved'}
+                for field in ('plan_sha256', 'changes', 'verification'):
+                    current.pop(field, None)
+                save(config, current)
+            return {**current, 'reference': reference}
         require(len(values['routes']) + len(ledger) < 50, 'shared edge route capacity exhausted')
         routes = [*values['routes'].values(), *(row['route'] for row in ledger.values())]
         require(not any(row['request']['target_private_ip'] == request['target_private_ip'] and
@@ -167,7 +186,8 @@ def load(reference):
             'owned allocation path required')
     row = read_private(path)
     ledger = read_private(path.parent / 'allocations.json')
-    require(row['request'] == ledger[row['route_key']]['request'] and row['route'] == ledger[row['route_key']]['route'] and
+    require(without_health(row['request']) == without_health(ledger[row['route_key']]['request']) and
+            without_health(row['route']) == without_health(ledger[row['route_key']]['route']) and
             row['config_sha256'] == config['_sha256'], 'allocation ownership conflict')
     return config, row
 
@@ -242,8 +262,16 @@ def save(config, row):
     durable_write(Path(config['state_dir']) / (row['route_key'] + '.json'), encoded(row))
 
 
+def has_unknown(value):
+    if isinstance(value, dict):
+        return any(has_unknown(item) for item in value.values())
+    if isinstance(value, list):
+        return any(has_unknown(item) for item in value)
+    return value is True
+
+
 def validate_plan(plan, row):
-    """Allow only this new route and additive networking. Existing routes never change."""
+    """Allow this route creation or its exact health-path update, plus additive networking."""
     require(row['route']['provider_kind'] == 'aws', 'only AWS routes can be written by this executor')
     require(not plan.get('errored'), 'successful edge plan required')
     actions_by_address = {item['address']: item['change']['actions'] for item in plan.get('resource_changes', [])}
@@ -262,6 +290,18 @@ def validate_plan(plan, row):
         if actions == ['no-op'] or (item.get('mode') == 'data' and actions == ['read']):
             continue
         allowed = address in exact and actions == ['create']
+        if address == 'aws_lb_target_group.app[' + json.dumps(key) + ']' and actions == ['update']:
+            before, after = change['before'], change['after']
+            prior = row.get('previous_route')
+            old_health, new_health = before.get('health_check'), after.get('health_check')
+            allowed = bool(prior and without_health(prior) == without_health(route)
+                and {k: v for k, v in before.items() if k != 'health_check'} ==
+                    {k: v for k, v in after.items() if k != 'health_check'}
+                and isinstance(old_health, list) and isinstance(new_health, list)
+                and len(old_health) == len(new_health) == 1
+                and old_health[0].get('path') == prior['health_path']
+                and new_health[0] == {**old_health[0], 'path': route['health_path']}
+                and not has_unknown(change.get('after_unknown', {})))
         if address == 'aws_security_group.alb' and actions == ['update']:
             before, after = change['before'], change['after']
             allowed = {k: v for k, v in before.items() if k != 'egress'} == {k: v for k, v in after.items() if k != 'egress'}
@@ -287,11 +327,14 @@ def plan_route(reference):
             require(re.fullmatch(r'app-[a-f0-9]{24}', key), 'registered allocation key required')
             other = read_private(Path(config['state_dir']) / (key + '.json'))
             require(other['phase'] != 'applying', 'another edge apply needs reconciliation')
-            if other['phase'] == 'applied' or other['route_key'] == row['route_key']:
+            if other['phase'] == 'applied' or other['route_key'] == row['route_key'] or other.get('previous_route'):
                 require(other['route']['provider_kind'] == 'aws', 'migrate the legacy GCP allocation before AWS edge writes')
                 key = other['route_key']
-                require(key not in values['routes'] or values['routes'][key] == other['route'], 'base route ownership conflict')
-                values['routes'][key] = other['route']
+                desired = (other['previous_route'] if other['phase'] != 'applied'
+                           and key != row['route_key'] and other.get('previous_route') else other['route'])
+                require(key not in values['routes'] or
+                        without_health(values['routes'][key]) == without_health(desired), 'base route ownership conflict')
+                values['routes'][key] = desired
         prefix = Path(config['state_dir']) / row['route_key']
         variables, saved = str(prefix) + '.tfvars.json', str(prefix) + '.tfplan'
         durable_write(variables, encoded(values))

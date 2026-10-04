@@ -57,6 +57,39 @@ class EdgeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'namespace already allocated'):
             edge.prepare(self.path, {**self.request, 'environment_id': 'other-env'})
 
+    def test_redeploy_updates_only_health_on_applied_owned_route(self):
+        first = self.prepared()
+        config, row = edge.load(first['reference'])
+        row['phase'] = 'applied'
+        edge.save(config, row)
+        reservation = (Path(config['state_dir']) / 'allocations.json').read_bytes()
+        changed = edge.prepare(self.path, {**self.request, 'health_path': '/ready'})
+        self.assertEqual(changed['phase'], 'reserved')
+        self.assertEqual(changed['previous_route'], row['route'])
+        self.assertEqual(changed['node_port'], row['node_port'])
+        self.assertEqual(changed['priority'], row['priority'])
+        self.assertTrue(changed['public_http']['url'].endswith('/ready'))
+        self.assertEqual(reservation, (Path(config['state_dir']) / 'allocations.json').read_bytes())
+        self.assertEqual(edge.prepare(self.path, {**self.request, 'health_path': '/ready'}), changed)
+        with self.assertRaisesRegex(ValueError, 'unfinished'):
+            edge.prepare(self.path, {**self.request, 'health_path': '/next'})
+        address = 'aws_lb_target_group.app["' + row['route_key'] + '"]'
+        before = {'id': 'tg-owned', 'port': row['node_port'], 'health_check': [{'path': '/health', 'matcher': '200'}]}
+        after = {**before, 'health_check': [{'path': '/ready', 'matcher': '200'}]}
+        def plan(value):
+            return {'resource_changes': [{'address': address, 'change': {'actions': ['update'],
+                'before': before, 'after': value, 'after_unknown': {'health_check': [{}], 'tags': {}}}}]}
+        self.assertEqual(len(edge.validate_plan(plan(after), changed)), 1)
+        for invalid in ({**after, 'port': 1234}, {**after, 'health_check': [{'path': '/ready', 'matcher': '200-499'}]}):
+            with self.assertRaises(ValueError):
+                edge.validate_plan(plan(invalid), changed)
+        # Unknown apply outcomes cannot be reset by prepare, even with identical input.
+        changed['phase'] = 'applying'
+        edge.save(config, changed)
+        self.assertEqual(edge.prepare(self.path, {**self.request, 'health_path': '/ready'})['phase'], 'applying')
+        with self.assertRaisesRegex(ValueError, 'unfinished'):
+            edge.prepare(self.path, self.request)
+
     def test_untrusted_endpoint_and_contract_rejected_before_native_effects(self):
         with patch('edge.native') as native:
             for mutation in ({'target_private_ip': '169.254.169.254'}, {'target_private_ip': '8.8.8.8'},
