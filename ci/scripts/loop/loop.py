@@ -387,6 +387,7 @@ def execute(a, run, state, progress_sink=None):
         os.environ['RAILSHOT_RUN_ID'] = state.data['run_id']
         os.environ['RAILSHOT_ATTEMPT_ID'] = f"{state.data['run_id']}:{attempt}"
         rec, report, attempt_scope = {}, None, 'packaging'
+        recheck_rejected = False
         if attempt:
             # Neither role can borrow the other role's unused allowance.
             # Completed checkpoints consume the same slots again on replay.
@@ -433,15 +434,17 @@ def execute(a, run, state, progress_sink=None):
             report = rec.get('output')
             if rec.get('exit_code'):
                 rejection, error, meta = rec.get('proposal_rejection') or {}, rec.get('error') or {}, rec.get('meta') or {}
-                ev['attempts'].append({'attempt': attempt, 'attempt_id': os.environ['RAILSHOT_ATTEMPT_ID'],
-                                       'role': role, 'agent_invoked': True, 'agent_meta': meta,
-                                       'written': rec.get('written'), 'error': error, 'proposal_rejection': rejection})
                 safe = (error.get('code') in {'SDK_OUTPUT_INVALID', 'SDK_PATCH_REJECTED'} and error.get('outcome') == 'FAIL'
                         and error.get('side_effect') == 'none' and rec.get('written') == []
                         and meta.get('sdk_status') == 'completed' and meta.get('status') == 'failed'
                         and rejection.get('safe_to_replan') is True)
                 rejection_signature = 'PROPOSAL:' + error.get('code', '') + ':' + rejection.get('reason', '')
-                if safe and attempt < total_limit and used[budget_kind] < budget[budget_kind] and rejection_signature not in seen:
+                replan = safe and attempt < total_limit and used[budget_kind] < budget[budget_kind] and rejection_signature not in seen
+                if not safe or replan:
+                    ev['attempts'].append({'attempt': attempt, 'attempt_id': os.environ['RAILSHOT_ATTEMPT_ID'],
+                                           'role': role, 'agent_invoked': True, 'agent_meta': meta,
+                                           'written': rec.get('written'), 'error': error, 'proposal_rejection': rejection})
+                if replan:
                     def replan_step():
                         guidance = rejection['guidance']
                         detail = {'attempt': attempt, 'signature': rejection_signature, 'source_changed': False, **rejection}
@@ -457,11 +460,15 @@ def execute(a, run, state, progress_sink=None):
                     seen.add(rejection_signature)
                     # Replanning retains its role and consumes that role's allowance.
                     continue
-                ev['result'] = 'stop: agent proposal rejected'
-                ev['error'] = rec.get('error')
-                ev['status'] = (rec.get('error') or {}).get('outcome', 'FAIL')
-                return finish(run, ev, state.data['started'], state)
-        if attempt and attempt_scope == 'source':
+                if not safe:
+                    ev['result'] = 'stop: agent proposal rejected'
+                    ev['error'] = rec.get('error')
+                    ev['status'] = (rec.get('error') or {}).get('outcome', 'FAIL')
+                    return finish(run, ev, state.data['started'], state)
+                # A completed, rejected proposal made no writes. The unchanged
+                # candidate can still earn release eligibility from fresh gates.
+                recheck_rejected = True
+        if attempt and attempt_scope == 'source' and not recheck_rejected:
             from repair import prepare_locks
             def preparation_step():
                 from diagnostics import Diagnostics
@@ -501,12 +508,15 @@ def execute(a, run, state, progress_sink=None):
             'repair_scope': attempt_scope, 'agent_invoked': bool(attempt), 'agent_meta': rec.get('meta'),
             'written': rec.get('written'), 'rejected': rec.get('rejected'),
             'instructions_sha256': rec.get('instructions_sha256'), 'report_status': report and report.get('status'),
+            **({'error': rec['error'], 'proposal_rejection': rec['proposal_rejection']} if recheck_rejected else {}),
             'verdict_ok': verdict.get('ok'), 'verdict_status': verdict.get('status'),
             'failure': f and {k: f.get(k) for k in ('layer', 'class', 'signature', 'source_repair_eligible')}})
         reason = decide(verdict, report, seen, a.repair_scope)
         if reason == 'passed' and tuple(a.layers.split(',')) not in RELEASE_ORDERS:
             reason = 'incomplete: partial gates are diagnostic only'
             ev['status'] = 'INCOMPLETE'
+        if recheck_rejected and reason is None:
+            reason = 'stop: agent proposal rejected'
         if reason:
             ev['result'] = reason
             ev['error'] = verdict.get('error')

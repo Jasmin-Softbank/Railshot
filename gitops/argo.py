@@ -16,12 +16,14 @@ from handoff import MIGRATION_ANNOTATIONS, database_binding, document_hash, http
 KINDS = [{'group': 'apps', 'kind': 'Deployment'}, {'group': '', 'kind': 'Service'},
          {'group': 'networking.k8s.io', 'kind': 'NetworkPolicy'}]
 JOB_KIND = {'group': 'batch', 'kind': 'Job'}
+PVC_KIND = {'group': '', 'kind': 'PersistentVolumeClaim'}
 LABEL = r'[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?'
 SHA = r'[a-f0-9]{40}'
 
 
 def workload_kinds(work):
-    return KINDS + ([JOB_KIND] if any(item['kind'] == 'Job' for item in work['items']) else [])
+    return KINDS + [entry for entry in (JOB_KIND, PVC_KIND)
+                    if any(item['kind'] == entry['kind'] for item in work['items'])]
 
 
 def validate_workload(work, name, namespace, target_id):
@@ -39,6 +41,16 @@ def validate_workload(work, name, namespace, target_id):
         if item['kind'] == 'NetworkPolicy' and item['metadata'].get('annotations'):
             annotations = {'annotations': {'argocd.argoproj.io/sync-wave': '-2'}}
         item_name = name
+        if item['kind'] == 'PersistentVolumeClaim':
+            item_name = name + '-data'
+            spec = item['spec']
+            require(item['apiVersion'] == 'v1' and set(spec) == {'accessModes', 'storageClassName', 'resources'}
+                    and spec['accessModes'] == ['ReadWriteOnce'] and spec['storageClassName'] == 'railshot-persistent'
+                    and set(spec['resources']) == {'requests'} and set(spec['resources']['requests']) == {'storage'}
+                    and re.fullmatch(r'(?:[1-9]|10)Gi', spec['resources']['requests']['storage'])
+                    and deployment['spec']['replicas'] == 1 and deployment['spec'].get('strategy') == {'type': 'Recreate'}
+                    and {'name': 'data', 'persistentVolumeClaim': {'claimName': item_name}} in pod['volumes']
+                    and not any(row['kind'] == 'Job' for row in work['items']), 'restricted persistent claim required')
         if item['kind'] == 'Job':
             item_name = item['metadata']['name']
             require(re.fullmatch(re.escape(name) + r'-migrate-[a-f0-9]{12}', item_name), 'bound migration identity required')

@@ -631,12 +631,16 @@ class GateNetworkTest(unittest.TestCase):
             if cmd[:3] == ["docker", "inspect", "--format"]:
                 return SimpleNamespace(returncode=0, stdout=json.dumps({net: {"IPAddress": "172.18.0.2"}}))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        spec = {"services": [{"name": "web", "port": 8080, "health": "/health"}]}
+        spec = {"services": [{"name": "web", "port": 8080, "health": "/health",
+                              "storage": {"mountPath": "/var/opt/memos", "sizeGi": 1}}]}
         with patch.object(gate, "require_ci_network"), patch.object(gate, "sh", side_effect=command) as shell, \
              patch.object(gate, "http_status", return_value=200) as http:
             self.assertEqual([], gate.l3(spec, {"web": "sha256:" + "b" * 64}, "a" * 16, network=gate.CI_NETWORK))
         http.assert_called_once_with("http://172.18.0.2:8080/health")
         self.assertFalse(any("-p" in call.args[0] for call in shell.call_args_list))
+        launch = next(call.args[0] for call in shell.call_args_list if call.args[0][:2] == ['docker', 'run'])
+        self.assertIn('/var/opt/memos:rw,uid=65532,gid=65532,mode=0700,size=1g', launch)
+        self.assertIn('--read-only', launch)
 
     def test_worker_installer_and_native_verifier_shell_parse(self):
         infra = gate.PLATFORM.parents[1] / "infrastructure/ansible"
