@@ -1,0 +1,27 @@
+npm WARN EBADENGINE Unsupported engine {
+npm WARN EBADENGINE   package: 'jasmin-entrypoints-poc@0.1.0',
+npm WARN EBADENGINE   required: { node: '>=22' },
+npm WARN EBADENGINE   current: { node: 'v21.7.1', npm: '10.5.0' }
+npm WARN EBADENGINE }
+npm WARN EBADENGINE Unsupported engine {
+npm WARN EBADENGINE   package: 'rolldown@1.2.12',
+npm WARN EBADENGINE   required: { node: '^20.19.0 || >=22.12.0' },
+npm WARN EBADENGINE   current: { node: 'v21.7.1', npm: '10.5.0' }
+npm WARN EBADENGINE }
+npm WARN EBADENGINE Unsupported engine {
+npm WARN EBADENGINE   package: 'vite@8.2.2',
+npm WARN EBADENGINE   required: { node: '^20.19.0 || >=22.12.0' },
+npm WARN EBADENGINE   current: { node: 'v21.7.1', npm: '10.5.0' }
+npm WARN EBADENGINE }
+npm WARN EBADENGINE Unsupported engine {
+npm WARN EBADENGINE   package: 'jasmin-entrypoints-poc@0.1.0',
+npm WARN EBADENGINE   required: { node: '>=22' },
+npm WARN EBADENGINE   current: { node: 'v21.7.1', npm: '10.5.0' }
+npm WARN EBADENGINE }
+
+added 24 packages, and audited 27 packages in 1s
+
+9 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities

@@ -2,19 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import yazl from 'yazl';
-import { mkdtemp, mkdir, symlink, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspectArchive } from '../src/archive.js';
+import { inspectArchive, documentationOnly } from '../src/archive.js';
 import { createDeploymentService } from '../src/github.js';
 import { createAppServer } from '../src/server.js';
-import { archiveFromPath, deploySource, inferredAppName, insideRoot } from '../src/client.js';
+import { archiveFromPath, deploySource, inferredAppName } from '../src/client.js';
 import { fetchPublicGithubSource } from '../src/public-github.js';
 import { readPublished } from '../src/published.js';
 import { readSourceSnapshot, sourceSnapshotLimit } from '../src/source-snapshot.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readFile } from 'node:fs/promises';
+
+test('documentation detection preserves executable and unknown source formats', () => {
+  for (const path of ['index.html', 'package.json', 'Dockerfile', 'main.go', 'app.py', 'web/main.rs', '.railshot/railshot.yaml']) {
+    assert.equal(documentationOnly([{ path: 'readme.md' }, { path }]), false, path);
+  }
+  assert.equal(documentationOnly([{ path: 'readme.md' }, { path: '.editorconfig' }]), true);
+});
 
 async function zipOf(files, options = {}) {
   const zip = new yazl.ZipFile();
@@ -83,9 +90,9 @@ test('재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에
   const sha = (value) => createHash('sha1').update(`blob ${Buffer.byteLength(value)}\0${value}`).digest('hex');
   const calls = [];
   const oldFiles = [
-    { path: 'same.txt', mode: '100644', type: 'blob', sha: sha('same') },
-    { path: 'changed.txt', mode: '100644', type: 'blob', sha: sha('old') },
-    { path: 'removed.txt', mode: '100644', type: 'blob', sha: sha('removed') },
+    { path: 'same.js', mode: '100644', type: 'blob', sha: sha('same') },
+    { path: 'changed.js', mode: '100644', type: 'blob', sha: sha('old') },
+    { path: 'removed.js', mode: '100644', type: 'blob', sha: sha('removed') },
   ];
   const fakeFetch = async (url, options = {}) => {
     const path = new URL(url).pathname;
@@ -108,14 +115,14 @@ test('재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에
   };
   const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fakeFetch);
   const result = await service.deploy({ app: 'my-app', files: [
-    { path: 'same.txt', content: Buffer.from('same') },
-    { path: 'changed.txt', content: Buffer.from('new') },
-    { path: 'added.txt', content: Buffer.from('added') },
+    { path: 'same.js', content: Buffer.from('same') },
+    { path: 'changed.js', content: Buffer.from('new') },
+    { path: 'added.js', content: Buffer.from('added') },
   ] });
   assert.deepEqual(result.changes, { added: 1, updated: 1, deleted: 1, unchanged: 1 });
   assert.equal(calls.filter((call) => call.path.endsWith('/git/blobs')).length, 2);
   const appTree = calls.find((call) => call.path.endsWith('/git/trees') && call.method === 'POST').body;
-  assert.deepEqual(appTree.tree.map((item) => item.path), ['same.txt', 'changed.txt', 'added.txt']);
+  assert.deepEqual(appTree.tree.map((item) => item.path), ['same.js', 'changed.js', 'added.js']);
   assert.equal(appTree.tree[0].sha, oldFiles[0].sha);
   assert.equal(calls.at(-1).path.endsWith('/dispatches'), true);
 });
@@ -133,13 +140,13 @@ test('소스가 같아도 커밋 없이 Actions를 다시 실행한다', async (
     else if (path.endsWith('/git/trees/base')) data = { tree: [{ path: 'apps', type: 'tree', sha: 'apps-tree' }] };
     else if (path.endsWith('/git/trees/apps-tree')) data = { tree: [{ path: 'demo', type: 'tree', sha: 'tenant-tree' }] };
     else if (path.endsWith('/git/trees/tenant-tree')) data = { tree: [{ path: 'my-app', type: 'tree', sha: 'app-tree' }] };
-    else if (path.endsWith('/git/trees/app-tree')) data = { tree: [{ path: 'same.txt', mode: '100644', type: 'blob', sha }], truncated: false };
+    else if (path.endsWith('/git/trees/app-tree')) data = { tree: [{ path: 'same.js', mode: '100644', type: 'blob', sha }], truncated: false };
     else if (path.endsWith('/dispatches')) data = { workflow_run_id: 789 };
     else throw new Error(`Unexpected path: ${path}`);
     return Response.json(data);
   };
   const service = createDeploymentService({ token: 'test', owner: 'org', repo: 'apps', targetId: 'aws-demo' }, fakeFetch);
-  const result = await service.deploy({ app: 'my-app', files: [{ path: 'same.txt', content }] });
+  const result = await service.deploy({ app: 'my-app', files: [{ path: 'same.js', content }] });
   assert.equal(result.source_commit, 'a'.repeat(40));
   assert.deepEqual(result.changes, { added: 0, updated: 0, deleted: 0, unchanged: 1 });
   assert.deepEqual(calls.filter((call) => call.method !== 'GET').map((call) => call.path.split('/').at(-1)), ['dispatches']);
@@ -264,10 +271,10 @@ test('HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사�
   } finally { server.close(); }
 });
 
-function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app', gateResult, sourceSha256 = 'c'.repeat(64) } = {}) {
+function publishedFiles({ specName = 'railshot.yaml', attempt = 1, sourceCommit = 'a'.repeat(40), targetId = 'aws-demo', app = 'my-app', gateResult, sourceSha256 = 'c'.repeat(64), layers = ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'] } = {}) {
   const hash = (value) => createHash('sha256').update(value).digest('hex');
   const verdict = { ok: true, release_eligible: true, status: 'PASS', source_sha256: sourceSha256,
-    layers: ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'].map((layer) => ({ layer, ok: true, errors: [] })),
+    layers: layers.map((layer) => ({ layer, ok: true, errors: [] })),
     images: { web: 'local/web:gate' }, image_ids: { web: 'sha256:' + 'd'.repeat(64) } };
   if (gateResult) Object.assign(verdict.layers.find((row) => row.layer === gateResult.layer), gateResult);
   const files = { [specName]: 'app: my-app\n', 'verdict.json': JSON.stringify(verdict),
@@ -296,6 +303,18 @@ test('canonical and historical publications retain exact filename/hash bindings;
     const renamed = { ...files, [other]: files[specName] }; delete renamed[specName];
     assert.throws(() => readPublished(entries(renamed), identity));
   }
+});
+
+test('publication accepts complete minimal and historical gates but rejects partial or failed image/runtime verification', () => {
+  const identity = { runId: 789, attempt: 1, headSha: 'a'.repeat(40), targetId: 'aws-demo', tenant: 'demo' };
+  const read = (layers, gateResult) => readPublished(Object.entries(publishedFiles({ layers, gateResult }))
+    .map(([path, content]) => ({ path, content: Buffer.from(content) })), identity);
+  for (const layers of [['L0', 'L1', 'L2', 'L3'], ['L0', 'L1', 'L2', 'L4', 'L3'], ['L0', 'L1', 'Q', 'L2', 'L4', 'L3']]) {
+    assert.equal(read(layers).status, 'published');
+    for (const layer of ['L0', 'L1', 'L2', 'L3']) assert.throws(() => read(layers, { layer, ok: false }), /gate 단계/);
+  }
+  for (const layers of [['L0', 'L1', 'L2'], ['L0', 'L1', 'L3'], ['L0', 'L1', 'L3', 'L2']])
+    assert.throws(() => read(layers), /gate 단계/);
 });
 
 test('publication accepts quality advisories but rejects runtime, isolation and unknown failures', () => {
@@ -580,17 +599,6 @@ test('CI와 다른 앱 이름과 임의 target은 소스 등록 전에 거부한
   assert.throws(() => createDeploymentService({ token: 'test' }), /TARGET_ID/);
 });
 
-test('MCP 소스 경로는 심볼릭 링크를 통해 허용 범위 밖으로 나갈 수 없다', async () => {
-  const parent = await mkdtemp(join(tmpdir(), 'jasmin-poc-'));
-  try {
-    const allowed = join(parent, 'allowed');
-    const outside = join(parent, 'outside');
-    await mkdir(allowed); await mkdir(outside);
-    await symlink(outside, join(allowed, 'escape'));
-    await assert.rejects(insideRoot(join(allowed, 'escape'), allowed), /허용된 소스 경로 밖/);
-  } finally { await rm(parent, { recursive: true, force: true }); }
-});
-
 test('CLI의 폴더 입력은 API가 받는 ZIP으로 만들어진다', async () => {
   const folder = await mkdtemp(join(tmpdir(), 'jasmin-app-'));
   try {
@@ -815,4 +823,50 @@ test('snapshot digest interoperates with Python gate hashing for Unicode names, 
   const value = { ...snapshotFixture(), ...generated };
   const read = readSourceSnapshot(Buffer.from(JSON.stringify(value)), value, value.source_sha256);
   assert.deepEqual(read.map((file) => file.path), ['a/한글😀.txt', 'a.txt']);
+});
+
+test('large source trees are bounded, complete, and never dispatch after a tree failure', async () => {
+  const files = Array.from({ length: 231 }, (_, i) => ({ path: `src/group-${i % 7}/file-${i}.js`, content: Buffer.from(`file ${i}`) }));
+  for (const failure of [null, 'tree', 'dispatch']) {
+    const trees = new Map(); let sourceWrites = 0, commits = 0, dispatches = 0, publishedTree;
+    const service = createDeploymentService({ token: 'secret', targetId: 'aws-demo' }, async (url, options = {}) => {
+      const path = new URL(url).pathname, body = options.body && JSON.parse(options.body);
+      if (path.endsWith('/git/ref/heads/main')) return Response.json({ object: { sha: 'a'.repeat(40) } });
+      if (path.endsWith('/git/commits/' + 'a'.repeat(40))) return Response.json({ tree: { sha: 'base' } });
+      if (path.endsWith('/git/trees/base')) return Response.json({ tree: [] });
+      if (path.endsWith('/git/blobs')) return Response.json({ sha: createHash('sha1').update(body.content).digest('hex') });
+      if (path.endsWith('/git/trees')) {
+        if (body.tree[0].type === 'tree') { publishedTree = trees.get(body.tree[0].sha); return Response.json({ sha: 'root' }); }
+        sourceWrites++;
+        if (body.tree.length > 100 || failure === 'tree' && sourceWrites === 2) return Response.json({ message: 'private upstream detail' }, { status: 504 });
+        const entries = new Map(body.base_tree ? trees.get(body.base_tree) : []);
+        for (const entry of body.tree) entries.set(entry.path, entry.sha);
+        const sha = `tree-${sourceWrites}`; trees.set(sha, entries); return Response.json({ sha });
+      }
+      if (path.endsWith('/git/commits')) { commits++; return Response.json({ sha: 'b'.repeat(40) }); }
+      if (path.endsWith('/git/refs/heads/main')) return Response.json({});
+      if (path.endsWith('/dispatches')) {
+        dispatches++;
+        if (failure === 'dispatch') throw new DOMException('private upstream detail', 'TimeoutError');
+        return Response.json({ workflow_run_id: 987 });
+      }
+      assert.fail(path);
+    });
+    if (failure) {
+      await assert.rejects(service.deploy({ app: 'large-app', files }), (error) => {
+        assert.equal(error.phase, failure === 'tree' ? 'source_tree' : 'ci_dispatch');
+        assert.equal(error.upstream_status, failure === 'tree' ? 504 : null);
+        assert.equal(error.outcomeUnknown, failure === 'dispatch');
+        assert.ok(!error.message.includes('private upstream detail'));
+        return true;
+      });
+      assert.equal(dispatches, failure === 'tree' ? 0 : 1);
+      assert.equal(commits, failure === 'tree' ? 0 : 1);
+    } else {
+      assert.equal((await service.deploy({ app: 'large-app', files })).run_id, 987);
+      assert.deepEqual([...publishedTree.keys()].sort(), files.map((f) => f.path).sort());
+      assert.equal(dispatches, 1);
+      assert.equal(commits, 1);
+    }
+  }
 });

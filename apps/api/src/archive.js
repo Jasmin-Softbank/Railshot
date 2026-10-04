@@ -34,6 +34,17 @@ export function validateFiles(files) {
   return accepted;
 }
 
+export const documentationOnlyMessage = '문서와 링크 목록만 있어 실행할 앱을 찾을 수 없습니다. README에서 소개하는 실제 웹 앱의 저장소 또는 실행 소스를 제출하세요.';
+
+export function documentationOnly(files) {
+  // Reject only a known documentation-only tree; unknown formats keep their existing path.
+  return files.length > 0 && files.every(({ path }) => {
+    const name = path.split('/').at(-1).toLowerCase();
+    return /\.(md|markdown|rst|txt|png|jpe?g|gif|svg|webp|ico|pdf)$/.test(name)
+      || ['license', 'licence', 'copying', 'authors', 'readme', '.editorconfig', '.gitignore', '.gitattributes'].includes(name);
+  });
+}
+
 function streamToBuffer(stream, expectedSize) {
   return new Promise((resolve, reject) => {
     const chunks = [];

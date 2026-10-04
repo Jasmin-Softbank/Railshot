@@ -2,30 +2,31 @@
 
 ## Goal
 
-Make the repository deployable on Railshot with the fewest new files. You write the container build and the workload spec. The platform renders manifests, infrastructure values, DNS and TLS from your spec with best-practice defaults, so you never write those.
+Understand the repository and make it deployable on Railshot with the smallest coherent create/update/delete proposal. The shared prepare-deployment skill supplies the system flow and decision examples. You write the container build and the workload spec. The platform renders manifests, infrastructure values, DNS and TLS from your spec with best-practice defaults, so you never write those.
 
 ## Inputs (paths given in the task message)
 
-- `contract/stack-contract.md`, `contract/paths.yaml`, `contract/catalog.yaml`, `schemas/railshot.schema.json`: read these first.
+- `contract/stack-contract.md`: required platform rules. Read `schemas/railshot.schema.json` when authoring a workload spec; use `contract/catalog.yaml` for the capabilities actually needed. Writable paths and the response schema are supplied by the runner.
+- Latest verdict, `failure.txt`, and `lessons.md`: why this attempt is running and what was already tried.
 - `ir.json`: deterministic inventory of the repository: languages, package managers, framework hints, candidate entrypoints and ports, existing Dockerfiles, build and data scripts, size.
 - The workspace: a sanitized copy of the user's repository. Only the writable paths may change.
 - `request.txt` (optional): what the user said about this deployment.
 
 ## Procedure
 
-1. Read the contract, then `ir.json`. Draft a service map: what runs, on which port, what must be built first (data generation, frontend build), which service users reach.
+1. Read the required platform rules and initial evidence. Inspect relevant build manifests and execution documentation first. Use `ir.json` only for missing inventory hints. Search for entrypoint and asset-loading symbols, then read those ranges; expand to related files when a requirement is still unresolved. Draft a service map: what runs, on which port, what must be built first (data generation, frontend build), which service users reach.
 2. Confirm every fact in the source code, not in docs or comments:
    - the real start command and how to bind `0.0.0.0` (existing CLI flag or env var);
    - the port and whether the app reads `PORT`;
    - a health path that returns 2xx without auth or side effects. Prefer an existing health route, then a cheap read-only route, then `/`. Never invent an endpoint;
    - external hosts the code calls at runtime (HTTP clients, SDK base URLs). They go to `egress`; outbound traffic to anything else is blocked.
-   Record each fact with `file:line` in `assumptions`.
+   Put inspected source/log references in `evidence_refs`; keep unresolved conditions and hypotheses in `assumptions`.
 3. Choose the build per service, in this order:
    1. An existing Dockerfile that meets the contract: keep it; fix only contract violations.
    2. Otherwise write a multi-stage Dockerfile (rules below).
-4. For a new spec, write `.railshot/railshot.yaml` with `apiVersion: railshot/v0`. If the workspace already has legacy `.jasmin/jasmin.yaml`, edit that file in place and preserve its API version; never create a second spec. Include only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. List requests the catalog cannot meet in `assumptions`.
+4. For a new spec, write `.railshot/railshot.yaml` with `apiVersion: railshot/v0`. If only legacy `.jasmin/jasmin.yaml` exists, edit it in place and preserve its API version. If both specs exist, compare them and retain one complete intended definition; propose deletion of a proven redundant duplicate. Never create a second spec. Include only the facts from step 2, the choices from step 3, and what `request.txt` explicitly asks for within `catalog.yaml`. Leave out everything the defaults cover. If the app requires a capability listed in `unsupported_mvp` (such as persistent volumes for SQLite data or attachments), return `give_up` and name the missing capability. Never relocate persistent data to `/tmp` or disable persistence to pass health checks.
 5. Re-check your files against C1–C11 and the forbidden patterns in `paths.yaml`.
-6. Plan every gate in `gate_plan` (L0, L1, Q, L2, L4, L3). Q is advisory: record existing quality checks or their absence without adding tests or checker setup. Return the smallest packaging proposal (`status: proposed`), or `give_up` if it exceeds the trusted scope. The outer executor checks the actual build and runtime before requesting any source repair.
+6. Return the smallest packaging proposal (`status: proposed`), or `give_up` when evidence or scope prevents one. Record suspected later source defects in `assumptions`. The host owns the verification plan and checks build/runtime before requesting source repair.
 
 ## Dockerfile rules
 

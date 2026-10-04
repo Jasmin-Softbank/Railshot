@@ -46,6 +46,16 @@ the registrar lock permits a local tombstone with zero remote changes. A partial
 registration or unknown remote outcome is blocked; resource ownership is never guessed
 from a display name.
 
+A stopped CD observation (`blocked`, `outcome_unknown: true`) after verified image
+publication does not prevent deleting the same registered application. The API requires
+an exact application, environment, target and session match and no local deployment
+worker. A new native plan inventories live resources even when the CD journal is
+missing; apply retains every ownership, active-sync and provider-state check below.
+Unknown writers, uncertain CI, incomplete registration and prior uncertain lifecycle
+operations still require reconciliation. The old deployment error remains in the audit
+history. The dashboard labels an uncertain delivery as requiring result verification
+and offers deletion while disabling stop/start.
+
 ## Execution and ownership
 
 `deployment/scripts/application_lifecycle.py` is the existing application adapter's

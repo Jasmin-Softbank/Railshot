@@ -102,5 +102,20 @@ class PlatformVerificationTests(unittest.TestCase):
                 verify.expected(bad, "b" * 64, "c" * 64)
 
 
+    def test_remote_wait_is_visible_and_failure_preserves_only_known_reasons(self):
+        revision, images = "a" * 40, verify.expected("a" * 40, "b" * 64, "c" * 64)
+        for code, expected in [("ARGO_REVISION_NOT_HEALTHY", "ARGO_REVISION_NOT_HEALTHY"),
+                               ("untrusted-secret-value", "REMOTE_VERIFIER_FAILED")]:
+            responses = iter([{"Command": {"CommandId": "12345678-1234-1234-1234-123456789012"}},
+                              {"Status": "InProgress"},
+                              {"Status": "Failed", "StandardOutputContent": json.dumps({"status": "failed", "code": code})}])
+            with patch.object(verify.time, "sleep"), patch("builtins.print") as output:
+                with self.assertRaisesRegex(verify.NotReady, "^" + expected + "$"):
+                    verify.remote(revision, images, "2", "e" * 64, call=lambda *args: next(responses))
+                messages = " ".join(str(call.args[0]) for call in output.call_args_list)
+                self.assertIn("Waiting for cluster verification: SSM=InProgress", messages)
+                self.assertNotIn("untrusted-secret-value", messages)
+
+
 if __name__ == "__main__":
     unittest.main()

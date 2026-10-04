@@ -413,7 +413,7 @@ def share_application_cluster(kube, cd, registered, environment_id):
 
 
 def preflight_renewal(cd, registered, target_id, *, allow_existing=False):
-    """Reject capacity/identity conflicts before creating any runtime or Argo object."""
+    """Validate the policy and existing identity before creating registration objects."""
     cm = argo.kubectl(cd['context'], 'argocd', 'get', 'configmap', 'railshot-credentials', '-o', 'json')
     policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
     target = registered['target']
@@ -424,9 +424,9 @@ def preflight_renewal(cd, registered, target_id, *, allow_existing=False):
         argo.require(allow_existing and all(previous[key] == value for key, value in expected.items())
                      and previous['service_account']['name'] == SA
                      and previous['service_account']['namespace'] == target['namespace'], 'renewal target binding conflict')
-    else:
-        # Existing credentials.validate_policy contract has a 20-target ceiling.
-        argo.require(len(policy['targets']) < 20, 'renewal target capacity exhausted')
+    # Failed deployments may still own resources and need token renewal. Their
+    # registration count is not an application quota. install_renewal validates
+    # the actual candidate document size again before writing policy or RBAC.
 
 
 def install_renewal(cd, renewal):

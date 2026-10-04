@@ -7,16 +7,13 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test",
-    "cli": "node src/cli.js",
-    "mcp": "node src/mcp.js"
+    "cli": "node src/cli.js"
   },
   "engines": {
     "node": ">=22.13"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.2.0",
     "yauzl": "^3.4.0",
-    "yazl": "^3.3.1",
-    "zod": "^4.6.5"
+    "yazl": "^3.3.1"
   }
 }

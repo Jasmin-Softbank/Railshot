@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Deterministic release gate: L0 patch, L1 spec, Q quality, L2 build, L4 scan, L3 runtime.
+"""Deterministic release gate: L0 patch, L1 spec, L2 build, L4 scan, L3 runtime.
 
 usage:
-  gate.py WORKSPACE RUN [--layers L0,L1,Q,L2,L4,L3]
+  gate.py WORKSPACE RUN [--layers L0,L1,L2,L4,L3]
   gate.py --self-test
 
 Writes RUN/verdict.json and, on failure, RUN/failure.txt (input for the fixer).
@@ -32,12 +32,17 @@ PLATFORM = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PLATFORM))
 sys.path.insert(0, str(PLATFORM / "runner"))
 from observability import OperationError, event_record  # noqa: E402
-from run_agent import path_ok, writable_rules, source_change_allowed  # noqa: E402
+from run_agent import path_ok, writable_rules, source_change_allowed, deletion_allowed  # noqa: E402
 from quality import run_quality  # noqa: E402
 from bundle import source_digest, source_spec, stage_source  # noqa: E402
 from process import run_bounded  # noqa: E402
-from execution import APP_UID, GATE_ORDER, docker_security, docker_command, quality_advisory  # noqa: E402
+from storage import durable_write
+from execution import APP_UID, GATE_ORDER, FULL_GATE_ORDER, RELEASE_ORDERS, docker_security, docker_command, quality_advisory, stage_contract  # noqa: E402
 from progress import Progress  # noqa: E402
+from diagnostics import Diagnostics, fingerprint, redact  # noqa: E402
+
+DIAGNOSTICS = None
+PROGRESS = None
 
 ORDER = GATE_ORDER
 
@@ -62,7 +67,20 @@ DEFAULT_CLASS = {"L0": "F5", "L1": "F5", "Q": "QUALITY", "L2": "F2", "L3": "F4",
 
 
 def sh(cmd, cwd=None, timeout=900, check=False, raw=False):
-    return run_bounded(cmd, cwd=cwd, timeout=timeout, check=check, raw=raw)
+    started, result, error = time.monotonic(), None, None
+    try:
+        result = run_bounded(cmd, cwd=cwd, timeout=timeout, check=check, raw=raw,
+                             on_tick=PROGRESS.tick if PROGRESS is not None else None)
+        return result
+    except Exception as exc:
+        error = type(exc).__name__
+        raise
+    finally:
+        if DIAGNOSTICS is not None:
+            try:
+                DIAGNOSTICS.process(cmd, result, started, error)
+            except (OSError, ValueError, TypeError):
+                DIAGNOSTICS.missing.append('process_capture_unavailable')
 
 
 def docker_ok():
@@ -118,13 +136,21 @@ def l0(ws, paths, *, repair_scope="packaging", native_locks=None):
     from repair import verified_lock
     changes = changed_files(ws)
     allow, protected = writable_rules("contract/paths.yaml", scope=repair_scope)
-    errors, native = [], set()
+    errors, native, deleted_bytes = [], set(), 0
     for kind, path in changes:
         if repair_scope == "source" and kind != "D" and not (ws / path).is_symlink() and verified_lock(ws, path, native_locks or {}):
             native.add(path)
             continue
         if kind == "D":
-            errors.append(f"deleted file: {path}")
+            try:
+                original = sh(["git", "show", "HEAD:" + path], cwd=ws, check=True, raw=True).stdout
+                mode = sh(["git", "ls-tree", "HEAD", "--", path], cwd=ws, check=True).stdout.split()[0]
+                if mode not in {"100644", "100755"}:
+                    raise ValueError("cannot delete a non-regular file: " + path)
+                deletion_allowed(path, original, allow, protected, repair_scope=repair_scope)
+                deleted_bytes += len(original)
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                errors.append(str(exc))
         elif not path_ok(path, allow, protected):
             errors.append(f"path not writable: {path}")
         elif (ws / path).is_symlink():
@@ -141,7 +167,7 @@ def l0(ws, paths, *, repair_scope="packaging", native_locks=None):
     if len(changes) - len(native) > lim["max_files_changed"]:
         errors.append(f"too many files changed: {len(changes)} > {lim['max_files_changed']}")
     lines = added_lines(ws, [c for c in changes if c[0] != "D" and c[1] not in native])
-    if sum(len(l) + 1 for l in lines) > lim["max_patch_bytes"]:
+    if deleted_bytes + sum(len(l) + 1 for l in lines) > lim["max_patch_bytes"]:
         errors.append(f"patch too large: > {lim['max_patch_bytes']} bytes")
     for pat in paths["forbidden_patterns"]:
         hit = next((l for l in lines if re.search(pat, l)), None)
@@ -619,7 +645,7 @@ def l4(images, *, network=None):
 # ---------- verdict ----------
 
 def classify(layer, text):
-    if re.search(r"TLS handshake timeout|i/o timeout|429 Too Many Requests|connection reset by peer|temporary failure in name resolution|connection refused|cannot connect to.*docker|failed to download.*database", text, re.I):
+    if re.search(r"TLS handshake timeout|i/o timeout|429 Too Many Requests|connection reset by peer|temporary failure in name resolution|connection refused|cannot connect to.*docker|failed to download.*database|EAI_AGAIN|ENOTFOUND|ETIMEDOUT", text, re.I):
         return "F8"
     for lay, pat, cls in CLASS_RULES:
         if lay == layer and re.search(pat, text, re.I):
@@ -628,20 +654,17 @@ def classify(layer, text):
 
 
 def signature(layer, cls, text):
-    first = next((l for l in text.splitlines() if re.search(r"error|failed|not |invalid|denied|missing|must", l, re.I)),
-                 text.splitlines()[0] if text else "")
-    norm = re.sub(r"[0-9a-f]{8,}|\d+|/[\w./-]+", "#", first.strip().lower())[:160]
-    return f"{layer}:{cls}:{norm}"
+    return fingerprint(layer, cls, text)
 
 
 def excerpt(text, limit=4000):
-    return SECRET.sub("***", text)[:limit]
+    return redact(text)[:limit]
 
 
 def validate_layers(layers):
-    if not layers or any(layer not in ORDER for layer in layers) or len(set(layers)) != len(layers):
+    if not layers or any(layer not in FULL_GATE_ORDER for layer in layers) or len(set(layers)) != len(layers):
         return "INVALID_LAYERS: require nonempty unique known layers"
-    if list(layers) != sorted(layers, key=ORDER.index):
+    if list(layers) != sorted(layers, key=FULL_GATE_ORDER.index):
         return "INVALID_LAYERS: required order is " + ",".join(ORDER)
     if any(layer in layers for layer in ("L2", "L4", "L3")) and "L1" not in layers:
         return "INVALID_LAYERS: Docker stages require L1 spec validation"
@@ -691,6 +714,11 @@ def finish_verdict(verdict, run, run_id, attempt_id, *, persist=True):
                             run_id=run_id, attempt_id=attempt_id, error=verdict["error"],
                             attributes={"release_eligible": verdict["release_eligible"], "checks_ok": verdict["checks_ok"]})
     verdict["event"] = complete_event()
+    if persist and DIAGNOSTICS is not None and DIAGNOSTICS.run == run:
+        try:
+            verdict['diagnostics'] = DIAGNOSTICS.finish(verdict)
+        except (OSError, ValueError, KeyError, TypeError):
+            verdict['diagnostics'] = {'state': 'unavailable', 'reason': 'capture_failed'}
     if persist:
         try:
             run.mkdir(parents=True, exist_ok=True)
@@ -708,7 +736,50 @@ def finish_verdict(verdict, run, run_id, attempt_id, *, persist=True):
     return verdict
 
 
-def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None):
+def build_binding(source, spec, network, run_id):
+    # Cache scope is one operation and the entire source, not guessed changed paths.
+    # Trusted implementation changes also invalidate reuse.
+    trusted = [Path(__file__), CI_PROFILE_PATH, *(PLATFORM / name for name in (
+        'execution.py', 'gate/bundle.py', 'process.py', 'source_snapshot.py', 'contract/stages.json'))]
+    return {'run_id': run_id, 'source_sha256': source, 'spec': spec, 'network': network,
+            'implementation': {str(p.relative_to(PLATFORM)): hashlib.sha256(p.read_bytes()).hexdigest() for p in trusted}}
+
+
+def reuse_build(path, binding):
+    if path is None:
+        return None
+    path = Path(path)
+    if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+        raise ValueError('invalid build receipt')
+    receipt = json.loads(path.read_bytes())
+    if receipt.get('binding') != binding:
+        return None
+    if receipt.get('version') != 1 or receipt.get('stage') != 'image.build' or receipt.get('outcome') != 'PASS':
+        raise ValueError('invalid build receipt')
+    images, identifiers = receipt['images'], receipt['image_ids']
+    if set(images) != {svc['name'] for svc in binding['spec']['services']} or set(images) != set(identifiers):
+        raise ValueError('invalid build image set')
+    for service, tag in images.items():
+        if not re.fullmatch(r'sha256:[0-9a-f]{64}', identifiers[service]):
+            raise ValueError('invalid build image identifier')
+        actual = sh(['docker', 'image', 'inspect', '--format', '{{.Id}}', tag], timeout=15)
+        if actual.returncode or actual.stdout.strip() != identifiers[service]:
+            return None
+    return images, identifiers
+
+
+def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None, build_receipt=None):
+    global DIAGNOSTICS, PROGRESS
+    try:
+        return _run_gate(ws, run, layers, selected_root=selected_root, quality_network=quality_network,
+                         repair_scope=repair_scope, native_locks=native_locks, app_id=app_id, build_receipt=build_receipt)
+    finally:
+        DIAGNOSTICS = PROGRESS = None
+
+
+def _run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repair_scope="packaging", native_locks=None, app_id=None, build_receipt=None):
+    global DIAGNOSTICS, PROGRESS
+    DIAGNOSTICS = PROGRESS = None
     observation_id = os.environ.get("RAILSHOT_RUN_ID") or str(uuid.uuid4())
     attempt_id = os.environ.get("RAILSHOT_ATTEMPT_ID")
     invalid = validate_layers(layers)
@@ -717,6 +788,8 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
     if app_id is not None and (not isinstance(app_id, str) or not re.fullmatch(r'[a-z][a-z0-9-]{1,28}[a-z0-9]', app_id)):
         invalid = "INVALID_APP_ID"
     inside_source = run.resolve() == ws.resolve() or ws.resolve() in run.resolve().parents
+    if build_receipt is not None and Path(build_receipt).resolve().is_relative_to(ws.resolve()):
+        invalid = 'INVALID_BUILD_RECEIPT_PATH'
     if inside_source:
         invalid = "INVALID_RUN_PATH: gate artifacts must be outside the source workspace"
     before, config_error = None, None
@@ -744,11 +817,19 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
         result = observe_layer({'layer': 'EVIDENCE', 'ok': False, 'blocked': exc.code}, observation_id, attempt_id, exc)
         return finish_verdict({'ok': False, 'release_eligible': False, 'checks_ok': False, 'status': 'UNKNOWN',
                                'layers': [result], 'failure': None}, run, observation_id, attempt_id)
+    PROGRESS = progress
+    try:
+        DIAGNOSTICS = Diagnostics(ws, run, observation_id, attempt_id, layers, repair_scope, before)
+        DIAGNOSTICS.capture()
+    except (OSError, ValueError, TypeError):
+        DIAGNOSTICS = None
     run_id = uuid.uuid4().hex[:16]  # Docker identity is separate from the durable parent run ID.
     for layer in layers:
-        errs, error = [], None
+        errs, error, reused = [], None, False
         try:
             progress.start(layer)
+            if DIAGNOSTICS is not None:
+                DIAGNOSTICS.layer = layer
             if layer == "L0":
                 errs, changed = l0(ws, paths, repair_scope=repair_scope, native_locks=native_locks)
                 result = {"layer": layer, "ok": not errs, "changed": changed, "errors": errs}
@@ -770,13 +851,24 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
                     raise OperationError("GATE_ENVIRONMENT_UNAVAILABLE", component="gate", phase=layer,
                                          retry_policy="after_configuration")
                 if layer == "L2":
-                    errs, images = l2(ws, spec, run_id, network=quality_network)
+                    binding = build_binding(before, spec, quality_network, observation_id)
+                    cached = reuse_build(build_receipt, binding)
+                    if cached:
+                        images, image_ids = cached
+                        reused = True
+                    else:
+                        errs, images = l2(ws, spec, run_id, network=quality_network)
                     for service, tag in images.items():
                         image_id = sh(["docker", "image", "inspect", "--format", "{{.Id}}", tag], timeout=15, check=True).stdout.strip()
-                        if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+                        if (not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)
+                                or reused and image_id != image_ids[service]):
                             raise OperationError("GATE_EVIDENCE_MISMATCH", component="gate", phase=layer,
                                                  retry_policy="after_reconcile", side_effect="possible")
                         image_ids[service] = image_id
+                    if not errs and source_digest(ws) == before:
+                        receipt = {'version': 1, 'stage': 'image.build', 'outcome': 'PASS',
+                                   'binding': binding, 'images': images, 'image_ids': image_ids}
+                        durable_write(run / 'build.json', json.dumps(receipt, sort_keys=True).encode())
                 elif layer == "L3":
                     required = sorted({key for svc in spec["services"] for key in svc.get("secrets", [])
                                        if key != "DATABASE_URL" or "postgres" not in spec.get("resources", {})})
@@ -798,14 +890,24 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
                 result["errors"] = errs
             else:
                 result["blocked"] = error.code
+        result['reused'] = reused
         results.append(observe_layer(result, observation_id, attempt_id, error))
         if layer == "Q":
             results[-1]["advisory"] = True
             results[-1]["advisory"] = quality_advisory(results[-1])
             results[-1]["event"]["attributes"]["advisory"] = results[-1]["advisory"]
         try:
+            # Each gate has an independent result artifact even though the bounded
+            # repair loop runs in one job to retain its workspace/image store.
+            stage = stage_contract(layer)
+            receipt = {'version': 1, 'stage': stage['id'], 'input_sha256': before,
+                       'run_id': observation_id, 'attempt_id': attempt_id,
+                       'outcome': results[-1]['outcome'], 'reused': reused,
+                       'image_ids': image_ids if layer in ('L2', 'L3', 'L4') else {},
+                       'error': results[-1].get('error'), 'replay': stage['replay']}
+            durable_write(run / (layer + '.json'), json.dumps(receipt, sort_keys=True).encode())
             progress.complete(results[-1])
-        except (OperationError, KeyError) as exc:
+        except (OperationError, KeyError, OSError) as exc:
             observation_error = exc if isinstance(exc, OperationError) else Progress.failure(exc)
             results[-1] = observe_layer({'layer': layer, 'ok': False, 'blocked': observation_error.code},
                                         observation_id, attempt_id, observation_error)
@@ -847,7 +949,7 @@ def run_gate(ws, run, layers, *, selected_root=None, quality_network=None, repai
         results.append(observe_layer({"layer": "EVIDENCE", "ok": False, "blocked": error.code}, observation_id, attempt_id, error))
     required = [r for r in results if not quality_advisory(r)]
     checks_ok = failure is None and all(r["ok"] for r in required) and len(results) == len(layers)
-    ok = checks_ok and tuple(layers) == ORDER
+    ok = checks_ok and tuple(layers) in RELEASE_ORDERS
     status = ("PASS" if ok else "INCOMPLETE" if checks_ok else "UNKNOWN" if any(r["outcome"] == "UNKNOWN" for r in required)
               else "BLOCKED" if any(r["outcome"] == "BLOCKED" for r in required) else "FAIL")
     verdict = {"ok": ok, "release_eligible": ok, "checks_ok": checks_ok, "status": status, "layers": results, "failure": failure,
@@ -862,6 +964,7 @@ def main():
     ap.add_argument("--layers", default=",".join(ORDER))
     ap.add_argument("--quality-network", help="trusted CI network profile for Q/L2/L3; requires locally verified railshot-quality worker, never supplied by upload")
     ap.add_argument("--selected-root", help="trusted selected project path within the uploaded workspace")
+    ap.add_argument("--reuse-build", type=Path, help="trusted prior build receipt from the same operation")
     ap.add_argument("--app-id", help="trusted operator app identity, never inferred from uploaded source")
     ap.add_argument("--repair-scope", choices=["packaging", "source"], default="packaging", help="trusted operator patch scope; uploaded specs cannot grant it")
     ap.add_argument("--native-locks", type=Path, help="trusted native-resolution receipt outside the source workspace")
@@ -874,7 +977,7 @@ def main():
         ap.error("native lock receipt must be outside the source workspace")
     v = run_gate(ws, Path(a.run).resolve(), a.layers.split(","), quality_network=a.quality_network,
                  repair_scope=a.repair_scope, selected_root=a.selected_root, app_id=a.app_id,
-                 native_locks=json.loads(a.native_locks.read_text()) if a.native_locks else None)
+                 native_locks=json.loads(a.native_locks.read_text()) if a.native_locks else None, build_receipt=a.reuse_build)
     print(json.dumps({"ok": v["ok"], "failure": v["failure"] and {k: v["failure"][k] for k in ("layer", "class", "signature")},
                       "status": v["status"], "error": v["error"], "event": v["event"],
                       "layers": [(r["layer"], r["ok"], r.get("blocked")) for r in v["layers"]]}, ensure_ascii=False))

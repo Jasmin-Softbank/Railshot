@@ -82,13 +82,18 @@ test('stop/start/delete consume private plans once, preserve data on stop, and r
     assert.equal(disk(f.directory, 'plans', plan.id).private.credential, 'never-public');
     assert.throws(() => f.product.getPlan(plan.id, f.owner.id), { status: 404 });
     assert.deepEqual(f.product.list('plans', f.owner.id), []);
+    assert.equal(f.product.getApplicationPlan(app.id, plan.id, f.owner.id).operation_id, undefined);
     const body = f.input(plan);
     const [first, repeat] = await Promise.all([f.product.createApplicationOperation(app.id, body, action, f.owner.id),
       f.product.createApplicationOperation(app.id, { ...body }, action, f.owner.id)]);
     assert.equal(first.id, repeat.id);
+    assert.equal(f.product.getApplicationPlan(app.id, plan.id, f.owner.id).operation_id, first.id);
+    assert.throws(() => f.product.getApplicationPlan(app.id, plan.id, f.stranger.id), { status: 404 });
     const result = await settled(f.product, first.id, f.owner.id);
     assert.equal(result.status, 'succeeded'); assert.equal(result.stage, 'complete');
     assert.equal(f.product.getApplication(app.id, f.owner.id).status, status);
+    assert.equal(f.product.getApplicationPlan(app.id, plan.id, f.owner.id).operation_id, first.id);
+    assert.equal(f.product.applications(f.owner.id).length, status === 'deleted' ? 0 : 1);
     assert.equal((await f.product.createApplicationOperation(app.id, body, action, f.owner.id)).id, first.id);
     await assert.rejects(f.product.createApplicationOperation(app.id, { ...body, confirmation: 'another' }, action, f.owner.id), { code: 'IDEMPOTENCY_CONFLICT' });
     if (status !== 'ready') await assert.rejects(f.product.createDeployment(source, 'deploy-' + action, undefined, f.owner.id), { code: 'APPLICATION_STATE_CONFLICT' });
@@ -228,11 +233,15 @@ test('adapter pins operator configuration, writes private requests, sanitizes re
   assert.deepEqual(result.residuals, resources); assert.deepEqual(result.steps, [{ name: 'delete', status: 'blocked' }]);
   assert.ok(!JSON.stringify(result).includes('secret')); assert.equal(calls[0].options.mutation, false); assert.equal(calls[1].options.mutation, true);
   assert.deepEqual(calls[1].request, { version: 1, application_id: application.id, environment_id: 'runtime-aws', app: 'calculator',
-    phase: 'apply', action: 'delete', operation_id: operationId, plan_id: id, plan_hash: 'c'.repeat(64), delete_data: true });
+    phase: 'apply', action: 'delete', operation_id: operationId, plan_id: plan.private.native_plan_id, plan_hash: 'c'.repeat(64), delete_data: true });
   await assert.rejects(adapter.applyLifecycle(application, plan, { id: operationId, deleteData: true }), { code: 'APPLICATION_OPERATION_RECONCILE_REQUIRED' });
+  const recovered = await adapter.planLifecycle(application, { id, action: 'delete' });
+  assert.equal(recovered.public.id, id);
+  assert.notEqual(recovered.private.native_plan_id, plan.private.native_plan_id);
+  assert.equal(calls[2].options.mutation, false);
   await writeFile(configPath, JSON.stringify({ ...config, changed: true }));
   await assert.rejects(adapter.verifyLifecyclePlan(application, plan), { code: 'APPLICATION_POLICY_CHANGED' });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
 });
 
 test('HTTP plan and operation routes enforce session, JSON, idempotency and polling headers', async (t) => {
@@ -569,7 +578,7 @@ test('known registration preflight failure deletes a queued app only through a v
     assert.equal(submissions, 0);
     if (mode !== 'unstarted') {
       await assert.rejects(product.createApplicationPlan(deployment.application_id, { action: 'delete' }, owner),
-        { code: mode === 'unknown_registration' ? 'EXECUTOR_BUSY' : 'APPLICATION_PLAN_BLOCKED' });
+        { code: mode === 'unknown_registration' ? 'EXECUTOR_BUSY' : 'APPLICATION_REGISTRATION_INCOMPLETE' });
       assert.deepEqual(phases, mode === 'unknown_registration' ? ['registration'] : ['registration', 'plan']);
       assert.notEqual(product.getApplication(deployment.application_id, owner).status, 'deleted');
       return;
@@ -608,4 +617,208 @@ test('GitHub cancellation binds workflow/source/repository and sends a single ca
     assert.equal(cancels, ['source_mismatch', 'initial_attempt_changed'].includes(mode) ? 0 : 1);
     assert.equal(reads, ['lost_cancel', 'source_mismatch', 'initial_attempt_changed'].includes(mode) ? 1 : 2);
   }
+});
+
+test('failed initial deployment cannot stop or start but remains deletable', async (t) => {
+  const f = await fixture(t);
+  await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction((state) => { state.operations['failed-initial'] = {
+    id: 'failed-initial', kind: 'deployments', application_id: app.id, app: app.app,
+    target_id: app.target_id, session_id: f.owner.id, status: 'failed', stage: 'ci',
+    created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    cd: { state: 'not_started' }, public_http: { state: 'not_run' }
+  }; });
+  await store.close();
+  const product = await createProductService(f.options);
+  try {
+    assert.equal(product.getApplication(app.id, f.owner.id).current_deployment_state, 'not_deployed');
+    for (const action of ['stop', 'start']) await assert.rejects(product.createApplicationPlan(app.id, { action }, f.owner.id), { code: 'APPLICATION_NOT_DEPLOYED' });
+    const plan = await product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id);
+    const operation = await product.createApplicationOperation(app.id, f.input(plan), 'delete-failed', f.owner.id);
+    assert.equal((await settled(product, operation.id, f.owner.id)).status, 'succeeded');
+    assert.deepEqual(product.applications(f.owner.id), []);
+  } finally { await product.close(); }
+});
+
+test('published delivery with a missing CD journal can be deleted only through a fresh native plan', async (t) => {
+  for (const rejected of [false, true]) await t.test(rejected ? 'unverified inventory' : 'verified cleanup', async (t) => {
+    const f = await fixture(t);
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    await store.transaction((state) => { state.operations['missing-cd'] = {
+      id: 'missing-cd', kind: 'deployments', application_id: app.id, app: app.app,
+      target_id: app.target_id, environment_target_id: app.environment_target_id, session_id: f.owner.id,
+      status: 'blocked', stage: 'cd', ci: { state: 'published' }, cd: { state: 'blocked', revision: null, deployed: false },
+      error: { code: 'DEPLOYMENT_NOT_FOUND', outcome_unknown: true },
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    }; });
+    await store.close();
+    if (rejected) f.adapter.planLifecycle = async () => { throw new EnvironmentError('APPLICATION_CONTROL_CONFLICT', 409); };
+    const product = await createProductService(f.options);
+    try {
+      assert.equal(product.getApplication(app.id, f.owner.id).current_deployment_state, 'unverified');
+      for (const action of ['stop', 'start']) await assert.rejects(
+        product.createApplicationPlan(app.id, { action }, f.owner.id), { code: 'APPLICATION_RECONCILE_REQUIRED' });
+      await assert.rejects(product.createApplicationPlan(app.id, { action: 'delete' }, f.stranger.id), { status: 404 });
+      if (rejected) {
+        await assert.rejects(product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id), { code: 'APPLICATION_CONTROL_CONFLICT' });
+        assert.equal(f.calls.apply, 0);
+        assert.equal(product.getApplication(app.id, f.owner.id).status, 'ready');
+      } else {
+        const plan = await product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id);
+        assert.equal(f.calls.plan, 1); assert.equal(f.calls.apply, 0);
+        assert.deepEqual(plan.resources, resources);
+        const op = await product.createApplicationOperation(app.id, f.input(plan), 'delete-missing-cd', f.owner.id);
+        assert.equal((await settled(product, op.id, f.owner.id)).status, 'succeeded');
+        assert.equal(product.getApplication(app.id, f.owner.id).status, 'deleted');
+        assert.equal((await product.createApplicationOperation(app.id, f.input(plan), 'delete-missing-cd', f.owner.id)).id, op.id);
+        assert.equal(f.calls.apply, 1);
+      }
+      assert.equal(disk(f.directory, 'operations', 'missing-cd').error.code, 'DEPLOYMENT_NOT_FOUND');
+      assert.equal(f.calls.dispatch, 0);
+    } finally { await product.close(); }
+  });
+});
+
+test('deletion does not bypass uncertain writers, CI, lifecycle or mismatched ownership', async (t) => {
+  for (const [name, patch] of Object.entries({
+    unknown: { status: 'unknown', queue: { released_at: new Date().toISOString() } },
+    ci: { stage: 'ci' }, unpublished: { ci: { state: 'unknown' } },
+    lifecycle: { kind: 'application-lifecycle' }, otherApp: { application_id: 'other' },
+    target: { target_id: 'other' }, environment: { environment_target_id: undefined }, owner: { session_id: null },
+  })) await t.test(name, async (t) => {
+    const f = await fixture(t);
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    await store.transaction((state) => { state.operations.uncertain = {
+      id: 'uncertain', kind: 'deployments', application_id: app.id, app: app.app,
+      target_id: app.target_id, environment_target_id: app.environment_target_id, session_id: f.owner.id,
+      status: 'blocked', stage: 'cd', ci: { state: 'published' }, error: { outcome_unknown: true }, ...patch,
+    }; });
+    await store.close();
+    const product = await createProductService(f.options);
+    try {
+      await assert.rejects(product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id), { code: 'APPLICATION_RECONCILE_REQUIRED' });
+      assert.equal(f.calls.plan, 0); assert.equal(f.calls.apply, 0);
+    } finally { await product.close(); }
+  });
+});
+
+test('async lifecycle preview returns before cloud inspection, deduplicates and leaves the writer queue free', async (t) => {
+  let release, calls = 0;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const f = await fixture(t, { adapter: { planLifecycle: async (application, { id, action }) => {
+    calls++; await gate;
+    return { public: { id, application_id: application.id, action, plan_hash: 'b'.repeat(64), resources, retained,
+      expires_at: new Date(Date.now() + 600000).toISOString() }, private: { path: '/private/never-exposed' } };
+  } } });
+  try {
+    const pending = await f.product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id, { asynchronous: true });
+    assert.equal(pending.status, 'planning');
+    assert.equal(disk(f.directory, 'plans', pending.id).public.status, 'planning');
+    const replay = await f.product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id, { asynchronous: true });
+    assert.equal(replay.id, pending.id); assert.equal(calls, 1);
+    const rejected = f.product.createApplicationOperation(app.id, { ...f.input(pending), plan_hash: 'b'.repeat(64) }, 'not-ready', f.owner.id);
+    await assert.rejects(Promise.race([rejected, pause(300).then(() => { throw new Error('writer queue blocked by cloud inspection'); })]), { code: 'APPLICATION_PLAN_STALE' });
+    assert.throws(() => f.product.getApplicationPlan(app.id, pending.id, f.stranger.id), { status: 404 });
+    assert.throws(() => f.product.getApplicationPlan(app.id, pending.id), { status: 404 });
+    assert.equal(f.calls.apply, 0);
+    release();
+    for (let i = 0; i < 100 && f.product.getApplicationPlan(app.id, pending.id, f.owner.id).status === 'planning'; i++) await pause(5);
+    const ready = f.product.getApplicationPlan(app.id, pending.id, f.owner.id);
+    assert.equal(ready.status, 'ready'); assert.equal(ready.private, undefined);
+    const op = await f.product.createApplicationOperation(app.id, f.input(ready), 'confirmed-delete', f.owner.id);
+    assert.equal((await settled(f.product, op.id, f.owner.id)).status, 'succeeded'); assert.equal(f.calls.apply, 1);
+  } finally { release(); }
+});
+
+test('async plan failures are inspectable and private executor errors stay private', async (t) => {
+  const f = await fixture(t, { adapter: { planLifecycle: async () => { throw new Error('/private/credentials SECRET'); } } });
+  const pending = await f.product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id, { asynchronous: true });
+  for (let i = 0; i < 100 && f.product.getApplicationPlan(app.id, pending.id, f.owner.id).status === 'planning'; i++) await pause(5);
+  const failed = f.product.getApplicationPlan(app.id, pending.id, f.owner.id);
+  assert.equal(failed.status, 'failed'); assert.equal(failed.error.code, 'APPLICATION_PLAN_UNAVAILABLE');
+  assert.equal(failed.error.outcome_unknown, false); assert.doesNotMatch(JSON.stringify(failed), /SECRET|credentials/);
+  assert.equal(f.calls.apply, 0);
+});
+
+test('restart resumes the same read-only plan without applying any operation', async (t) => {
+  const f = await fixture(t); const plan = await f.plan(); await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction((state) => { state.plans[plan.id].public.status = 'planning'; }); await store.close();
+  const restarted = await createProductService(f.options);
+  try {
+    for (let i = 0; i < 100 && restarted.getApplicationPlan(app.id, plan.id, f.owner.id).status === 'planning'; i++) await pause(5);
+    const value = restarted.getApplicationPlan(app.id, plan.id, f.owner.id);
+    assert.equal(value.status, 'ready'); assert.equal(value.id, plan.id);
+    assert.equal(f.calls.plan, 2); assert.equal(f.calls.apply, 0);
+  } finally { await restarted.close(); }
+});
+
+test('async plan becomes stale if the application changes during inspection', async (t) => {
+  const f = await fixture(t); const approved = await f.plan('stop');
+  const original = f.adapter.planLifecycle; let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  f.adapter.planLifecycle = async (...args) => { await gate; return original(...args); };
+  try {
+    const pending = await f.product.createApplicationPlan(app.id, { action: 'delete' }, f.owner.id, { asynchronous: true });
+    const stop = await f.product.createApplicationOperation(app.id, f.input(approved), 'stop-during-inspection', f.owner.id);
+    await settled(f.product, stop.id, f.owner.id); release();
+    for (let i = 0; i < 100 && f.product.getApplicationPlan(app.id, pending.id, f.owner.id).status === 'planning'; i++) await pause(5);
+    const stale = f.product.getApplicationPlan(app.id, pending.id, f.owner.id);
+    assert.equal(stale.status, 'failed'); assert.equal(stale.error.code, 'APPLICATION_PLAN_STALE');
+    assert.equal(f.calls.apply, 1);
+  } finally { release(); }
+});
+
+test('HTTP async plan exposes a session-bound status URL and polling never applies deletion', async (t) => {
+  let release; const gate = new Promise((resolve) => { release = resolve; });
+  const f = await fixture(t); const original = f.adapter.planLifecycle;
+  f.adapter.planLifecycle = async (...args) => { await gate; return original(...args); };
+  const server = createAppServer({ product: f.product });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const headers = { cookie: 'railshot_session=' + f.owner.token, 'content-type': 'application/json', Prefer: 'respond-async' };
+  try {
+    const response = await fetch(base + `/api/v1/applications/${app.id}/plans`, { method: 'POST', headers, body: JSON.stringify({ action: 'delete' }) });
+    assert.equal(response.status, 202); assert.equal(response.headers.get('preference-applied'), 'respond-async');
+    const body = await response.json(); assert.equal(body.status, 'planning');
+    const location = response.headers.get('location'); assert.equal(location, `/api/v1/applications/${app.id}/plans/${body.id}`);
+    const status = await fetch(base + location, { headers }); assert.equal(status.status, 200);
+    assert.equal(status.headers.get('retry-after'), '2'); assert.equal((await status.json()).status, 'planning');
+    assert.equal((await fetch(base + location, { headers: { ...headers, cookie: 'railshot_session=' + f.stranger.token } })).status, 404);
+    assert.equal((await fetch(base + location + '?extra=1', { headers })).status, 422);
+    assert.equal((await fetch(base + location, { method: 'POST', headers })).status, 405);
+    assert.equal(f.calls.apply, 0);
+  } finally { release(); }
+});
+
+ test('restart rejects a changed application snapshot before native planning', async (t) => {
+  const f = await fixture(t); const plan = await f.plan(); await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction((state) => {
+    state.plans[plan.id].public.status = 'planning';
+    state.applications[app.id].status = 'stopped';
+  }); await store.close();
+  const restarted = await createProductService(f.options);
+  try {
+    for (let i = 0; i < 100 && restarted.getApplicationPlan(app.id, plan.id, f.owner.id).status === 'planning'; i++) await pause(5);
+    assert.equal(restarted.getApplicationPlan(app.id, plan.id, f.owner.id).error.code, 'APPLICATION_PLAN_STALE');
+    assert.equal(f.calls.plan, 1); assert.equal(f.calls.apply, 0);
+  } finally { await restarted.close(); }
+});
+
+test('application inventory orders newest registrations first with a stable ID tie break', async t => {
+  const f = await fixture(t); await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction(state => {
+    for (const [id, created_at] of [['older', '2026-10-01T00:00:00Z'], ['new-a', '2026-10-03T00:00:00Z'], ['new-z', '2026-10-03T00:00:00Z']])
+      state.applications[id] = { ...app, id, app: id, session_id: f.owner.id, created_at };
+  });
+  await store.close();
+  const restarted = await createProductService(f.options);
+  try { assert.deepEqual(restarted.applications(f.owner.id).map(row => row.id), ['new-z', 'new-a', 'older', app.id]); }
+  finally { await restarted.close(); }
 });

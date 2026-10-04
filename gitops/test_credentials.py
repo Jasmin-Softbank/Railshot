@@ -17,6 +17,54 @@ import credentials
 
 
 class CredentialsTest(unittest.TestCase):
+    def policy(self, count):
+        return {'version': 1, 'targets': [{**copy.deepcopy(self.target), 'target_id': f'reserved-{index}',
+            'secret': f'railshot-reserved-{index}'} for index in range(count)]}
+
+    def test_registration_count_is_not_a_deployed_app_quota(self):
+        policy = self.policy(40)
+        self.assertEqual(credentials.validate_policy(policy), policy)
+        size = len(json.dumps(policy).encode())
+        with patch.object(credentials, 'MAX_POLICY_BYTES', size), self.assertRaises(credentials.PolicyCapacityError):
+            credentials.validate_policy(policy)
+
+    def test_renewal_is_bounded_and_a_failed_target_does_not_block_others(self):
+        policy = self.policy(25)
+        lock = threading.Lock()
+        active = peak = 0
+        visited = []
+        first_batch = threading.Barrier(credentials.RENEWAL_WORKERS)
+
+        def renew(target):
+            nonlocal active, peak
+            index = int(target['target_id'].split('-')[-1])
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                visited.append(target['secret'])
+            try:
+                if index < credentials.RENEWAL_WORKERS:
+                    first_batch.wait(timeout=5)
+                if index == 0:
+                    raise RuntimeError('unreachable target')
+                return {'secret': target['secret'], 'status': 'renewed'}
+            finally:
+                with lock:
+                    active -= 1
+
+        with patch.object(credentials, 'renew', side_effect=renew):
+            results = credentials.renew_policy(policy)
+        self.assertEqual(peak, credentials.RENEWAL_WORKERS)
+        self.assertCountEqual(visited, [row['secret'] for row in policy['targets']])
+        self.assertEqual([row['secret'] for row in results], [row['secret'] for row in policy['targets']])
+        self.assertEqual(results[0]['code'], 'RENEWAL_FAILED')
+        self.assertTrue(all(row['status'] == 'renewed' for row in results[1:]))
+
+    def test_duplicate_secrets_are_rejected_before_concurrent_renewal(self):
+        with patch.object(credentials, 'renew') as renew, self.assertRaisesRegex(ValueError, 'duplicate registration'):
+            credentials.renew_policy({'version': 1, 'targets': [self.target, self.target]})
+        renew.assert_not_called()
+
     def setUp(self):
         self.now = 1_800_000_000
         self.ca = b'synthetic CA fixture'

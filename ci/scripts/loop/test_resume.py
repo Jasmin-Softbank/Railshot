@@ -39,7 +39,7 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, code)
 
     def cli(self, resume=False, *extra):
-        args = ['loop', str(self.upload), str(self.run), *extra]
+        args = ['loop', str(self.upload), str(self.run), '--max-attempts', '2', *extra]
         if resume:
             args.append('--resume')
         with patch.object(sys, 'argv', args):
@@ -149,6 +149,180 @@ s.step('agent:1', lambda: os._exit(9))
         (self.upload / 'app.py').write_text('source changed')
         self.assertEqual(self.cli(True), 1)
 
+    def test_calculator_is_packaged_before_baseline_without_ai_or_lock_rewrite(self):
+        (self.upload / 'package.json').write_text(json.dumps({
+            'scripts': {'build': 'tsc && vite build'}, 'devDependencies': {'vite': '^4.4.5'}}))
+        (self.upload / 'index.html').write_text('<div id="root"></div>')
+        (self.upload / 'yarn.lock').write_text('# yarn lockfile v1\n')
+        with self.gate_result({'ok': True, 'release_eligible': True, 'status': 'PASS'}) as gate, \
+                patch.object(loop, 'agent') as agent, patch('repair.prepare_locks') as locks:
+            self.assertEqual(self.cli(False, '--app-id', 'calculator', '--repair-scope', 'source'), 0)
+            agent.assert_not_called()
+            locks.assert_not_called()
+            self.assertEqual(gate.call_count, 1)
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(evidence['intake']['packaging']['status'], 'prepared')
+        self.assertEqual(evidence['sdk_invocations'], 0)
+        self.assertTrue((self.run / 'work/Dockerfile').is_file())
+
+    def test_zero_ai_failure_reports_the_gate_cause_instead_of_attempt_limit(self):
+        error = StateError('GATE_CHECK_FAILED', component='gate', phase='L1', outcome='FAIL').as_dict()
+        verdict = {'ok': False, 'status': 'FAIL', 'error': error,
+                   'failure': {'layer': 'L1', 'class': 'F5', 'excerpt': 'application port is missing', 'signature': 'missing-port'}}
+        with self.gate_result(verdict), patch.object(loop, 'agent') as agent, redirect_stdout(io.StringIO()):
+            self.assertEqual(self.cli(False, '--max-attempts', '0'), 1)
+            agent.assert_not_called()
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual('baseline failed: application port is missing', evidence['result'])
+        self.assertEqual(error, evidence['error'])
+
+    def test_resume_between_import_and_packaging_does_not_import_again(self):
+        original_step = RunState.step
+        def interrupt(state, name, function, **kwargs):
+            result = original_step(state, name, function, **kwargs)
+            if name == 'intake:0': raise KeyboardInterrupt('completed import')
+            return result
+        with patch.object(RunState, 'step', interrupt), self.assertRaises(KeyboardInterrupt):
+            self.cli()
+        from native_packaging import prepare_packaging
+        with patch.object(loop, 'run_json', side_effect=AssertionError('intake repeated')), \
+                patch('native_packaging.prepare_packaging', wraps=prepare_packaging) as packaging, \
+                self.gate_result({'ok': True, 'release_eligible': True, 'status': 'PASS'}):
+            self.assertEqual(self.cli(True), 0)
+            packaging.assert_called_once()
+
+    def test_preparation_then_repair_stops_on_pass_and_completed_resume_does_not_replay(self):
+        verdicts = [
+            {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1', 'class': 'F5', 'signature': 'missing-spec'}},
+            {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L3', 'class': 'F4', 'signature': 'runtime'}},
+            {'ok': True, 'release_eligible': True, 'status': 'PASS'}]
+        def gate(ws, run, attempt, *args, **kwargs):
+            target = run / f'gate-{attempt}'; target.mkdir()
+            (target / 'verdict.json').write_text(json.dumps(verdicts[attempt]))
+            return verdicts[attempt]
+        record = {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
+                  'meta': {'sdk_status': 'completed', 'duration_ms': 1}}
+        with patch.object(loop, 'gate', side_effect=gate), self.agent_result(record) as agent:
+            self.assertEqual(self.cli(False, '--max-attempts', '2', '--max-packaging-attempts', '1'), 0)
+            self.assertEqual([call.args[0] for call in agent.call_args_list], ['adapter', 'fixer'])
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(evidence['budget_used'], {'packaging': 1, 'repair': 1})
+        self.assertEqual(evidence['agent_budget'], {'enabled': True, 'max_invocations': 3})
+        self.assertEqual(evidence['sdk_invocations'], 2)
+        with patch.object(loop, 'agent') as agent, patch.object(loop, 'gate') as gate:
+            self.assertEqual(self.cli(True, '--max-attempts', '2', '--max-packaging-attempts', '1'), 0)
+            agent.assert_not_called(); gate.assert_not_called()
+
+    def test_separate_role_allowances_never_exceed_three_or_override_zero(self):
+        for limit in (0, 1, 2):
+            with self.subTest(limit=limit):
+                self.run = self.root / f'combined-{limit}'
+                def gate(ws, run, attempt, *args, **kwargs):
+                    target = run / f'gate-{attempt}'; target.mkdir()
+                    verdict = {'ok': False, 'status': 'FAIL', 'failure': {
+                        'layer': 'L1' if not attempt else 'L3', 'class': 'F5' if not attempt else 'F4',
+                        'signature': f'new-failure-{attempt}'}}
+                    (target / 'verdict.json').write_text(json.dumps(verdict))
+                    return verdict
+                record = {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
+                          'meta': {'sdk_status': 'completed'}}
+                with patch.object(loop, 'gate', side_effect=gate), self.agent_result(record) as agent:
+                    self.assertEqual(self.cli(False, '--max-attempts', str(limit), '--max-packaging-attempts', '1'), 1)
+                    total = limit + 1 if limit else 0
+                    self.assertEqual(agent.call_count, total)
+                    self.assertEqual([call.args[0] for call in agent.call_args_list],
+                                     ['adapter'] + ['fixer'] * limit if total else [])
+                    self.assertTrue(all(call.args[5] == total for call in agent.call_args_list))
+                evidence = json.loads((self.run / 'evidence.json').read_text())
+                self.assertEqual(evidence['sdk_invocations'], total)
+                self.assertEqual(evidence['budget_used'], {'packaging': 1 if total else 0, 'repair': limit})
+                self.assertFalse(evidence['passed'])
+                with patch.object(loop, 'agent') as agent, patch.object(loop, 'gate') as gate:
+                    self.assertEqual(self.cli(True, '--max-attempts', str(limit), '--max-packaging-attempts', '1'), 1)
+                    agent.assert_not_called(); gate.assert_not_called()
+
+    def test_existing_spec_never_lends_unused_adapter_slot_to_a_third_fixer(self):
+        spec = self.upload / loop.SOURCE_SPECS[0]
+        spec.parent.mkdir(); spec.write_text('app: sample\n')
+        for packaging in (0, 1):
+            with self.subTest(packaging=packaging):
+                self.run = self.root / f'existing-spec-{packaging}'
+                def gate(ws, run, attempt, *args, **kwargs):
+                    verdict = {'ok': False, 'status': 'FAIL', 'failure': {
+                        'layer': 'L3', 'class': 'F4', 'signature': f'runtime-{attempt}'}}
+                    target = run / f'gate-{attempt}'; target.mkdir()
+                    (target / 'verdict.json').write_text(json.dumps(verdict))
+                    return verdict
+                record = {'output': {'status': 'proposed'}, 'written': [], 'meta': {'sdk_status': 'completed'}}
+                with patch.object(loop, 'gate', side_effect=gate), self.agent_result(record) as agent:
+                    self.assertEqual(self.cli(False, '--max-packaging-attempts', str(packaging)), 1)
+                    self.assertEqual([call.args[0] for call in agent.call_args_list], ['fixer', 'fixer'])
+                evidence = json.loads((self.run / 'evidence.json').read_text())
+                self.assertEqual(evidence['budget_used'], {'packaging': 0, 'repair': 2})
+                self.assertEqual(evidence['sdk_invocations'], 2)
+
+    def test_packaging_zero_does_not_borrow_a_fixer_slot_for_missing_spec(self):
+        fail = {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1', 'class': 'F5', 'signature': 'missing'}}
+        with self.gate_result(fail), patch.object(loop, 'agent') as agent:
+            self.assertEqual(self.cli(False, '--max-packaging-attempts', '0'), 1)
+            agent.assert_not_called()
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(evidence['sdk_invocations'], 0)
+        self.assertEqual(evidence['budget_used'], {'packaging': 0, 'repair': 0})
+
+    def test_rejected_adapter_cannot_replan_under_the_fixer_allowance(self):
+        fail = {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1', 'class': 'F5', 'signature': 'missing'}}
+        error = StateError('SDK_PATCH_REJECTED', component='runner', phase='patch', outcome='FAIL', side_effect='none').as_dict()
+        rejected = {'output': {'status': 'proposed'}, 'written': [], 'error': error,
+                    'meta': {'sdk_status': 'completed', 'status': 'failed'},
+                    'proposal_rejection': {'safe_to_replan': True, 'reason': 'EVIDENCE_LINE_OUT_OF_RANGE',
+                                           'field': 'evidence_refs[0].line', 'guidance': 'Choose an existing source line.'}}
+        with self.gate_result(fail), self.agent_result(rejected, rc=1) as agent:
+            self.assertEqual(self.cli(), 1)
+            self.assertEqual([call.args[0] for call in agent.call_args_list], ['adapter'])
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(evidence['budget_used'], {'packaging': 1, 'repair': 0})
+        self.assertEqual(evidence['sdk_invocations'], 1)
+        with patch.object(loop, 'agent') as agent:
+            self.assertEqual(self.cli(True), 1)
+            agent.assert_not_called()
+
+    def test_resume_after_second_call_runs_only_the_remaining_fixer(self):
+        def gate(ws, run, attempt, *args, **kwargs):
+            verdict = ({'ok': True, 'release_eligible': True, 'status': 'PASS'} if attempt == 3 else
+                       {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1' if not attempt else 'L3',
+                        'class': 'F5' if not attempt else 'F4', 'signature': f'failure-{attempt}'}})
+            target = run / f'gate-{attempt}'; target.mkdir()
+            (target / 'verdict.json').write_text(json.dumps(verdict))
+            return verdict
+        record = {'output': {'status': 'proposed'}, 'written': [], 'meta': {'sdk_status': 'completed'}}
+        original_step = RunState.step
+        def crash(state, name, function, **kwargs):
+            result = original_step(state, name, function, **kwargs)
+            if name == 'agent:2': raise KeyboardInterrupt('second call durably completed')
+            return result
+        with patch.object(loop, 'gate', side_effect=gate), self.agent_result(record) as agent, \
+                patch.object(RunState, 'step', crash), self.assertRaises(KeyboardInterrupt):
+            self.cli()
+        self.assertEqual([call.args[0] for call in agent.call_args_list], ['adapter', 'fixer'])
+        with patch.object(loop, 'gate', side_effect=gate), self.agent_result(record) as agent:
+            self.assertEqual(self.cli(True), 0)
+            self.assertEqual([(call.args[0], call.args[4]) for call in agent.call_args_list], [('fixer', 3)])
+        evidence = json.loads((self.run / 'evidence.json').read_text())
+        self.assertEqual(evidence['budget_used'], {'packaging': 1, 'repair': 2})
+        self.assertEqual(evidence['sdk_invocations'], 3)
+
+    def test_resume_cannot_widen_a_completed_repair_allowance(self):
+        fail = {'ok': False, 'status': 'FAIL', 'failure': {'layer': 'L1', 'class': 'F5', 'signature': 'missing'}}
+        record = {'output': {'status': 'proposed'}, 'written': [], 'meta': {'sdk_status': 'completed'}}
+        with self.gate_result(fail), self.agent_result(record) as agent:
+            self.assertEqual(self.cli(False, '--max-attempts', '1'), 1)
+            self.assertEqual(agent.call_count, 1)
+        with patch.object(loop, 'agent') as agent, patch.object(loop, 'gate') as gate, redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(self.cli(True, '--max-attempts', '2'), 1)
+        self.assertEqual(json.loads(output.getvalue())['error']['code'], 'STATE_BINDING_MISMATCH')
+        agent.assert_not_called(); gate.assert_not_called()
+
     def test_resume_after_agent_checkpoint_skips_agent_and_baseline(self):
         fail = {'ok': False, 'status': 'FAIL', 'failure': {'class': 'F1', 'layer': 'L1', 'signature': 'missing'}}
         original_step = RunState.step
@@ -179,6 +353,38 @@ s.step('agent:1', lambda: os._exit(9))
         self.assertEqual(ev['attempts'][1]['role'], 'adapter')
         self.assertEqual(ev['attempts'][1]['repair_scope'], 'packaging')
 
+    def test_role_budgets_preserve_gate_first_and_scoped_repairs(self):
+        for budget, failure_count in ((0, 1), (1, 2), (2, 0), (2, 2), (2, 3), (2, 4)):
+            with self.subTest(budget=budget, failure_count=failure_count):
+                self.run = self.root / f'budget-{budget}-failures-{failure_count}'
+                sequence, scopes = [], []
+                def gate_result(ws, run, attempt, layers, **options):
+                    sequence.append(('gate', attempt))
+                    layer, code = ('L1', 'F5') if attempt == 0 else ('L3', 'F4')
+                    verdict = ({'ok': False, 'status': 'FAIL', 'layers': [{'layer': layer, 'ok': False}],
+                                'failure': {'layer': layer, 'class': code, 'signature': f'failure-{attempt}'}}
+                               if attempt < failure_count else {'ok': True, 'release_eligible': True, 'status': 'PASS'})
+                    (run / f'gate-{attempt}').mkdir()
+                    (run / f'gate-{attempt}/verdict.json').write_text(json.dumps(verdict))
+                    return verdict
+                def proposal(*args):
+                    role, _, _, run, attempt, _, _, scope = args[:8]
+                    sequence.append(('agent', attempt))
+                    scopes.append((role, scope))
+                    return 0, {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
+                               'meta': {'sdk_status': 'completed'}}
+                with patch.object(loop, 'gate', side_effect=gate_result), self.agent_result(side_effect=proposal), \
+                        redirect_stdout(io.StringIO()):
+                    code = self.cli(False, '--max-attempts', str(budget), '--repair-scope', 'source')
+                total = budget + 1 if budget else 0
+                used = min(total, failure_count)
+                self.assertEqual(code, 0 if failure_count <= total else 1)
+                self.assertEqual(sequence, [('gate', 0)] + [item for n in range(1, used + 1)
+                                                         for item in [('agent', n), ('gate', n)]])
+                self.assertEqual(scopes, ([('adapter', 'packaging')] + [('fixer', 'source')] * (used - 1)) if used else [])
+                evidence = json.loads((self.run / 'evidence.json').read_text())
+                self.assertEqual(evidence['agent_attempts'], used)
+
     def test_every_gate_prefix_failure_reruns_complete_order_after_source_proposal(self):
         for layer, failure_class in (('L0', 'F5'), ('L1', 'F5'),
                                      ('L2', 'F3'), ('L4', 'F6'), ('L3', 'F7')):
@@ -208,11 +414,14 @@ s.step('agent:1', lambda: os._exit(9))
                     self.assertEqual(self.cli(True, '--repair-scope', 'source'), 0)
 
     def test_safe_rejected_proposal_replans_once_after_resume_then_runs_all_gates(self):
+        spec = self.upload / loop.SOURCE_SPECS[0]
+        spec.parent.mkdir(); spec.write_text('app: sample\n')
         failed = {'ok': False, 'status': 'FAIL', 'failure': {'class': 'F5', 'layer': 'L1', 'signature': 'missing-spec'}}
         error = StateError('SDK_PATCH_REJECTED', component='runner', phase='patch', outcome='FAIL', side_effect='none').as_dict()
         rejected = {'output': {'status': 'proposed'}, 'written': [], 'error': error,
                     'meta': {'sdk_status': 'completed', 'status': 'failed'},
-                    'proposal_rejection': {'safe_to_replan': True, 'reason': 'PATH_SCOPE', 'guidance': 'Use writable paths.'}}
+                    'proposal_rejection': {'safe_to_replan': True, 'reason': 'EVIDENCE_LINE_OUT_OF_RANGE',
+                                           'field': 'evidence_refs[0].line', 'guidance': 'Choose an existing source line.'}}
         original_step = RunState.step
         def crash(state, name, function, **kwargs):
             result = original_step(state, name, function, **kwargs)
@@ -222,7 +431,7 @@ s.step('agent:1', lambda: os._exit(9))
         with self.gate_result(failed), self.agent_result(rejected, rc=1), patch.object(RunState, 'step', crash):
             with self.assertRaises(KeyboardInterrupt):
                 self.cli()
-        self.assertIn('PATH_SCOPE', (self.run / 'failure.txt').read_text())
+        self.assertIn('EVIDENCE_LINE_OUT_OF_RANGE', (self.run / 'failure.txt').read_text())
         self.assertEqual('original\n', (self.run / 'work/app.py').read_text())
         def corrected(*args):
             self.assertEqual(('fixer', 2), (args[0], args[4]))
@@ -236,6 +445,8 @@ s.step('agent:1', lambda: os._exit(9))
         evidence = json.loads((self.run / 'evidence.json').read_text())
         self.assertEqual(2, evidence['agent_attempts'])
         self.assertEqual([], evidence['attempts'][1]['written'])
+        self.assertEqual(evidence['attempts'][1]['proposal_rejection'], rejected['proposal_rejection'])
+        self.assertEqual(json.loads((self.run/'rejection-1.json').read_text())['field'], 'evidence_refs[0].line')
         self.assertTrue(evidence['passed'])
 
     def test_binding_tracks_gate_and_schema_but_not_test_files(self):
@@ -249,7 +460,7 @@ s.step('agent:1', lambda: os._exit(9))
         schema.write_text('{}')
         (fixture / 'observability.py').write_text('v1')
         (fixture / 'process.py').write_text('v1')
-        for name in ('execution.py','storage.py','infra/database.py'):
+        for name in ('execution.py','storage.py','infra/database.py','diagnostics.py','source_snapshot.py'):
             path=fixture/name; path.parent.mkdir(exist_ok=True); path.write_text('v1')
         args = SimpleNamespace(upload=str(self.upload), run=str(self.run), request=None, resume=False, self_test=False)
         with patch.object(loop, 'PLATFORM', fixture):
@@ -265,7 +476,7 @@ s.step('agent:1', lambda: os._exit(9))
             (fixture / 'observability.py').write_text('v2')
             self.assertNotEqual(loop.binding(args), first)
             (fixture / 'observability.py').write_text('v1')
-            for name in ('execution.py','storage.py','infra/database.py'):
+            for name in ('execution.py','storage.py','infra/database.py','diagnostics.py','source_snapshot.py'):
                 path=fixture/name; path.write_text('v2')
                 self.assertNotEqual(loop.binding(args), first)
                 path.write_text('v1')

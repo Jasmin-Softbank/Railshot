@@ -45,7 +45,8 @@ packaging_protected:
   - "**/pyproject.toml"
   - "**/requirements*.txt"
 
-# Additive only when a trusted operator selects --repair-scope source.
+# Source edits only when a trusted operator selects --repair-scope source.
+# Existing tests are immutable; dependency manifests retain additive-only checks.
 # Uploaded workload specifications cannot grant this scope.
 source_writable:
   - "**/package.json"
@@ -102,7 +103,7 @@ source_protected:
 limits:
   max_files_changed: 8
   max_patch_bytes: 20000
-  delete_files: false
+  delete_files: true
   binary_files: false
   symlinks: false
 

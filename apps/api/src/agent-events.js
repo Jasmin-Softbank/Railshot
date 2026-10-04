@@ -1,3 +1,4 @@
+import { redactDiagnostic } from './diagnostics.js';
 import { APP_NAME, TENANT_NAME, TARGET_ID, SOURCE_COMMIT } from './contract.js';
 
 export const agentEventLimits = Object.freeze({ items: 60, textBytes: 60_000, responseBytes: 2 * 1024 * 1024, cacheMs: 15_000 });
@@ -53,8 +54,32 @@ function validateItem(item) {
   requireValid(record(item) && integer(item.sequence) && item.sequence > 0 && timestamp(item.occurred_at)
     && typeof item.native_run_id === 'string' && safeId.test(item.native_run_id));
   if (['loop.started', 'loop.completed'].includes(item.event_name)) {
-    requireValid(exact(item, [...common, 'phase', 'outcome', 'sdk_invocations']) && item.phase === 'loop'
+    requireValid(exact(item, [...common, 'phase', 'outcome', 'sdk_invocations'], ['agent_budget']) && item.phase === 'loop'
       && outcomes.includes(item.outcome) && (item.sdk_invocations === null || integer(item.sdk_invocations)));
+    if (Object.hasOwn(item, 'agent_budget')) requireValid(exact(item.agent_budget, ['enabled', 'max_invocations'])
+      && [0, 1, 2, 3].includes(item.agent_budget.max_invocations)
+      && item.agent_budget.enabled === (item.agent_budget.max_invocations > 0));
+  } else if (item.event_name === 'agent.repair') {
+    const repair = item.repair;
+    requireValid(exact(item, [...common, 'attempt_id', 'repair']) && typeof item.attempt_id === 'string' && safeId.test(item.attempt_id)
+      && exact(repair, ['state', 'role', 'changes', 'omitted_changes', 'failure_layer'])
+      && ['verifying', 'succeeded', 'failed', 'unknown'].includes(repair.state)
+      && ['adapter', 'fixer'].includes(repair.role) && [null, 'L0', 'L1', 'Q', 'L2', 'L3', 'L4'].includes(repair.failure_layer)
+      && integer(repair.omitted_changes) && Array.isArray(repair.changes) && repair.changes.length <= 24);
+    for (const change of repair.changes) {
+      requireValid(exact(change, ['path', 'summary', 'status']) && typeof change.path === 'string' && change.path.length <= 240
+        && /^[A-Za-z0-9_./@-]+$/.test(change.path) && !change.path.startsWith('/')
+        && !change.path.split('/').some(part => ['', '.', '..'].includes(part))
+        && redactDiagnostic(change.path) === change.path && change.status === 'applied'
+        && typeof change.summary === 'string' && change.summary.length > 0 && change.summary.length <= 300);
+      change.summary = redactDiagnostic(change.summary);
+    }
+  } else if (['gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat'].includes(item.event_name)) {
+    requireValid(exact(item, [...common, 'attempt_id', 'phase', 'outcome', 'completed_steps', 'total_steps', 'duration_s'])
+      && typeof item.attempt_id === 'string' && safeId.test(item.attempt_id)
+      && ['L0', 'L1', 'Q', 'L2', 'L4', 'L3'].includes(item.phase) && outcomes.includes(item.outcome)
+      && integer(item.completed_steps) && integer(item.total_steps) && item.total_steps >= 1 && item.total_steps <= 6
+      && item.completed_steps <= item.total_steps && Number.isFinite(item.duration_s) && item.duration_s >= 0 && item.duration_s <= 86400);
   } else {
     requireValid(['agent.heartbeat', 'agent.observation'].includes(item.event_name)
       && exact(item, [...common, 'attempt_id', 'role', 'provider', 'elapsed_ms', 'process_running', 'snapshot_state',
@@ -66,6 +91,24 @@ function validateItem(item) {
       && (item.last_sdk_event_age_ms === null || integer(item.last_sdk_event_age_ms)));
     if (Object.hasOwn(item, 'progress')) validateProgress(item.progress);
   }
+}
+
+// A projection for dashboard readers, never a scheduler or an inferred model-call count.
+// Older producers have no budget. A heartbeat alone cannot prove an SDK invocation.
+export function summarizeAgentEvents(envelope, timeline = { items: [] }) {
+  const items = envelope.items || [], latest = items.at(-1) || null;
+  const prior = (timeline.items || []).filter((event) => String(event.correlation?.github_run_id) === String(envelope.run_id)
+    && event.correlation?.github_run_attempt === envelope.run_attempt);
+  const budget = items.findLast((event) => event.agent_budget)?.agent_budget
+    || prior.findLast((event) => event.attributes?.agent_budget)?.attributes.agent_budget || null;
+  let count = null;
+  for (const event of items) {
+    if (event.event_name.startsWith('loop.')) count = event.sdk_invocations;
+    else if (event.event_name.startsWith('agent.')) count = null;
+  }
+  return { poll_after_ms: agentEventLimits.cacheMs, stale_after_seconds: 60,
+    latest: latest ? structuredClone(latest) : null, agent_budget: budget ? structuredClone(budget) : null,
+    sdk_invocations: Number.isSafeInteger(count) ? count : null };
 }
 
 export function readAgentEventCheck(check, binding) {
@@ -96,7 +139,7 @@ export function readAgentEventCheck(check, binding) {
       && item.native_run_id === nativeRunId && (!item.attempt_id || item.attempt_id.startsWith(`${nativeRunId}:`)));
     sequence = item.sequence;
   }
-  // Only the exact content-free schema above can leave this module.
+  // Only allowlisted metadata and bounded, redacted repair descriptions leave this module.
   return structuredClone(value);
 }
 

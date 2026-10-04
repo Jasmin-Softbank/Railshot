@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Add one registered application to an existing, state-bound GCP edge. No DNS writer."""
+"""Add one registered application to a state-bound GCP edge using the shared DNS writer."""
 import argparse
 from collections import Counter
 import copy
 import hashlib
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
+import time
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 from edge import encoded, digest, read_private, locked, durable_write, native, require, http_path, lifecycle_ready
 
@@ -18,6 +23,40 @@ KINDS = ('google_compute_network_endpoint_group', 'google_compute_network_endpoi
          'google_certificate_manager_dns_authorization', 'google_certificate_manager_certificate',
          'google_certificate_manager_certificate_map_entry')
 UPDATES = {'google_compute_url_map.app', 'google_compute_url_map.redirect', 'google_compute_firewall.gfe'}
+
+
+class RouteError(ValueError):
+    def __init__(self, code, *, unknown=False):
+        super().__init__(code)
+        self.code, self.unknown = code, unknown
+
+
+def certificate_dns():
+    """Terraform creation hook: publish the owned CNAME before issuing its cert."""
+    import dns
+    request = json.loads(os.environ['RAILSHOT_GCP_CERTIFICATE_DNS_REQUEST'])
+    try:
+        dns.require(request.get('purpose') == 'certificate', 'DNS_REQUEST_INVALID')
+        receipt = dns.ensure(os.environ['RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG'], request)
+        # API readback alone does not prove that Google's resolver sees the CNAME.
+        query = 'https://dns.google/resolve?' + urlencode({'name': request['hostname'], 'type': 'CNAME'})
+        for attempt in range(30):
+            try:
+                with urlopen(query, timeout=5) as response:
+                    answer = json.loads(response.read(65_537))
+                if isinstance(answer, dict) and answer.get('Status') == 0 and any(isinstance(row, dict) and row.get('type') == 5 and
+                        row.get('name', '').rstrip('.').lower() == request['hostname'] and
+                        row.get('data', '').rstrip('.').lower() == request['content']
+                        for row in (answer.get('Answer') or [])):
+                    return receipt
+            except (OSError, ValueError):
+                pass
+            if attempt < 29:
+                time.sleep(2)
+        raise dns.DNSError('DNS_CERTIFICATE_PROPAGATION_PENDING', 'UNKNOWN')
+    except dns.DNSError as error:
+        durable_write(Path.cwd() / 'certificate-dns-error.json', encoded({'code': error.code}))
+        raise
 
 
 def owned(state):
@@ -93,10 +132,48 @@ def unknown_paths(value, path=()):
             yield from unknown_paths(child, (*path, key))
 
 
+def comparable_resource(address, value):
+    """Compare GCP resource references and unset routing fields by their meaning."""
+    result = copy.deepcopy(value)
+    if not isinstance(result, dict):
+        return result
+    if address == 'google_compute_firewall.gfe':
+        # Provider refresh can turn unset selectors into empty lists. Nonempty
+        # selectors, source ranges and ports still require exact comparison.
+        for field in ('source_service_accounts', 'source_tags', 'target_tags'):
+            if result.get(field) is None:
+                result[field] = []
+    elif address in ('google_compute_url_map.app', 'google_compute_url_map.redirect'):
+        for field in ('host_rule', 'path_matcher'):
+            for block in result.get(field) or []:
+                if block.get('description') in (None, ''):
+                    block.pop('description', None)
+                if field == 'path_matcher':
+                    backend = block.get('default_service')
+                    if backend == '':
+                        block['default_service'] = None
+                    elif isinstance(backend, str):
+                        block['default_service'] = backend.removeprefix('https://www.googleapis.com/compute/v1/')
+                    for redirect in block.get('default_url_redirect') or []:
+                        for key in ('path_redirect', 'prefix_redirect'):
+                            if redirect.get(key) == '':
+                                redirect[key] = None
+    return result
+
+
 def validate_plan(plan, request, values):
     actions = {item['address']: item['change']['actions'] for item in plan.get('resource_changes', [])}
-    require(not plan.get('errored') and all(actions.get(item['address']) == ['no-op']
-            for item in plan.get('resource_drift', [])), 'reconcile writable refresh drift before route writes')
+    require(not plan.get('errored'), 'reconcile writable refresh drift before route writes')
+    for item in plan.get('resource_drift', []):
+        address, change = item['address'], item.get('change', {})
+        # A refreshed resource may also receive the requested additive update,
+        # but only when refresh changed representation, not existing behavior.
+        representation_only = (address in UPDATES and actions.get(address) == ['update'] and
+                               isinstance(change.get('before'), dict) and isinstance(change.get('after'), dict) and
+                               comparable_resource(address, change['before']) ==
+                               comparable_resource(address, change['after']))
+        require(actions.get(address) == ['no-op'] or representation_only,
+                'reconcile writable refresh drift before route writes')
     key = request['application_id']
     expected = copy.deepcopy({**values, 'routes': {**values.get('routes', {}), key: checked_request(request)}})
     actual = copy.deepcopy({k: plan.get('variables', {}).get(k, {}).get('value') for k in expected})
@@ -150,7 +227,8 @@ def validate_plan(plan, request, values):
             require(all(after.get(k) == v for k, v in expected.items()), 'new resource differs from registered route')
             continue
         require(address in UPDATES and actions == ['update'], 'unrelated create, update, delete or replacement forbidden')
-        before, after = change['before'], change['after']
+        before = comparable_resource(address, change['before'])
+        after = comparable_resource(address, change['after'])
         fields = {'allow', 'fingerprint'} if address.endswith('.gfe') else {'host_rule', 'path_matcher', 'fingerprint'}
         require({k: v for k, v in before.items() if k not in fields} ==
                 {k: v for k, v in after.items() if k not in fields}, 'existing edge behavior changed')
@@ -205,13 +283,74 @@ def output_route(state, request, values):
             **routes[request['application_id']], 'public_route_state': 'pending_verification'}
 
 
-def ensure(config_path, request):
+def recover(config_path, config, journal):
+    """Adopt a completed interrupted apply only after a refreshed no-change plan."""
+    row = read_private(journal)
+    request = row['request']; checked_request(request)
+    root = Path(config['state_dir'])
+    matches = [work for work in root.glob('gcp-route-' + request['application_id'] + '-*')
+               if (work / 'plan').is_file() and hashlib.sha256((work / 'plan').read_bytes()).hexdigest() == row['plan_sha256']]
+    require(len(matches) == 1, 'original saved route plan required')
+    work = matches[0]
+    before = read_private(work / 'before.json') if (work / 'before.json').exists() else {
+        'config': config, 'values': read_private(config['variables_file'])}
+    old_config, values = before['config'], before['values']
+    require(digest(old_config) == row['config_sha256'] and digest(values) == row['variables_sha256'],
+            'original edge authority required')
+    require(digest({name: hashlib.sha256((work / name).read_bytes()).hexdigest()
+                    for name in ('main.tf', 'variables.tf', '.terraform.lock.hcl')}) == row['module_sha256'],
+            'original route module required')
+    candidate = read_private(work / 'candidate.json')
+    require(candidate == {**values, 'routes': {**values.get('routes', {}), request['application_id']: checked_request(request)}},
+            'original route candidate required')
+    command = lambda *args: native(['terraform', '-chdir=' + str(work), *args])
+    plan = json.loads(command('show', '-json', str(work / 'plan')))
+    creates = validate_plan(plan, request, values)
+    state = read_private(config['state_file']); identities = owned(state)
+    require(state['lineage'] == old_config['state_lineage'] and set(identities) == set(old_config['owned_resources']) | creates
+            and all(identities[k] == v for k, v in old_config['owned_resources'].items()), 'incomplete applied route')
+    updated_config = {**old_config, 'owned_resources': identities}
+    require(config in (old_config, updated_config) and read_private(config['variables_file']) in (values, candidate),
+            'edge authority changed since interrupted apply')
+    result = output_route(state, request, candidate)
+    # Terraform refresh is read-only here. A partial apply or actual cloud drift
+    # remains an operator repair; never replay the original stale apply plan.
+    command('plan', '-input=false', '-lock-timeout=5s', '-var-file=' + str(work / 'candidate.json'),
+            '-out=' + str(work / 'recovery-plan'))
+    observed = json.loads(command('show', '-json', str(work / 'recovery-plan')))
+    require(not observed.get('errored') and all(item['change']['actions'] == ['no-op']
+            or item.get('mode') == 'data' and item['change']['actions'] == ['read']
+            for item in observed.get('resource_changes', []))
+            and all(change['actions'] == ['no-op'] for change in observed.get('output_changes', {}).values()),
+            'interrupted route still requires cloud reconciliation')
+    require(read_private(config['state_file']) == state and config_at(config_path) == config,
+            'edge changed during recovery observation')
+    durable_write(config['variables_file'], encoded(candidate))
+    durable_write(config_path, encoded(updated_config))
+    durable_write(journal, encoded({**row, 'phase': 'applied', 'result': result, 'state_sha256_after': digest(state)}))
+    return updated_config
+
+
+def ensure(config_path, request, *, dns_config_path=None):
+    try:
+        return _ensure(config_path, request, dns_config_path=dns_config_path)
+    except RouteError:
+        raise
+    except (ValueError, OSError, RuntimeError) as error:
+        raise RouteError('GCP_ROUTE_PREPARATION_FAILED') from error
+
+
+def _ensure(config_path, request, *, dns_config_path=None):
     route, config = checked_request(request), config_at(config_path)
     with locked(config) as root:
         lifecycle_ready(root)
         require(config_at(config_path) == config, 'authority changed before locking')
         for existing in root.glob('gcp-route-*.json'):
-            require(read_private(existing).get('phase') == 'applied', 'unfinished edge operation requires manual reconciliation')
+            if read_private(existing).get('phase') != 'applied':
+                try:
+                    config = recover(config_path, config, existing)
+                except Exception as error:
+                    raise RouteError('GCP_ROUTE_RECONCILE_REQUIRED', unknown=True) from error
         state, values = bound_state(config), read_private(config['variables_file'])
         routes = values.get('routes', {})
         require(isinstance(routes, dict), 'route map required')
@@ -221,6 +360,8 @@ def ensure(config_path, request):
                     {k: v for k, v in routes[key].items() if k != 'enabled'} == route,
                     'existing application route changes require separate approval')
             return output_route(state, request, values)
+        if not isinstance(dns_config_path, str) or not Path(dns_config_path).is_absolute():
+            raise RouteError('GCP_CERTIFICATE_DNS_NOT_CONFIGURED')
         require(all(route['hostname'] != r['hostname'] and route['node_port'] != r['node_port'] for r in
                     [{**values, 'node_port': values.get('node_port', 30080)}, *routes.values()]),
                 'hostname or NodePort already allocated')
@@ -232,6 +373,7 @@ def ensure(config_path, request):
             durable_write(work / name, raw)
         durable_write(work / 'backend.tf.json', encoded({'terraform': {'backend': {'local': {'path': config['state_file']}}}}))
         durable_write(work / 'candidate.json', encoded(candidate))
+        durable_write(work / 'before.json', encoded({'config': config, 'values': values}))
         command = lambda *args: native(['terraform', '-chdir=' + str(work), *args])
         command('init', '-input=false', '-lockfile=readonly')
         command('plan', '-input=false', '-lock=true', '-var-file=' + str(work / 'candidate.json'), '-out=' + str(work / 'plan'))
@@ -247,7 +389,11 @@ def ensure(config_path, request):
             require(hashlib.sha256((work / 'plan').read_bytes()).hexdigest() == row['plan_sha256'] and
                     digest({name: hashlib.sha256((work / name).read_bytes()).hexdigest() for name in files}) == module_sha,
                     'saved plan or copied module changed before apply')
-            command('apply', '-input=false', str(work / 'plan'))
+            # Native GCP URL map/firewall operations routinely exceed 110 seconds.
+            # Keep this below the route executor's 30-minute deadline.
+            native(['terraform', '-chdir=' + str(work), 'apply', '-input=false', str(work / 'plan')], timeout=900,
+                   env={'RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG': dns_config_path,
+                        'PYTHONPATH': str(Path(__file__).resolve().parent)})
             after = read_private(config['state_file']); identities = owned(after)
             require(after['lineage'] == config['state_lineage'] and set(identities) == set(config['owned_resources']) | creates and
                     all(identities[k] == v for k, v in config['owned_resources'].items()), 'applied state ownership mismatch')
@@ -258,9 +404,13 @@ def ensure(config_path, request):
             durable_write(config_path, encoded({**config, 'owned_resources': identities}))
             durable_write(journal, encoded({**row, 'phase': 'applied', 'result': result, 'state_sha256_after': digest(after)}))
             return result
-        except Exception:
-            durable_write(journal, encoded({**row, 'phase': 'unknown'}))
-            raise
+        except Exception as error:
+            timed_out = isinstance(error.__cause__, subprocess.TimeoutExpired)
+            code = 'GCP_ROUTE_APPLY_TIMEOUT' if timed_out else 'GCP_ROUTE_APPLY_INCOMPLETE'
+            if (work / 'certificate-dns-error.json').exists():
+                code = 'GCP_CERTIFICATE_DNS_FAILED'
+            durable_write(journal, encoded({**row, 'phase': 'unknown', 'error': {'code': code}}))
+            raise RouteError(code, unknown=True) from error
 
 
 execute = ensure
@@ -268,5 +418,6 @@ execute = ensure
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(); parser.add_argument('--config', required=True); parser.add_argument('--request', required=True)
+    parser.add_argument('--dns-config')
     args = parser.parse_args()
-    print(json.dumps(ensure(args.config, read_private(args.request))))
+    print(json.dumps(ensure(args.config, read_private(args.request), dns_config_path=args.dns_config)))

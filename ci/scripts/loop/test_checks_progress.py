@@ -22,7 +22,7 @@ ENV = {'GITHUB_REPOSITORY': 'Jasmin-Softbank/railshot-apps', 'GITHUB_RUN_ID': '1
 def event(name='agent.heartbeat', **attributes):
     if name.startswith('loop.'):
         return event_record(name, component='loop', phase='loop', outcome='PASS' if name.endswith('completed') else 'RUNNING',
-                            run_id='native-run', attributes={'sdk_invocations': 0 if name.endswith('completed') else None})
+                            run_id='native-run', attributes={'sdk_invocations': 0 if name.endswith('completed') else None, **attributes})
     return event_record(name, component='loop', phase='agent', outcome='RUNNING', run_id='native-run',
                         attempt_id='native-run:1', attributes={'role': 'fixer', 'provider': 'codex', 'elapsed_ms': 25000,
                         'process_running': name == 'agent.heartbeat', 'snapshot_state': 'current',
@@ -54,6 +54,66 @@ class FakeChecks(progress.ChecksProgress):
 
 
 class ChecksProgressTest(unittest.TestCase):
+    def test_repair_receipt_requires_host_release_verdict_and_redacts_descriptions(self):
+        record = {'exit_code': 0, 'written': ['Dockerfile'], 'output': {
+            'status': 'proposed', 'files_changed': [{'path': 'Dockerfile', 'why': 'token=secret-canary'}]}}
+        record['repair_activity'] = loop.repair_changes(record)
+        self.assertEqual(record['repair_activity']['changes'][0]['summary'], '[REDACTED]')
+        sink = FakeChecks()
+        with patch.dict(os.environ, {'RAILSHOT_RUN_ID': 'native-run', 'RAILSHOT_ATTEMPT_ID': 'native-run:1'}):
+            loop.publish_repair(sink, 'fixer', record, 'L2')
+            loop.publish_repair(sink, 'fixer', record, 'L2', {'ok': True, 'release_eligible': False})
+            loop.publish_repair(sink, 'fixer', record, 'L2', {'ok': True, 'release_eligible': True})
+        rows = json.loads(sink.payload()['text'])['items']
+        self.assertEqual([r['repair']['state'] for r in rows], ['verifying', 'failed', 'succeeded'])
+        for r in rows:
+            self.assertEqual(progress.restored_row(r), r)
+        self.assertNotIn('secret-canary', json.dumps(rows))
+        invalid = event('agent.repair', repair={**rows[0]['repair'], 'raw_prompt': 'forbidden'})
+        with self.assertRaises(ValueError):
+            progress.row(invalid)
+
+    def test_loop_budget_is_optional_bounded_and_survives_check_restore(self):
+        self.assertNotIn('agent_budget', progress.row(event('loop.started')))
+        for limit in (0, 1, 2, 3):
+            budget = {'enabled': limit > 0, 'max_invocations': limit}
+            for name in ('loop.started', 'loop.completed'):
+                with self.subTest(limit=limit, event=name):
+                    row = progress.row(event(name, agent_budget=budget, sdk_invocations=None))
+                    self.assertEqual(row['agent_budget'], budget)
+                    self.assertIsNone(row['sdk_invocations'])
+                    row['sequence'] = 1
+                    self.assertEqual(progress.restored_row(row), row)
+        for budget in (None, {}, {'enabled': True, 'max_invocations': 4},
+                       {'enabled': True, 'max_invocations': 0}, {'enabled': False, 'max_invocations': 2},
+                       {'enabled': 1, 'max_invocations': 1}, {'enabled': True, 'max_invocations': True},
+                       {'enabled': True, 'max_invocations': 2, 'token': 'sentinel'}):
+            with self.subTest(invalid=budget), self.assertRaises(ValueError):
+                progress.row(event('loop.started', agent_budget=budget))
+
+    def test_real_loop_emits_declared_budget_and_confirmed_zero_without_sdk(self):
+        for repair, packaging, limit in ((0, 1, 0), (1, 0, 1), (1, 1, 2), (2, 1, 3)):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); upload = root / 'upload'; run = root / 'run'
+                upload.mkdir(); (upload / 'app.py').write_text('print(1)')
+                sink = FakeChecks()
+                def gate(ws, run, attempt, *args, **kwargs):
+                    path = run / f'gate-{attempt}'; path.mkdir()
+                    verdict = {'ok': True, 'release_eligible': True, 'status': 'PASS'}
+                    (path / 'verdict.json').write_text(json.dumps(verdict))
+                    return verdict
+                with patch.object(sys, 'argv', ['loop', str(upload), str(run), '--max-attempts', str(repair),
+                                              '--max-packaging-attempts', str(packaging)]), \
+                        patch.object(loop, 'progress_from_environment', return_value=sink), \
+                        patch.object(loop, 'gate', side_effect=gate), patch.object(loop, 'agent') as agent:
+                    self.assertEqual(loop.main(), 0)
+                    agent.assert_not_called()
+                events = json.loads(sink.remote['output']['text'])['items']
+                self.assertEqual([row['event_name'] for row in events], ['loop.started', 'loop.completed'])
+                self.assertTrue(all(row['agent_budget'] == {'enabled': limit > 0, 'max_invocations': limit} for row in events))
+                self.assertIsNone(events[0]['sdk_invocations'])
+                self.assertEqual(events[-1]['sdk_invocations'], 0)
+
     def test_live_safe_projection_rate_bound_and_neutral_zero_call_completion(self):
         sink = FakeChecks()
         with patch.object(progress.time, 'monotonic', return_value=0) as clock:

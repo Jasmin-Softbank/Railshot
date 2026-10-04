@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 
 class WorkflowPolicyTest(unittest.TestCase):
     def run_loop_policy(self, root, attempts, *, provider='codex', credentials=False,
-                        loop_exit=0, entry=None):
+                        loop_exit=0, entry=None, packaging=None):
         """Run the actual workflow shell; pip and the expensive gate are local stand-ins."""
         step = next(s for s in yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())
                     ['jobs']['loop']['steps'] if s.get('id') == 'loop')
@@ -46,10 +46,12 @@ class WorkflowPolicyTest(unittest.TestCase):
                'RAILSHOT_PROGRESS_TOKEN': ''}
         for key in ('CODEX_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_HOME',
                     'RAILSHOT_CODEX_HOME', 'RAILSHOT_AUTH_MODE', 'ANTHROPIC_BASE_URL',
-                    'RAILSHOT_MAX_REPAIR_ATTEMPTS'):
+                    'RAILSHOT_MAX_REPAIR_ATTEMPTS', 'RAILSHOT_MAX_PACKAGING_ATTEMPTS'):
             env.pop(key, None)
         if attempts is not None:
             env['RAILSHOT_MAX_REPAIR_ATTEMPTS'] = attempts
+        if packaging is not None:
+            env['RAILSHOT_MAX_PACKAGING_ATTEMPTS'] = packaging
         if credentials:
             env.update(RAILSHOT_AUTH_MODE='api-key', CODEX_API_KEY='synthetic-codex',
                        ANTHROPIC_API_KEY='synthetic-claude', OPENAI_API_KEY='synthetic-openai',
@@ -74,8 +76,18 @@ class WorkflowPolicyTest(unittest.TestCase):
                         self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
                         self.assertEqual(Path(tmp, 'output').read_text(), f'passed={str(loop_exit == 0).lower()}\n')
 
-    def test_repair_defaults_to_three_and_nonzero_still_requires_provider_auth(self):
-        for attempts in (None, '', '1', '2', '3'):
+    def test_default_allows_one_adapter_and_two_fixers_with_configured_provider(self):
+        for attempts in (None, ''):
+            with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
+                result = self.run_loop_policy(tmp, attempts, credentials=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                invocation = json.loads(Path(tmp, 'invocation.json').read_text())
+                self.assertEqual(invocation['args'][invocation['args'].index('--max-attempts') + 1], '2')
+                self.assertEqual(invocation['args'][invocation['args'].index('--max-packaging-attempts') + 1], '1')
+                self.assertIn('CODEX_API_KEY', invocation['model_env'])
+
+    def test_nonzero_repair_requires_explicit_budget_and_provider_auth(self):
+        for attempts in ('1', '2'):
             for provider, sdk in (('codex', 'openai-codex==0.159.3'), ('claude', 'claude-agent-sdk==0.2.158')):
                 for credentials in (False, True):
                     with self.subTest(attempts=attempts, provider=provider, credentials=credentials), tempfile.TemporaryDirectory() as tmp:
@@ -87,12 +99,12 @@ class WorkflowPolicyTest(unittest.TestCase):
                             continue
                         self.assertEqual(result.returncode, 0, result.stderr)
                         args = json.loads(Path(tmp, 'invocation.json').read_text())['args']
-                        self.assertEqual(args[args.index('--max-attempts') + 1], attempts or '3')
+                        self.assertEqual(args[args.index('--max-attempts') + 1], attempts)
                         self.assertEqual(Path(tmp, 'pip.log').read_text().splitlines(),
                                          [f'install -q {sdk}', 'install -q pyyaml jsonschema'])
 
     def test_repair_attempts_reject_noncanonical_values_before_install_or_loop(self):
-        for attempts in ('-1', '4', '00', '03', '1.0', 'true', ' 0', '0 ', '0\n', '1; true', '$(true)'):
+        for attempts in ('-1', '3', '4', '00', '03', '1.0', 'true', ' 0', '0 ', '0\n', '1; true', '$(true)'):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, attempts, credentials=True)
                 self.assertNotEqual(result.returncode, 0)
@@ -142,7 +154,7 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(len(steps), 1)
         step = steps[0]
         self.assertEqual(step['env']['RAILSHOT_PROGRESS_TOKEN'], '${{ github.token }}')
-        for attempts in ('0', '3'):
+        for attempts in ('0', '2'):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as directory:
                 env = {**os.environ, 'RAILSHOT_PROGRESS_TOKEN': 'sentinel-progress-token', 'RAILSHOT_AUTH_MODE': 'api-key',
                        'RAILSHOT_MAX_REPAIR_ATTEMPTS': attempts,
@@ -173,31 +185,37 @@ class WorkflowPolicyTest(unittest.TestCase):
         import ci_scope
         workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())
         jobs = workflow['jobs']
-        self.assertEqual(set(jobs), set(ci_scope.JOBS) | {'changes', 'gate', 'release'})
-        self.assertEqual(set(jobs['gate']['needs']), set(ci_scope.JOBS) | {'changes'})
-        self.assertEqual(jobs['gate']['if'], 'always()')
+        self.assertEqual(set(jobs), {'changes', 'containers', 'gate', 'release', 'full-checks'})
+        self.assertEqual(set(jobs['gate']['needs']), {'changes', 'containers'})
+        self.assertEqual(jobs['gate']['if'], "always() && github.event_name != 'workflow_dispatch'")
+        self.assertEqual(jobs['full-checks']['if'], "github.event_name == 'workflow_dispatch'")
+        self.assertEqual(jobs['changes']['if'], "github.event_name != 'workflow_dispatch'")
         self.assertEqual(set(jobs['changes']['outputs']),
-                         set(ci_scope.JOBS) | {'selected', 'container_components', 'release'})
+                         {'containers', 'selected', 'container_components', 'release'})
+        full = yaml.safe_load((HERE.parents[1] / '.github/workflows/platform-checks.yml').read_text())
+        self.assertEqual(set(full.get('on', full.get(True))), {'workflow_call', 'workflow_dispatch'})
+        self.assertEqual(set(full['jobs']), set(ci_scope.JOBS))
+        self.assertIs(full['jobs']['containers']['with']['publish'], False)
         events = workflow.get('on', workflow.get(True))  # PyYAML's YAML 1.1 "on" key.
         for event in ('pull_request', 'push'):
             self.assertFalse({'paths', 'paths-ignore'} & set(events[event] or {}))
-        for job in ci_scope.JOBS:
+        for job in ('containers',):
             self.assertEqual(jobs[job]['needs'], 'changes')
             output = f"['{job}']" if '-' in job else f'.{job}'
             self.assertEqual(jobs[job]['if'], f"needs.changes.outputs{output} == 'true'")
         self.assertEqual(jobs['containers']['uses'], './.github/workflows/platform-containers.yml')
-        self.assertEqual(jobs['containers']['permissions'], {'contents': 'read'})
+        self.assertEqual(jobs['containers']['permissions'], {'contents': 'read', 'packages': 'write'})
         trusted = "github.event_name == 'push' && github.ref == vars.RAILSHOT_PLATFORM_VERIFY_REF && vars.RAILSHOT_AUTO_RELEASE == 'true'"
         selection = next(step for step in jobs['changes']['steps'] if step.get('id') == 'select')
         self.assertEqual(selection['env']['AUTO_RELEASE'], '${{ ' + trusted + ' }}')
         self.assertEqual(jobs['containers']['with']['components'], '${{ needs.changes.outputs.container_components }}')
-        self.assertEqual(jobs['containers']['with']['export_image'], "${{ needs.changes.outputs.release == 'true' && " + trusted + ' }}')
+        self.assertEqual(jobs['containers']['with']['publish'], "${{ needs.changes.outputs.release == 'true' && " + trusted + ' }}')
         release = jobs['release']
         self.assertEqual(release['needs'], ['changes', 'gate'])
         self.assertEqual(release['if'], "${{ always() && !cancelled() && needs.gate.result == 'success' && needs.changes.outputs.release == 'true' && " + trusted + ' }}')
         self.assertEqual(release['uses'], './.github/workflows/platform-publish.yml')
-        self.assertEqual(release['with'], {'components': '["dashboard","api","mcp","ci-runner"]',
-            'publish': True, 'deploy': True, 'multicloud': "${{ vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' }}", 'skip_build': True,
+        self.assertEqual(release['with'], {'components': '${{ needs.changes.outputs.container_components }}',
+            'publish': True, 'deploy': True, 'multicloud': False, 'skip_build': True,
             'ci_run_id': "${{ format('{0}', github.run_id) }}"})
         self.assertEqual(release['permissions'], {'contents': 'write', 'actions': 'read', 'packages': 'write', 'id-token': 'write'})
 
@@ -247,12 +265,12 @@ class WorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(release['permissions'], {'contents': 'read', 'actions': 'read', 'packages': 'write'})
         self.assertNotIn('REGISTRY_', json.dumps(jobs['loop']))
         login = next(s for s in release['steps'] if s.get('name') == 'Log in to GHCR')
-        self.assertEqual(login['env'], {'GHCR_TOKEN': '${{ secrets.GITHUB_TOKEN }}'})
+        self.assertEqual(login['with'], {'registry': 'ghcr.io', 'username': '${{ github.actor }}', 'password': '${{ secrets.GITHUB_TOKEN }}', 'logout': True})
         self.assertEqual([s['name'] for s in release['steps'] if 'secrets.GITHUB_TOKEN' in json.dumps(s)],
                          ['Log in to GHCR', "Recover the same workflow run's publication history"])
         scripts = '\n'.join(s.get('run', '') for s in release['steps'])
         self.assertIn('"$REGISTRY_PREFIX/${TENANT}-${APP}"', scripts)
-        self.assertIn('docker login ghcr.io', scripts)
+        self.assertTrue(login['uses'].startswith('docker/login-action@'))
         self.assertNotIn('REGISTRY_PASSWORD', json.dumps(release))
         self.assertNotIn('REGISTRY_USERNAME', json.dumps(release))
         self.assertNotIn('GITOPS_TOKEN', json.dumps(release))
@@ -290,33 +308,39 @@ class WorkflowPolicyTest(unittest.TestCase):
         for name in ('GHCR_PULL_USERNAME', 'GHCR_PULL_TOKEN', 'PULL_SECRET_NAMESPACE', 'PULL_SECRET_NAME'):
             self.assertNotEqual(subprocess.run(['bash', '-c', guard['run']], env={**configured, name: ''}, capture_output=True).returncode, 0)
 
-    def test_login_uses_password_stdin_and_private_ephemeral_config(self):
+    def test_standard_docker_actions_keep_private_ephemeral_credentials(self):
         release = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']['release']
-        login = next(s for s in release['steps'] if s.get('name') == 'Log in to GHCR')
-        cleanup = next(s for s in release['steps'] if s.get('name') == 'Remove ephemeral registry credentials')
-        self.assertEqual(cleanup['if'], 'always()')
-        self.assertNotIn('runner.', json.dumps(release['env']))
-        prepare = next(s for s in release['steps'] if s.get('name') == 'Set registry credential path')
+        steps = release['steps']
+        setup = next(s for s in steps if s.get('name') == 'Match the CI containerd image store')
+        self.assertTrue(setup['uses'].startswith('docker/setup-docker-action@'))
+        self.assertTrue(json.loads(setup['with']['daemon-config'])['features']['containerd-snapshotter'])
+        login = next(s for s in steps if s.get('name') == 'Log in to GHCR')
+        self.assertRegex(login['uses'], r'^docker/login-action@[0-9a-f]{40}$')
+        self.assertIs(login['with']['logout'], True)
+        self.assertIs(setup['with']['set-host'], True)
+        prepare = next(s for s in steps if s.get('name') == 'Set registry credential path')
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            env = {**os.environ, 'CAPTURE': tmp, 'RUNNER_TEMP': tmp,
-                   'GITHUB_ENV': str(root / 'env'), 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
-                   'REGISTRY_PREFIX': 'ghcr.io/owner',
-                   'GITHUB_ACTOR': 'workflow-actor', 'GHCR_TOKEN': 'synthetic-test-secret'}
+            env = {**os.environ, 'RUNNER_TEMP': tmp, 'GITHUB_ENV': str(root / 'env'),
+                   'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2'}
             subprocess.run(['bash', '-c', prepare['run']], env=env, check=True)
-            self.assertEqual((root / 'env').read_text(), f'DOCKER_CONFIG={tmp}/railshot-registry-123-2\n')
             env['DOCKER_CONFIG'] = str(root / 'railshot-registry-123-2')
-            # This shell function captures the actual workflow's argv/stdin without contacting a registry.
-            stub = 'docker() { printf "%s\\n" "$@" > "$CAPTURE/argv"; cat > "$CAPTURE/stdin"; }\n'
-            result = subprocess.run(['bash', '-c', stub + login['run']], env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((root / 'argv').read_text().splitlines(),
-                             ['login', 'ghcr.io', '--username', 'workflow-actor', '--password-stdin'])
-            self.assertEqual((root / 'stdin').read_text(), env['GHCR_TOKEN'])
-            self.assertNotIn(env['GHCR_TOKEN'], result.stdout + result.stderr + (root / 'argv').read_text())
             self.assertEqual(Path(env['DOCKER_CONFIG']).stat().st_mode & 0o777, 0o700)
-            subprocess.run(['bash', '-c', cleanup['run']], env=env, check=True)
-            self.assertFalse(Path(env['DOCKER_CONFIG']).exists())
+
+    def test_zero_disables_sdk_even_with_packaging_enabled(self):
+        for packaging in ('0', '1', '2', '-1'):
+            with self.subTest(packaging=packaging), tempfile.TemporaryDirectory() as tmp:
+                result = self.run_loop_policy(tmp, '0', packaging=packaging, credentials=True)
+                if packaging not in ('0', '1'):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(Path(tmp, 'pip.log').exists())
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                invocation = json.loads(Path(tmp, 'invocation.json').read_text())
+                args = invocation['args']
+                self.assertEqual(args[args.index('--max-packaging-attempts') + 1], packaging)
+                self.assertEqual(invocation['model_env'], [])
+                self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
 
     def test_pull_credentials_reach_only_trusted_release_validation(self):
         jobs = yaml.safe_load((HERE.parent / 'workflows/railshot-deploy.yml').read_text())['jobs']

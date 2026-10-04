@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import { setTimeout as pause } from 'node:timers/promises';
-import { inspectArchive, validateFiles, archiveLimits } from './archive.js';
+import { inspectArchive, validateFiles, archiveLimits, documentationOnly, documentationOnlyMessage } from './archive.js';
 import { APP_NAME, APP_NAME_MESSAGE, TENANT_NAME, TARGET_ID, SOURCE_COMMIT } from './contract.js';
 import { readPublished } from './published.js';
 import { readSourceArchive, readSourceResponse, sourceSnapshotLimit } from './source-snapshot.js';
 import { AgentEventError, agentEventCheckName, agentEventLimits, validateEventBinding, validateEventRun, readAgentEventCheck, emptyAgentEvents } from './agent-events.js';
+import { diagnosticLimits, readDiagnosticArchive, readDiagnosticCase, sha256 } from './diagnostics.js';
 
 const API = 'https://api.github.com';
 const diagnosticLimit = 2 * 1024 * 1024;
@@ -60,7 +61,22 @@ function safeDiagnostics(evidence, attempt, artifactId) {
 }
 
 export class ServiceError extends Error {
-  constructor(message, status = 500, code) { super(message); Object.assign(this, { status, code }); }
+  constructor(message, status = 500, code) { super(message); Object.assign(this, { status, code, retryable: false }); }
+}
+const transientRead = (error) => error.retryable === true || error instanceof TypeError || ['TimeoutError', 'AbortError'].includes(error.name);
+
+export class SubmissionError extends ServiceError {
+  constructor(phase, cause) {
+    const labels = { source_lookup: '소스 저장소 조회', source_upload: '소스 파일 업로드',
+      source_tree: '소스 파일 목록 등록', source_commit: '소스 커밋 생성', source_ref: '소스 브랜치 반영', ci_dispatch: 'CI 실행 접수' };
+    const upstreamStatus = Number.isInteger(cause?.upstreamStatus) ? cause.upstreamStatus : null;
+    const reason = cause?.name === 'TimeoutError' ? 'timeout' : 'upstream_failure';
+    const detail = upstreamStatus ? `GitHub HTTP ${upstreamStatus}` : reason === 'timeout' ? 'GitHub 응답 시간 초과' : 'GitHub 통신 오류';
+    const unknown = phase === 'ci_dispatch' && (upstreamStatus === null || upstreamStatus >= 500 || upstreamStatus === 408);
+    super(`${labels[phase]} 중 ${detail}가 발생했습니다. ${unknown ? '실행 접수 응답을 확인하지 못했습니다.' : phase === 'ci_dispatch' ? 'GitHub가 CI 실행 접수를 거절했습니다.' : 'CI 실행은 아직 요청하지 않았습니다.'}`,
+      502, phase === 'ci_dispatch' ? unknown ? 'CI_DISPATCH_UNCONFIRMED' : 'CI_DISPATCH_REJECTED' : 'SOURCE_REGISTRATION_FAILED');
+    Object.assign(this, { phase, upstream_status: upstreamStatus, reason, outcomeUnknown: unknown });
+  }
 }
 
 export function createDeploymentService(config, fetchImpl = fetch) {
@@ -90,9 +106,11 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         ...(options.body ? { 'content-type': 'application/json' } : {}),
         ...options.headers,
       },
-    });
+    }).catch((error) => { throw Object.assign(error, { retryable: true }); });
     if (!response.ok) {
-      throw new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502);
+      throw Object.assign(new ServiceError(`GitHub API 요청 실패 (${response.status}).`, [404, 409].includes(response.status) ? response.status : 502), {
+        upstreamStatus: response.status, retryable: response.status >= 500 || [408, 429].includes(response.status)
+          || response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after')) });
     }
     if (response.status === 204) return {};
     if (maxBytes === 0) {
@@ -182,67 +200,108 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     return createHash('sha1').update(`blob ${content.length}\0`).update(content).digest('hex');
   }
 
-  async function deploy({ app, files, source, target_id = targetId }) {
+  async function deploy({ app, files, source, target_id = targetId, operation_id, onPrepared }) {
     if (typeof app !== 'string' || !APP_NAME.test(app)) throw new ServiceError(APP_NAME_MESSAGE, 400);
     permittedTarget(target_id);
+    if (operation_id !== undefined && !/^[a-f0-9-]{36}$/.test(operation_id)) throw new ServiceError('배포 요청 식별자가 잘못되었습니다.', 400);
     const acceptedFiles = validateFiles(files);
+    if (documentationOnly(acceptedFiles)) throw new ServiceError(documentationOnlyMessage, 422);
     const prefix = `apps/${tenant}/${app}`;
-    const branch = await request(`${repoPath}/git/ref/heads/${encodeURIComponent(ref)}`);
-    const parent = branch.object.sha;
-    if (!SOURCE_COMMIT.test(parent)) throw new ServiceError('소스 commit SHA를 확인하지 못했습니다.', 502);
-    let sourceCommit = parent;
-    const base = await request(`${repoPath}/git/commits/${parent}`);
-    const existing = await findAppTree(base.tree.sha, app);
-    const previous = new Map(existing?.map((item) => [item.path, item]) || []);
-    const changes = { added: 0, updated: 0, deleted: 0, unchanged: 0 };
-    const treeEntries = [];
-    for (const file of acceptedFiles) {
-      const before = previous.get(file.path);
-      let sha = blobSha(file.content);
-      if (!before) changes.added++;
-      else if (before.sha !== sha || before.mode !== '100644' || before.type !== 'blob') changes.updated++;
-      else changes.unchanged++;
-      if (before?.sha !== sha || before.type !== 'blob') {
-        const blob = await request(`${repoPath}/git/blobs`, {
-          method: 'POST',
-          body: JSON.stringify({ content: file.content.toString('base64'), encoding: 'base64' }),
-        });
-        sha = blob.sha;
+    let phase = 'source_lookup';
+    try {
+      const branch = await request(`${repoPath}/git/ref/heads/${encodeURIComponent(ref)}`);
+      const parent = branch.object.sha;
+      if (!SOURCE_COMMIT.test(parent)) throw new ServiceError('소스 commit SHA를 확인하지 못했습니다.', 502);
+      let sourceCommit = parent;
+      const base = await request(`${repoPath}/git/commits/${parent}`);
+      const existing = await findAppTree(base.tree.sha, app);
+      const previous = new Map(existing?.map((item) => [item.path, item]) || []);
+      const changes = { added: 0, updated: 0, deleted: 0, unchanged: 0 };
+      const treeEntries = [];
+      phase = 'source_upload';
+      for (const file of acceptedFiles) {
+        const before = previous.get(file.path);
+        let sha = blobSha(file.content);
+        if (!before) changes.added++;
+        else if (before.sha !== sha || before.mode !== '100644' || before.type !== 'blob') changes.updated++;
+        else changes.unchanged++;
+        if (before?.sha !== sha || before.type !== 'blob') {
+          const blob = await request(`${repoPath}/git/blobs`, {
+            method: 'POST',
+            body: JSON.stringify({ content: file.content.toString('base64'), encoding: 'base64' }),
+          });
+          sha = blob.sha;
+        }
+        treeEntries.push({ path: file.path, mode: '100644', type: 'blob', sha });
       }
-      treeEntries.push({ path: file.path, mode: '100644', type: 'blob', sha });
-    }
-    const incomingPaths = new Set(acceptedFiles.map((file) => file.path));
-    changes.deleted = [...previous.keys()].filter((path) => !incomingPaths.has(path)).length;
-    if (changes.added || changes.updated || changes.deleted) {
-      // Replace only this app's tree; absent paths disappear, while other apps stay on base_tree.
-      const appTree = await request(`${repoPath}/git/trees`, {
-        method: 'POST', body: JSON.stringify({ tree: treeEntries }),
+      const incomingPaths = new Set(acceptedFiles.map((file) => file.path));
+      changes.deleted = [...previous.keys()].filter((path) => !incomingPaths.has(path)).length;
+      let treeSha = base.tree.sha;
+      if (changes.added || changes.updated || changes.deleted) {
+        phase = 'source_tree';
+        // Replace only this app's tree; absent paths disappear, while other apps stay on base_tree.
+        // ponytail: cap each GitHub tree write at 100 entries; large flat trees can return 504.
+        let appTree;
+        for (let offset = 0; offset < treeEntries.length; offset += 100) {
+          appTree = await request(`${repoPath}/git/trees`, {
+            method: 'POST', body: JSON.stringify({ ...(appTree ? { base_tree: appTree.sha } : {}), tree: treeEntries.slice(offset, offset + 100) }),
+          });
+        }
+        const tree = await request(`${repoPath}/git/trees`, {
+          method: 'POST', body: JSON.stringify({ base_tree: base.tree.sha, tree: [
+            { path: prefix, mode: '040000', type: 'tree', sha: appTree.sha },
+          ] }),
+        });
+        treeSha = tree.sha;
+      }
+      // A unique source commit binds even an unchanged rebuild to one durable request.
+      if (changes.added || changes.updated || changes.deleted || operation_id) {
+        phase = 'source_commit';
+        const commit = await request(`${repoPath}/git/commits`, {
+          method: 'POST',
+          body: JSON.stringify({ message: `${existing ? 'fix: update' : 'feat: add'} ${tenant}/${app} via entrypoints PoC${source?.type === 'github' ? `\n\nSource: ${source.repository}@${source.sha}` : ''}${operation_id ? `\n\nRailshot-Request: ${operation_id}\nRailshot-Target: ${target_id}` : ''}`, tree: treeSha, parents: [parent] }),
+        });
+        if (!SOURCE_COMMIT.test(commit.sha)) throw new ServiceError('등록된 commit SHA를 확인하지 못했습니다.', 502);
+        sourceCommit = commit.sha;
+        phase = 'source_ref';
+        await request(`${repoPath}/git/refs/heads/${encodeURIComponent(ref)}`, {
+          method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
+        });
+      }
+      await onPrepared?.({ source_commit: sourceCommit });
+      phase = 'ci_dispatch';
+      const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
+        method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id } }),
       });
-      const tree = await request(`${repoPath}/git/trees`, {
-        method: 'POST', body: JSON.stringify({ base_tree: base.tree.sha, tree: [
-          { path: prefix, mode: '040000', type: 'tree', sha: appTree.sha },
-        ] }),
-      });
-      const commit = await request(`${repoPath}/git/commits`, {
-        method: 'POST',
-        body: JSON.stringify({ message: `${existing ? 'fix: update' : 'feat: add'} ${tenant}/${app} via entrypoints PoC${source?.type === 'github' ? `\n\nSource: ${source.repository}@${source.sha}` : ''}`, tree: tree.sha, parents: [parent] }),
-      });
-      if (!SOURCE_COMMIT.test(commit.sha)) throw new ServiceError('등록된 commit SHA를 확인하지 못했습니다.', 502);
-      sourceCommit = commit.sha;
-      await request(`${repoPath}/git/refs/heads/${encodeURIComponent(ref)}`, {
-        method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
-      });
-    }
-    const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
-      method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id } }),
-    });
-    if (!dispatched.workflow_run_id) {
-      throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
-    }
-    return {
-      run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id, state: 'queued', changes, ...(source ? { source } : {}),
-      actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
-    };
+      if (!dispatched.workflow_run_id) {
+        throw new ServiceError('앱은 등록됐지만 Actions 실행 ID를 받지 못했습니다. GitHub Actions를 확인하세요.', 502);
+      }
+      return {
+        run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id, state: 'queued', changes, ...(source ? { source } : {}),
+        actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
+      };
+    } catch (error) { throw new SubmissionError(phase, error); }
+  }
+
+  async function findDeployment({ operation_id, source_commit, app, target_id }) {
+    permittedTarget(target_id);
+    if (!/^[a-f0-9-]{36}$/.test(operation_id) || !SOURCE_COMMIT.test(source_commit || '') || !APP_NAME.test(app || ''))
+      throw new ServiceError('실행 접수 기록이 잘못되었습니다.', 409, 'CI_BINDING_MISMATCH');
+    const commit = await request(`${repoPath}/git/commits/${source_commit}`);
+    if (!commit.message?.split('\n').includes(`Railshot-Request: ${operation_id}`)
+        || !commit.message.split('\n').includes(`Railshot-Target: ${target_id}`))
+      throw new ServiceError('소스 커밋과 배포 요청이 일치하지 않습니다.', 409, 'CI_BINDING_MISMATCH');
+    const listing = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/runs?event=workflow_dispatch&head_sha=${source_commit}&per_page=100`);
+    if (!Array.isArray(listing.workflow_runs) || !Number.isSafeInteger(listing.total_count)
+        || listing.total_count !== listing.workflow_runs.length || listing.total_count > 100)
+      throw new ServiceError('실행 목록을 식별할 수 없습니다.', 409, 'CI_DISPATCH_AMBIGUOUS');
+    const matches = listing.workflow_runs.filter((run) => run.head_sha === source_commit && run.head_branch === ref
+      && run.event === 'workflow_dispatch' && run.path === `.github/workflows/${workflow}`
+      && run.display_title === `railshot:${tenant}/${app}:${target_id}:${source_commit}`);
+    if (matches.length > 1 || matches.some((run) => run.run_attempt !== 1))
+      throw new ServiceError('같은 접수 기록에 여러 실행 또는 재실행이 있습니다.', 409, 'CI_DISPATCH_AMBIGUOUS');
+    const run = matches[0];
+    return run ? { run_id: run.id, source_commit, app, target_id, actions_url: `https://github.com/${owner}/${repo}/actions/runs/${run.id}` } : null;
   }
 
   async function status(runId, expectedTargetId = targetId) {
@@ -276,7 +335,10 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     let artifactError = null;
     if (completed && conclusion === 'success') {
       try { publication = await published(runId, observed.get('release').observed_attempt, run.head_sha, false, expectedTargetId); }
-      catch { artifactError = '게시 산출물의 식별자·무결성·계약을 확인하지 못했습니다. GitHub Actions 기록을 확인하세요.'; }
+      catch (error) {
+        if (transientRead(error)) throw Object.assign(error, { retryable: true });
+        artifactError = '게시 산출물의 식별자·무결성·계약을 확인하지 못했습니다. GitHub Actions 기록을 확인하세요.';
+      }
     }
     const state = publication ? 'published' : artifactError ? 'publication_unverified'
       : completed ? 'failed' : run.status === 'in_progress' ? 'running' : 'queued';
@@ -336,7 +398,8 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     const response = await fetchImpl(`${API}${repoPath}/actions/artifacts/${artifact.id}/zip`, {
       signal: AbortSignal.timeout(30_000), headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' },
     });
-    if (!response.ok) throw new ServiceError('게시 artifact를 다운로드하지 못했습니다.', 502);
+    if (!response.ok) throw Object.assign(new ServiceError('게시 artifact를 다운로드하지 못했습니다.', 502), {
+      upstreamStatus: response.status, retryable: response.status >= 500 || [408, 429].includes(response.status) });
     const files = await inspectArchive(await readSourceResponse(response, archiveLimits.maxBytes));
     const receipt = readPublished(files, { runId, attempt, headSha, targetId: expectedTargetId, tenant });
     const publication = { ...receipt, artifact_id: artifact.id, artifact_name: name };
@@ -410,7 +473,68 @@ export function createDeploymentService(config, fetchImpl = fetch) {
     }
   }
 
-  return { deploy, status, cancel, events, publishedFiles, sourceFiles, allowTarget, targetId,
+  async function diagnosticArtifact(identity, name, maxBytes) {
+    const list = await request(`${repoPath}/actions/runs/${identity.runId}/artifacts?name=${name}&per_page=100`,
+      { redirect: 'error' }, diagnosticLimits.archive);
+    if (!Number.isSafeInteger(list.total_count) || list.total_count < 0 || list.total_count > 100
+        || !Array.isArray(list.artifacts) || list.artifacts.length !== list.total_count) throw new Error('Invalid artifact listing');
+    const matches = list.artifacts.filter((item) => item.name === name), artifact = matches[0];
+    if (matches.length !== 1 || artifact.expired !== false || !Number.isSafeInteger(artifact.id) || artifact.id < 1
+        || artifact.workflow_run?.id !== Number(identity.runId) || artifact.workflow_run?.head_sha !== identity.source_commit
+        || !Number.isSafeInteger(artifact.size_in_bytes) || artifact.size_in_bytes < 1 || artifact.size_in_bytes > maxBytes)
+      throw new Error('Invalid diagnostic artifact');
+    const signal = AbortSignal.timeout(60_000);
+    let response = await fetchImpl(`${API}${repoPath}/actions/artifacts/${artifact.id}/zip`, { redirect: 'manual', signal,
+      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' } });
+    if (response.status === 302) {
+      const url = new URL(response.headers.get('location'));
+      if (url.protocol !== 'https:' || url.username || url.password || url.port
+          || !(url.hostname.endsWith('.blob.core.windows.net') || url.hostname.endsWith('.actions.githubusercontent.com')))
+        throw new Error('Invalid diagnostic download destination');
+      await response.body?.cancel();
+      response = await fetchImpl(url.href, { redirect: 'error', signal });
+    }
+    const bytes = await readSourceResponse(response, maxBytes), digest = sha256(bytes);
+    if (artifact.digest != null && artifact.digest !== `sha256:${digest}`) throw new Error('Artifact digest mismatch');
+    return { bytes, artifact: { id: artifact.id, sha256: digest } };
+  }
+
+  async function diagnosticIdentity(runId, binding) {
+    const identity = { ...binding, runId: String(runId), tenant, owner, repo, ref, workflow };
+    validateEventBinding(identity.runId, identity); permittedTarget(identity.target_id);
+    const run = await request(`${repoPath}/actions/runs/${identity.runId}`, { redirect: 'error' }, diagnosticLimits.archive);
+    identity.attempt = validateEventRun(run, identity);
+    if (run.status !== 'completed' || binding.run_attempt != null && binding.run_attempt !== identity.attempt)
+      throw new Error('Diagnostic attempt not final or changed');
+    return identity;
+  }
+
+  async function diagnostics(runId, binding) {
+    const identity = await diagnosticIdentity(runId, binding);
+    const { bytes, artifact } = await diagnosticArtifact(identity, `diagnostics-${identity.attempt}`, diagnosticLimits.archive);
+    const result = readDiagnosticCase(await readDiagnosticArchive(bytes), { run_id: Number(runId), producer_attempt: identity.attempt,
+      source_commit: identity.source_commit, app: identity.app, tenant, target_id: identity.target_id }, artifact);
+    await diagnosticIdentity(runId, { ...binding, run_attempt: identity.attempt });
+    return result;
+  }
+
+  async function diagnosticCurrent(diagnostic) {
+    const binding = diagnostic.binding;
+    await diagnosticIdentity(binding.run_id, { ...binding, run_attempt: binding.producer_attempt });
+  }
+
+  async function diagnosticSource(diagnostic) {
+    const binding = diagnostic?.binding;
+    if (diagnostic?.state !== 'ready' || !binding || !diagnostic.source.snapshot
+        || diagnostic.source.tested_sha256 !== diagnostic.source.after_sha256) throw new Error('Diagnostic source unavailable');
+    const identity = await diagnosticIdentity(binding.run_id, { ...binding, run_attempt: binding.producer_attempt });
+    const { bytes } = await diagnosticArtifact(identity, `diagnostic-source-${identity.attempt}`, sourceSnapshotLimit);
+    const files = await readSourceArchive(bytes, binding, diagnostic.source.tested_sha256, diagnostic.source.snapshot.sha256);
+    await diagnosticIdentity(binding.run_id, { ...binding, run_attempt: binding.producer_attempt });
+    return files;
+  }
+
+  return { deploy, findDeployment, status, cancel, events, diagnostics, diagnosticCurrent, diagnosticSource, publishedFiles, sourceFiles, allowTarget, targetId,
     identity: Object.freeze({ tenant, sourceRepository: `${owner}/${repo}` }),
     get targetIds() { return Object.freeze([...targetIds]); } };
 }

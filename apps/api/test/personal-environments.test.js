@@ -71,7 +71,7 @@ async function fixture(t) {
     assert.equal(response.status, 202);
     await until(client, `/api/v1/targets/${row.id}`, (r) => r.runtime_preparation.status === 'succeeded');
   }
-  return { directory, calls, client, target, heartbeat, until, runtime, evidence, personalAdapter, get base() { return base; }, restart: async () => { await stop(); await start(); } };
+  return { directory, calls, client, target, heartbeat, until, runtime, evidence, personalAdapter, product: () => server.productReady, get base() { return base; }, restart: async () => { await stop(); await start(); } };
 }
 
 test('current browser owns registration immediately and can query instances as soon as the client is ready without recovery', async (t) => {
@@ -458,4 +458,69 @@ test('a late proven success for the same attempt can close uncertainty before an
   assert.equal((await owner.request(path+'/receipts',final,auth)).body.status,'succeeded');
   assert.equal((await owner.request(path)).body.status,'deleted');
   assert.equal((await owner.request(path+'/operations',{action:'resume',operation_id:operation.id,reconciliation_id:check.body.reconciliation.id,confirmation:row.created.body.label,delete_data:true},{headers:{'Idempotency-Key':'late-resume'}})).status,409);
+});
+
+
+function selectedPersonalSource(targetId, expectedTargetId) {
+  const form = new FormData();
+  form.set('environment', 'onprem'); form.set('provider', 'openstack');
+  form.set('target_id', targetId); form.set('source_name', 'merged-personal-app');
+  if (expectedTargetId !== undefined) form.set('expected_target_id', expectedTargetId);
+  form.append('files', new Blob(['console.log(1)']), 'app.js'); form.set('paths', '["app.js"]');
+  return form;
+}
+
+test('modular upload preserves personal ownership and the reviewed target precondition', async (t) => {
+  const f = await fixture(t), owner = f.client(), stranger = f.client(), row = await f.target(owner);
+  await f.runtime(owner, row);
+  const submit = (client, expected, key) => client.request('/api/v1/deployments', undefined,
+    { method: 'POST', body: selectedPersonalSource(row.id, expected), headers: { 'Idempotency-Key': key } });
+  const stale = await submit(owner, 'different-target', 'review-stale');
+  assert.equal(stale.status, 409); assert.equal(stale.body.error.code, 'DEPLOYMENT_TARGET_CHANGED');
+  assert.equal((await submit(stranger, row.id, 'foreign-review')).status, 404);
+  assert.equal(f.calls.deploy.length, 0);
+  const accepted = await submit(owner, row.id, 'review-correct');
+  assert.equal(accepted.status, 202);
+  await f.until(owner, `/api/v1/deployments/${accepted.body.resource_id}`, (value) => value.status === 'succeeded');
+  assert.equal(f.calls.deploy.length, 1);
+});
+
+test('queued personal deployment rechecks connectivity before registration or CI dispatch', async (t) => {
+  const f = await fixture(t), owner = f.client(), row = await f.target(owner);
+  await f.runtime(owner, row);
+  const product = await f.product();
+  assert.equal(product.pauseForRelease(), true);
+  const accepted = await owner.request('/api/v1/deployments', undefined,
+    { method: 'POST', body: selectedPersonalSource(row.id, row.id), headers: { 'Idempotency-Key': 'queued-personal' } });
+  assert.equal(accepted.status, 202);
+  assert.equal((await owner.request(`/api/v1/deployments/${accepted.body.resource_id}`)).body.status, 'queued');
+  f.personalAdapter.verify = async () => ({ status: 'succeeded', reachable: false });
+  await f.heartbeat(owner, row);
+  product.resumeAfterRelease();
+  const stopped = await f.until(owner, `/api/v1/deployments/${accepted.body.resource_id}`, (value) => value.status === 'blocked');
+  assert.equal(stopped.body.error.code, 'TARGET_UNAVAILABLE');
+  assert.equal(stopped.body.error.outcome_unknown, false);
+  assert.equal(f.calls.deploy.length, 0);
+  const apps = await owner.request(`/api/v1/targets/${row.id}/applications`);
+  assert.equal(apps.body.items[0].status, 'queued', 'native registration never starts');
+});
+
+test('owner dashboard preferences and upstream registration tokens coexist across restart and recovery', async (t) => {
+  const f = await fixture(t), oldBrowser = f.client(), recoveredBrowser = f.client(), row = await f.target(oldBrowser);
+  assert.equal((await oldBrowser.request('/api/v1/preferences', { view: 'personal', environment: 'onprem', provider: 'openstack' }, { method: 'PUT' })).status, 200);
+  const product = await f.product();
+  const identity = product.dashboard.owner(oldBrowser.cookies.get('railshot_owner'));
+  const registration = product.registrations.create(identity.session_id, { provider: 'openstack' });
+  await f.restart();
+  const restarted = await f.product();
+  assert.equal(restarted.registrations.get(identity.session_id, registration.id).status, 'pending');
+  assert.equal(restarted.registrations.activeToken(registration.linkage_token), true);
+  const recovery = await recoveredBrowser.request('/api/v1/recoveries', { recovery_key: row.owner.body.recovery_key });
+  assert.equal(recovery.status, 200);
+  assert.equal((await recoveredBrowser.request(`/api/v1/targets/${row.id}`)).status, 200);
+  assert.deepEqual((await recoveredBrowser.request('/api/v1/preferences')).body,
+    { view: 'personal', environment: 'onprem', provider: 'openstack' });
+  assert.equal((await oldBrowser.request('/api/v1/preferences')).body.view, 'deploy');
+  assert.equal(restarted.registrations.claim(registration.linkage_token).registration_id, registration.id);
+  assert.equal(restarted.registrations.claim(registration.linkage_token), null);
 });

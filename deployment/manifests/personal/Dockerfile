@@ -26,6 +26,7 @@ COPY apps/dashboard/package.json apps/dashboard/package.json
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund --workspace=apps/api --include-workspace-root=false
 COPY apps/api/src/ apps/api/src/
 COPY apps/dashboard/index.html apps/dashboard/app.js apps/dashboard/styles.css apps/dashboard/
+COPY apps/dashboard/src/ apps/dashboard/src/
 COPY contracts/application.mjs contracts/application.mjs
 COPY apps/agent/ apps/agent/
 COPY deployment/bootstrap/client_setup/ deployment/bootstrap/client_setup/

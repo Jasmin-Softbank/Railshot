@@ -294,7 +294,7 @@ def main():
     except Exception as exc:
         unknown = isinstance(exc, RegistrationError) and exc.unknown
         result = {'status': 'unknown' if unknown else 'blocked', 'deployment_supported': False,
-                  'error': {'code': exc.code if isinstance(exc, RegistrationError) else 'APPLICATION_INPUT_INVALID',
+                  'error': {'code': exc.code if isinstance(exc, (RegistrationError, runtime.credentials.PolicyCapacityError)) else 'APPLICATION_INPUT_INVALID',
                             'retryable': False, 'outcome_unknown': unknown}}
     print(json.dumps(result))
     return 0 if result['status'] == 'succeeded' else 3

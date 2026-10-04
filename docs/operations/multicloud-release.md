@@ -1,14 +1,16 @@
-# 공통 릴리스 배포
+# 플랫폼 배포와 인프라 유지보수
 
-`railshot-ci.yml`의 성공한 `Railshot CI gate`가 같은 커밋의 플랫폼 릴리스를 호출한다. `RAILSHOT_AUTO_RELEASE=true`이고 현재 브랜치가 `RAILSHOT_PLATFORM_VERIFY_REF`와 일치하면 문서 전용 변경을 제외한 플랫폼·런타임·공통 정책 변경을 자동 게시하고 플랫폼 배포를 검증한다. 기존 플랫폼 자동 릴리스는 이 변수로 계속 운영한다. 중앙 워커와 AWS/GCP/OpenStack까지 같은 릴리스를 적용하려면 별도로 `RAILSHOT_MULTICLOUD_RELEASE=true`를 설정한다. 이 두 번째 변수는 미설정·`false`가 기본이며, 초기 운영 바인딩과 세 환경 검증을 준비한 뒤 활성화한다. 수동 실행도 저장소 변수가 `true`일 때만 `multicloud` 입력을 허용한다. `false`·미설정 상태에서 입력만 켜면 admission에서 차단한다.
+일반 PR·push는 변경된 컨테이너의 빌드와 기동 확인만 수행한다. 전체 계약 검사, 브라우저 E2E, Terraform, 임시 런타임 설치 검사는 `Railshot CI`를 대상 integration ref로 수동 실행하면 별도 `Platform full checks` workflow를 호출한다. 일반 push에서는 호출하지 않는다. 자동 배포는 `RAILSHOT_AUTO_RELEASE=true`인 정확한 `RAILSHOT_PLATFORM_VERIFY_REF` push에만 적용한다.
 
-1. dashboard/API/ci-runner를 시험하고 같은 실행에서 얻은 GHCR digest를 고정한다.
-2. 기존 `deployment/platform` 브랜치에 플랫폼 선언을 반영하고 실제 Argo 상태·파드 digest·공개 HTTPS를 검증한다.
-3. 고정된 SSM 문서가 제어 서버에서 현재 승인 브랜치와 CI gate를 다시 확인한다. 기존 build-controller와 credential-renewer를 UID/CAS로 갱신하고 새 digest로 실행된 Job을 검증한다. 진행 중인 고객 runner Job은 보존한다.
-4. AWS/GCP/OpenStack을 병렬 실행한다. 앱이 등록된 환경은 기존 Terraform state의 소유권·drift·saved plan을 확인한 뒤 허용된 기존 리소스와 공통 RBAC·pull Secret·관측 구성을 갱신하고 앱·공개 HTTPS까지 검증한다. 명시적인 `node-only` 환경은 edge와 앱 단계를 건너뛰고 K3s·Cilium·관리 TLS·노드 UID·실제 CPU/메모리 수집을 검증한다. 두 경로 모두 공통 런타임 정책에 묶인다.
-5. **세 환경 모두 같은 source SHA로 검증된 경우에만** 앱 저장소의 실행 workflow와 `PLATFORM_REF`를 승격한다. 하나라도 실패하거나 상태가 불확실하면 전체 결과는 `incomplete`이고 앱 버전을 승격하지 않는다.
+1. 선택된 이미지를 빌드하고 기동 확인한 뒤 같은 runner에서 private GHCR에 게시한다. 이미지 tar 업로드·다운로드와 별도 게시 job은 없다.
+2. `Railshot CI gate`는 기존 필수 상태 이름을 유지하며 선택된 이미지 작업의 결과만 집계한다.
+3. 배포 job이 현재 소스인지 한 번 확인하고, 고정 digest를 `deployment/platform`에 반영한 뒤 Argo 동기화·Pod 이미지·공개 HTTP를 확인한다. 별도 admission·verify job은 없다.
 
-서로 독립적인 세 클라우드의 반영은 병렬로 시작하며 완료 시각은 다를 수 있다. 공통 버전 완료 여부는 세 환경의 receipt를 묶어서 판단한다.
+문서·테스트 전용 변경은 이미지 배포를 생략한다. 단, 직전 push가 실제 운영 검증까지 끝나지 않았다면 누락된 변경을 포함하도록 플랫폼·runner 세 이미지를 함께 반영한다. 이 조회가 실패해도 배포를 막지 않고 세 이미지를 선택한다. 일반 API·대시보드 변경은 두 플랫폼 이미지만 게시한다. 두 이미지를 함께 렌더링하는 기존 선언 계약은 유지한다. MCP는 자동 플랫폼 배포 대상이 아니며 필요한 경우 수동 이미지 빌드·게시로 처리한다. CI runner 또는 앱 CI workflow 변경 시에만 runner 이미지를 추가하고 `ci-runtime`으로 build-controller와 앱 workflow를 갱신한다. 실행 중인 고객 runner Job은 보존한다.
+
+AWS/GCP/OpenStack 노드·LB·관측 전체 갱신은 일반 배포에 연결하지 않는다. 필요한 운영 작업일 때 `Publish platform containers`를 수동 실행하고 `multicloud=true`를 명시한다. 이때만 기존 `RAILSHOT_MULTICLOUD_RELEASE=true` 설정과 세 provider 바인딩이 필요하다. 인프라 전용 변경은 플랫폼 이미지를 다시 배포하지 않는다.
+
+배포 실패 시 전체 파이프라인을 반복 실행하지 않고 해당 클러스터의 Deployment, Pod, 이벤트, 로그와 Argo 상태를 확인해 직접 수정한다. 운영 변경이 필요한 동안 Argo 자동 동기화를 잠시 중지했다면 수정 내용을 선언에도 반영한 뒤 다시 켠다. 마지막으로 해당 서비스의 rollout과 공개 HTTP를 확인한다. 확인 실패는 그대로 실패로 보고하며 미확정 앱 요청을 중복 실행하지 않는다.
 
 ## 처음 연결할 때
 
@@ -82,3 +84,9 @@ API 바인딩이 준비되지 않으면 노드 변경 전에 `observer_preflight
 K3s/Cilium 버전이 그대로면 설치나 재시작 없이 정책을 갱신한다. 버전 변경은 같은 minor 안의 전진 patch만 지원하고 `upgrade.recovery_ack=true`와 변경되는 바이너리의 SHA256을 요구한다. 런타임 identity, SQLite·token·config·기존 binary 및 Cilium Helm 설정을 보관한 뒤 갱신한다. 실패한 업그레이드의 자동 rollback이나 minor/major 이동은 하지 않는다. 백업과 실패 지점을 확인한 운영자 복구가 필요하다.
 
 원래 정지된 CronJob은 계속 정지 상태로 유지하며 전체 실행 검증을 통과시키지 않는다. Worker receipt의 `scope="worker_execution"`은 컨트롤러/갱신기 실행 검증이며 고객 앱 빌드 성공을 뜻하지 않는다. 앱 빌드·배포 성공은 별도 CI/CD operation으로 확인한다.
+
+## 부분 배포와 실행 중 요청 복구
+
+일반 플랫폼 배포는 변경된 이미지에 해당하는 Deployment만 교체한다. FE 전용 변경은 대시보드만, API 전용 변경은 API만 빌드·게시하며, 변경하지 않은 Deployment 전체는 현재 deployment/platform 선언에서 보존한다. 최초 설치에는 두 이미지가 모두 필요하다. CI 워커 변경이나 공유 의존성 변경은 필요한 이미지들을 함께 갱신하되 기존 고객 앱 리소스와 실행 중인 runner Job은 교체하지 않는다.
+
+단일 API 재시작으로 INTERRUPTED가 된 요청 중 CI 실행 ID·소스·앱 바인딩이 저장되어 있고 CD가 시작되지 않은 요청은 같은 CI 실행 조회를 재개한다. 소스를 다시 제출하거나 새 CI 실행을 만들지 않는다. 게시 결과가 원래 바인딩과 일치하면 기존 요청 ID로 CD를 이어간다. 이미 CD/HTTP 단계에 진입한 요청, 삭제 요청, 소유권 변경 또는 더 최신 요청이 있는 앱은 자동 재실행하지 않는다.

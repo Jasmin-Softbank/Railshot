@@ -3,7 +3,7 @@
   "info": {
     "title": "RAILSHOT session-scoped product API",
     "version": "1.2.0",
-    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Every remote API request is session-scoped, including requests with the existing internal operator bearer. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. Optional OpenStack connection metadata is stored separately, with encrypted write-only passwords; it is not execution configuration. One API process and one persistent SQLite database on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence. Personal environments use a separate persistent owner cookie and one-time-visible recovery key, without adding an external login provider; recovery rotates both capabilities."
+    "description": "Anonymous cookie sessions separate dashboard records; no user accounts or login. Every remote API request is session-scoped, including requests with the existing internal operator bearer. Exact Host/Origin checks remain. CI/provider execution credentials remain server-only. Optional OpenStack connection metadata is stored separately, with encrypted write-only passwords; it is not execution configuration. One API process and one persistent SQLite database on one host; one unfinished operation across all sessions. Local contract tests are not cloud deployment evidence. OpenStack registration requires the configured operator Bearer, stores only a salted hash of the user-supplied enrollment key, and returns a 10-minute one-time linkage token. The existing install.sh is served unchanged. Personal environments use a separate persistent owner cookie and one-time-visible recovery key, without adding an external login provider; recovery rotates both capabilities."
   },
   "servers": [
     {
@@ -415,7 +415,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/builds/{id}": {
@@ -502,7 +502,7 @@
       "post": {
         "operationId": "createDeployment",
         "summary": "Create deployment",
-        "description": "Persist a normalized private source snapshot and execution intent before any external mutation. Without plan_id, require the app-bound target in server CD configuration or a successful saved environment registration; reuse does not provision VMs or databases again. An environment/provider selection resolves the existing registered target server-side. Optional plan_id is only accepted with explicit app/target_id and consumes an executable, unexpired, unchanged plan for the same app and runtime target; its profile must include deployment registration. Complete environment execution and registration before CI, verified publication and CD. Environment or database success alone does not mean application deployment succeeded. One unfinished operation including unknown occupies the single worker. Same GitHub URL/key reuses the first SHA without refetching HEAD; plan_id and environment/provider selection are part of idempotent input.",
+        "description": "Persist a normalized private source snapshot and execution intent before any external mutation. Without plan_id, require the app-bound target in server CD configuration or a successful saved environment registration; reuse does not provision VMs or databases again. An environment/provider selection resolves the existing registered target server-side. Optional plan_id is only accepted with explicit app/target_id and consumes an executable, unexpired, unchanged plan for the same app and runtime target; its profile must include deployment registration. Complete environment execution and registration before CI, verified publication and CD. Environment or database success alone does not mean application deployment succeeded. Deployments and updates persist in a bounded FIFO; one writer executes at a time. A finished unknown worker releases its global slot after 60 seconds. An unknown registered CD/HTTP result with verified publication fences that environment; uncertain CI/registration or missing bindings still fence the shared app source across environments. Unclaimed queued deployments survive restart; started operations never auto-replay. Same GitHub URL/key reuses the first SHA without refetching HEAD; plan_id and environment/provider selection are part of idempotent input.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -559,7 +559,7 @@
             "$ref": "#/components/responses/Accepted"
           },
           "200": {
-            "description": "Replay of a terminal operation; unknown is terminal for retries and continues to occupy admission.",
+            "description": "Replay of a terminal operation; unknown is terminal for retries; its global slot expires after 60 seconds once the worker exits, while its resource fence and evidence remain.",
             "headers": {
               "X-Request-ID": {
                 "description": "Fresh server-generated UUID for this HTTP request.",
@@ -655,7 +655,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/deployments/{id}": {
@@ -1036,7 +1036,7 @@
             "$ref": "#/components/responses/Accepted"
           },
           "200": {
-            "description": "Replay of a terminal operation; unknown is terminal for retries and continues to occupy admission.",
+            "description": "Replay of a terminal operation; unknown is terminal for retries; its global slot expires after 60 seconds once the worker exits, while its resource fence and evidence remain.",
             "headers": {
               "X-Request-ID": {
                 "description": "Fresh server-generated UUID for this HTTP request.",
@@ -1132,7 +1132,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/environments/{id}": {
@@ -2107,8 +2107,8 @@
     "/api/v1/deployments/{id}/events": {
       "get": {
         "operationId": "getDeploymentEvents",
-        "summary": "Read content-free SDK progress for the current CI attempt",
-        "description": "The owning session and persisted deployment/run/source/app/target binding are checked before any GitHub read or cache access. Reads only the registered workflow, branch and repository, then the current attempt GitHub Actions check named Railshot agent events. The exact external ID, head SHA, details URL, producer and envelope bindings must match. No previous-attempt fallback. Strict schema rejects raw text, commands, reasoning and unknown fields. At most 60 recent items and 60,000 UTF-8 bytes; truncation is explicit. GitHub reads are bounded to five pages of twenty checks and 2 MiB per response. A process-local cache retains at most 100 source/attempt identities for 15 seconds; run identity is checked before and after reading. Complete describes observation completion, never CI success. Stale means a running observation is over 60 seconds old. Missing older producers remain not_started/not_available. No query parameters or mutation methods are accepted.",
+        "summary": "Read CI progress and the bounded deployment timeline",
+        "description": "The owning session and persisted deployment/run/source/app/target binding are checked before any GitHub read or cache access. Reads only the registered workflow, branch and repository, then the current attempt GitHub Actions check named Railshot agent events. The exact external ID, head SHA, details URL, producer and envelope bindings must match. No previous-attempt fallback. Strict schema rejects raw text, commands, reasoning and unknown fields. At most 60 recent items and 60,000 UTF-8 bytes; truncation is explicit. GitHub reads are bounded to five pages of twenty checks and 2 MiB per response. A process-local cache retains at most 100 source/attempt identities for 15 seconds; run identity is checked before and after reading. Complete describes observation completion, never CI success. Stale means a running observation is over 60 seconds old. Missing older producers remain not_started/not_available. No query parameters or mutation methods are accepted. The timeline field includes session-scoped dispatch/publication/config/controller/workload/HTTP observations, at most 240 events retained for seven days. It is evidence, not execution authority. The progress projection provides the last observed gate or SDK event, optional executor-declared budget capped at two, and confirmed SDK invocation count or null. Dashboard readers poll after 15 seconds and show stale after 60 seconds. Content-free SDK progress metadata is retained in the central timeline; prompts, source, commands and reasoning text remain excluded.",
         "parameters": [
           {
             "name": "id",
@@ -2343,7 +2343,7 @@
       "post": {
         "operationId": "createApplicationLifecyclePlan",
         "summary": "Preview stopping, starting or deleting an owned application",
-        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted. Registered active deployments can be deleted after cancellation/quiescence. Active deployment deletion uses a private, configuration-bound application scope and requires fresh ownership validation before cleanup. Other unfinished/unknown work blocks admission.",
+        "description": "Unknown fields, duplicate JSON keys and all query parameters are rejected. Other sessions receive 404. Operator credentials and local paths are never accepted. Registered active deployments can be deleted after cancellation/quiescence. Active deployment deletion uses a private, configuration-bound application scope and requires fresh ownership validation before cleanup. Other queued/running or unexpired unknown work blocks the shared slot; expired unknown still fences its own app or environment. Cloud inspection does not hold the product writer queue. A pending or failed plan cannot authorize any mutation. If the app changes during inspection, the plan fails as stale. Interrupted read-only planning resumes under the same public plan ID after restart with a fresh private native attempt. Application snapshot checks still apply; mutations are never replayed by recovery.",
         "parameters": [
           {
             "name": "id",
@@ -2352,6 +2352,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "Prefer",
+            "in": "header",
+            "schema": {
+              "type": "string",
+              "example": "respond-async"
+            },
+            "description": "Request durable asynchronous inspection. Same-app/action in-flight requests reuse the plan. The response is 202 with Location; legacy requests without this preference retain 201."
           }
         ],
         "requestBody": {
@@ -2424,6 +2433,45 @@
           },
           "503": {
             "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "description": "Read-only inspection accepted; no deletion has executed. Poll Location.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "2"
+                }
+              },
+              "Preference-Applied": {
+                "schema": {
+                  "const": "respond-async"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationLifecyclePlanProgress"
+                }
+              }
+            }
           }
         }
       }
@@ -2917,7 +2965,7 @@
     "/api/v1/deployments/{id}/source": {
       "get": {
         "operationId": "downloadDeploymentSource",
-        "summary": "Download submitted or gate-verified deployed source",
+        "summary": "Download submitted, verified deployed or exact failed source",
         "parameters": [
           {
             "name": "id",
@@ -2933,7 +2981,8 @@
             "schema": {
               "enum": [
                 "submitted",
-                "deployed"
+                "deployed",
+                "failed"
               ],
               "default": "submitted"
             }
@@ -3002,6 +3051,806 @@
         }
       }
     },
+    "/api/v1/registrations": {
+      "post": {
+        "operationId": "createOpenStackRegistration",
+        "summary": "Store an OpenStack registration and issue a one-time linkage token",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "provider"
+                ],
+                "properties": {
+                  "provider": {
+                    "const": "openstack"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registration and one-time token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "id",
+                    "provider",
+                    "status",
+                    "created_at",
+                    "claimed_at",
+                    "linkage_token",
+                    "token_expires_at"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "provider": {
+                      "const": "openstack"
+                    },
+                    "status": {
+                      "enum": [
+                        "pending",
+                        "claimed"
+                      ]
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "claimed_at": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "format": "date-time"
+                    },
+                    "linkage_token": {
+                      "type": "string",
+                      "pattern": "^rsl_[A-Za-z0-9_-]{43}$"
+                    },
+                    "token_expires_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Operator Bearer required"
+          },
+          "422": {
+            "description": "Invalid input"
+          },
+          "503": {
+            "description": "Operator token or store unavailable"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listOpenStackRegistrations",
+        "summary": "List session-owned registrations",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registration list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/OpenStackRegistration"
+                      }
+                    },
+                    "next_marker": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/registrations/{id}": {
+      "get": {
+        "operationId": "getOpenStackRegistration",
+        "summary": "Read a session-owned registration",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registration metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenStackRegistration"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not owned by this session"
+          }
+        }
+      }
+    },
+    "/api/v1/registrations/{id}/tokens": {
+      "post": {
+        "operationId": "renewOpenStackLinkageToken",
+        "summary": "Issue a new token after expiry for the same browser session",
+        "security": [
+          {
+            "operatorBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New one-time token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "registration_id",
+                    "token",
+                    "expires_at"
+                  ],
+                  "properties": {
+                    "registration_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "token": {
+                      "type": "string",
+                      "pattern": "^rsl_[A-Za-z0-9_-]{43}$"
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Wrong enrollment key"
+          },
+          "409": {
+            "description": "Current token remains valid"
+          }
+        }
+      }
+    },
+    "/api/v1/registrations/claim": {
+      "post": {
+        "operationId": "claimOpenStackLinkageToken",
+        "summary": "Consume a one-time linkage token from the customer node",
+        "description": "The token is the credential for this endpoint. Success proves token possession only; no WireGuard tunnel is created.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "linkage_token"
+                ],
+                "properties": {
+                  "linkage_token": {
+                    "type": "string",
+                    "pattern": "^rsl_[A-Za-z0-9_-]{43}$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Token claimed once; connectivity is not verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "registration_id",
+                    "status",
+                    "claimed_at"
+                  ],
+                  "properties": {
+                    "registration_id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "status": {
+                      "const": "claimed"
+                    },
+                    "claimed_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid, expired, or already used token"
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack": {
+      "get": {
+        "operationId": "getOpenStackInstaller",
+        "summary": "Get the existing install.sh content and download URLs",
+        "responses": {
+          "200": {
+            "description": "Installer metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "install_sh",
+                    "bundle_sha256",
+                    "script_url",
+                    "bundle_url",
+                    "token_client_url"
+                  ],
+                  "properties": {
+                    "install_sh": {
+                      "type": "string"
+                    },
+                    "bundle_sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "script_url": {
+                      "const": "/api/v1/installers/openstack/scripts"
+                    },
+                    "bundle_url": {
+                      "const": "/api/v1/installers/openstack/bundles"
+                    },
+                    "token_client_url": {
+                      "const": "/api/v1/installers/openstack/client"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/scripts": {
+      "get": {
+        "operationId": "downloadOpenStackInstallScript",
+        "summary": "Download the existing install.sh file",
+        "responses": {
+          "200": {
+            "description": "Shell script",
+            "content": {
+              "text/x-shellscript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/client": {
+      "get": {
+        "operationId": "downloadOpenStackTokenClient",
+        "summary": "Download the standalone customer token input file",
+        "responses": {
+          "200": {
+            "description": "Python script",
+            "content": {
+              "text/x-python": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/installers/openstack/bundles": {
+      "get": {
+        "operationId": "downloadOpenStackInstallerBundle",
+        "summary": "Download install.sh with its companion files",
+        "responses": {
+          "200": {
+            "description": "ZIP package",
+            "content": {
+              "application/zip": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/applications/{id}/plans/{plan}": {
+      "get": {
+        "operationId": "getApplicationLifecyclePlan",
+        "summary": "Read the owned application plan status",
+        "description": "Session-bound planning, ready or failed status. Closing the UI only stops polling. Never applies or automatically retries deletion. Failed inspection can be replaced with a new explicit POST; failed GET should retry the same Location.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "plan",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current saved plan status. Retry-After is provided while planning.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplicationLifecyclePlanStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          }
+        }
+      }
+    },
+    "/api/v1/applications/resolve": {
+      "get": {
+        "operationId": "resolveApplication",
+        "summary": "Resolve the submitted app name to an existing session-owned application",
+        "description": "Read-only lookup before source upload. Uses the same provider-to-environment and app identity mapping as new deployment, independent of app inventory pagination. Same-owner successful applications use the existing update preview/start flow. Does not transfer ownership, register an app, or dispatch CI.",
+        "parameters": [
+          {
+            "name": "environment",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "cloud",
+                "onprem"
+              ]
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "aws",
+                "gcp",
+                "openstack",
+                "proxmox"
+              ]
+            }
+          },
+          {
+            "name": "app",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact existing app match in the server-selected environment, or null. Another session owner returns 409 without app details.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "app",
+                    "environment_target_id",
+                    "application"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "app": {
+                      "type": "string"
+                    },
+                    "environment_target_id": {
+                      "type": "string"
+                    },
+                    "application": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/components/schemas/Application"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}/diagnostics": {
+      "get": {
+        "operationId": "getDeploymentDiagnostics",
+        "summary": "Read exact failed-run evidence without a model call",
+        "description": "Owning session and persisted run/app/target/source identity are required. No query parameters. See docs/api/diagnostics.md for bounds and evidence requirements.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeploymentDiagnostics"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/deployments/{id}/classifications": {
+      "post": {
+        "operationId": "classifyDeployment",
+        "summary": "Classify verified failure facts once per input digest",
+        "description": "Owning session and persisted run/app/target/source identity are required. No query parameters. See docs/api/diagnostics.md for bounds and evidence requirements.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current resource state; errors are also represented inside the resource.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailureClassification"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error401"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "413": {
+            "$ref": "#/components/responses/Error413"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error415"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error500"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error502"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "202": {
+            "description": "Classification reserved; poll diagnostics. Repeated requests reuse the input digest.",
+            "headers": {
+              "X-Request-ID": {
+                "description": "Fresh server-generated UUID for this HTTP request.",
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FailureClassification"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "maxProperties": 0
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/owners": {
       "$ref": "./personal.openapi.json#/paths/~1api~1v1~1owners"
     },
@@ -3040,6 +3889,9 @@
     },
     "/api/v1/targets/{id}/reconciliations": {
       "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1reconciliations"
+    },
+    "/api/v1/readiness": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1readiness"
     }
   },
   "components": {
@@ -3417,6 +4269,67 @@
         ],
         "additionalProperties": false
       },
+      "ExecutionObservation": {
+        "type": "object",
+        "description": "Freshness of the authoritative upstream observation, separate from execution outcome. A read failure preserves the last confirmed execution state.",
+        "properties": {
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_success_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "next_retry_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              },
+              "upstream_status": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "retryable"
+            ],
+            "additionalProperties": false
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "checked_at",
+          "last_success_at",
+          "next_retry_at",
+          "error"
+        ],
+        "additionalProperties": false
+      },
       "Deployment": {
         "type": "object",
         "properties": {
@@ -3515,6 +4428,27 @@
               "diagnostics_checked_at": {
                 "type": "string",
                 "format": "date-time"
+              },
+              "observation": {
+                "$ref": "#/components/schemas/ExecutionObservation"
+              },
+              "workflow": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "conclusion": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "additionalProperties": false
               }
             },
             "required": [
@@ -3560,6 +4494,9 @@
                 ],
                 "additionalProperties": false,
                 "description": "Optional observed migration Job result. Its success alone does not establish application deployment or public HTTP success."
+              },
+              "observation": {
+                "$ref": "#/components/schemas/ExecutionObservation"
               }
             },
             "required": [
@@ -3851,6 +4788,109 @@
                   "sha"
                 ],
                 "additionalProperties": false
+              }
+            ]
+          },
+          "queue": {
+            "$ref": "#/components/schemas/OperationQueue"
+          },
+          "unknown_since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the current unknown interval; reads do not extend the queue release deadline."
+          },
+          "telemetry": {
+            "$ref": "#/components/schemas/Telemetry"
+          },
+          "classification": {
+            "$ref": "#/components/schemas/FailureClassification"
+          },
+          "dispatch": {
+            "type": "object",
+            "properties": {
+              "prepared_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "preparing",
+                  "requesting",
+                  "accepted"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "additionalProperties": false,
+            "description": "Durable preparation time before dispatch; it does not prove GitHub accepted the request."
+          },
+          "deployment_selection": {
+            "type": "object",
+            "description": "Original environment/provider choice retained for deployments submitted using provider selection. Absent on historical and explicit-target requests.",
+            "properties": {
+              "environment": {
+                "enum": [
+                  "cloud",
+                  "onprem"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "aws",
+                  "gcp",
+                  "openstack",
+                  "proxmox"
+                ]
+              }
+            },
+            "required": [
+              "environment",
+              "provider"
+            ],
+            "additionalProperties": false
+          },
+          "agent_activity_summary": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "enum": [
+                      "analyzing",
+                      "verifying",
+                      "succeeded",
+                      "failed",
+                      "unknown"
+                    ]
+                  },
+                  "attempt": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "updated_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "id",
+                  "state",
+                  "attempt",
+                  "updated_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -4344,6 +5384,14 @@
             ],
             "additionalProperties": false,
             "description": "Deployment target registration, including the private database binding when one was produced."
+          },
+          "queue": {
+            "$ref": "#/components/schemas/OperationQueue"
+          },
+          "unknown_since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the current unknown interval; reads do not extend the queue release deadline."
           }
         },
         "required": [
@@ -4888,6 +5936,11 @@
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
               },
+              "expected_target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$",
+                "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
+              },
               "target_id": {
                 "type": "string"
               }
@@ -4977,6 +6030,11 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "expected_target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$",
+                "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
               },
               "target_id": {
                 "type": "string"
@@ -5074,6 +6132,11 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "expected_target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$",
+                "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
               },
               "target_id": {
                 "type": "string"
@@ -5990,6 +7053,9 @@
                 ],
                 "minimum": 0,
                 "maximum": 9007199254740991
+              },
+              "agent_budget": {
+                "$ref": "#/components/schemas/AgentBudget"
               }
             },
             "required": [
@@ -6083,6 +7149,121 @@
               "snapshot_state",
               "sdk_activity_since_previous",
               "last_sdk_event_age_ms"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "sequence": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "occurred_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "event_name": {
+                "enum": [
+                  "gate.layer.started",
+                  "gate.layer.completed",
+                  "gate.layer.heartbeat"
+                ]
+              },
+              "native_run_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "phase": {
+                "enum": [
+                  "L0",
+                  "L1",
+                  "Q",
+                  "L2",
+                  "L4",
+                  "L3"
+                ]
+              },
+              "outcome": {
+                "enum": [
+                  "RUNNING",
+                  "PASS",
+                  "FAIL",
+                  "BLOCKED",
+                  "UNKNOWN",
+                  "NOT_RUN",
+                  "INCOMPLETE"
+                ]
+              },
+              "attempt_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "completed_steps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 6
+              },
+              "total_steps": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 6
+              },
+              "duration_s": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 86400
+              }
+            },
+            "required": [
+              "sequence",
+              "occurred_at",
+              "event_name",
+              "native_run_id",
+              "phase",
+              "outcome",
+              "attempt_id",
+              "completed_steps",
+              "total_steps",
+              "duration_s"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "sequence": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "occurred_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "native_run_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "event_name": {
+                "const": "agent.repair"
+              },
+              "attempt_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "repair": {
+                "$ref": "#/components/schemas/AgentRepairReceipt"
+              }
+            },
+            "required": [
+              "sequence",
+              "occurred_at",
+              "native_run_id",
+              "event_name",
+              "attempt_id",
+              "repair"
             ],
             "additionalProperties": false
           }
@@ -6187,6 +7368,22 @@
           },
           "next_marker": {
             "type": "null"
+          },
+          "timeline": {
+            "$ref": "#/components/schemas/Telemetry"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/CiProgress"
+          },
+          "agent_activity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AgentActivity"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -6206,7 +7403,8 @@
           "status",
           "truncated",
           "items",
-          "next_marker"
+          "next_marker",
+          "progress"
         ],
         "additionalProperties": false
       },
@@ -6403,6 +7601,11 @@
             "type": "string",
             "format": "uuid"
           },
+          "operation_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The existing operation accepted from this plan, when present. Recover a lost acknowledgement by GET without resubmitting a mutation."
+          },
           "application_id": {
             "type": "string"
           },
@@ -6428,6 +7631,20 @@
             }
           },
           "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
             "type": "string",
             "format": "date-time"
           }
@@ -6598,6 +7815,14 @@
           "effective_plan_hash": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/OperationQueue"
+          },
+          "unknown_since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the current unknown interval; reads do not extend the queue release deadline."
           }
         },
         "required": [
@@ -6762,6 +7987,744 @@
           "reason"
         ],
         "additionalProperties": false
+      },
+      "OperationQueue": {
+        "type": "object",
+        "description": "Single-replica FIFO metadata. Sequence is an admission order, not a live position. Release only drops the global slot; it never establishes an external outcome or retries the operation. Legacy unknown records can have release fields without enqueue fields.",
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "enqueued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "released_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "release_reason": {
+            "const": "unknown_timeout"
+          }
+        },
+        "additionalProperties": false
+      },
+      "OpenStackRegistration": {
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "status",
+          "created_at",
+          "claimed_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider": {
+            "const": "openstack"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "claimed"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "claimed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ApplicationLifecyclePlanProgress": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "application_id",
+          "action",
+          "status",
+          "created_at",
+          "updated_at",
+          "resources",
+          "retained"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "action": {
+            "$ref": "#/components/schemas/LifecycleAction"
+          },
+          "resources": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleResource"
+            }
+          },
+          "retained": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "$ref": "#/components/schemas/LifecycleResource"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "planning",
+              "failed"
+            ]
+          },
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "outcome_unknown"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "outcome_unknown": {
+                "const": false
+              }
+            }
+          }
+        }
+      },
+      "ApplicationLifecyclePlanStatus": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ApplicationLifecyclePlan"
+          },
+          {
+            "$ref": "#/components/schemas/ApplicationLifecyclePlanProgress"
+          }
+        ]
+      },
+      "Telemetry": {
+        "type": "object",
+        "description": "Version 1 bounded central event journal; see docs/api/diagnostics.md.",
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "state": {
+            "type": "string"
+          },
+          "checked_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "maxItems": 240,
+            "items": {
+              "type": "object",
+              "required": [
+                "event_id",
+                "event_name",
+                "occurred_at",
+                "observed_at",
+                "correlation",
+                "outcome"
+              ],
+              "properties": {
+                "event_id": {
+                  "type": "string"
+                },
+                "event_name": {
+                  "type": "string"
+                },
+                "occurred_at": {
+                  "type": "string"
+                },
+                "observed_at": {
+                  "type": "string"
+                },
+                "correlation": {
+                  "type": "object"
+                },
+                "outcome": {
+                  "enum": [
+                    "RUNNING",
+                    "PASS",
+                    "FAIL",
+                    "BLOCKED",
+                    "UNKNOWN",
+                    "NOT_RUN",
+                    "INCOMPLETE"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "FailureClassification": {
+        "type": "object",
+        "description": "Durable typed hypothesis with input/rubric/model identity; never grants write or retry authority.",
+        "properties": {
+          "state": {
+            "enum": [
+              "not_requested",
+              "not_configured",
+              "not_failed",
+              "unavailable",
+              "running",
+              "succeeded",
+              "failed"
+            ]
+          },
+          "input_sha256": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "is_hypothesis": {
+            "const": true
+          },
+          "grants_write_authority": {
+            "const": false
+          },
+          "evidence_refs": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "DeploymentDiagnostics": {
+        "type": "object",
+        "required": [
+          "deployment_id",
+          "state"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "not_started",
+              "not_failed",
+              "unavailable",
+              "ready"
+            ]
+          },
+          "binding": {
+            "type": "object"
+          },
+          "case_id": {
+            "type": "string"
+          },
+          "case_sha256": {
+            "type": "string"
+          },
+          "classification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailureClassification"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checks": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object"
+            }
+          },
+          "missing_evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AgentBudget": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "max_invocations": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          }
+        },
+        "required": [
+          "enabled",
+          "max_invocations"
+        ],
+        "additionalProperties": false,
+        "description": "Executor-declared total SDK invocation budget, up to one initial packaging call and two repair calls. This is an allowance, not actual usage. enabled must equal max_invocations > 0. Older limits of 0, 1 and 2 remain valid; missing metadata stays null."
+      },
+      "CiProgress": {
+        "type": "object",
+        "properties": {
+          "poll_after_ms": {
+            "const": 15000
+          },
+          "stale_after_seconds": {
+            "const": 60
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentEventItem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "agent_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentBudget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sdk_invocations": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "poll_after_ms",
+          "stale_after_seconds",
+          "latest",
+          "agent_budget",
+          "sdk_invocations"
+        ],
+        "additionalProperties": false,
+        "description": "Last observed CI progress, not execution authority. A heartbeat alone never proves an SDK invocation; actual model calls and cost cannot be inferred. Budget may be recovered only from the same run and attempt in the retained timeline."
+      },
+      "AgentRepairChange": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "status": {
+            "const": "applied"
+          }
+        },
+        "required": [
+          "path",
+          "summary",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "AgentRepairReceipt": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "enum": [
+              "verifying",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "role": {
+            "enum": [
+              "adapter",
+              "fixer"
+            ]
+          },
+          "changes": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/AgentRepairChange"
+            }
+          },
+          "omitted_changes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failure_layer": {
+            "enum": [
+              null,
+              "L0",
+              "L1",
+              "Q",
+              "L2",
+              "L3",
+              "L4"
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "role",
+          "changes",
+          "omitted_changes",
+          "failure_layer"
+        ],
+        "additionalProperties": false
+      },
+      "AgentRepairAttempt": {
+        "type": "object",
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "enum": [
+              "analyzing",
+              "verifying",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "role": {
+            "enum": [
+              "adapter",
+              "fixer"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "changes": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/AgentRepairChange"
+            }
+          },
+          "verification": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "not_run",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "unknown"
+                  ]
+                }
+              },
+              "required": [
+                "key",
+                "label",
+                "state"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "failure_layer": {
+            "enum": [
+              null,
+              "L0",
+              "L1",
+              "Q",
+              "L2",
+              "L3",
+              "L4"
+            ]
+          },
+          "omitted_changes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "attempt",
+          "state",
+          "started_at",
+          "updated_at",
+          "finished_at",
+          "changes",
+          "verification",
+          "failure_layer",
+          "omitted_changes"
+        ],
+        "additionalProperties": false
+      },
+      "AgentActivity": {
+        "type": "object",
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "enum": [
+              "analyzing",
+              "verifying",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "role": {
+            "enum": [
+              "adapter",
+              "fixer"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "changes": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/AgentRepairChange"
+            }
+          },
+          "verification": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "not_run",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "unknown"
+                  ]
+                }
+              },
+              "required": [
+                "key",
+                "label",
+                "state"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "failure_layer": {
+            "enum": [
+              null,
+              "L0",
+              "L1",
+              "Q",
+              "L2",
+              "L3",
+              "L4"
+            ]
+          },
+          "omitted_changes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "schema_version": {
+            "const": 1
+          },
+          "id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "stage": {
+            "const": "build"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "current_action": {
+            "type": "string"
+          },
+          "observation": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": [
+                  "current",
+                  "stale",
+                  "unavailable"
+                ]
+              },
+              "checked_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "state",
+              "checked_at"
+            ],
+            "additionalProperties": false
+          },
+          "previous_attempts": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/AgentRepairAttempt"
+            }
+          },
+          "question": {
+            "type": "null"
+          },
+          "omitted": {
+            "type": "object",
+            "properties": {
+              "changes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "previous_attempts": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "changes",
+              "previous_attempts"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "attempt",
+          "state",
+          "started_at",
+          "updated_at",
+          "finished_at",
+          "changes",
+          "verification",
+          "failure_layer",
+          "omitted_changes",
+          "schema_version",
+          "id",
+          "revision",
+          "stage",
+          "summary",
+          "current_action",
+          "observation",
+          "previous_attempts",
+          "question",
+          "omitted"
+        ],
+        "additionalProperties": false,
+        "description": "Read-only projection of bound host events. Agent completion does not imply repair success; repair success does not imply deployment success. No model invocation on GET."
       },
       "PersonalOwner": {
         "$ref": "./personal.openapi.json#/components/schemas/PersonalOwner"
@@ -7165,6 +9128,12 @@
           "pattern": "^[A-Za-z0-9._-]{1,128}$"
         },
         "description": "Anonymous session and resource-kind scope. Same semantic input returns the same operation; a different input conflicts. Unknown operations never replay. Trusted cookieless localhost maintenance keeps legacy workspace scope."
+      }
+    },
+    "securitySchemes": {
+      "operatorBearer": {
+        "type": "http",
+        "scheme": "bearer"
       }
     }
   }

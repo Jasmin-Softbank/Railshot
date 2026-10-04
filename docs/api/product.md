@@ -4,9 +4,23 @@
 
 사용자 계정·로그인·팀원 allowlist는 없다. 개인 환경은 별도 장기 소유자 쿠키와 복구키로 유지하며 [개인 OpenStack 환경 호출 규격](personal-environments.md)에 추가 경로·삭제 정책·지원 조건을 정리한다. 익명 브라우저 세션별로 접수 기록·계획·화면 설정·연결 정보를 분리한다. 운영자 지정 공용 대상과 실행기의 동시 실행 한도는 공유한다. 세션·스키마·이관 계약은 [dashboard-sessions.md](dashboard-sessions.md)를 따른다. 공개 모드는 `RAILSHOT_PUBLIC_DEMO=1`, `RAILSHOT_ALLOWED_HOSTS`, `RAILSHOT_ALLOWED_ORIGINS`를 명시하며 브라우저 Bearer를 요구하지 않는다. 기본 로컬 모드와 별도 내부 운영자 모드는 `access.js`의 기존 경계를 사용한다. 실행용 GitHub·Provider·SSH 자격은 서버 설정에만 둔다. 별도 OpenStack 연결 정보 저장은 실행용 자격을 바꾸지 않는다.
 
+### 실행 중 CI 관측
+
+`GET /api/v1/deployments/{id}/events`는 소유 세션·소스·앱·대상·GitHub 실행과 현재 attempt를 검증한 뒤 실행 중인 GitHub Checks 기록을 반환한다. 대시보드의 작업 로그는 15초마다 조회한다. 실행기는 약 20초 간격으로 관측을 전달하고 API cache도 15초이므로 초 단위 즉시 전달을 보장하지 않는다. 진행 중 기록이 60초 이상 갱신되지 않으면 `stale=true`로 표시하며, 관측 지연을 실행 실패로 바꾸지 않는다.
+
+`progress.latest`는 마지막으로 관측한 검사 단계 또는 SDK 진행 이벤트다. `progress.agent_budget`은 실행기가 선언한 활성화 여부와 합산 호출 한도다. 현재 정책은 초기 패키징 최대 1회와 오류 수정 최대 2회를 각각 제한하여 총 3회이며, 패키징이 필요 없는 앱의 수정 횟수는 최대 2회다. API는 이전 실행기가 선언하는 0·1·2회도 허용하고, 이 필드가 없으면 `null`이다. 선언 한도는 실제 사용 횟수가 아니다. 최근 60개 중 최초 이벤트가 빠져도 같은 run/attempt의 중앙 기록에 있으면 예산을 보존한다. 다른 attempt의 값을 재사용하지 않는다. `progress.sdk_invocations`는 확인된 SDK 실행 횟수이며 heartbeat만 있을 때는 `null`이다. SDK 실행 횟수를 모델 내부 호출 수나 과금 횟수로 해석하면 안 된다.
+
+중앙 `timeline`에는 안전한 SDK 활동 종류·횟수·토큰 계수·갱신 시각을 보존한다. 프롬프트, 소스 본문, 명령, reasoning 원문은 허용하지 않는다. 조회 실패는 `unavailable`, 아직 CI 미접수는 `not_started`이며, 과거 기록은 현재 상태와 구분한다. 이 GET은 모델·CI·배포를 시작하지 않는다. `complete`는 관측 종료이며 CI 통과나 앱 배포 성공을 뜻하지 않는다.
+
 | 자원 | 구현 경로 | 의미 |
 | --- | --- | --- |
 | 화면 선택 | `GET /api/v1/options` | 기존 환경의 클라우드(AWS/GCP)·온프레미스(OpenStack/Proxmox) 선택을 반환한다. provider에 배정된 대상이 CI 허용 목록과 CD 등록에 모두 있을 때만 available이다. |
+| OpenStack 등록 | `POST /api/v1/registrations`, `GET /api/v1/registrations`, `GET /api/v1/registrations/{id}` | 운영자 Bearer로 인증하고 세션별 등록 ID를 SQLite에 저장한다. 생성 응답에서 무작위 일회성 토큰을 한 번만 반환한다. |
+| 연계 토큰 재발급 | `POST /api/v1/registrations/{id}/tokens` | 같은 브라우저 세션에서 빈 JSON 객체로 요청하며 기존 토큰 만료 뒤에만 10분짜리 새 토큰을 발급한다. |
+| 연계 토큰 접수 | `POST /api/v1/registrations/claim` | 고객 노드에서 입력한 토큰을 본문으로 받아 만료·재사용을 검사하고 원자적으로 한 번만 소비한다. 접수는 터널 연결을 뜻하지 않는다. |
+| OpenStack 설치 파일 | `GET /api/v1/installers/openstack`, `GET /api/v1/installers/openstack/scripts`, `GET /api/v1/installers/openstack/bundles` | 저장소의 기존 `install.sh` 내용, 단독 파일, 필수 동반 파일 ZIP을 제공한다. |
+| 토큰 포함 설치 파일 주소 | `GET /onpremise/install.sh?token=…` | 유효한 미사용 연계 토큰에 한해 같은 `install.sh`를 내려받는다. 다운로드만으로 토큰을 소비하거나 설치하지 않는다. |
+| 토큰 입력 파일 | `GET /api/v1/installers/openstack/client` | 고객 노드에서 토큰을 숨겨 입력받아 접수 API에 보내는 독립 Python 파일을 제공한다. |
 | 환경 관측 | `GET /api/v1/targets/{id}/observations` | 접근 가능한 등록 대상의 실제 노드·앱 지표와 수집 시각. 배포 이력 없이 조회하며 결측·실패는 null과 상태로 표시한다. |
 | 대상 | `GET /api/v1/targets` | CI 서비스에 등록한 대상 목록. `ci_submission`·`application_deployment`를 구분한다. CD가 등록한 앱은 `application_name`과 `deployment_scope=registered_application`으로 표시한다. runtime 상태는 독립 관측이 없으면 unknown이다. |
 | 빌드 | `POST /api/v1/builds`, `GET /api/v1/builds/{id}` | ZIP·폴더·공개 GitHub를 기존 CI로 제출한다. ID는 GitHub run ID 문자열이며 등록한 run만 조회한다. `published`는 검증한 이미지 게시다. |
@@ -17,6 +31,14 @@
 | 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | 저장된 계획을 한 번 실행한다. 자원·guest·runtime, 선택적 Patroni DB와 배포 대상 등록을 각각 기록한다. 앱 소스의 CI·배포·공개 HTTP 검증은 이 요청에 포함하지 않는다. |
 | 앱 작업 계획 | `POST /api/v1/applications/{id}/plans` | 현재 세션이 소유한 앱의 중지·시작·삭제 범위와 보존 자원을 읽어 10분간 유효한 계획을 반환한다. |
 | 앱 작업 | `POST /api/v1/applications/{id}/operations`, `GET /api/v1/operations/{id}` | 확인한 계획을 한 번 실행하고 단계·결과·남거나 확인하지 못한 자원을 기록한다. |
+
+### OpenStack 등록과 설치 파일 전달
+
+브라우저는 `POST /api/v1/registrations`에 `provider: openstack`만 보낸다. OpenStack 프로젝트·사용자 ID 및 인증 방식은 이 단계에서 받지 않는다. 서비스는 32바이트 난수로 10분짜리 연계 토큰을 만들어 생성 응답의 `linkage_token`으로 한 번만 보여 준다. 토큰 원문은 DB에 저장하지 않고 해시만 저장한다. 상세·목록에도 토큰은 없다. 같은 브라우저 세션의 미완료 등록은 기존 토큰 만료 후 빈 JSON 객체를 보내 재발급할 수 있다. 기존 SQLite의 미사용 `auth_type`·`project_id`·`user_id`·`key_salt`·`key_hash` 열은 서버 시작 시 제거한다.
+
+등록·재발급·조회 API는 공개 데모 모드에서도 운영자 Bearer를 요구한다. 운영 Nginx는 서버에서만 읽는 `RAILSHOT_API_TOKEN_FILE`을 `/api/` 프록시에 주입하고, 브라우저에는 이 토큰을 전달하지 않는다. HttpOnly 세션 쿠키가 등록 요청의 범위를 구분하지만 사용자 신원을 증명하지는 않는다. 접수 API는 고객 노드가 운영자 Bearer 없이 호출하며, 10분 유효한 일회성 연계 토큰 자체로 접수를 제한한다. 운영 배포에서는 이 API에 HTTPS로 접속해야 한다.
+
+설치 파일 API는 저장소의 현재 `deployment/bootstrap/install.sh` 바이트를 단독 파일과 복사 가능한 코드로 제공한다. UI는 현재 접속 origin으로 `curl -fsSL 'https://서비스-주소/onpremise/install.sh?token=…' -o install.sh` 명령을 만들고, 이 주소는 미사용·미만료 토큰을 확인해 같은 스크립트를 반환한다. 토큰이 URL에 있으므로 중간 프록시의 요청 URL 기록에 남지 않도록 운영 설정을 확인해야 한다. ZIP에는 현재 저장소의 동반 파일과 `deployment/bootstrap/claim_token.py`가 포함된다. 단독 `install.sh`만으로는 로컬 실행 시 필요한 동반 파일이 준비되지 않는다. 고객은 노드에서 `python3 claim_token.py --service-url https://서비스-주소`를 실행해 토큰을 숨겨 입력한다. 접수 결과는 등록 ID와 접수 시각만 반환하며 OpenStack 인증정보를 보내지 않는다. 이 기존 연계 토큰 흐름은 `install.sh`의 개인 환경용 `--personal-registration` 모드를 자동 선택하지 않고 새 WireGuard 터널도 만들지 않는다. 따라서 발급·접수·파일 전달을 터널 연결 완료로 표시하지 않는다.
 
 실행 목록은 `{items, next_marker, total}`, 나머지 목록은 `{items, next_marker}`이고 미설정 서버의 대상·profile 목록은 빈 목록이다. 목록에는 `limit`(1–100, 기본 20)과 해당 목록의 ID를 사용한 `marker`를 받는다. 개인 환경 목록에는 추가로 `scope=owned&provider=openstack`을 사용한다. 소스 다운로드는 `variant=submitted|deployed`를 받으며 그 밖의 경로는 query를 받지 않는다. 알려지지 않은 필드, 중복 단일 multipart 필드·query·JSON key는 거부한다. 파일은 최대 2,000개·총 100 MiB이며 원시 multipart 상한에는 framing용 1 MiB를 더한다. `files`만 반복할 수 있다.
 
@@ -34,7 +56,7 @@
 
 소스 접수는 multipart의 `app`, `target_id`와 공개 GitHub URL(`repository_url`), ZIP(`archive`), 폴더(`files`와 JSON 문자열 배열 `paths`) 중 하나를 받는다. `source_type`은 생략할 수 있으며 지정하면 실제 소스 형식과 일치해야 한다. `plan_id`는 `POST /api/v1/deployments`에서만 선택적으로 받는다. 빌드·legacy deploy에는 허용하지 않는다. 계획을 포함한 배포의 `app`·`target_id`는 계획의 이름·`runtime_target_id`와 일치해야 하고, 해당 profile에 배포 등록 설정이 있어야 한다. 계획이 없는 배포는 서버 CD 설정 또는 성공한 환경 등록 기록의 대상·앱을 사용한다. 성공한 환경의 재배포는 저장한 CD 설정을 재사용하며 VM·DB 생성은 반복하지 않는다. 대상·앱·계획·환경 ID가 일치한 성공 기록만 재시작 후 CI 허용 대상으로 복원한다.
 
-기존 환경을 선택하는 화면은 같은 배포 경로에 `app`·`target_id` 대신 `environment`·`provider`와 `source_name`을 보낼 수 있다. 폴더는 `source_name`이 필수이며 ZIP은 파일명, GitHub는 저장소명에서 이름을 얻을 수 있다. 화면·API·CLI/MCP는 `contracts/application.mjs`의 정규화 규칙을 공유하며 이름이 없거나 유효하지 않으면 거절한다. 서버는 등록된 provider와 CI/CD 연결에서 대상만 선택하고 앱 이름은 소스에서 정한다. `RAILSHOT_APPLICATIONS_FILE`에 등록된 환경은 업로드에서 앱 등록을 자동으로 생성한다. 기존 고정 앱 대상은 이름이 다르면 소스 취득·CI 전에 거절하며 샘플 앱 이름으로 바꾸지 않는다. 환경과 고정 앱 등록이 모두 없으면 미연결 provider로 거부한다. 이 선택 방식에는 `app`, `target_id`, `plan_id`를 함께 보낼 수 없다. 새 앱·DB 환경을 만드는 화면은 profiles로 계획을 만든 뒤 그 계획의 `name`, `runtime_target_id`, `id`를 각각 `app`, `target_id`, `plan_id`로 제출한다.
+기존 환경을 선택하는 화면은 같은 배포 경로에 `app`·`target_id` 대신 `environment`·`provider`와 `source_name`을 보낼 수 있다. 폴더는 `source_name`이 필수이며 ZIP은 파일명, GitHub는 저장소명에서 이름을 얻을 수 있다. 화면·API·CLI는 `contracts/application.mjs`의 정규화 규칙을 공유하며 이름이 없거나 유효하지 않으면 거절한다. `apps/agent` MCP는 앱 이름과 등록된 대상 ID를 명시적으로 받는다. 서버는 등록된 provider와 CI/CD 연결에서 대상만 선택하고 앱 이름은 소스에서 정한다. `RAILSHOT_APPLICATIONS_FILE`에 등록된 환경은 업로드에서 앱 등록을 자동으로 생성한다. 기존 고정 앱 대상은 이름이 다르면 소스 취득·CI 전에 거절하며 샘플 앱 이름으로 바꾸지 않는다. 환경과 고정 앱 등록이 모두 없으면 미연결 provider로 거부한다. 이 선택 방식에는 `app`, `target_id`, `plan_id`를 함께 보낼 수 없다. 새 앱·DB 환경을 만드는 화면은 profiles로 계획을 만든 뒤 그 계획의 `name`, `runtime_target_id`, `id`를 각각 `app`, `target_id`, `plan_id`로 제출한다.
 
 profile의 `target_id`는 고정 runtime 대상 또는 새 대상 이름의 기준이다. `create_per_request=true`이면 사용자 앱 이름과 계획 ID의 SHA-256 앞 8자리로 runtime·DB 대상, namespace와 GitOps 경로를 한 번 파생한다. 이때 `application_name`은 null이며 최종 요청은 계획의 `runtime_target_id`를 사용한다. false이면 기존 고정 대상·앱을 유지한다. 운영자 설정 `registration_max_age_seconds`(1800–604800)는 계획 준비 시 비공개 등록 만료 시각을 한 번 정하며 재검증으로 연장하지 않는다. 이 만료는 VM 종료나 비용 상한을 보장하지 않는다. `deployment_supported`는 배포 설정 유무, `supported`는 provider·runtime 용도·운영자 실행 허용 여부를 나타낸다. 두 값 모두 생성·등록·준비 완료를 뜻하지 않는다. `database`는 null 또는 `{mode:"patroni", required, database_nodes, dcs_voters, proxy_nodes}`다. `required`는 등록된 앱 대상의 DB binding 필요 여부다. DB와 DCS 역할은 같은 VM에 둘 수 있으므로 역할 수를 더한 값이 VM 수는 아니다.
 
@@ -94,13 +116,15 @@ CI는 `GITHUB_TOKEN`, 등록 대상 ID 및 기존 GitHub 저장소 설정을 사
 
 디렉터리는 0700, 비공개 파일은 0600, API OS 사용자 소유여야 한다. 기존 API·Terraform·edge·budget writer 중지, SQLite backup·integrity·행 digest와 Terraform lineage 확인 후 단일 정본을 이전한다. 개인 자격·비밀을 이미지나 HTTP에 포함하지 않는다. 이 설정 계약은 이관·실배포 완료 증거가 아니며 VM·DB readiness·대상 등록·migration·공개 HTTP 결과는 각각 실행 기록으로 확인한다. GCP의 서버 자격과 자동 billing 수집, AWS↔GCP 사설 연결은 별도 준비·검증이 필요하다.
 
-기존 `POST /api/deploy`와 `GET /api/runs/{run_id}`는 응답 필드와 `x-railshot-request: deploy` (legacy: `x-jasmin-request: deploy`) 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·admission·run binding을 공유하므로 다른 세션에서 접수했거나 이 workspace에 없는 run ID는 원격에서 조회하지 않는다. CLI/MCP는 호스트별 쿠키를 ~/.local/state/railshot-client의 0600 파일에 저장하며 RAILSHOT_CLIENT_SESSION_DIR로 위치를 지정한다. 쿠키 없는 비공개 localhost 유지보수만 기존 공유 범위를 유지한다. v1 배포와 달리 legacy deploy는 CI 제출이다.
+기존 `POST /api/deploy`와 `GET /api/runs/{run_id}`는 응답 필드와 `x-railshot-request: deploy` (legacy: `x-jasmin-request: deploy`) 계약을 유지한다. 실제 등록 서비스에서는 새 영속 접수·admission·run binding을 공유하므로 다른 세션에서 접수했거나 이 workspace에 없는 run ID는 원격에서 조회하지 않는다. CLI는 호스트별 쿠키를 `~/.local/state/railshot-client`의 0600 파일에 저장하며 `RAILSHOT_CLIENT_SESSION_DIR`로 위치를 지정한다. `apps/agent` MCP는 v1 배포를 사용하고 쿠키를 `RAILSHOT_AGENT_SESSION_DIR`에 보관한다. 쿠키 없는 비공개 localhost 유지보수만 기존 공유 범위를 유지한다. v1 배포와 달리 legacy deploy는 CI 제출이다.
 
 현재 운영 메트릭, 수집 시각과 실패 상태는 [제품 관측 계약](observations.md)을 따른다.
 
 신규 edge 등록을 사용한 배포는 공개 검증 성공 시 `public_http.site_url`과 `public_http.receipt`를 추가한다. `url`은 검증한 health 경로이고 `site_url`은 HTTPS 200을 확인한 앱 경로다. 제품 최상위 `url`은 `site_url`이 있으면 이를 사용하고 기존 고정 앱은 health URL을 유지한다. receipt는 deployment·target·tenant·app·environment·namespace, source/Git revision, image/route/plan digest, 만료 정책과 DNS/TLS/target health 결과를 연결한다. IP·자격·응답 body는 공개 receipt에 넣지 않는다. 검증되지 않은 결과에는 이 선택 필드가 없다.
 
 대시보드는 소스와 `environment=cloud|onprem`, `provider=aws|gcp|openstack|proxmox`를 기존 배포 endpoint로 보낸다. 이 모드는 `app`·`target_id`와 함께 사용할 수 없다. API가 운영자의 `RAILSHOT_PROVIDER_TARGETS` 매핑과 CD 등록에서 대상·앱을 결정하며, 등록 앱이 없으면 GitHub/ZIP/폴더 이름에서 유효한 앱 이름을 생성한다. 폴더명은 선택적 `source_name`(1–255자, 제어 문자 금지)으로 전달한다. 알 수 없는 provider와 잘못된 조합은 422, 연결되지 않은 선택은 409이며 다른 대상으로 대체하지 않는다. 기존 app/target_id 요청과 builds API는 유지한다.
+
+화면에서 사용자가 고른 환경은 늦게 도착한 저장 설정으로 덮어쓰지 않는다. 검토 후 선택값이 달라지면 다시 검토해야 한다. 대시보드는 앱 조회에서 확인한 환경 대상 ID를 `expected_target_id`로 함께 보내며, 서버의 현재 provider 대상과 다르면 소스 취득·접수·CI 전에 409 `DEPLOYMENT_TARGET_CHANGED`로 거부한다. 이 필드는 환경 선택 방식에서만 허용하며 이전 클라이언트에는 선택적이다. 신규 배포 기록의 `deployment_selection`은 접수한 `environment`·`provider`를 보존하고 `environment_target_id`는 실제 등록 환경을 나타낸다.
 
 현재 공개 플랫폼 manifest는 AWS 기본 대상에 `RAILSHOT_TARGET_PROVIDER=aws`를 명시한다. 추가 provider는 선택 JSON 설정 `RAILSHOT_PROVIDER_TARGETS={"gcp":"k3s-gcp","openstack":"k3s-openstack"}`으로 연결하며 기본 AWS 대상은 유지한다. 추가 ID가 `RAILSHOT_TARGET_IDS`의 CI 허용 목록과 CD adapter의 등록 대상 양쪽에 있을 때만 `/api/v1/options`에서 사용 가능하다. 선택은 해당 대상의 등록 앱으로 바인딩되며 다른 provider로 대체하지 않는다. 잘못된 매핑, 기본 provider의 대상 교체, 같은 ID의 여러 provider 선언은 거부한다. provider가 명시되지 않은 대상은 ID 문자열로 종류를 추측하지 않는다. UI의 클라우드/온프레미스 카드와 provider 선택은 그대로 유지한다.
 
@@ -145,3 +169,13 @@ AWS 경로 사전 검사가 등록 시작 전에 `APPLICATION_AWS_ROUTE_PREFLIGH
 운영 참조 파일과 Terraform state는 단일 API PVC에 둔다. `railshot-cloudflare` Secret의 `cloudflare-token`·`cloudflare.json`은 init container가 0600으로 복사한다. GCP WIF 설정은 `railshot-environments.google_credentials_file`로 참조하며 정적 서비스 계정 키를 이미지에 넣지 않는다. 기존 Terraform state의 lineage·resource ID를 유지하고 이전 writer를 중지한 뒤 이관한다. 원본 state 복사본으로 별도 apply하지 않는다.
 
 현재 한계: AWS/GCP 자동 공개 경로만 연결돼 있다. OpenStack은 기존 환경의 앱 등록 코드를 공유하지만 공개 경로 writer가 연결되기 전에는 자동 배포 옵션을 차단한다. 같은 앱의 소스·이미지 재배포는 기존 등록을 사용하고, NodePort·health path 등 라우팅 계약 변경은 자동 수정하지 않는다. 기존 경로 변경에는 별도 검토가 필요하다. 실제 실행 상태와 미검증 항목은 [앱 자동 등록 검증 기록](../poc/application-registration-20261003.md)을 따른다.
+
+### 실행 결과와 관측 상태
+
+`ci.observation`과 `cd.observation`은 원본 시스템의 마지막 조회 시각(`checked_at`), 마지막 성공 조회(`last_success_at`), 조회 오류(`error`), 다음 조회 시각(`next_retry_at`)을 별도로 제공한다. 브라우저가 API를 읽은 시각과 다르다. 일시적인 GitHub/클러스터 조회 장애는 마지막 실행 사실을 유지하며, CI 재실행이나 CD 재적용 없이 재조회한다. 조회 사이에는 저장된 다음 조회 시각을 사용하여 작업자를 반납하고 다른 앱을 처리한다. 같은 앱의 대기 요청과 실제 변경 작업은 직렬 처리한다. 명시적인 조회 권한 거절이나 식별자 충돌은 원인을 가진 `blocked`로 표시하며, 이미 접수된 실행의 결과가 불확실하면 같은 앱의 변경은 계속 보류한다.
+
+제품 요청은 소스가 동일한 재빌드도 요청 ID를 포함한 고유 커밋으로 기록한다. `dispatch.state=preparing`은 소스 준비, `requesting`은 영속 저장 후 외부 접수 요청, `accepted`는 run ID 저장을 뜻한다. `prepared_at`은 GitHub 접수 성공 증거가 아니다. 응답 유실 시 저장한 커밋·요청 ID와 workflow 실행 이름을 대조하여 기존 실행을 찾는다. 접수가 명시적으로 거절된 4xx는 `CI_DISPATCH_REJECTED`, 정상 조회로 5분 동안 실행을 찾지 못하면 `CI_DISPATCH_NOT_IDENTIFIED`이며 자동 재접수하지 않는다. 재시작 시 CI는 저장된 run ID를 조회하고, 게시가 확인된 고객 CD는 기존 `cd.json` 및 native journal을 읽기 전용으로 관측한다. CD 기록이 없으면 `CD_RECORD_MISSING`을 표시하며 라우팅 설정이나 앱 적용을 자동 재실행하지 않는다.
+
+### 앱 관리 접수 확인과 목록 순서
+
+앱 계획 GET은 해당 계획으로 접수된 작업이 있으면 `operation_id`를 반환한다. 대시보드는 삭제·중지·재개 응답을 잃어도 저장한 `plan_id`로 기존 작업을 찾아 조회하며 변경 요청을 다시 보내지 않는다. 앱 목록은 생성 시각 내림차순, 같은 시각에는 ID 내림차순이다. 실행 이력은 기존 생성 시각/ID 내림차순을 유지한다.

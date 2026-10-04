@@ -181,8 +181,38 @@ def observe(config, registered, directory, state):
                 site_url = 'https://' + health.netloc + handoff.http_path(review['receipt']['http']['route'])
                 public = {**public, 'site_url': site_url} if site_probe(site_url) else {
                     'state': 'unverified', 'verified_at': None, 'url': None}
-    return output(observed['status'], revision=observed['git_revision'], deployed=observed['deployed'], public=public,
-                  migration=observed.get('migration'))
+    value = output(observed['status'], revision=observed['git_revision'], deployed=observed['deployed'], public=public,
+                   migration=observed.get('migration'))
+    from workload_diagnostics import workload
+    value['cd']['evidence'] = {'observed_at': datetime.now(timezone.utc).isoformat(),
+        'config_revision': observed['git_revision'], 'observed_revision': observed.get('observed_revision') if re.fullmatch(r'[0-9a-f]{40}', str(observed.get('observed_revision'))) else None,
+        'sync': observed.get('sync') if observed.get('sync') in {'Synced', 'OutOfSync', 'Unknown'} else None,
+        'health': observed.get('health') if observed.get('health') in {'Healthy', 'Progressing', 'Degraded', 'Suspended', 'Missing', 'Unknown'} else None,
+        'workload': workload(config, review)}
+    return value
+
+
+def advance(config, registered, directory, state, save):
+    """Continue only from durable completion; uncertain mutations stay read-only."""
+    if state['phase'] == 'pushed':
+        # A concurrent writer must not cause us to deploy a stale continuation.
+        handoff.require(git(config, 'ls-remote', 'origin', 'refs/heads/' + config['branch']).split()[0] == state['revision'],
+                        'remote revision readback differs')
+        review = argo.load_review(directory / 'review')
+        argo.verify_git(review, config['repository'])
+        app = review['application']
+        project = argo.kubectl(config['context'], app['metadata']['namespace'],
+                               'get', 'appproject', app['spec']['project'], '-o', 'json')
+        argo.validate_project(project, app, review['workload'])
+        save('syncing')
+        argo.deploy(review, config['context'], sync=True, timeout=0)
+        save('sync_requested')  # Request completed, not a claim that Pods are healthy.
+    if state['phase'] == 'sync_requested':
+        if 'edge' in registered:
+            save('routing')
+            edge.ensure(registered['edge'])
+        save('observing')
+    return observe(config, registered, directory, state)
 
 
 def execute(config, request):
@@ -196,6 +226,9 @@ def execute(config, request):
             return output(code='CD_EXECUTOR_BUSY')
         directory = root / request['deployment_id']
         state_path = directory / 'state.json'
+        def save(phase):
+            state['phase'] = phase
+            durable_write(state_path, encoded(state))
         if directory.exists():
             private_directory(directory)
             if not state_path.is_file() or state_path.is_symlink():
@@ -205,6 +238,8 @@ def execute(config, request):
             if state.get('phase') == 'blocked':
                 return output(code='CD_PREPARATION_FAILED')
             try:
+                if request['action'] == 'apply' and state.get('phase') in ('pushed', 'sync_requested'):
+                    return advance(config, registered, directory, state, save)
                 return observe(config, registered, directory, state)
             except (ValueError, KeyError, TypeError, OSError, RuntimeError):
                 return output('unknown', revision=state.get('revision'), code='CD_RECONCILE_REQUIRED', unknown=True)
@@ -214,9 +249,6 @@ def execute(config, request):
         state = {'binding': binding, 'phase': 'preparing', 'revision': None}
         if 'edge' in registered:
             state['edge_request'] = {'deployment_id': request['deployment_id'], 'publication': request['publication']}
-        def save(phase):
-            state['phase'] = phase
-            durable_write(state_path, encoded(state))
         save('preparing')
         try:
             published = private_directory(directory / 'published')
@@ -281,15 +313,10 @@ def execute(config, request):
             git(config, 'push', 'origin', state['revision'] + ':refs/heads/' + config['branch'])
             handoff.require(git(config, 'ls-remote', 'origin', 'refs/heads/' + config['branch']).split()[0] == state['revision'],
                             'remote revision readback differs')
-            save('syncing')
-            argo.deploy(review, config['context'], sync=True, timeout=0)
-            if 'edge' in registered:
-                save('routing')
-                edge.ensure(registered['edge'])
-            save('observing')
-            return observe(config, registered, directory, state)
+            save('pushed')
+            return advance(config, registered, directory, state, save)
         except (ValueError, KeyError, TypeError, OSError, RuntimeError, handoff.ValidationError):
-            unknown = state['phase'] in ('pushing', 'syncing', 'routing', 'observing')
+            unknown = state['phase'] in ('pushing', 'pushed', 'syncing', 'sync_requested', 'routing', 'observing')
             if not unknown:
                 save('blocked')
             return output('unknown' if unknown else 'blocked', revision=state['revision'],

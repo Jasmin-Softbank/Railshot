@@ -1,0 +1,140 @@
+{
+  "recorded_at": "2026-10-02T22:57:53.806008+09:00",
+  "repository": "Jasmin-Softbank/Railshot",
+  "branch": "feature/deployment-runtime-seungmin",
+  "tested_commit": "003fc3ba0f84b4179ca697dfa31d4de5bc844b4d",
+  "integration_merged": "94808d26e36f84bc8e65f7b7e3d3bb085634e334",
+  "prior_evidence_commit": "72c16dce1775aa682ad90f6f6615b0eb1c54063f",
+  "local_tests": {
+    "python_suites": [
+      {
+        "suite": "ci-scripts-gate",
+        "total": 134,
+        "pass": 134,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "ci-scripts-infra",
+        "total": 18,
+        "pass": 18,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "ci-scripts-loop",
+        "total": 31,
+        "pass": 31,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "ci-scripts-poc",
+        "total": 1,
+        "pass": 1,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "ci-scripts-runner",
+        "total": 50,
+        "pass": 50,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "ci-scripts",
+        "total": 56,
+        "pass": 56,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "deployment-scripts-tests",
+        "total": 75,
+        "pass": 75,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "gitops",
+        "total": 26,
+        "pass": 26,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "infrastructure-ansible",
+        "total": 65,
+        "pass": 65,
+        "skip": 0,
+        "fail": 0
+      },
+      {
+        "suite": "infrastructure-providers-terraform_tools",
+        "total": 63,
+        "pass": 63,
+        "skip": 0,
+        "fail": 0
+      }
+    ],
+    "python": {
+      "pass": 519,
+      "fail": 0,
+      "skip": 0
+    },
+    "api": {
+      "pass": 73,
+      "fail": 0,
+      "skip": 0
+    },
+    "pytest_ci": {
+      "pass": 18,
+      "fail": 0,
+      "skip": 0
+    },
+    "native_database_boundary_tests": {
+      "pass": 4,
+      "included_in_python_total": true
+    },
+    "total": {
+      "pass": 610,
+      "fail": 0,
+      "skip": 0
+    }
+  },
+  "shell_pass": 20,
+  "yaml_pass": 9,
+  "openapi_pass": 2,
+  "packaged_build": "PASS",
+  "native_ansible_syntax_and_lint": "PASS",
+  "github_jobs": {
+    "pass": 14,
+    "fail": 0,
+    "skip": 0
+  },
+  "runtime_artifact": {
+    "deploy": "ready",
+    "verify": "ready",
+    "cleanup": "cleaned",
+    "scope": "github-hosted-linux-amd64-runtime",
+    "actual_aws_deploy": false
+  },
+  "failure_classification": {
+    "A": [],
+    "B": [],
+    "C": [],
+    "D": [],
+    "E": [
+      "real cloud smoke not dispatched; no dedicated cloud target/credential contract used"
+    ],
+    "F": [
+      "local Docker daemon unavailable; equivalent hosted container jobs passed",
+      "native dependencies and Argo schema were initially absent; prepared and reran without skips"
+    ]
+  },
+  "runtime_or_workflow_bug_fix_needed": false,
+  "manual_other_ownership_edits": false,
+  "protected_branch_writes": false,
+  "cloud_resource_mutations": false
+}

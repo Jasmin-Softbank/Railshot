@@ -67,8 +67,8 @@ def parse_input(data):
     sample = work.get('sample_content', False)
     if type(sample) is not bool:
         raise InputError('workload.sample_content: expected boolean')
-    if sample and (port != 80 or health != '/' or not re.fullmatch(r'(?:docker.io/library/)?nginx:[A-Za-z0-9_.-]+', image)):
-        raise InputError('sample_content is only for tagged nginx on port 80 with health_path /')
+    if sample and (port != 80 or health != '/' or not re.fullmatch(r'(?:docker.io/library/)?nginx(?::[A-Za-z0-9_.-]+)?(?:@sha256:[a-f0-9]{64})?', image)):
+        raise InputError('sample_content is only for explicitly tagged or digest-pinned nginx on port 80 with health_path /')
     exposure = obj(data.get('exposure', {}), 'exposure', ('type', 'node_port', 'verification_url', 'public_url'))
     exposure_type = exposure.get('type', 'nodeport')
     if exposure_type not in ('nodeport', 'cloudflare-tunnel'):

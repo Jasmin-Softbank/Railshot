@@ -364,6 +364,34 @@ class ReleaseTests(unittest.TestCase):
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_actions_skip_only_superseded_and_keep_other_failures_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'output'
+            summary = Path(directory) / 'summary'
+            args = ['--source-sha', 'a' * 40, '--ref', 'refs/heads/main']
+            for error, skip, expected_status, expected_exit in (
+                (None, True, 'admitted', 0),
+                (ValueError('SUPERSEDED_RELEASE_SOURCE'), True, 'superseded', 0),
+                (ValueError('SUPERSEDED_RELEASE_SOURCE'), False, 'blocked', 1),
+                (ValueError('EXACT_SOURCE_CI_GATE_REQUIRED'), True, 'blocked', 1),
+                (ValueError('TRUSTED_RELEASE_SOURCE_REQUIRED'), True, 'blocked', 1),
+                (OSError('network unavailable'), True, 'blocked', 1),
+            ):
+                with self.subTest(error=error, skip=skip):
+                    output.write_text(''); summary.write_text('')
+                    with mock.patch.dict(os.environ, {'GITHUB_OUTPUT': str(output), 'GITHUB_STEP_SUMMARY': str(summary)}), \
+                         mock.patch.object(admission, 'admit', side_effect=error, return_value={'status': 'admitted'}), \
+                         mock.patch('sys.stdout', new_callable=io.StringIO) as stdout:
+                        code = admission.main(args + (['--skip-superseded'] if skip else []))
+                    self.assertEqual(code, expected_exit)
+                    self.assertEqual(json.loads(stdout.getvalue())['status'], expected_status)
+                    self.assertEqual(output.read_text(), ('admitted=' + str(expected_status == 'admitted').lower() + '\n') if skip else '')
+                    self.assertEqual(bool(summary.read_text()), expected_status == 'superseded')
+            with mock.patch.dict(os.environ, {'GITHUB_OUTPUT': ''}), mock.patch.object(admission, 'admit') as checked, \
+                 mock.patch('sys.stderr', new_callable=io.StringIO), self.assertRaises(SystemExit):
+                admission.main(args + ['--skip-superseded'])
+            checked.assert_not_called()
+
     def test_requires_current_sha_trusted_push_latest_attempt_gate(self):
         sha = 'a' * 40
         run = {'id': 12, 'run_attempt': 2, 'head_sha': sha, 'head_branch': 'main', 'head_repository': {'full_name': admission.REPOSITORY},

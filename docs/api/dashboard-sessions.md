@@ -41,7 +41,7 @@
 
 쿠키가 없거나 만료·변조됐으면 새 빈 세션을 만든다. 같은 브라우저의 탭은 세션을 공유하고 다른 브라우저·시크릿 창은 별도 세션이다. 쿠키 삭제 시 기존 세션 복구 기능은 없다. 계정 인증이나 사람의 신원 확인을 제공하지 않으며 쿠키를 소유한 클라이언트가 같은 세션이다.
 
-모든 원격 API 요청은 세션 범위를 적용한다. reverse proxy가 기존 내부 Bearer를 삽입해도 소유 범위를 우회하지 못한다. 기존 비공개 localhost의 쿠키 없는 CLI 유지보수 경로만 기존 공유 상태 접근을 유지한다. 원격 CLI/MCP는 API origin별 쿠키를 `~/.local/state/railshot-client`의 0600 파일에 저장한다. `RAILSHOT_CLIENT_SESSION_DIR`로 위치를 바꿀 수 있다. 원격 curl 등 별도 클라이언트도 cookie jar를 유지해야 한다.
+모든 원격 API 요청은 세션 범위를 적용한다. reverse proxy가 기존 내부 Bearer를 삽입해도 소유 범위를 우회하지 못한다. 기존 비공개 localhost의 쿠키 없는 CLI 유지보수 경로만 기존 공유 상태 접근을 유지한다. 원격 CLI는 API origin별 쿠키를 `~/.local/state/railshot-client`에, `apps/agent` MCP는 `~/.local/state/railshot-agent`에 0600 파일로 저장한다. 각각 `RAILSHOT_CLIENT_SESSION_DIR`, `RAILSHOT_AGENT_SESSION_DIR`로 위치를 바꿀 수 있다. 원격 curl 등 별도 클라이언트도 cookie jar를 유지해야 한다.
 
 배포·빌드·계획·환경의 조회와 목록, 멱등 키, 신규 런타임 대상은 세션별이다. 다른 세션의 상세 ID는 404이고 외부 서비스 조회 전에 거부한다. 다른 세션의 계획으로 배포를 요청하면 실행 가능한 계획이 없다는 422, 환경 생성은 404다. 운영자가 지정한 공용 대상은 계속 공유하므로 같은 공용 앱에 배포하면 기존 앱을 갱신할 수 있다. 세션은 VM·네트워크 격리를 제공하지 않는다. 하나의 미완료 작업만 허용하는 기존 실행 제한도 전체 서버에 적용한다.
 
@@ -90,7 +90,7 @@ label은 1–80자, URL은 최대 2048자, username은 최대 256자, password�
 
 ## 이관·백업·복구
 
-DB의 `user_version=0`일 때 기존 `state.json`을 한 번 가져오고 트랜잭션에서 version 1을 기록한다. 기존 기록은 `session_id=NULL`로 남겨 첫 방문자에게 넘기지 않는다. `state.json`은 보존하지만 이후 기록의 정본이 아니다. 재기동 시 queued/running은 기존 정책대로 unknown으로 바꾸며 재실행하지 않는다.
+DB의 `user_version=0`일 때 기존 `state.json`을 한 번 가져오고 트랜잭션에서 version 1을 기록한다. 기존 기록은 `session_id=NULL`로 남겨 첫 방문자에게 넘기지 않는다. `state.json`은 보존하지만 이후 기록의 정본이 아니다. 재기동 시 running과 구형 queued는 unknown으로 바꾸며 재실행하지 않는다. 영속 queue.sequence/enqueued_at이 있고 started_at이 없는 새 배포 queued는 저장한 소스 그대로 FIFO 실행을 재개한다. unknown 기록은 보존하며 worker 종료 후 60초가 지나면 전역 슬롯만 반납한다. 같은 앱의 변경은 결과 확인 전까지 차단한다.
 
 배포 전 API에 활성 실행이 없는지 확인하고 기존 상태 디렉터리를 백업한다. 실행 중인 DB를 파일 복사할 때 WAL을 누락하면 안 된다. SQLite backup API 또는 API 정상 종료·checkpoint 후 디렉터리 snapshot을 사용한다. 복구 가능한 백업에는 DB, 소스 snapshot, 실행에 참조되는 비공개 환경 상태가 필요하고 `connections.key`도 별도 보호 백업으로 보관한다. DB만 공개 저장소나 CI artifact에 업로드하지 않는다.
 

@@ -104,6 +104,11 @@ def verify_dashboard(endpoint, token, calls, marker):
     assert status == 200 and calls[-1]['authenticated'], 'Browser supplied authorization reached the private API'
     assert calls[-1]['path'] == '/api/v1/deployments' and calls[-1]['method'] == 'POST'
     assert calls[-1]['body'] == b'local-source-fixture' and calls[-1]['idempotency_key'] == 'proxy-smoke'
+    for path in ['/mcp', '/mcp/', '/.well-known/oauth-protected-resource']:
+        status, _, _ = http(endpoint + path, headers)
+        assert status == 401 and calls[-1]['path'] == path, 'MCP proxy did not reach fixture'
+        assert not calls[-1]['authenticated'], 'MCP proxy injected the internal API token'
+        assert calls[-1]['host'] == headers['Host'], 'MCP proxy lost Host'
     for path in ['/railshot-proxy.conf', '/start.sh', '/run/secrets/api-token', '/.env', '/.git/config']:
         status, _, content = http(endpoint + path)
         assert status == 404 and token.encode() not in content, 'Private configuration is reachable as a static asset'
@@ -158,7 +163,8 @@ def web_smoke(component, image, token_file, token, upstream=None):
                '-v', f'{token_file}:/run/secrets/api-token:ro']
     if component == 'dashboard':
         options += ['--add-host', 'host.docker.internal:host-gateway',
-                    '-e', f'RAILSHOT_API_UPSTREAM=host.docker.internal:{upstream[0]}']
+                    '-e', f'RAILSHOT_API_UPSTREAM=host.docker.internal:{upstream[0]}',
+                    '-e', f'RAILSHOT_MCP_UPSTREAM=host.docker.internal:{upstream[0]}']
     else:
         options += ['-e', 'RAILSHOT_BIND_HOST=0.0.0.0', '-e', 'RAILSHOT_ALLOWED_HOSTS=localhost,127.0.0.1',
                     '-e', 'RAILSHOT_STATE_DIR=/tmp/railshot-state', '-e', 'RAILSHOT_TARGET_ID=container-smoke',
@@ -184,7 +190,34 @@ def web_smoke(component, image, token_file, token, upstream=None):
                 assert http(endpoint + '/api/runs/1', headers)[0] == expected, 'API access or run-binding boundary failed'
             status, _, content = http(endpoint + '/api/v1/targets', {'Authorization': 'Bearer ' + token})
             assert status == 200 and json.loads(content)['items'][0]['id'] == 'container-smoke', 'Product state did not initialize'
+            # Build the real installer from image files; source-checkout tests cannot catch missing COPY inputs.
+            docker('exec', container, 'node', '--input-type=module', '-e',
+                   "import assert from 'node:assert/strict'; import {buildOpenStackInstaller} from '/app/apps/api/src/openstack/installer.js'; "
+                   "const {archive,tokenClient}=await buildOpenStackInstaller(); assert(archive.length>0); assert(tokenClient.length>0);")
             docker('exec', container, 'node', '-e', "const fs=require('node:fs');if(process.getuid()!==1000||(fs.statSync('/tmp/railshot-state').mode&0o777)!==0o700)process.exit(1)")
+    finally:
+        remove_container(name)
+
+
+def mcp_http_smoke(image):
+    name = 'railshot-mcp-http-smoke-' + secrets.token_hex(6)
+    try:
+        container = docker('run', '-d', '--name', name, '--read-only', '--cap-drop', 'ALL',
+                           '--security-opt', 'no-new-privileges', '-p', '127.0.0.1::4185',
+                           '-e', 'RAILSHOT_MCP_PORT=tcp://10.52.0.1:4185',
+                           image, 'node', 'src/remote-mcp.js')
+        endpoint = 'http://' + docker('port', container, '4185').splitlines()[0]
+        for attempt in range(50):
+            try:
+                status, _, body = http(endpoint + '/healthz')
+                assert status == 200 and body == b'ok\n'
+                break
+            except (URLError, ConnectionError, TimeoutError, AssertionError):
+                if attempt == 49:
+                    raise AssertionError('Remote MCP did not start with Kubernetes Service environment')
+                time.sleep(0.2)
+        status, _, body = http(endpoint + '/.well-known/oauth-protected-resource/mcp')
+        assert status == 200 and json.loads(body)['resource'] == 'https://railshot.io/mcp'
     finally:
         remove_container(name)
 
@@ -209,9 +242,19 @@ def smoke(component, image):
                 assert selector.select(30), 'MCP initialize timed out'
                 response = json.loads(process.stdout.readline())
             assert response.get('id') == 1 and response.get('result', {}).get('serverInfo'), response
+            process.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
+            process.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}}) + '\n')
+            process.stdin.flush()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                assert selector.select(30), 'MCP tools/list timed out'
+                tools = json.loads(process.stdout.readline())
+            names = {item['name'] for item in tools.get('result', {}).get('tools', [])}
+            assert tools.get('id') == 2 and {'deploy_repository', 'get_deployment'} <= names, tools
         finally:
             remove_container(name)
             process.communicate(timeout=15)
+        mcp_http_smoke(image)
         return
     if component == 'api':
         native_api_smoke(image)

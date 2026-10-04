@@ -237,8 +237,6 @@ class DeploymentEngine:
             raise DeploymentError('NODE_IP_INVALID', 'Node InternalIP must be IPv4') from None
         base = f'http://{addresses[0]}:{self.spec.exposure.node_port}'
         urls = [base + self.spec.workload.health_path]
-        if self.spec.exposure.verification_url and self.result.deployment_mode != 'airgap':
-            urls.append(self.spec.exposure.verification_url)
         opener = build_opener(ProxyHandler({}))
         for url in urls:
             deadline, last = time.monotonic() + self.spec.runtime.timeout_seconds, ''
@@ -257,8 +255,35 @@ class DeploymentEngine:
                         raise DeploymentError('ENDPOINT_HTTP_FAILED', f'{url}: {last}') from exc
                     time.sleep(1)
         self.result.endpoint = base
-        self.result.endpoint_scope = 'node-local-with-additional-url' if len(urls) > 1 else 'node-local'
+        self.result.endpoint_scope = 'node-local'
         self.state('ENDPOINT_READY')
+
+    def additional_endpoint(self):
+        """Bounded observation of an upstream exposure; never invalidate local readiness."""
+        url = self.spec.exposure.verification_url
+        if not url:
+            return
+        diagnostic = {'url': url, 'status': 'unavailable', 'reason': 'offline_mode'}
+        if self.result.deployment_mode != 'airgap':
+            try:
+                output = self.command(['curl', '--noproxy', '*', '--silent', '--show-error',
+                    '--connect-timeout', '2', '--max-time', '3', '--max-filesize', '4096',
+                    '--write-out', '\n%{http_code}', url], timeout=4)
+                body, _, status = output.rpartition('\n')
+                if status != '200':
+                    raise ValueError(f'HTTP {status or "unknown"}')
+                if self.spec.workload.sample_content and body.strip() != 'Railshot Runtime OK':
+                    raise ValueError('Unexpected sample response body')
+                diagnostic.update(status='ready', reason=None)
+                if self.result.endpoint_scope == 'node-local':
+                    self.result.endpoint_scope = 'node-local-with-additional-url'
+            except (DeploymentError, ValueError) as exc:
+                # No raw response bodies or credentials in a diagnostic.
+                diagnostic['reason'] = exc.code if isinstance(exc, DeploymentError) else str(exc)
+        self.result.exposure_status['additional_verification'] = diagnostic
+        if diagnostic['status'] != 'ready':
+            self.result.exposure_status.update(status='degraded', reason='additional_endpoint_unavailable')
+            print(f'[EXTERNAL_DEPENDENCY] additional endpoint {diagnostic["reason"]}; node-local runtime remains ready', file=sys.stderr)
 
     def reconcile(self, action):
         if action == 'deploy':
@@ -291,6 +316,7 @@ class DeploymentEngine:
         self.workload_ready()
         self.endpoints()
         apply_exposure(self.spec, self.result, self.result.deployment_mode == 'airgap')
+        self.additional_endpoint()
         self.result.status = 'ready'
 
     def cleanup_workload(self):
