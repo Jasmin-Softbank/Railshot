@@ -125,12 +125,12 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           throw new ServiceError('API authentication required', 401);
         if (shuttingDown || release || draining) throw new ServiceError('Platform update in progress', 503);
         const input = await jsonInput(request);
-        if (!input || Object.keys(input).sort().join(',') !== 'environment_target_id,operation_id'
+        if (!input || !['environment_target_id,operation_id', 'environment_target_id,operation_id,packaging'].includes(Object.keys(input).sort().join(','))
             || !/^[a-f0-9-]{36}$/.test(input.operation_id || '')
             || !/^[A-Za-z0-9._-]{1,128}$/.test(input.environment_target_id || ''))
           throw new ServiceError('Invalid source replay identity', 422);
         activeRequests++; counted = true;
-        json(response, 202, await (await productReady).replaySubmittedSource(input.operation_id, input.environment_target_id)); return;
+        json(response, 202, await (await productReady).replaySubmittedSource(input.operation_id, input.environment_target_id, input.packaging)); return;
       }
       // Kept outside the public gateway's /api/ route. Always require the operator
       // token, including public-demo mode. The hook has no database/cloud mounts.

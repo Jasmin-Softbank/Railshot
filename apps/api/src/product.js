@@ -1200,7 +1200,7 @@ export async function createProductService({ service, directory, target, provide
       return publicRecord(reserved.record);
     },
     // Private operator route only: reuse verified stored bytes and preserve the original owner.
-    async replaySubmittedSource(id, environmentTargetId) {
+    async replaySubmittedSource(id, environmentTargetId, packaging = {}) {
       const record = find('deployments', id);
       const sameTarget = environmentTargetId === record.environment_target_id;
       const notSent = record.status === 'failed' && record.stage === 'ci' && !record.ci?.run_id
@@ -1209,9 +1209,17 @@ export async function createProductService({ service, directory, target, provide
       if (record.deletion_requested || !(sameTarget ? notSent : successfulDeployment(record))
           || !applicationAdapter?.targets?.[environmentTargetId])
         throw new ProductError(409, 'SOURCE_REPLAY_REJECTED', '미접수로 확인된 요청 또는 성공한 배포의 저장 소스만 사용할 수 있습니다.');
+      if (!packaging || typeof packaging !== 'object' || Array.isArray(packaging)
+          || Object.entries(packaging).some(([path, content]) => !['Dockerfile', '.dockerignore', '.railshot/railshot.yaml'].includes(path)
+            || typeof content !== 'string' || Buffer.byteLength(content) > 65536))
+        throw invalid('복구 시에는 Dockerfile, .dockerignore, 배포 설정만 추가하거나 수정할 수 있습니다.');
       const files = await submittedFiles(record);
+      for (const [path, content] of Object.entries(packaging)) {
+        const existing = files.find(file => file.path === path);
+        if (existing) existing.content = Buffer.from(content); else files.push({ path, content: Buffer.from(content) });
+      }
       return this.createDeployment({ app: record.app, target_id: environmentTargetId, source_type: 'folder', files },
-        `source-replay.${record.id}.${environmentTargetId}`, undefined, record.session_id);
+        `source-replay.${record.id}.${digest([environmentTargetId, sourceDigest(files)]).slice(0, 32)}`, undefined, record.session_id);
     },
     async resumeDeployment(id, sessionId = null) {
       const record = await store.transaction((state) => {
