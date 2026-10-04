@@ -189,6 +189,16 @@ class ApplicationRoutesTest(unittest.TestCase):
             ])
             case.edge.assert_not_called(); case.registration.native.assert_not_called()
 
+    def test_gcp_shared_certificate_only_registers_application_dns(self):
+        with self.fixture('gcp') as case:
+            case.gcp_result['dns_authorization_record'] = None
+            result = routes.ensure(case.config_path, case.request)
+            self.assert_configured_only(case, result)
+            self.assertEqual(case.dns.call_count, 1)
+            self.assertEqual(case.dns.call_args.args[1], {
+                'application_id': case.registered['application_id'],
+                'hostname': case.registered['hostname'], 'type': 'A', 'content': '34.100.10.20'})
+
     def test_openstack_finalized_binding_runs_octavia_then_tunnel_then_proxied_dns(self):
         with self.fixture('openstack') as case:
             result = routes.ensure(case.config_path, case.request)

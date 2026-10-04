@@ -476,6 +476,38 @@ class LifecycleRuntimeTest(unittest.TestCase):
                     self.kube.objects.append(duplicate); code = 'APPLICATION_RUNTIME_SHARED_STORAGE'
                 self.blocked(code, lambda: self.inventory('delete')); self.assertFalse(self.kube.writes)
 
+    def test_managed_local_storage_survives_stop_start_and_is_in_delete_plan(self):
+        claim, volume = self.storage()
+        claim['metadata']['uid'] = '12345678-1234-1234-1234-123456789012'
+        key = 'pvc-' + claim['metadata']['uid']
+        claim['spec'].update(volumeName=key, storageClassName='railshot-persistent')
+        volume['metadata']['name'] = key
+        volume['metadata']['annotations']['pv.kubernetes.io/provisioned-by'] = 'rancher.io/local-path'
+        volume['spec'].pop('csi')
+        volume['spec'].update(storageClassName='railshot-persistent',
+            local={'path': '/var/lib/rancher/railshot-volumes/' + key + '_' + APP + '_data'},
+            nodeAffinity={'required': {'nodeSelectorTerms': [{'matchExpressions': [
+                {'key': 'kubernetes.io/hostname', 'operator': 'In', 'values': ['railshot-gcp-poc']}]}]}})
+        volume['spec']['claimRef']['uid'] = claim['metadata']['uid']
+        sc = obj('StorageClass', 'railshot-persistent', provisioner='rancher.io/local-path',
+                 volumeBindingMode='WaitForFirstConsumer', reclaimPolicy='Delete')
+        sc['metadata']['annotations'] = {'defaultVolumeType': 'local'}
+        self.kube.objects.append(sc)
+        preview = self.inventory('stop')
+        self.assertEqual(preview['storage'][0]['volume_source'], 'local')
+        runtime.execute(self.kube, self.binding, 'stop', preview)
+        self.assertIsNotNone(self.kube.find('PersistentVolumeClaim', 'data'))
+        stopped = self.inventory('start')
+        runtime.execute(self.kube, self.binding, 'start', stopped, preview)
+        for wrong_path in ('/etc', '/var/lib/rancher/railshot-volumes/another-app'):
+            original = volume['spec']['local']['path']
+            volume['spec']['local']['path'] = wrong_path
+            self.blocked('APPLICATION_RUNTIME_UNSUPPORTED_STORAGE', self.inventory)
+            volume['spec']['local']['path'] = original
+        deletion = self.inventory('delete')
+        self.assertIn({'kind': 'PersistentVolume', 'name': key}, deletion['resources'])
+        self.assertEqual(runtime.execute(self.kube, self.binding, 'delete', deletion)['status'], 'succeeded')
+
     def test_external_database_and_host_path_and_external_service_rejected(self):
         self.binding['registered']['target']['database'] = {'host': 'private-db'}
         self.blocked('APPLICATION_RUNTIME_EXTERNAL_DATABASE', lambda: self.inventory('delete'))

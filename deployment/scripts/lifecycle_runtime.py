@@ -264,24 +264,45 @@ def storage(kube, ns, objects):
         pv = matches[0]; vs = pv['spec']; csi = vs.get('csi', {})
         driver, handle = csi.get('driver'), csi.get('volumeHandle')
         provisioner = pv['metadata'].get('annotations', {}).get('pv.kubernetes.io/provisioned-by')
-        require(driver and handle and provisioner == driver and FINALIZER in pv['metadata'].get('finalizers', []) and
-                vs.get('persistentVolumeReclaimPolicy') == 'Delete' and
+        require(vs.get('persistentVolumeReclaimPolicy') == 'Delete' and
                 vs.get('claimRef', {}).get('uid') == cm['uid'] and vs['claimRef'].get('namespace') == ns and
                 vs['claimRef'].get('name') == cm['name'] and not spec.get('selector') and
-                set(vs.get('accessModes', [])) in ({'ReadWriteOnce'}, {'ReadWriteOncePod'}) and
-                bool(csi.get('volumeAttributes', {}).get('storage.kubernetes.io/csiProvisionerIdentity')),
+                set(vs.get('accessModes', [])) in ({'ReadWriteOnce'}, {'ReadWriteOncePod'}),
                 'APPLICATION_RUNTIME_UNSUPPORTED_STORAGE')
-        require(sum(p.get('spec', {}).get('csi', {}).get('driver') == driver and
-                    p.get('spec', {}).get('csi', {}).get('volumeHandle') == handle for p in volumes) == 1,
-                'APPLICATION_RUNTIME_SHARED_STORAGE')
         sc_name = vs.get('storageClassName')
         require(name(sc_name) and sc_name == spec.get('storageClassName'), 'APPLICATION_RUNTIME_UNSUPPORTED_STORAGE')
         sc = get(kube, ns, 'storageclass', sc_name)
+        local = vs.get('local', {}).get('path')
+        if local:
+            driver, handle = 'rancher.io/local-path', local
+            expected_path = '/var/lib/rancher/railshot-volumes/' + pv['metadata']['name'] + '_' + ns + '_' + cm['name']
+            terms = vs.get('nodeAffinity', {}).get('required', {}).get('nodeSelectorTerms', [])
+            require(sc_name == 'railshot-persistent' and provisioner == driver and local == expected_path
+                    and re.fullmatch(r'pvc-[a-f0-9-]{36}', pv['metadata']['name'])
+                    and pv['metadata']['name'] == 'pvc-' + cm['uid']
+                    and sc and sc['metadata'].get('labels', {}).get('app.kubernetes.io/managed-by') == 'railshot'
+                    and sc.get('metadata', {}).get('annotations', {}).get('defaultVolumeType') == 'local'
+                    and sc.get('volumeBindingMode') == 'WaitForFirstConsumer' and not csi and not vs.get('hostPath')
+                    and len(terms) == 1 and len(terms[0].get('matchExpressions', [])) == 1
+                    and terms[0]['matchExpressions'][0].get('key') == 'kubernetes.io/hostname'
+                    and terms[0]['matchExpressions'][0].get('operator') == 'In'
+                    and len(terms[0]['matchExpressions'][0].get('values', [])) == 1,
+                    'APPLICATION_RUNTIME_UNSUPPORTED_STORAGE')
+            require(sum(p.get('spec', {}).get('local', {}).get('path') == local for p in volumes) == 1,
+                    'APPLICATION_RUNTIME_SHARED_STORAGE')
+        else:
+            require(driver and handle and provisioner == driver and FINALIZER in pv['metadata'].get('finalizers', [])
+                    and bool(csi.get('volumeAttributes', {}).get('storage.kubernetes.io/csiProvisionerIdentity')),
+                    'APPLICATION_RUNTIME_UNSUPPORTED_STORAGE')
+            require(sum(p.get('spec', {}).get('csi', {}).get('driver') == driver and
+                        p.get('spec', {}).get('csi', {}).get('volumeHandle') == handle for p in volumes) == 1,
+                    'APPLICATION_RUNTIME_SHARED_STORAGE')
         require(sc and sc.get('provisioner') == driver and sc.get('reclaimPolicy', 'Delete') == 'Delete',
                 'APPLICATION_RUNTIME_UNSUPPORTED_STORAGE')
         result.append({'claim': identity(claim, ns), 'claim_uid': cm['uid'], 'volume': identity(pv),
                        'volume_uid': pv['metadata']['uid'], 'spec_sha256': digest(vs),
                        'driver': driver, 'handle_sha256': digest(handle),
+                       **({'volume_source': 'local'} if local else {}),
                        'storage_class_uid': sc['metadata']['uid'],
                        'storage_class_sha256': digest({k: v for k, v in sc.items() if k != 'metadata'}),
                        'attachments': [identity(a) for a in attachments
@@ -408,6 +429,8 @@ def deleted(kube, ns, snapshot):
                          'VolumeAttachment', 'storage.k8s.io/v1')
     for stored in snapshot['storage']:
         if any(p['metadata']['name'] == stored['volume']['name'] or
+               (stored.get('volume_source') == 'local' and
+                digest(p.get('spec', {}).get('local', {}).get('path')) == stored['handle_sha256']) or
                (p.get('spec', {}).get('csi', {}).get('driver') == stored['driver'] and
                 digest(p['spec']['csi'].get('volumeHandle')) == stored['handle_sha256']) for p in volumes):
             return False

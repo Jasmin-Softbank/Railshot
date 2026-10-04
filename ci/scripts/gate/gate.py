@@ -275,6 +275,8 @@ def validate_semantics(spec):
     if len(names) != len(set(names)):
         raise ValueError("service names must be unique")
     for svc in spec["services"]:
+        if svc.get("storage") and (len(spec["services"]) != 1 or svc.get("replicas", 1) != 1 or svc.get("migrate")):
+            raise ValueError("persistent storage requires one service, one replica and no migration Job")
         if set(svc.get("env", {})) & {"PORT", "DATABASE_URL", "MIGRATION_DATABASE_URL"} or set(svc.get("secrets", [])) & {"PORT", "MIGRATION_DATABASE_URL"}:
             raise ValueError("PORT and database role bindings are platform-owned; use DATABASE_URL secret for an external DB")
 
@@ -481,6 +483,9 @@ def l3(spec, images, run_id, *, network=None):
             name = f"{net}-{s['name']}"
             cmd = ["docker", "run", "-d", "--name", name, "--network", net, *docker_security(),
                    "--cpus=1", "--memory=1g", "--pids-limit=128", *env]
+            if s.get("storage"):
+                # CI storage is temporary; durable PVC verification belongs to CD.
+                cmd += ["--tmpfs", f"{s['storage']['mountPath']}:rw,uid=65532,gid=65532,mode=0700,size=1g"]
             started.append(name)
             p = sh(cmd + docker_command(images[s["name"]], s.get("command")))
             if p.returncode:

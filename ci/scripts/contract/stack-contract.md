@@ -37,6 +37,8 @@ Direct CLI calls default to packaging-only repair. The customer workflow allows 
 - `env` holds non-secret values only. Secret names go in `secrets`; runtime injection is a separate target contract. The CI currently blocks required external secrets.
 - Do not infer deployment resources from the CI limits in §4. The spec records facts about the app and explicit user choices, nothing else.
 - `resources` may only request what `catalog.yaml` offers.
+- A single-service, single-replica application may declare `storage: {mountPath: /var/opt/memos, sizeGi: 1}`. One namespace-owned PVC uses the operator-installed `railshot-persistent` StorageClass. The path is restricted to `/data`, `/var/lib/<name>` or `/var/opt/<name>` and their safe subdirectories. Persistent workloads use Recreate to avoid concurrent SQLite writers. Database migration Jobs are not combined with local application storage.
+- L3 provides temporary isolated writable storage at that same path. CI does not claim durable storage success; the target must bind the real PVC and verify runtime readiness. Stop and update preserve it; explicit permanent application deletion includes its data.
 
 ## 4. CI limits and target boundary
 
@@ -45,6 +47,8 @@ L1 validates schema, unique service names and reserved PORT/database bindings. S
 L3 runs the tested image in an isolated ephemeral container environment. When requested, it starts temporary PostgreSQL 17, uses owner permissions for migration and a restricted runtime role for the app, and checks the declared health/routes. This does not choose a production DB operator, order a real rollout, verify backups or recover customer data.
 
 A complete gate verdict binds source/spec and tested image identities. The trusted publisher exports or publishes those same images and returns remote digests. The current workflow hands the original spec, verdict and bundle manifest plus `images.json` to CD. It does not assign domains, issue certificates, configure Gateway/ALB, install a cluster or claim deployment success. See [registry contract](registry.md).
+
+An agent's `give_up` is advisory: a fresh complete passing gate verdict still permits publication. A completed proposal rejected before any writes also receives a final gate evaluation after its repair allowance is exhausted. The rejected proposal and its error remain in the attempt receipt. Partial checks, unresolved required capabilities, missing workload specs, uncertain SDK outcomes and partial writes never establish release eligibility.
 
 ## 5. Base image allowlist
 

@@ -68,12 +68,14 @@ test('normal shared cloud applications keep using the existing common adapter', 
   const f = await fixture(t), calls = [];
   const base = { targets: { aws: { provider: 'aws', automaticDelivery: true } },
     describe: (id, app) => ({ id: `common-${id}-${app}`, environment_target_id: id }),
-    register: async (app) => { calls.push(app.id); return { ...app, status: 'ready' }; } };
+    register: async (app) => { calls.push(app.id); return { ...app, status: 'ready' }; },
+    observePublished: async (app) => ({ application_id: app.id, public_http: { state: 'succeeded' } }) };
   const adapter = await createPersonalAdapter({ ...f.options, base });
   assert.equal(adapter.application.targets.aws.provider, 'aws');
   const app = adapter.application.describe('aws', 'demo');
   assert.equal((await adapter.application.register(app)).status, 'ready');
   assert.deepEqual(calls, ['common-aws-demo']);
+  assert.equal((await adapter.application.observePublished(app)).public_http.state, 'succeeded');
 });
 
 

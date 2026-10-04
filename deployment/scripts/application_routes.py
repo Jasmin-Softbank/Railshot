@@ -83,11 +83,12 @@ def _ensure(config, publication_request, prepared):
             raise applications.RegistrationError(error.code, unknown=error.unknown) from error
         applications.require(native['hostname'] == request['hostname'], 'APPLICATION_ROUTE_BINDING_MISMATCH')
         auth = native['dns_authorization_record']
-        applications.require(auth['type'] == 'CNAME' and auth['data'].rstrip('.').endswith('.authorize.certificatemanager.goog'),
-                             'APPLICATION_CERTIFICATE_DNS_INVALID')
-        dns.ensure(ingress['dns_config_file'], {'application_id': app_id, 'purpose': 'certificate',
-            'application_hostname': request['hostname'], 'hostname': auth['name'].rstrip('.'),
-            'type': 'CNAME', 'content': auth['data'].rstrip('.')})
+        if auth is not None:
+            applications.require(auth['type'] == 'CNAME' and auth['data'].rstrip('.').endswith('.authorize.certificatemanager.goog'),
+                                 'APPLICATION_CERTIFICATE_DNS_INVALID')
+            dns.ensure(ingress['dns_config_file'], {'application_id': app_id, 'purpose': 'certificate',
+                'application_hostname': request['hostname'], 'hostname': auth['name'].rstrip('.'),
+                'type': 'CNAME', 'content': auth['data'].rstrip('.')})
         dns_request = {'application_id': app_id, 'hostname': request['hostname'], 'type': 'A', 'content': native['frontend_ip']}
         edge_receipt = {'provider': 'gcp', 'backend_service': native['backend_service']}
     else:

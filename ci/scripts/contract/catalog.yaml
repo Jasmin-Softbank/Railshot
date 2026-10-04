@@ -16,13 +16,19 @@ env:
 secrets:
   max_keys: 20            # names only; runtime values and injection belong to the target owner
 
+persistent_storage:
+  max_volumes: 1
+  replicas: 1
+  size_gib: {min: 1, max: 10}
+  storage_class: railshot-persistent
+  # Target operator installs the provisioner. CI uses temporary isolated storage.
+
 unsupported_mvp:
   - bucket
   - automatic_backup_restore
   - custom_domain
   - gpu
   - region_change
-  - stateful_volumes
   - privileged_or_root
 
 # Allowed base images (stack-contract §5). A FROM matches when the repository is equal

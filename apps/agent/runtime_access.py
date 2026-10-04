@@ -413,7 +413,8 @@ def validate_document(doc, namespace, target):
         require(doc['subjects'] == [{'kind': 'ServiceAccount', 'name': 'railshot-argocd', 'namespace': subject_ns}])
     else:
         require(set(doc) == common | {'rules'} and meta['name'] == 'railshot-argocd' and isinstance(doc['rules'], list))
-        writable = {('apps', 'deployments'), ('', 'services'), ('networking.k8s.io', 'networkpolicies'), ('batch', 'jobs')}
+        writable = {('apps', 'deployments'), ('', 'services'), ('', 'persistentvolumeclaims'),
+                    ('networking.k8s.io', 'networkpolicies'), ('batch', 'jobs')}
         readable = {('', 'pods'), ('', 'events'), ('', 'pods/log'), ('apps', 'replicasets')}
         for rule in doc['rules']:
             require(isinstance(rule, dict) and set(rule) <= {'apiGroups', 'resources', 'verbs', 'resourceNames'}

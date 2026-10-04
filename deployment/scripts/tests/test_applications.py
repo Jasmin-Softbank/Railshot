@@ -138,6 +138,28 @@ class ApplicationsTest(unittest.TestCase):
         self.assertEqual(migrated['data'], before_data)
         self.assertEqual(migrated['metadata']['labels']['argocd.argoproj.io/secret-type'], 'railshot-application')
 
+    def test_existing_registration_gains_storage_permissions_once(self):
+        first = self.register(); app_id = first['application_id']
+        first.pop('runtime_permissions_version')
+        env.save(self.home() / 'registration.json', first)
+        role = self.fixture.runtime.objects[app_id, 'role', env.SA]
+        for rule in role['rules']:
+            rule['resources'] = [r for r in rule['resources'] if r != 'persistentvolumeclaims']
+        project = self.fixture.control.objects['argocd', 'appproject', app_id]
+        project['spec']['namespaceResourceWhitelist'] = env.argo.KINDS
+        before = (self.home() / 'binding.json').read_bytes()
+        result = self.register()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(result['runtime_permissions_version'], 2)
+        self.assertEqual((self.home() / 'binding.json').read_bytes(), before)
+        role = self.fixture.runtime.objects[app_id, 'role', env.SA]
+        self.assertIn('persistentvolumeclaims', [r for rule in role['rules'] for r in rule['resources']])
+        project = self.fixture.control.objects['argocd', 'appproject', app_id]
+        self.assertIn(env.argo.PVC_KIND, project['spec']['namespaceResourceWhitelist'])
+        counters = (self.fixture.runtime.applications, self.fixture.control.applications)
+        self.assertEqual(self.register(), result)
+        self.assertEqual(counters, (self.fixture.runtime.applications, self.fixture.control.applications))
+
     def test_shared_scope_partial_write_requires_reconciliation_without_replay(self):
         original = self.fixture.control.__call__
         def fail_policy(namespace, *args, document=None):

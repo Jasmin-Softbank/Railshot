@@ -43,6 +43,23 @@ class HandoffTest(unittest.TestCase):
                       'resources': {'requests': {'cpu': '100m', 'memory': '128Mi'}, 'limits': {'cpu': '500m', 'memory': '256Mi'}}}
             receipt = prepare()
             result = render(root, target)
+            spec['services'][0]['storage'] = {'mountPath': '/var/opt/memos', 'sizeGi': 1}
+            prepare()
+            persistent = render(root, target)
+            import argo
+            argo.validate_workload(persistent['workload'], 'demo', 'tenant-demo', 'aws-demo')
+            deployment = persistent['workload']['items'][0]
+            self.assertEqual(deployment['spec']['strategy'], {'type': 'Recreate'})
+            self.assertIn({'name': 'data', 'mountPath': '/var/opt/memos'},
+                          deployment['spec']['template']['spec']['containers'][0]['volumeMounts'])
+            claim = persistent['workload']['items'][-1]
+            self.assertEqual(claim['kind'], 'PersistentVolumeClaim')
+            self.assertEqual(claim['metadata']['name'], 'demo-data')
+            self.assertEqual(claim['spec']['storageClassName'], 'railshot-persistent')
+            claim['spec']['storageClassName'] = 'unreviewed'
+            with self.assertRaisesRegex(ValueError, 'restricted persistent'):
+                argo.validate_workload(persistent['workload'], 'demo', 'tenant-demo', 'aws-demo')
+            spec['services'][0].pop('storage'); receipt = prepare()
             # Historical artifacts keep the old filename and hash bindings.
             (root / 'railshot.yaml').rename(root / 'jasmin.yaml')
             legacy_manifest = json.loads((root / 'manifest.json').read_bytes())

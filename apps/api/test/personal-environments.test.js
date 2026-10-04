@@ -475,6 +475,18 @@ function selectedPersonalSource(targetId, expectedTargetId) {
 test('modular upload preserves personal ownership and the reviewed target precondition', async (t) => {
   const f = await fixture(t), owner = f.client(), stranger = f.client(), row = await f.target(owner);
   await f.runtime(owner, row);
+  const query = new URLSearchParams({ environment: 'onprem', provider: 'openstack', app: 'merged-personal-app', target_id: row.id });
+  const resolved = await owner.request(`/api/v1/applications/resolve?${query}`);
+  assert.equal(resolved.status, 200);
+  assert.equal(resolved.body.environment_target_id, row.id);
+  assert.equal((await stranger.request(`/api/v1/applications/resolve?${query}`)).status, 404);
+  query.delete('target_id'); query.set('targetId', row.id); query.set('registerNew', 'false');
+  assert.equal((await owner.request(`/api/v1/applications/resolve?${query}`)).body.environment_target_id, row.id);
+  assert.equal((await stranger.request(`/api/v1/applications/resolve?${query}`)).status, 404);
+  for (const extra of ['&target_id=other', '&targetId=other', '&registerNew=false', '&unexpected=1'])
+    assert.equal((await owner.request(`/api/v1/applications/resolve?${query}${extra}`)).status, 422);
+  query.set('registerNew', 'true');
+  assert.equal((await owner.request(`/api/v1/applications/resolve?${query}`)).status, 422);
   const submit = (client, expected, key) => client.request('/api/v1/deployments', undefined,
     { method: 'POST', body: selectedPersonalSource(row.id, expected), headers: { 'Idempotency-Key': key } });
   const stale = await submit(owner, 'different-target', 'review-stale');
@@ -496,7 +508,10 @@ test('application resolution binds snake_case personal target selection to its c
   assert.deepEqual(resolved.body, { app: 'resolved-app', environment_target_id: row.id, application: null });
   assert.equal((await stranger.request(`/api/v1/applications/resolve?${query}`)).status, 404);
   const camelCase = new URLSearchParams({ environment: 'onprem', provider: 'openstack', app: 'resolved-app', targetId: row.id });
-  assert.equal((await owner.request(`/api/v1/applications/resolve?${camelCase}`)).status, 422);
+  const compatible = await owner.request(`/api/v1/applications/resolve?${camelCase}`);
+  assert.equal(compatible.status, 200);
+  assert.deepEqual(compatible.body, resolved.body);
+  assert.equal((await stranger.request(`/api/v1/applications/resolve?${camelCase}`)).status, 404);
 });
 
 test('owner runtime reconciliation points to the readable target resource', async (t) => {

@@ -287,6 +287,45 @@ s.step('agent:1', lambda: os._exit(9))
             self.assertEqual(self.cli(True), 1)
             agent.assert_not_called()
 
+    def test_agent_stop_uses_fresh_complete_gate_verdict_and_resume_keeps_receipt(self):
+        failed = {'ok': False, 'status': 'FAIL', 'failure': {
+            'layer': 'L1', 'class': 'F5', 'signature': 'missing-spec'}}
+        error = StateError('SDK_PATCH_REJECTED', component='runner', phase='patch',
+                           outcome='FAIL', side_effect='none').as_dict()
+        rejected = {'output': {'status': 'proposed'}, 'written': [], 'error': error,
+                    'meta': {'sdk_status': 'completed', 'status': 'failed'},
+                    'proposal_rejection': {'safe_to_replan': True, 'reason': 'EVIDENCE_LINE_OUT_OF_RANGE',
+                                           'field': 'evidence_refs[0].line', 'guidance': 'Use an existing line.'}}
+        gave_up = {'output': {'status': 'give_up', 'give_up': {'class': 'OUT_OF_SCOPE'}},
+                   'written': [], 'meta': {'sdk_status': 'completed', 'status': 'completed'}}
+        passed = {'ok': True, 'release_eligible': True, 'status': 'PASS'}
+        incomplete = {'ok': False, 'checks_ok': True, 'release_eligible': False, 'status': 'INCOMPLETE'}
+        for stop, record, rc in (('give_up', gave_up, 0), ('rejected', rejected, 1)):
+            for name, final, expected in (('pass', passed, 0), ('fail', failed, 1), ('partial', incomplete, 1)):
+                with self.subTest(stop=stop, verdict=name):
+                    self.run = self.root / f'{stop}-{name}'
+                    def gate(ws, run, attempt, layers, **options):
+                        self.assertEqual(layers, ','.join(loop.GATE_ORDER))
+                        verdict = final if attempt else failed
+                        target = run / f'gate-{attempt}'; target.mkdir()
+                        (target / 'verdict.json').write_text(json.dumps(verdict))
+                        return verdict
+                    with patch.object(loop, 'gate', side_effect=gate) as check, \
+                            self.agent_result(record, rc=rc) as agent, redirect_stdout(io.StringIO()):
+                        self.assertEqual(self.cli(), expected)
+                    self.assertEqual(check.call_count, 2)
+                    self.assertEqual(agent.call_count, 1)
+                    evidence = json.loads((self.run / 'evidence.json').read_text())
+                    self.assertEqual([a['attempt'] for a in evidence['attempts']], [0, 1])
+                    self.assertEqual(evidence['agent_attempts'], 1)
+                    self.assertEqual(evidence['passed'], expected == 0)
+                    if stop == 'rejected':
+                        self.assertEqual(evidence['attempts'][1]['error'], error)
+                    with patch.object(loop, 'gate', side_effect=AssertionError('gate replayed')), \
+                            patch.object(loop, 'agent', side_effect=AssertionError('agent replayed')), \
+                            redirect_stdout(io.StringIO()):
+                        self.assertEqual(self.cli(True), expected)
+
     def test_resume_after_second_call_runs_only_the_remaining_fixer(self):
         def gate(ws, run, attempt, *args, **kwargs):
             verdict = ({'ok': True, 'release_eligible': True, 'status': 'PASS'} if attempt == 3 else

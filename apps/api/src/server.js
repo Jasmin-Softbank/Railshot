@@ -258,12 +258,20 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           }
           if (url.pathname === '/api/v1/applications/resolve') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
-            const required = ['environment', 'provider', 'app'], optional = ['target_id'];
-            if ([...url.searchParams.keys()].some((key) => ![...required, ...optional].includes(key))
-                || required.some((key) => url.searchParams.getAll(key).length !== 1)
-                || optional.some((key) => url.searchParams.getAll(key).length > 1))
+            const keys = ['environment', 'provider', 'app'];
+            const optional = ['target_id', 'targetId', 'registerNew'];
+            if ([...url.searchParams.keys()].some((key) => ![...keys, ...optional].includes(key))
+                || keys.some((key) => url.searchParams.getAll(key).length !== 1)
+                || optional.some((key) => url.searchParams.getAll(key).length > 1)
+                || url.searchParams.has('target_id') && url.searchParams.has('targetId')
+                || url.searchParams.has('registerNew') && url.searchParams.get('registerNew') !== 'false')
               throw new ServiceError('환경·공급자·앱 이름을 하나씩 입력하세요.', 422);
-            json(response, 200, products.resolveApplication(Object.fromEntries(url.searchParams), sessionId)); return;
+            const selection = Object.fromEntries(keys.map((key) => [key, url.searchParams.get(key)]));
+            // The deployed dashboard serializes its selection object, including
+            // targetId=null for cloud providers. Keep its review/start flow compatible.
+            const targetId = url.searchParams.get('target_id') ?? url.searchParams.get('targetId');
+            if (targetId !== null && !(selection.environment === 'cloud' && targetId === 'null')) selection.target_id = targetId;
+            json(response, 200, products.resolveApplication(selection, sessionId)); return;
           }
           const updateRoute = /^\/api\/v1\/applications\/([A-Za-z0-9._-]+)\/updates$/.exec(url.pathname);
           if (updateRoute) {
