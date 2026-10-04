@@ -386,11 +386,13 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             json(response, 200, kind === 'plans' ? page(products.list(kind, sessionId), url.searchParams)
               : products.list(kind, sessionId, pagination(url.searchParams))); return;
           }
-          if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+          const recordView = kind === 'deployments' && id && request.method === 'GET'
+            && [...url.searchParams].length === 1 && url.searchParams.get('view') === 'record';
+          if ([...url.searchParams].length && !recordView) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
           if (!products) throw new ServiceError('제품 실행 기능이 설정되지 않았습니다.', 503);
           if (request.method === 'GET') {
             const getter = { builds: 'getBuild', deployments: 'getDeployment', plans: 'getPlan', environments: 'getEnvironment' }[kind];
-            json(response, 200, await products[getter](id, sessionId)); return;
+            json(response, 200, await products[getter](id, sessionId, ...(recordView ? [{ view: 'record' }] : []))); return;
           }
           if (kind === 'builds') {
             const result = await products.createBuild(await uploadedSource(request, true), sourceLoader, sessionId);

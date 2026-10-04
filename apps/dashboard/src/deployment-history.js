@@ -78,7 +78,7 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
     } catch (error) { submissions.set(key, 'unknown'); throw error; }
   }
   const close = () => { generation++; controller?.abort(); cleanup(); host.replaceChildren(); host.hidden = true; onVisibility(false); };
-  function draw(record, diagnostic, question, notes = []) {
+  function draw(record) {
     cleanup(); host.replaceChildren(); host.hidden = false; currentRecord = record;
     const application = getApplications().find((item) => item.id === record.application_id);
     const back = button('‹ 배포 내역', close, 'dh-back');
@@ -93,7 +93,6 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
     const url = serviceUrl(application);
     if (url) { const link = node('a', '서비스 접속 ↗', 'primary-button'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; actions.append(link); }
     header.append(heading, actions); host.append(back, header);
-    for (const note of notes) { const message = node('p', note, 'dh-note'); message.setAttribute('role', 'status'); host.append(message); }
     const viewport = node('div', '', 'dh-detail-viewport'); viewport.dataset.pane = 'history';
     const overview = node('section', '', 'dh-history-pane'), issuePane = node('section', '', 'dh-issue-pane');
     overview.setAttribute('aria-label', '접속정보 및 배포내역'); issuePane.setAttribute('aria-label', '선택한 배포의 오류 상세');
@@ -111,7 +110,7 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       issueSequence++; issueController?.abort(); disposePipeline();
       switchPane(false, event); originButton?.focus({ preventScroll: true });
     }
-    async function showIssue(item, event, refresh = false) {
+    async function showIssue(item, event) {
       if (!hasProcessingDetail(item)) return;
       const sequence = ++issueSequence; issueController?.abort(); disposePipeline(); issueController = new AbortController();
       if (issueRecordId !== item.id) selectedStage = null;
@@ -125,16 +124,16 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       switchPane(true, event); backToHistory.focus({ preventScroll: true }); viewport.scrollIntoView({ block: 'nearest' });
       try {
         content.append(node('p', '오류 상세를 불러오고 있습니다.', 'dh-note'));
-        const result = item.id === record.id && !refresh && !record.agent_activity ? [record, diagnostic, question, []] : await readDetail(item, issueController);
+        const result = await readDetail(item, issueController);
         if (sequence !== issueSequence || generation !== epoch) return;
         content.replaceChildren(); const [selected, evidence, followup, warnings] = result;
         for (const warning of warnings) content.append(node('p', warning, 'dh-note'));
         if (!hasProcessingDetail(selected)) { content.append(node('p', '이 배포에는 현재 확인된 오류가 없습니다. 배포내역을 새로고침해 주세요.', 'dh-note')); return; }
-        const pipeline = renderPipeline(selected, evidence, followup, () => showIssue(selected, null, true));
+        const pipeline = renderPipeline(selected, evidence, followup, () => showIssue(selected));
         disposePipeline = pipeline.dispose; content.append(pipeline.layout);
       } catch (error) {
         if (sequence !== issueSequence || generation !== epoch) return;
-        content.replaceChildren(node('p', `오류 상세 조회 실패: ${error.message}`, 'dh-error'), button('다시 시도', () => showIssue(item, null, true)));
+        content.replaceChildren(node('p', `오류 상세 조회 실패: ${error.message}`, 'dh-error'), button('다시 시도', () => showIssue(item)));
       }
     }
     cleanup = () => { issueSequence++; issueController?.abort(); disposePipeline(); };
@@ -258,10 +257,14 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
     } };
   }
 
-  async function readDetail(record, activeController) {
-    const { data } = await request(`/api/v1/${record.kind === 'builds' ? 'builds' : 'deployments'}/${encodeURIComponent(record.id)}`, {}, activeController);
+  async function readRecord(record, activeController) {
+    const build = record.kind === 'builds';
+    const { data } = await request(`/api/v1/${build ? 'builds' : 'deployments'}/${encodeURIComponent(record.id)}${build ? '' : '?view=record'}`, {}, activeController);
     if (data?.id !== record.id || typeof data.app !== 'string') throw new Error('요청한 배포와 상세 정보가 일치하지 않습니다.');
-    const full = { ...data, kind: record.kind || 'deployments' }, notes = [];
+    return { ...data, kind: record.kind || 'deployments' };
+  }
+  async function readDetail(record, activeController) {
+    const full = await readRecord(record, activeController), notes = [];
     let diagnostic = null, question = null;
     const extras = await Promise.allSettled([
       full.kind === 'deployments' && ['failed', 'blocked', 'unknown'].includes(full.status)
@@ -294,9 +297,9 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
     selectedStage = currentRecord?.id === record.id ? selectedStage : null;
     host.hidden = false; onVisibility(true); host.replaceChildren(node('p', '배포 상세를 불러오고 있습니다.', 'dh-note'));
     try {
-      const result = await readDetail(record, controller);
+      const result = await readRecord(record, controller);
       if (generation !== call) return;
-      draw(...result);
+      draw(result);
     } catch (error) {
       if (generation !== call) return;
       host.replaceChildren(button('‹ 배포 내역', close, 'dh-back'), node('p', `배포 상세 조회 실패: ${error.message}`, 'dh-error'), button('다시 시도', () => open(record)));

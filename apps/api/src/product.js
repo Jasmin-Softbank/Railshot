@@ -1214,8 +1214,10 @@ export async function createProductService({ service, directory, target, provide
       launch(() => observe(record, String(record.ci.run_id), { resume: true }), record.id);
       return publicRecord(record);
     },
-    async getDeployment(id, sessionId = null) {
+    async getDeployment(id, sessionId = null, { view = 'full' } = {}) {
       let record = publicRecord(find('deployments', id, sessionId));
+      // History needs the durable record, not a synchronous GitHub/metrics refresh.
+      if (view === 'record') return record;
       // Older completed records can acquire diagnostics without replaying CI or CD.
       if (record.stage === 'ci' && ['failed', 'blocked'].includes(record.status) && record.ci?.run_id && record.ci.diagnostics?.state !== 'ready'
           && (!record.ci.diagnostics_checked_at || Date.now() - Date.parse(record.ci.diagnostics_checked_at) > 30000)) {

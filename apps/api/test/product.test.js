@@ -294,6 +294,41 @@ function form() {
   const value = new FormData(); value.set('app', 'demo-app'); value.set('target_id', 'demo'); value.set('source_type', 'folder');
   value.append('files', new Blob(['hello']), 'app.js'); value.set('paths', '["app.js"]'); return value;
 }
+test('record view skips slow metrics and CI refresh without changing default detail reads', async (t) => {
+  let metricReads = 0, ciReads = 0, release, entered;
+  const gate = new Promise(resolve => { release = resolve; });
+  const observing = new Promise(resolve => { entered = resolve; });
+  t.after(() => release());
+  const f = await fixture(t, {
+    service: { status: async () => { ciReads++; return { run_id: 123, state: 'failed', status: 'completed', conclusion: 'failure' }; } },
+    observeMetrics: async () => { metricReads++; entered(); await gate; return { state: 'ready' }; },
+  });
+  const created = await f.product.createDeployment(input, 'record-view');
+  const record = await settle(() => f.product.getDeployment(created.id, null, { view: 'record' }));
+  assert.equal(record.status, 'failed');
+  const now = Date.now(); t.mock.method(Date, 'now', () => now + 31000);
+  const server = createAppServer({ product: f.product, service: f.service });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  const url = `http://127.0.0.1:${server.address().port}/api/v1/deployments/${created.id}`;
+  const before = ciReads;
+  const fast = await fetch(url + '?view=record', { signal: AbortSignal.timeout(1000) });
+  const body = await fast.json();
+  assert.equal(fast.status, 200); assert.equal(body.id, created.id);
+  assert.equal('observation' in body, false); assert.equal('session_id' in body, false);
+  assert.equal(ciReads, before); assert.equal(metricReads, 0);
+  for (const query of ['view=full', 'view=record&view=record', 'view=record&token=x']) {
+    assert.equal((await fetch(url + '?' + query)).status, 422);
+  }
+  assert.equal((await fetch(url.replace('/deployments/', '/builds/') + '?view=record')).status, 422);
+  let finished = false;
+  const full = fetch(url).then(response => response.json()).then(value => { finished = true; return value; });
+  await observing; assert.equal(finished, false); assert.equal(ciReads, before + 1);
+  assert.equal((await fetch(url + '?view=record', { signal: AbortSignal.timeout(1000) })).status, 200);
+  assert.equal(metricReads, 1); assert.equal(finished, false);
+  release(); assert.deepEqual((await full).observation, { state: 'ready' });
+});
+
 test('API reads registrar updates and never falls back to a legacy observer after handoff', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-observer-binding-'));
   const legacy = join(directory, 'observer.json'), live = join(directory, 'product.json');

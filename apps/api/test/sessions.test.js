@@ -68,7 +68,7 @@ test('anonymous sessions isolate histories, IDs, legacy reads, plans and idempot
   assert.equal(first.response.status, 202);
   const id = first.body.resource_id, complete = await completed(a, id);
   assert.equal('session_id' in complete, false);
-  for (const path of [`/api/v1/deployments/${id}`, `/api/v1/builds/${complete.ci.run_id}`, `/api/runs/${complete.ci.run_id}`]) {
+  for (const path of [`/api/v1/deployments/${id}`, `/api/v1/deployments/${id}?view=record`, `/api/v1/builds/${complete.ci.run_id}`, `/api/runs/${complete.ci.run_id}`]) {
     assert.equal((await b.request(path)).response.status, 404);
     assert.equal((await f.client().request(path)).response.status, 404, 'omitting a cookie never grants operator access remotely');
   }

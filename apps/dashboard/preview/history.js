@@ -44,6 +44,7 @@ export const sampleQuestion = (record) => ({
 const overview = document.querySelector('#preview-overview');
 const detail = createHistoryDetail({ host: document.querySelector('#preview-detail'),
   request: async (path) => {
+    path = new URL(path, location.origin).pathname;
     const record = [...records, previous, pastFailure].find(item => path.endsWith(`/${item.id}`) || path.endsWith(`/${item.id}/events`));
     if (path.endsWith('/events')) return { data: { deployment_id: record?.id,
       agent_activity: record?.agent_activity_summary ? sampleActivity(record) : null,

@@ -175,13 +175,14 @@ test('agent card opens on successful history, polls independently and preserves 
       current_action: '수정 후 실행 검사 중', started_at: '2026-10-04T03:00:00Z', updated_at: '2026-10-04T03:00:42Z',
       observation: { state: 'current' }, changes: [{ path: 'Dockerfile', summary: '<img src=x onerror=alert(1)>', status: 'applied' }],
       verification: [{ key: 'image.build', label: '이미지 빌드', state: 'succeeded' }], previous_attempts: [] };
-    window.eventReads = 0; window.unavailable = false;
+    window.eventReads = 0; window.questionReads = 0; window.detailReads = []; window.unavailable = false;
     const question = { id: 'q-1', deployment_id: record.id, revision: 'r1', stage: 'build', summary: '확인 필요', prompt: '추가 설명',
       expires_at: new Date(Date.now() + 60000).toISOString(), evidence: [{ label: '확인', text: '확인' }],
       options: [{ id: 'provide', label: '설명 제공', fields: [{ id: 'notes', label: '설명', type: 'text', required: true }] }] };
     window.historyDetail = createHistoryDetail({ host: document.querySelector('#detail'), getRecords: () => [record], getApplications: () => [],
-      serviceUrl: () => null, onLogs: () => {}, onMonitor: () => {}, recovery: { load: async () => question },
+      serviceUrl: () => null, onLogs: () => {}, onMonitor: () => {}, recovery: { load: async () => { window.questionReads++; return question; } },
       request: async path => {
+        window.detailReads.push(path);
         if (path.endsWith('/events')) {
           window.eventReads++;
           if (window.unavailable) throw new Error('offline');
@@ -192,8 +193,14 @@ test('agent card opens on successful history, polls independently and preserves 
       } });
     await window.historyDetail.open(record);
   });
+  assert.deepEqual(await page.evaluate(() => ({ events: window.eventReads, questions: window.questionReads, reads: window.detailReads })),
+    { events: 0, questions: 0, reads: ['/api/v1/deployments/deployment-1?view=record'] },
+    'overview renders after only the durable record read, without waiting for remote events or recovery');
+  assert.equal(await page.getByRole('heading', { name: '접속정보', exact: true }).isVisible(), true);
   await page.getByRole('button', { name: /처리 내역 보기/ }).click();
   await page.getByRole('heading', { name: 'AI 자동 복구', exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => window.eventReads), 1, 'events load when processing details are opened');
+  assert.equal(await page.evaluate(() => window.questionReads), 1);
   assert.match(await page.locator('.dh-agent-card').innerText(), /재검증 중/);
   assert.equal(await page.locator('.dh-agent-card img').count(), 0, 'model description is text, never HTML');
   await page.getByText('변경 내용 보기', { exact: true }).click();

@@ -662,7 +662,7 @@
       "get": {
         "operationId": "getDeployment",
         "summary": "Read deployment",
-        "description": "Read persisted execution state and bounded, read-only observations of the operator-bound target and app. Observer failures do not change deployment outcome. Metrics older than 90 seconds have null values. No dispatch, provision or reconcile.",
+        "description": "Read persisted execution state and bounded, read-only observations of the operator-bound target and app. Observer failures do not change deployment outcome. Metrics older than 90 seconds have null values. No dispatch, provision or reconcile. With view=record, return only the authorized persisted deployment record without waiting for GitHub diagnostic refresh or monitoring queries; observation is omitted. The default full response is unchanged. Use diagnostics/events endpoints when opening processing details.",
         "parameters": [
           {
             "name": "id",
@@ -670,6 +670,18 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "required": false,
+            "description": "Use record for fast history details without live observations or diagnostic refresh. Omit for the existing full response.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "record"
+              ]
             }
           }
         ],
