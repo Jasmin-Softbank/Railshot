@@ -199,3 +199,19 @@ UI/SDK 변경 후 `npm run build:insights --workspace @railshot/agent`로 재생
 API PVC의 `/var/lib/railshot/state/observer/product.before-insights-demo-20261004.json` 및
 `desired.before-insights-demo-20261004.json`에 있다. 이후 다른 등록이 생겼다면 백업 전체를
 덮어쓰지 말고 이번 앱 항목만 제거한다. SG 회수는 위 rule ID로 한정한다.
+
+## 운영 보고서 UI
+
+대시보드와 MCP App은 `apps/dashboard/src/insights-view.js`의 동일한 화면을 사용한다.
+현재 HTTP 상태와 최근 요청·5xx 오류율·p95 지표를 먼저 표시하고, 아래에 요청 추이,
+배포 타임라인, AI 작업 기록을 배치한다. 배포 성공 여부와 무관하게 AI 기록을 표시한다.
+
+- 그래프에 마우스를 올리거나 키보드로 슬라이더를 이동하면 실제 표본을 확인한다.
+  누락된 표본과 수집 간격의 공백은 선으로 연결하지 않는다.
+- 배포 HTTP 검증 시점은 기록된 시각이 조회 구간에 포함될 때만 표시한다.
+- 변경 파일을 펼치면 AI 설명을 볼 수 있으며, 30초 갱신 후에도 펼친 상태를 유지한다.
+- 관측이 없거나 오래된 경우 수치를 정상 또는 0으로 표시하지 않는다. 요청 수는 방문자 수가 아니다.
+- 외부 아이콘·차트 CDN 없이 SVG를 사용한다. 보고서는 Markdown으로 저장한다.
+
+이 UI 변경의 검증 범위는 화면·공식 MCP AppBridge 브라우저 검사 2개, MCP 계약 검사 1개,
+대시보드 빌드와 MCP HTML 재현성 검사다. 운영 배포나 파이프라인 실행 로직은 변경하지 않는다.

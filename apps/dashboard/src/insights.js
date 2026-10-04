@@ -6,11 +6,12 @@ export function openInsights(record, request) {
     style = document.createElement("style"),
     content = document.createElement("div");
   style.textContent = insightsStyle;
-  dialog.style.cssText =
-    "width:min(1060px,95vw);max-height:90vh;border:0;border-radius:16px;padding:8px";
+  dialog.className = "rs-insights-dialog";
+  dialog.setAttribute("aria-label", `${record.app || "배포"} 운영 인사이트`);
   const close = document.createElement("button");
   close.textContent = "닫기";
-  close.style.cssText = "float:right;padding:8px";
+  close.className = "rs-close";
+  close.setAttribute("aria-label", "운영 인사이트 닫기");
   dialog.append(style, close, content);
   document.body.append(dialog);
   dialog.showModal();
