@@ -194,6 +194,9 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
         if (stopped) return;
         if (data?.deployment_id !== record.id) throw new Error('배포 식별자 불일치');
         if (data.run_attempt && data.run_attempt < runAttempt) return;
+        if (data.run_attempt > runAttempt) {
+          activity = null; activityId = null; activityRevision = -1; card?.update(null);
+        }
         runAttempt = data.run_attempt || runAttempt;
         const next = data.agent_activity;
         if (next && (next.id !== activityId || next.revision >= activityRevision)) {
