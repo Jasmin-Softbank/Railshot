@@ -46,9 +46,9 @@ export const tools = {
   },
 };
 
-export function createToolRunner(api = createApiClient(), availableTools = tools) {
+export function createToolRunner(api = createApiClient()) {
   return async function call(name, input) {
-    const tool = availableTools[name];
+    const tool = tools[name];
     if (!tool) throw new Error('지원하지 않는 도구입니다.');
     return tool.run(api, tool.schema.parse(input));
   };

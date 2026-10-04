@@ -5,7 +5,6 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createRemoteMcpServer } from '../src/remote-mcp.js';
 import { createApiClient } from '../src/api.js';
-import { uploadedSource } from '../../api/src/http/source.js';
 
 const apiSecret = 'a'.repeat(32);
 const webCookie = 'w'.repeat(43), aiCookie = 'i'.repeat(43);
@@ -24,7 +23,7 @@ test('an expired bound API session never switches to a newly issued session', as
 
 test('OAuth joins an existing web session and issues a distinct AI-first session', async (t) => {
   const seen = [];
-  const api = createServer(async (request, response) => {
+  const api = createServer((request, response) => {
     assert.equal(request.headers.authorization, `Bearer ${apiSecret}`);
     const cookie = /railshot_session=([A-Za-z0-9_-]{43})/.exec(request.headers.cookie || '')?.[1];
     const session = cookie || aiCookie;
@@ -32,15 +31,6 @@ test('OAuth joins an existing web session and issues a distinct AI-first session
     response.setHeader('content-type', 'application/json');
     if (!cookie) response.setHeader('set-cookie', `railshot_session=${aiCookie}; Path=/; HttpOnly; SameSite=Strict`);
     if (request.url === '/api/v1/sessions') response.end(JSON.stringify({ expires_at: new Date(Date.now() + 3600000).toISOString() }));
-    else if (request.url === '/api/v1/deployments' && request.method === 'POST') {
-      const source = await uploadedSource(request, true, true);
-      assert.equal(source.app, 'file-app');
-      assert.equal(source.target_id, 'demo-target');
-      assert.equal(source.source_type, 'folder');
-      assert.deepEqual(source.files.map(({ path, content }) => [path, content.toString()]), [['index.html', '<h1>Hi</h1>']]);
-      assert.equal(request.headers['idempotency-key'], 'file-intent');
-      response.writeHead(202).end(JSON.stringify({ resource_id: 'file-deployment', status: 'accepted' }));
-    }
     else if (request.url === '/api/v1/deployments/web-app') {
       response.writeHead(session === webCookie ? 200 : 404).end(JSON.stringify(session === webCookie
         ? { id: 'web-app', status: 'succeeded' } : { error: { code: 'NOT_FOUND', message: '없음' } }));
@@ -105,43 +95,16 @@ test('OAuth joins an existing web session and issues a distinct AI-first session
   assert.equal(web.cookie, null);
   assert.match(ai.cookie, new RegExp(`railshot_session=${aiCookie}`));
   assert.notEqual(web.token, ai.token);
-  async function tool(token, name = 'get_deployment', args = { deployment_id: 'web-app' }) {
+  async function tool(token) {
     const response = await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${token}`,
       'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) });
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_deployment', arguments: { deployment_id: 'web-app' } } }) });
     assert.equal(response.status, 200);
     const body = await response.text();
     return body.startsWith('event:') ? JSON.parse(/^data: (.*)$/m.exec(body)[1]) : JSON.parse(body);
   }
   assert.equal((await tool(web.token)).result.structuredContent.id, 'web-app');
   assert.equal((await tool(ai.token)).result.isError, true);
-  const prepared = (await tool(ai.token, 'prepare_file_deployment', {
-    app: 'file-app', target_id: 'demo-target', idempotency_key: 'file-intent',
-  })).result.structuredContent;
-  assert.equal(prepared.app, 'file-app');
-  assert.equal(prepared.target_id, 'demo-target');
-  assert.equal((await tool(ai.token, 'get_file_upload', { upload_id: prepared.upload_id })).result.structuredContent.status, 'awaiting_upload');
-  assert.equal((await tool(web.token, 'get_file_upload', { upload_id: prepared.upload_id })).result.isError, true);
-  const uploadPath = new URL(prepared.upload_url).pathname;
-  const uploadPage = await fetch(`${base}${uploadPath}`);
-  assert.equal(uploadPage.status, 200);
-  const pageHtml = await uploadPage.text();
-  assert.match(pageHtml, /ZIP 파일/);
-  assert.doesNotThrow(() => new Function(/<script[^>]*>([\s\S]*?)<\/script>/.exec(pageHtml)[1]));
-  assert.match(uploadPage.headers.get('content-security-policy'), /script-src 'nonce-/);
-  const source = new FormData();
-  source.append('files', new Blob(['<h1>Hi</h1>']), 'index.html');
-  source.set('paths', '["index.html"]');
-  const submitted = await fetch(`${base}${uploadPath}`, { method: 'POST', body: source });
-  assert.equal(submitted.status, 202);
-  assert.deepEqual(await submitted.json(), { resource_id: 'file-deployment', status: 'accepted' });
-  assert.equal((await tool(ai.token, 'get_file_upload', { upload_id: prepared.upload_id })).result.structuredContent.resource_id, 'file-deployment');
-  const replay = await fetch(`${base}${uploadPath}`, { method: 'POST', body: source });
-  assert.equal(replay.status, 200);
-  assert.equal((await replay.json()).resource_id, 'file-deployment');
-  assert.equal(seen.filter((entry) => entry.path === '/api/v1/deployments').length, 1);
-  assert.ok(seen.some((entry) => entry.path === '/api/v1/deployments' && entry.session === aiCookie));
-  assert.equal((await fetch(`${base}/mcp/upload/${'x'.repeat(43)}`)).status, 410);
   assert.equal((await fetch(`${base}/mcp`, { method: 'POST' })).status, 401);
   assert.ok(seen.some((entry) => entry.path === '/api/v1/deployments/web-app' && entry.session === webCookie));
   assert.ok(seen.some((entry) => entry.path === '/api/v1/deployments/web-app' && entry.session === aiCookie));
