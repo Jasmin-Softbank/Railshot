@@ -53,7 +53,7 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
       return selected.describe(id, app);
     },
   };
-  for (const method of ['register', 'deployPublished', 'observeLogs', 'planPendingDeletion', 'planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle']) {
+  for (const method of ['register', 'deployPublished', 'observePublished', 'observeLogs', 'planPendingDeletion', 'planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle']) {
     application[method] = (app, ...args) => {
       const selected = dynamicApplications.get(app.environment_target_id) || base;
       if (!selected?.[method]) throw new Error('Application environment is not registered');

@@ -30,7 +30,7 @@ def matcher(request, values, redirect=False):
 
 def plan_for(request, values):
     changes = []
-    for kind in routes.KINDS:
+    for kind in routes.resource_kinds(routes.application_route(request, values)):
         after = {'name': name(request, values), 'project': values['project_id']}
         if kind == 'google_compute_network_endpoint_group':
             after.update(default_port=request['node_port'], network_endpoint_type='GCE_VM_IP_PORT', zone=values['zone'])
@@ -46,6 +46,8 @@ def plan_for(request, values):
             after['managed'] = [{'domains': [request['hostname']]}]
         if kind == 'google_certificate_manager_certificate_map_entry':
             after.update(hostname=request['hostname'], map=values.get('name', 'railshot-gcp-edge'))
+            if values.get('application_certificate'):
+                after['certificates'] = [values['application_certificate']['id']]
         changes.append({'address': kind + '.routes[' + json.dumps(request['application_id']) + ']', 'mode': 'managed',
                         'change': {'actions': ['create'], 'before': None, 'after': after}})
     existing = [{'application_id': k, **v} for k, v in values.get('routes', {}).items()]
@@ -69,7 +71,7 @@ def plan_for(request, values):
               'allow': [{'protocol': 'tcp', 'ports': [str(values.get('node_port', 30080)), *[str(r['node_port']) for r in existing]]}]}
     after = copy.deepcopy(before); after['allow'][0]['ports'].append(str(request['node_port']))
     changes.append({'address': 'google_compute_firewall.gfe', 'change': {'actions': ['update'], 'before': before, 'after': after}})
-    candidate = {**values, 'routes': {**values.get('routes', {}), request['application_id']: routes.checked_request(request)}}
+    candidate = {**values, 'routes': {**values.get('routes', {}), request['application_id']: routes.application_route(request, values)}}
     return {'resource_changes': changes, 'variables': {k: {'value': v} for k, v in candidate.items()},
             'configuration': {'provider_config': {'google': {'full_name': 'registry.terraform.io/hashicorp/google',
                                 'expressions': {'project': {'references': ['var.project_id']}}}}}}
@@ -115,7 +117,7 @@ class GcpRoutesTest(unittest.TestCase):
         before = routes.read_private(work / 'before.json')
         current = before['values']
         key = next(k for k in candidate['routes'] if k not in current.get('routes', {}))
-        request = {'application_id': key, **candidate['routes'][key]}
+        request = {'application_id': key, **{k: candidate['routes'][key][k] for k in ('hostname', 'node_port', 'health_path')}}
         if command == 'plan':
             self.assertEqual({k: v for k, v in candidate.items() if k != 'routes'}, {k: v for k, v in current.items() if k != 'routes'})
             self.assertEqual({k: candidate['routes'][k] for k in current.get('routes', {})}, current.get('routes', {}))
@@ -135,7 +137,7 @@ class GcpRoutesTest(unittest.TestCase):
         if self.interrupt:
             raise RuntimeError('synthetic uncertain apply')
         state = routes.read_private(self.config['state_file'])
-        for kind in routes.KINDS:
+        for kind in routes.resource_kinds(candidate['routes'][key]):
             resource = next((r for r in state['resources'] if r['type'] == kind and r['name'] == 'routes'), None)
             if resource is None:
                 resource = {'mode': 'managed', 'type': kind, 'name': 'routes', 'instances': []}; state['resources'].append(resource)
@@ -143,7 +145,7 @@ class GcpRoutesTest(unittest.TestCase):
         state['serial'] += 1
         state['outputs']['application_routes'] = {'value': {k: {
             'hostname': v['hostname'], 'frontend_ip': '34.1.2.3', 'backend_service': name({'application_id': k}, current),
-            'dns_authorization_record': {'name': '_acme-challenge_abc.' + v['hostname'] + '.', 'type': 'CNAME',
+            'dns_authorization_record': None if v.get('certificate_id') else {'name': '_acme-challenge_abc.' + v['hostname'] + '.', 'type': 'CNAME',
                                          'data': 'abc.authorize.certificatemanager.goog.'}}
             for k, v in candidate['routes'].items()}}
         if self.corrupt_output:
@@ -157,6 +159,29 @@ class GcpRoutesTest(unittest.TestCase):
         with patch('gcp_routes.native') as native, self.assertRaisesRegex(routes.RouteError, 'GCP_CERTIFICATE_DNS_NOT_CONFIGURED'):
             routes.ensure(self.config_path, app())
         native.assert_not_called()
+
+    def test_shared_certificate_skips_new_issuance_and_preserves_legacy_route(self):
+        with patch('gcp_routes.native', side_effect=self.native):
+            legacy = routes.ensure(self.config_path, app(), dns_config_path=str(self.root / 'dns.json'))
+            values = routes.read_private(self.config['variables_file'])
+            values['application_certificate'] = {'domain': 'railshot.io',
+                'id': 'projects/fixture-project/locations/global/certificates/shared-apps'}
+            self.write(self.config['variables_file'], values)
+            result = routes.ensure(self.config_path, app(2), dns_config_path=str(self.root / 'dns.json'))
+            self.assertIsNone(result['dns_authorization_record'])
+            self.assertEqual(routes.output_route(routes.read_private(self.config['state_file']), app(),
+                routes.read_private(self.config['variables_file'])), legacy)
+            owned = routes.owned(routes.read_private(self.config['state_file']))
+            self.assertNotIn('google_certificate_manager_certificate.routes["' + app(2)['application_id'] + '"]', owned)
+            import application_cleanup
+            saved = routes.read_private(self.config['variables_file'])
+            removed = application_cleanup.addresses('gcp', app(2)['application_id'], saved['routes'][app(2)['application_id']], saved, 'delete')
+            self.assertEqual(len(removed), 5)
+            self.assertFalse(any('certificate.routes' in key or 'dns_authorization.routes' in key for key in removed))
+            wrong = copy.deepcopy(values)
+            wrong['application_certificate']['domain'] = 'another.test'
+            with self.assertRaises(ValueError):
+                routes.application_route(app(2), wrong)
 
     def test_certificate_dns_failure_keeps_partial_route_unknown_and_specific_reason(self):
         def native(argv, **kwargs):
@@ -332,7 +357,7 @@ class GcpRoutesTest(unittest.TestCase):
         plan = plan_for(app(), self.values)
         self.assertEqual(len(routes.validate_plan(plan, app(), self.values)), 7)
         plan['resource_changes'].pop(0)
-        with self.assertRaisesRegex(ValueError, 'exact seven'): routes.validate_plan(plan, app(), self.values)
+        with self.assertRaisesRegex(ValueError, 'exact application resources'): routes.validate_plan(plan, app(), self.values)
 
     def test_existing_backend_self_link_and_empty_redirect_are_equivalent(self):
         values = {**self.values, 'routes': {app()['application_id']: routes.checked_request(app())}}

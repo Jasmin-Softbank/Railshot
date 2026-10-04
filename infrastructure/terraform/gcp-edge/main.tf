@@ -16,10 +16,11 @@ data "google_compute_instance" "backend" {
 }
 
 locals {
-  nic           = data.google_compute_instance.backend.network_interface[0]
-  gfe_sources   = ["35.191.0.0/16", "130.211.0.0/22"]
-  route_names   = { for id in keys(var.routes) : id => "${var.name}-${substr(sha256(id), 0, 16)}" }
-  active_routes = { for id, route in var.routes : id => route if route.enabled }
+  nic                    = data.google_compute_instance.backend.network_interface[0]
+  gfe_sources            = ["35.191.0.0/16", "130.211.0.0/22"]
+  route_names            = { for id in keys(var.routes) : id => "${var.name}-${substr(sha256(id), 0, 16)}" }
+  active_routes          = { for id, route in var.routes : id => route if route.enabled }
+  dedicated_certificates = { for id, route in var.routes : id => route if route.certificate_id == null }
 }
 
 resource "google_project_service" "certificates" {
@@ -192,7 +193,7 @@ resource "google_certificate_manager_certificate_map_entry" "app" {
 }
 
 resource "google_certificate_manager_dns_authorization" "routes" {
-  for_each   = var.routes
+  for_each   = local.dedicated_certificates
   name       = local.route_names[each.key]
   domain     = each.value.hostname
   type       = "PER_PROJECT_RECORD"
@@ -217,7 +218,7 @@ resource "google_certificate_manager_dns_authorization" "routes" {
 }
 
 resource "google_certificate_manager_certificate" "routes" {
-  for_each = var.routes
+  for_each = local.dedicated_certificates
   name     = local.route_names[each.key]
   managed {
     domains            = [each.value.hostname]
@@ -230,7 +231,7 @@ resource "google_certificate_manager_certificate_map_entry" "routes" {
   name         = local.route_names[each.key]
   map          = google_certificate_manager_certificate_map.app.name
   hostname     = each.value.hostname
-  certificates = [google_certificate_manager_certificate.routes[each.key].id]
+  certificates = [each.value.certificate_id != null ? each.value.certificate_id : google_certificate_manager_certificate.routes[each.key].id]
 }
 
 resource "google_compute_target_https_proxy" "app" {
@@ -306,6 +307,6 @@ output "application_routes" {
     frontend_ip              = google_compute_global_address.app.address
     hostname                 = route.hostname
     backend_service          = local.route_names[id]
-    dns_authorization_record = google_certificate_manager_dns_authorization.routes[id].dns_resource_record[0]
+    dns_authorization_record = try(google_certificate_manager_dns_authorization.routes[id].dns_resource_record[0], null)
   } }
 }
