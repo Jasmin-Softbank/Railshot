@@ -1,0 +1,16 @@
+# Replace addresses with operator-controlled central DNS. Its TLS SAN must match.
+ui = false
+disable_mlock = true
+api_addr = "https://control-vault.example.internal:8200"
+cluster_addr = "https://control-vault.example.internal:8201"
+listener "tcp" {
+  address = "0.0.0.0:8200"
+  cluster_address = "0.0.0.0:8201"
+  tls_cert_file = "/vault/tls/server.crt"
+  tls_key_file = "/vault/tls/server.key"
+  tls_min_version = "tls12"
+}
+storage "raft" {
+  path = "/vault/data"
+  node_id = "railshot-control-1"
+}

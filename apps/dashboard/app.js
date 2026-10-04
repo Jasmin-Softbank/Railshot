@@ -5,6 +5,7 @@ const views = {
   history: document.querySelector('#history-view'),
   monitor: document.querySelector('#monitor-view'),
   connections: document.querySelector('#connections-view'),
+  projects: document.querySelector('#projects-view'),
 };
 
 function showView(name) {
@@ -18,6 +19,7 @@ function showView(name) {
   document.title = `RailShot · ${views[name].querySelector('h1').textContent}`;
   savePreferences({ view: name });
   if (sessionReady && name === 'history') { loadHistory(); loadApplications(); }
+  if (sessionReady && name === 'projects') loadProjects();
   if (sessionReady && ['monitor', 'deploy'].includes(name)) loadEnvironments();
   else stopEnvironmentPolling();
   if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
@@ -66,6 +68,9 @@ if (Array.isArray(savedHistory?.markers) && savedHistory.markers.length <= 100 &
     && savedHistory.markers.slice(1).every((value) => typeof value === 'string' && value.length <= 1024)) historyMarkers = savedHistory.markers;
 document.querySelector('#history-kind').value = historyKind;
 let targets = [], observations = new Map(), environmentController, environmentTimer;
+let projects = [], selectedProject = null, projectVariables = null, projectsController, projectController, projectOperationTimer = null;
+let projectOperations = { delivery: null, transfer: null };
+let deploymentProject = null;
 
 let preferences = { view: 'deploy', environment: 'cloud', provider: '' };
 // The cookie is HttpOnly; no session token, credential, or execution locator enters localStorage.
@@ -117,6 +122,22 @@ repositoryUrl.addEventListener('input', () => {
   folder.value = '';
   const url = repositoryUrl.value.trim();
   setSource(url ? { kind: 'repository', label: url } : null);
+});
+
+function renderDeploymentProject() {
+  const select = document.querySelector('#deployment-project');
+  const current = deploymentProject?.id || '';
+  select.replaceChildren(new Option('프로젝트를 선택하지 않음', ''), ...projects.map((project) => new Option(project.name || project.id, project.id)));
+  if (projects.some((project) => project.id === current)) select.value = current;
+  document.querySelector('#deployment-project-note').textContent = deploymentProject
+    ? `${deploymentProject.name || deploymentProject.id} · 저장 버전 ${deploymentProject.revisionId || '없음'}을 새 배포에 함께 제출합니다.`
+    : '프로젝트를 선택하면 저장된 설정 버전이 새 환경에 적용됩니다.';
+}
+document.querySelector('#deployment-project-load').addEventListener('click', () => showView('projects'));
+document.querySelector('#deployment-project').addEventListener('change', (event) => {
+  const project = projects.find((item) => item.id === event.target.value);
+  deploymentProject = project ? { id: project.id, name: project.name, revisionId: project.revision_id || null } : null;
+  renderDeploymentProject(); invalidateReview();
 });
 sourceBox.addEventListener('dragover', (event) => {
   event.preventDefault();
@@ -536,6 +557,9 @@ deployButton.addEventListener('click', async () => {
     if (draft.plan) {
       payload.set('app', draft.plan.name); payload.set('target_id', draft.targetId); payload.set('plan_id', draft.plan.id);
     } else { payload.set('environment', draft.environment); payload.set('provider', draft.provider); }
+    if (deploymentProject?.id && deploymentProject?.revisionId) {
+      payload.set('project_id', deploymentProject.id); payload.set('revision_id', deploymentProject.revisionId);
+    }
     if (!draft.plan && draft.source.kind === 'folder') payload.set('source_name', (draft.source.files[0].webkitRelativePath || draft.source.files[0].name).split('/')[0]);
     appendSource(payload, draft.source);
     draft.attempted = true;
@@ -856,6 +880,9 @@ async function loadApplication(id) {
       applicationVersion(data.current_deployment_state === 'unverified' ? '마지막 검증 성공 · 현재 상태 확인 필요' : '현재 서비스 버전', data.current_deployment, data.current_deployment_state === 'unverified'),
       applicationVersion('최근 배포 시도', data.latest_deployment));
     document.querySelector('#application-update').disabled = Boolean(blocked);
+    const projectButton = document.querySelector('#application-project');
+    projectButton.hidden = !projectId(data.project_id);
+    projectButton.onclick = projectId(data.project_id) ? () => { showView('projects'); loadProject(data.project_id); } : null;
     document.querySelector('#application-detail-title').focus({ preventScroll: true }); panel.scrollIntoView({ block: 'nearest' });
   } catch (cause) {
     if (applicationController === controller) message.textContent = `앱 상세 조회 실패: ${cause.message}`;
@@ -1122,6 +1149,222 @@ document.querySelector('#connection-form').addEventListener('submit', async (eve
   } catch (cause) { document.querySelector('#connection-message').textContent = cause.message; }
   finally { password.value = ''; delete body.password; button.disabled = false; }
 });
+
+// Project configuration is deliberately kept in memory: secret replacement inputs never enter URL, browser storage or logs.
+const projectId = (value) => typeof value === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(value);
+const projectCapability = (name) => projectVariables?.capabilities?.[name] === true || selectedProject?.capabilities?.[name] === true;
+function projectError(message = '') { const node = document.querySelector('#variable-message'); node.textContent = message; node.hidden = !message; }
+function projectRevisionId() { return projectVariables?.revision_id || selectedProject?.revision_id || null; }
+function projectBindings() { return Array.isArray(projectVariables?.bindings) ? projectVariables.bindings : []; }
+function variableOperation(variable, operation = 'set') {
+  const result = { operation, name: variable.name, scope: variable.scope, environment_id: variable.scope === 'environment' ? variable.environment_id : null };
+  if (operation === 'set') Object.assign(result, { kind: variable.kind, required: Boolean(variable.required) }, variable.value !== undefined ? { value: variable.value } : {});
+  return result;
+}
+function renderProjectVariables() {
+  const items = Array.isArray(projectVariables?.items) ? projectVariables.items : [];
+  const body = document.querySelector('#project-variable-list');
+  body.replaceChildren(...items.map((variable) => {
+    const row = document.createElement('tr');
+    const edit = element('button', '수정', 'text-button'); edit.type = 'button'; edit.addEventListener('click', () => editVariable(variable));
+    const remove = element('button', '삭제', 'text-button danger-button'); remove.type = 'button'; remove.addEventListener('click', () => deleteVariable(variable));
+    row.append(element('td', variable.name), element('td', variable.kind === 'secret' ? '비밀' : '일반'),
+      element('td', variable.scope === 'environment' ? `환경 전용 · ${variable.environment_id || '미지정'}` : '공통'),
+      element('td', variable.required ? '필수' : '선택'), element('td', variable.has_value ? '등록됨' : '값 없음'),
+      element('td', formatTime(variable.updated_at)), (() => { const cell = document.createElement('td'); cell.append(edit, remove); return cell; })());
+    return row;
+  }));
+  const revision = projectRevisionId(), bindings = projectBindings();
+  const applied = bindings.filter((binding) => binding.applied_revision_id === revision).length;
+  document.querySelector('#project-revision-state').textContent = revision
+    ? `저장 버전 ${revision} · ${applied ? `${applied}개 환경에 배포 적용됨` : '저장됨 · 아직 적용되지 않음'}`
+    : '아직 저장된 설정 버전이 없습니다.';
+  document.querySelector('#project-capability').textContent = `저장 ${projectCapability('storage') ? '사용 가능' : '지원되지 않음'} · 환경 적용 ${projectCapability('delivery') ? '사용 가능' : '지원되지 않음'} · 환경 이전 ${projectCapability('transfer') ? '사용 가능' : '지원되지 않음'}`;
+  const bindingsSelect = document.querySelector('#delivery-binding');
+  bindingsSelect.replaceChildren(...bindings.map((binding) => new Option(`${binding.environment_id} · ${binding.application_id || '앱 연결 전'} · ${binding.status}`, binding.id)));
+  document.querySelector('#delivery-review').disabled = !projectCapability('delivery') || !revision || !bindings.length;
+  const environmentIds = new Set([...bindings.map((binding) => binding.environment_id), ...targets.map((target) => target.id)]);
+  const transferSelect = document.querySelector('#transfer-environment');
+  transferSelect.replaceChildren(...[...environmentIds].filter(Boolean).map((id) => new Option(id, id)));
+  document.querySelector('#transfer-review').disabled = !projectCapability('transfer') || !revision || !bindings.length || !environmentIds.size;
+}
+function renderProjects() {
+  const list = document.querySelector('#project-list');
+  list.replaceChildren(...projects.map((project) => {
+    const item = document.createElement('li'), button = element('button', '환경변수 관리', 'secondary-button'); button.type = 'button';
+    button.addEventListener('click', () => loadProject(project.id));
+    item.append(element('strong', project.name || project.id), element('small', `프로젝트 ID ${project.id}${project.revision_id ? ` · 저장 버전 ${project.revision_id}` : ''}`, 'history-meta'), button); return item;
+  }));
+  renderDeploymentProject();
+}
+async function loadProjects() {
+  projectsController?.abort(); const controller = new AbortController(); projectsController = controller;
+  const list = document.querySelector('#project-list'); list.setAttribute('aria-busy', 'true');
+  try {
+    const { data } = await request('/api/v1/projects?limit=100', {}, controller);
+    if (!Array.isArray(data.items) || data.items.some((project) => !projectId(project.id))) throw new Error('프로젝트 목록 응답을 확인하지 못했습니다.');
+    if (projectsController !== controller) return;
+    projects = data.items; renderProjects();
+  } catch (cause) {
+    if (projectsController === controller) list.replaceChildren(element('li', `프로젝트 목록 조회 실패: ${cause.message}`));
+  } finally { if (projectsController === controller) { projectsController = null; list.setAttribute('aria-busy', 'false'); } }
+}
+async function loadProject(id) {
+  if (!projectId(id)) return;
+  projectController?.abort(); const controller = new AbortController(); projectController = controller; selectedProject = null; projectVariables = null;
+  const detail = document.querySelector('#project-detail'); detail.hidden = false;
+  document.querySelector('#project-detail-message').textContent = '프로젝트 설정을 조회하고 있습니다.';
+  try {
+    const [{ data: project }, { data: variables }, targetResult] = await Promise.all([
+      request(`/api/v1/projects/${encodeURIComponent(id)}`, {}, controller), request(`/api/v1/projects/${encodeURIComponent(id)}/variables`, {}, controller),
+      request('/api/v1/targets?limit=100', {}, controller).catch(() => null),
+    ]);
+    if (projectController !== controller) return;
+    if (project.id !== id || variables.project_id !== id || !Array.isArray(variables.items) || !Array.isArray(variables.bindings)) throw new Error('프로젝트 설정 응답이 요청과 일치하지 않습니다.');
+    selectedProject = project; projectVariables = variables;
+    if (targetResult?.data && Array.isArray(targetResult.data.items) && !targetResult.data.next_marker) targets = targetResult.data.items.filter((target) => typeof target.id === 'string');
+    document.querySelector('#project-detail-title').textContent = project.name || project.id;
+    document.querySelector('#project-detail-message').textContent = `프로젝트 ID ${project.id} · 현재 설정을 수정하면 새 저장 버전이 만들어집니다.`;
+    renderProjectVariables(); resetVariableForm(); document.querySelector('#project-detail-title').focus({ preventScroll: true }); detail.scrollIntoView({ block: 'nearest' });
+  } catch (cause) { if (projectController === controller) document.querySelector('#project-detail-message').textContent = `프로젝트 설정 조회 실패: ${cause.message}`; }
+  finally { if (projectController === controller) projectController = null; }
+}
+function resetVariableForm() {
+  const form = document.querySelector('#variable-form'); form.reset();
+  for (const id of ['#variable-original-name', '#variable-original-scope', '#variable-original-environment']) document.querySelector(id).value = '';
+  document.querySelector('#variable-form-title').textContent = '환경변수 추가';
+  document.querySelector('#variable-cancel').hidden = true; document.querySelector('#variable-value').type = 'text'; document.querySelector('#variable-value').placeholder = '';
+  document.querySelector('#variable-environment-field').hidden = true; projectError('');
+}
+function editVariable(variable) {
+  document.querySelector('#variable-form-title').textContent = `${variable.name} 수정`;
+  document.querySelector('#variable-original-name').value = variable.name; document.querySelector('#variable-original-scope').value = variable.scope;
+  document.querySelector('#variable-original-environment').value = variable.environment_id || ''; document.querySelector('#variable-name').value = variable.name;
+  document.querySelector('#variable-kind').value = variable.kind; document.querySelector('#variable-scope').value = variable.scope;
+  document.querySelector('#variable-required').checked = Boolean(variable.required);
+  updateVariableEnvironmentOptions(variable.environment_id);
+  const value = document.querySelector('#variable-value'); value.value = variable.kind === 'plain' ? (variable.value || '') : '';
+  value.type = variable.kind === 'secret' ? 'password' : 'text'; value.placeholder = variable.kind === 'secret' ? '입력하면 기존 비밀값을 교체합니다' : '';
+  document.querySelector('#variable-cancel').hidden = false; document.querySelector('#variable-name').focus();
+}
+function updateVariableEnvironmentOptions(value) {
+  const field = document.querySelector('#variable-environment-field'), select = document.querySelector('#variable-environment');
+  const ids = [...new Set([...projectBindings().map((binding) => binding.environment_id), ...targets.map((target) => target.id)].filter(Boolean))];
+  select.replaceChildren(...ids.map((id) => new Option(id, id))); if (ids.includes(value)) select.value = value;
+  field.hidden = document.querySelector('#variable-scope').value !== 'environment';
+}
+document.querySelector('#variable-scope').addEventListener('change', () => updateVariableEnvironmentOptions());
+document.querySelector('#variable-kind').addEventListener('change', () => { const value = document.querySelector('#variable-value'), secret = document.querySelector('#variable-kind').value === 'secret'; value.type = secret ? 'password' : 'text'; value.placeholder = secret ? '입력하면 비밀값을 저장합니다' : ''; });
+document.querySelector('#variable-cancel').addEventListener('click', resetVariableForm);
+async function saveVariable(event) {
+  event.preventDefault(); if (!selectedProject || !projectCapability('storage')) { projectError('이 프로젝트는 설정 저장을 지원하지 않습니다.'); return; }
+  const original = { name: document.querySelector('#variable-original-name').value, scope: document.querySelector('#variable-original-scope').value, environment_id: document.querySelector('#variable-original-environment').value || null };
+  const name = document.querySelector('#variable-name').value.trim(), kind = document.querySelector('#variable-kind').value, scope = document.querySelector('#variable-scope').value;
+  const environment_id = scope === 'environment' ? document.querySelector('#variable-environment').value : null;
+  if (!name || scope === 'environment' && !environment_id) { projectError('변수 이름과 환경 전용 범위를 확인하세요.'); return; }
+  const valueInput = document.querySelector('#variable-value'); const variable = { name, kind, scope, environment_id, required: document.querySelector('#variable-required').checked };
+  if (kind === 'plain' || valueInput.value) variable.value = valueInput.value;
+  if (!original.name && kind === 'secret' && !valueInput.value) { projectError('새 비밀값은 값을 입력해야 합니다.'); return; }
+  const operations = []; if (original.name && (original.name !== name || original.scope !== scope || original.environment_id !== environment_id)) operations.push(variableOperation(original, 'delete'));
+  operations.push(variableOperation(variable)); const button = document.querySelector('#variable-save'); button.disabled = true; projectError('');
+  try {
+    await request(`/api/v1/projects/${encodeURIComponent(selectedProject.id)}/revisions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ base_revision_id: projectRevisionId(), operations }) });
+    valueInput.value = ''; resetVariableForm(); await loadProject(selectedProject.id); await loadProjects();
+  } catch (cause) { projectError(cause.message); valueInput.value = ''; }
+  finally { button.disabled = false; }
+}
+document.querySelector('#variable-form').addEventListener('submit', saveVariable);
+async function deleteVariable(variable) {
+  if (!selectedProject || !projectCapability('storage')) return;
+  if (!window.confirm(`${variable.name} 변수를 삭제하고 새 설정 버전을 만들까요?`)) return;
+  try {
+    await request(`/api/v1/projects/${encodeURIComponent(selectedProject.id)}/revisions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ base_revision_id: projectRevisionId(), operations: [variableOperation(variable, 'delete')] }) });
+    await loadProject(selectedProject.id); await loadProjects();
+  } catch (cause) { projectError(cause.message); }
+}
+document.querySelector('#projects-refresh').addEventListener('click', loadProjects);
+document.querySelector('#project-create-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); const input = document.querySelector('#project-create-name'), message = document.querySelector('#project-create-message'), name = input.value.trim();
+  if (!name) return; message.textContent = '프로젝트를 만들고 있습니다.';
+  try {
+    const { data, location, status } = await request('/api/v1/projects', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ name }) });
+    if (status !== 201 || !projectId(data.id) || location !== `/api/v1/projects/${encodeURIComponent(data.id)}`) throw new Error('프로젝트 생성 응답을 확인하지 못했습니다.');
+    input.value = ''; message.textContent = '프로젝트를 만들었습니다.'; await loadProjects(); await loadProject(data.id);
+  } catch (cause) { message.textContent = `프로젝트 생성 실패: ${cause.message}`; }
+});
+document.querySelector('#project-use-deployment').addEventListener('click', () => {
+  if (!selectedProject || !projectRevisionId()) return;
+  deploymentProject = { id: selectedProject.id, name: selectedProject.name, revisionId: projectRevisionId() }; renderDeploymentProject(); showView('deploy');
+});
+const projectConfirmDialog = document.querySelector('#project-confirm-dialog'); let projectConfirmDraft = null, transferPlanDraft = null;
+const acceptedProjectId = (data) => data?.resource_id || data?.id;
+function openProjectConfirm(draft) {
+  projectConfirmDraft = draft; document.querySelector('#project-confirm-title').textContent = draft.title; document.querySelector('#project-confirm-description').textContent = draft.description;
+  document.querySelector('#project-confirm-detail').textContent = draft.detail; document.querySelector('#project-confirm-error').hidden = true;
+  document.querySelector('#project-confirm-submit').textContent = draft.submit; document.querySelector('#project-confirm-submit').disabled = false;
+  projectConfirmDialog.showModal();
+}
+function pollProjectOperation(draft) {
+  clearTimeout(projectOperationTimer);
+  const read = async () => { try { const { data } = await request(draft.location); draft.onStatus(data); if (['queued', 'running', 'accepted'].includes(data.status)) projectOperationTimer = setTimeout(read, 15000); } catch (cause) { draft.onStatus({ status: 'unknown', error: { message: `상태 조회 실패: ${cause.message}` } }); } };
+  read();
+}
+function projectOperationState(status) { return ({ accepted: '접수됨', queued: '대기 중', running: '실행 중', ready: '준비됨', succeeded: '완료', failed: '실패', blocked: '차단됨', unknown: '결과 확인 필요' })[status] || '결과 확인 필요'; }
+function renderProjectOperation(kind, location, item) {
+  projectOperations[kind] = { location, id: acceptedProjectId(item), status: item.status };
+  document.querySelector(`#${kind}-status`).textContent = `환경 ${kind === 'delivery' ? '적용' : '이전'} ${projectOperationState(item.status)}${item.stage ? ` · ${item.stage}` : ''}${item.error?.message ? ` · ${item.error.message}` : ''}`;
+  document.querySelector(`#${kind}-observe`).hidden = item.status !== 'unknown';
+}
+document.querySelector('#delivery-review').addEventListener('click', () => {
+  const binding = projectBindings().find((item) => item.id === document.querySelector('#delivery-binding').value), revision = projectRevisionId();
+  if (!selectedProject || !binding || !revision || !projectCapability('delivery')) return;
+  const names = projectVariables.items.map((item) => item.name).join(', ') || '변경 변수 없음';
+  openProjectConfirm({ kind: 'delivery', title: '환경 적용 확인', description: `${binding.environment_id} 환경에 저장 버전 ${revision}을 적용합니다. 앱을 다시 시작할 수 있습니다.`, detail: `변경 변수: ${names}`, submit: '적용 접수', binding, revision, key: crypto.randomUUID() });
+});
+document.querySelector('#transfer-review').addEventListener('click', async () => {
+  const source = projectBindings()[0], destination_environment_id = document.querySelector('#transfer-environment').value, revision = projectRevisionId();
+  const status = document.querySelector('#transfer-status'); if (!selectedProject || !source || !destination_environment_id || !revision || !projectCapability('transfer')) return;
+  status.textContent = '이전 계획을 만들고 있습니다.';
+  const samePlan = transferPlanDraft && transferPlanDraft.source_binding_id === source.id && transferPlanDraft.destination_environment_id === destination_environment_id && transferPlanDraft.revision_id === revision;
+  const key = samePlan ? transferPlanDraft.key : crypto.randomUUID();
+  try {
+    const { data, location, status: code } = await request(`/api/v1/projects/${encodeURIComponent(selectedProject.id)}/transfers`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify({ destination_environment_id, revision_id: revision, source_binding_id: source.id }) });
+    if (code !== 201 || !projectId(data.id) || !/^[a-f0-9]{64}$/.test(data.plan_hash || '') || location !== `/api/v1/projects/${encodeURIComponent(selectedProject.id)}/transfers/${encodeURIComponent(data.id)}`) throw new Error('이전 계획 응답을 확인하지 못했습니다.');
+    transferPlanDraft = { source_binding_id: source.id, destination_environment_id, revision_id: revision, key };
+    const blockers = Array.isArray(data.blockers) ? data.blockers : [], overrides = Array.isArray(data.required_overrides) ? data.required_overrides : [];
+    status.textContent = blockers.length ? `이전 실행 차단: ${blockers.join(', ')}` : `이전 계획이 준비되었습니다. 환경 전용 검토 ${overrides.length}건`;
+    openProjectConfirm({ kind: 'transfer', title: '환경 이전 확인', description: blockers.length ? '이전 계획에 차단 항목이 있어 실행할 수 없습니다.' : `${source.environment_id}에서 ${destination_environment_id}로 공통값을 이전합니다.`, detail: `공통값은 복사 · 환경 전용값은 대상별 검토 ${overrides.join(', ') || '없음'} · 플랫폼 생성값은 대상에서 재생성`, submit: '이전 실행', plan: data, location, blocked: blockers.length > 0 });
+    document.querySelector('#project-confirm-submit').disabled = blockers.length > 0 || Date.parse(data.expires_at) <= Date.now();
+  } catch (cause) { status.textContent = `이전 계획 생성 실패: ${cause.message}`; }
+});
+document.querySelector('#project-confirm-cancel').addEventListener('click', () => projectConfirmDialog.close());
+document.querySelector('#project-confirm-form').addEventListener('submit', async (event) => {
+  event.preventDefault(); const draft = projectConfirmDraft; if (!draft || !selectedProject || draft.blocked) return; const submit = document.querySelector('#project-confirm-submit'); submit.disabled = true;
+  try {
+    if (draft.kind === 'delivery') {
+      const { data, location, status } = await request(`/api/v1/projects/${encodeURIComponent(selectedProject.id)}/deliveries`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': draft.key }, body: JSON.stringify({ binding_id: draft.binding.id, revision_id: draft.revision }) });
+      const id = acceptedProjectId(data);
+      if (status !== 202 || !projectId(id) || location !== `/api/v1/projects/${encodeURIComponent(selectedProject.id)}/deliveries/${encodeURIComponent(id)}`) throw new Error('환경 적용 접수 응답을 확인하지 못했습니다.');
+      projectConfirmDialog.close(); pollProjectOperation({ location, onStatus: (item) => renderProjectOperation('delivery', location, item) });
+    } else {
+      draft.executeKey ||= crypto.randomUUID();
+      const { data, location, status } = await request(`${draft.location}/actions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': draft.executeKey }, body: JSON.stringify({ action: 'execute', plan_hash: draft.plan.plan_hash }) });
+      if (status !== 202 || !projectId(acceptedProjectId(data)) || location !== draft.location) throw new Error('환경 이전 접수 응답을 확인하지 못했습니다.');
+      projectConfirmDialog.close(); pollProjectOperation({ location, onStatus: (item) => renderProjectOperation('transfer', location, item) });
+    }
+  } catch (cause) { const error = document.querySelector('#project-confirm-error'); error.textContent = cause.message; error.hidden = false; submit.disabled = false; }
+});
+for (const kind of ['delivery', 'transfer']) document.querySelector(`#${kind}-observe`).addEventListener('click', async () => {
+  const operation = projectOperations[kind]; if (!operation || operation.status !== 'unknown') return;
+  const button = document.querySelector(`#${kind}-observe`); button.disabled = true;
+  try {
+    const { data, location, status } = await request(`${operation.location}/actions`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': crypto.randomUUID() }, body: JSON.stringify({ action: 'observe' }) });
+    if (status !== 200 || !projectId(acceptedProjectId(data)) || location !== operation.location) throw new Error('결과 관측 응답을 확인하지 못했습니다.');
+    renderProjectOperation(kind, operation.location, data);
+  } catch (cause) { document.querySelector(`#${kind}-status`).textContent = `결과 다시 확인 실패: ${cause.message} 재배포하지 않았습니다.`; }
+  finally { button.disabled = false; }
+});
+window.addEventListener('pagehide', () => clearTimeout(projectOperationTimer));
 // Lifecycle actions bind only to the latest session-owned application inventory.
 const lifecycleDialog = document.querySelector('#lifecycle-dialog');
 const lifecycleNames = { stop: '중지', start: '재개', delete: '삭제' };

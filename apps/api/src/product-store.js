@@ -86,12 +86,22 @@ export async function createProductStore(directory) {
     } else {
       state = { version: 1, operations: {}, keys: {}, bindings: {}, plans: {} };
       state.applications = {};
+      for (const table of ['projects', 'revisions', 'project_bindings', 'project_keys']) { state[table] = {}; for (const row of db.prepare(`SELECT id, record FROM ${table}`).all()) state[table][row.id] = JSON.parse(row.record); }
       for (const table of ['operations', 'plans', 'applications']) for (const row of db.prepare(`SELECT id, record FROM ${table}`).all()) state[table][row.id] = JSON.parse(row.record);
       for (const row of db.prepare('SELECT run_id, record FROM bindings').all()) state.bindings[row.run_id] = JSON.parse(row.record);
       for (const row of db.prepare('SELECT key, operation_id FROM idempotency').all()) state.keys[row.key] = row.operation_id;
     }
     if (state.version !== 1 || !state.operations || !state.keys || !state.bindings || !state.plans) throw new Error('Invalid workspace state');
     state.applications ||= {};
+    for (const table of ['projects', 'revisions', 'project_bindings', 'project_keys']) state[table] ||= {};
+    // Repeatable linking preserves existing application IDs and exact anonymous owners.
+    for (const app of Object.values(state.applications)) {
+      if (app.project_id) continue;
+      const projectId = randomUUID(), bindingId = randomUUID();
+      state.projects[projectId] = { id: projectId, session_id: app.session_id ?? null, name: app.app, active_binding_id: bindingId, revision_id: null, created_at: app.created_at };
+      state.project_bindings[bindingId] = { id: bindingId, project_id: projectId, environment_id: app.environment_target_id, application_id: app.id, status: app.status, applied_revision_id: null };
+      Object.assign(app, { project_id: projectId, binding_id: bindingId });
+    }
     for (const app of Object.values(state.applications)) if (['registering', 'stopping', 'starting', 'deleting'].includes(app.status)) app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
       if (['queued', 'running'].includes(operation.status)) {
@@ -122,6 +132,11 @@ export async function createProductStore(directory) {
       for (const [id, value] of Object.entries(next.bindings)) binding.run(id, value.operation_id, JSON.stringify(value));
       const key = db.prepare('INSERT INTO idempotency VALUES (?, ?)');
       for (const [id, value] of Object.entries(next.keys)) key.run(id, value);
+      for (const table of ['projects', 'revisions', 'project_bindings', 'project_keys']) {
+        db.exec(`DELETE FROM ${table}`);
+        const insert = db.prepare(`INSERT INTO ${table} VALUES (?, ?)`);
+        for (const [id, value] of Object.entries(next[table] || {})) insert.run(id, JSON.stringify(value));
+      }
       db.exec('PRAGMA user_version=1; COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }

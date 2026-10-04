@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit
 from transport import forwarded_port, transport_parts
 
 HERE = Path(__file__).resolve().parent
@@ -26,7 +27,7 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / 'ci/scripts'))
 from storage import durable_write
 SCHEMA = ROOT / 'contracts/ansible-request.schema.json'
-PLAYBOOKS = {'guest': HERE / 'guest.yml', 'runtime': HERE / 'runtime.yml'}
+PLAYBOOKS = {'guest': HERE / 'guest.yml', 'runtime': HERE / 'runtime.yml', 'secrets': HERE / 'secrets.yml'}
 PRIVATE = tuple(ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
 MAX_BYTES = 1024 * 1024
 STATE_DIR = Path.home() / '.local/state/railshot/ansible'
@@ -141,7 +142,7 @@ def base_result(request=None):
     return {'schema_version': '1.0', 'request_id': request.get('request_id'),
             'target_id': request.get('target', {}).get('id'), 'operation': request.get('operation'),
             'status': 'failed', 'stage': 'validation', 'guest_ready': False,
-            'runtime_ready': False, 'application_ready': False, 'public_http_verified': False,
+            'runtime_ready': False, 'secrets_ready': False, 'application_ready': False, 'public_http_verified': False,
             'steps': [], 'replayed': False, 'error': None}
 
 
@@ -157,7 +158,7 @@ def support_error(request):
     inv = request['inventory']
     if len(inv['control_plane']) != 1 or inv['workers']:
         return ('SINGLE_NODE_ONLY', 'Current runtime supports one control-plane node and no workers.')
-    if request['operation'] == 'runtime.install' and request['target']['architecture'] != 'amd64':
+    if request['operation'] in ('runtime.install', 'secrets.configure', 'secrets.verify') and request['target']['architecture'] != 'amd64':
         return ('RUNTIME_ARCHITECTURE_UNVERIFIED', 'The first integrated runtime profile is amd64; ARM64 remains unverified.')
     return None
 
@@ -208,6 +209,139 @@ def playbook_variables(request):
             'railshot_wait_timeout_seconds': request.get('runtime', {}).get('wait_timeout_seconds', 300)}
 
 
+def secrets_variables(path, request, work, *, provision=False):
+    """Validate operator-only source references and build a remote-safe profile."""
+    path = Path(path)
+    private_file(path, identity=True)
+    try:
+        config = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise ContractError('Secrets configuration is not valid JSON') from exc
+    if (not isinstance(config, dict) or not {'version', 'environment_id', 'provider_profile'} <= set(config)
+            or set(config) - {'version', 'environment_id', 'provider_profile', 'central_provisioning'}
+            or config.get('version') != 1 or config.get('environment_id') != request['target']['id']):
+        raise ContractError('Secrets configuration does not match the target')
+    central = config.get('central_provisioning')
+    if central is not None:
+        if (not isinstance(central, dict) or set(central) != {'helper', 'state_dir'}
+                or central['helper'] != '/usr/local/libexec/railshot-provision-environment'
+                or not isinstance(central['state_dir'], str) or not Path(central['state_dir']).is_absolute()):
+            raise ContractError('Invalid central provisioning registration')
+        # Validate every non-generated artifact before any central issuance.
+        static = config.get('provider_profile')
+        if (not isinstance(static, dict) or set(static) != {'provider', 'namespace', 'storage', 'vault', 'external_secrets', 'recovery'}
+                or static.get('provider') != request['target']['provider'] or static.get('namespace') != 'railshot-secrets'):
+            raise ContractError('Static central profile does not match the target')
+        for name, fields in (('storage', {'class_name', 'capacity', 'manifest_file', 'manifest_sha256'}),
+                             ('external_secrets', {'manifest_file', 'manifest_sha256'})):
+            artifact = static[name]
+            if not isinstance(artifact, dict) or set(artifact) != fields:
+                raise ContractError('Static provider manifest is incomplete')
+            source = artifact['manifest_file']; digest = artifact['manifest_sha256']
+            if not isinstance(source, str) or not Path(source).is_absolute(): raise ContractError('Absolute manifest reference required')
+            private_file(source)
+            if not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest) or hashlib.sha256(Path(source).read_bytes()).hexdigest() != digest:
+                raise ContractError('Static provider artifact digest differs')
+        if (not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', static['storage'].get('class_name', ''))
+                or not re.fullmatch(r'[1-9][0-9]*(?:Gi|Ti)', static['storage'].get('capacity', ''))
+                or not isinstance(static['vault'], dict)
+                or set(static['vault']) != {'image', 'tls_secret', 'seal_secret', 'seal', 'tls', 'seal_env_file'}
+                or not re.fullmatch(r'[^\s@]+@sha256:[a-f0-9]{64}', static['vault'].get('image', ''))
+                or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', static['vault'].get(key, '')) for key in ('tls_secret', 'seal_secret'))):
+            raise ContractError('Static storage or Vault identity is invalid')
+        if not provision:
+            # Validation must never issue a key, token or certificate.
+            return {'railshot_central_provisioning_pending': True}
+        target = Path(central['state_dir']) / request['target']['id']
+        try:
+            issued = subprocess.run(['sudo', '-n', central['helper'], request['target']['id']],
+                capture_output=True, text=True, timeout=180, env=child_env())
+            if issued.returncode: raise ContractError('Central credential provisioning did not complete')
+            receipt = json.loads(issued.stdout)
+            if receipt.get('environment_id') != request['target']['id'] or receipt.get('status') not in ('issued', 'reused'):
+                raise ContractError('Central credential receipt differs')
+            generated_path = Path(receipt['profile_path'])
+            if generated_path.resolve() != (target / 'transit-profile.json').resolve():
+                raise ContractError('Central profile path differs')
+            private_file(generated_path, identity=True)
+            generated = json.loads(generated_path.read_text())
+            if generated.get('environment_id') != request['target']['id']:
+                raise ContractError('Central generated identity differs')
+            config['provider_profile']['vault'].update(seal=generated['seal'], seal_env_file=generated['seal_env_file'], tls=generated['vault_tls'])
+            config['provider_profile']['recovery'] = {'helper': '/usr/local/libexec/railshot-recovery-escrow', **generated['recovery']}
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+            raise ContractError('Central credential provisioning is unavailable') from exc
+    profile = config.get('provider_profile', {})
+    if (not isinstance(profile, dict) or set(profile) != {'provider', 'namespace', 'storage', 'vault', 'external_secrets', 'recovery'}
+            or profile.get('provider') != request['target']['provider']):
+        raise ContractError('Secrets provider profile does not match the target')
+    storage, vault, eso, recovery = (profile[key] for key in ('storage', 'vault', 'external_secrets', 'recovery'))
+    if (not isinstance(storage, dict) or set(storage) != {'class_name', 'capacity', 'manifest_file', 'manifest_sha256'}
+            or not isinstance(eso, dict) or set(eso) != {'manifest_file', 'manifest_sha256'}
+            or not isinstance(vault, dict) or set(vault) != {'image', 'tls_secret', 'seal_secret', 'seal', 'tls', 'seal_env_file'}
+            or not isinstance(vault.get('tls'), dict) or set(vault['tls']) != {'cert_file', 'key_file', 'ca_file'}
+            or not isinstance(recovery, dict) or set(recovery) != {
+                'helper', 'endpoint', 'ca_file', 'client_cert_file', 'client_key_file'}
+            or recovery.get('helper') != '/usr/local/libexec/railshot-recovery-escrow'):
+        raise ContractError('Secrets provider artifacts are incomplete')
+    endpoint = urlsplit(recovery['endpoint'])
+    if endpoint.scheme != 'https' or not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+        raise ContractError('Recovery escrow endpoint must be credential-free HTTPS')
+    public = [storage['manifest_file'], eso['manifest_file'], vault['tls']['cert_file'], vault['tls']['ca_file'],
+              recovery['ca_file'], recovery['client_cert_file']]
+    transit = isinstance(vault.get('seal'), dict) and vault['seal'].get('type') == 'transit'
+    if transit:
+        if set(vault['seal']) != {'type', 'address', 'key_name', 'mount_path', 'ca_file'}:
+            raise ContractError('Transit requires environment-bound key, address and CA')
+        public.append(vault['seal']['ca_file'])
+    private = [vault['tls']['key_file'], vault['seal_env_file'], recovery['client_key_file']]
+    if any(not isinstance(value, str) or not Path(value).is_absolute() for value in public + private):
+        raise ContractError('Secrets artifact references must be absolute paths')
+    for source in public:
+        private_file(source)
+    for source in private:
+        private_file(source, identity=True)
+    for source, expected in ((storage['manifest_file'], storage['manifest_sha256']),
+                             (eso['manifest_file'], eso['manifest_sha256'])):
+        if not isinstance(expected, str) or not re.fullmatch(r'[a-f0-9]{64}', expected) or hashlib.sha256(Path(source).read_bytes()).hexdigest() != expected:
+            raise ContractError('Pinned provider artifact digest differs')
+    remote = '/var/lib/railshot/secrets-runtime'
+    remote_profile = {'version': 1, 'environment_id': config['environment_id'], 'provider_profile': {
+        **profile,
+        'storage': {key: storage[key] for key in ('class_name', 'capacity', 'manifest_sha256')},
+        'external_secrets': {'manifest_sha256': eso['manifest_sha256']},
+        'vault': {**vault, 'tls': {'cert_file': remote + '/tls.crt', 'key_file': remote + '/tls.key',
+                                   'ca_file': remote + '/ca.crt'}, 'seal_env_file': remote + '/seal.json'},
+        'recovery': {'helper': recovery['helper']}}}
+    if transit:
+        remote_profile['provider_profile']['vault']['seal'] = {**vault['seal'], 'ca_file': remote + '/transit-ca.crt'}
+    # Use the target validator before dispatch, including provider-specific seal rules.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('railshot_secrets_profile', ROOT / 'deployment/scripts/secrets_runtime.py')
+    validator = importlib.util.module_from_spec(spec); spec.loader.exec_module(validator)
+    try:
+        validator.validate(remote_profile, request['target']['id'], request['target']['provider'])
+    except validator.RuntimeErrorCode as exc:
+        raise ContractError('Secrets runtime profile is invalid: ' + exc.code) from exc
+    profile_path = work / 'secrets-profile.json'
+    profile_path.write_text(json.dumps(remote_profile)); profile_path.chmod(0o600)
+    escrow_path = work / 'recovery-escrow.json'
+    escrow_path.write_text(json.dumps({'version': 1, 'endpoint': recovery['endpoint'],
+        'ca_file': remote + '/escrow-ca.crt', 'client_cert_file': remote + '/escrow-client.crt',
+        'client_key_file': remote + '/escrow-client.key'})); escrow_path.chmod(0o600)
+    return {'railshot_provider': request['target']['provider'],
+            'railshot_runtime_source': str(ROOT / 'deployment/scripts/secrets_runtime.py'),
+            'railshot_recovery_helper_source': str(ROOT / 'deployment/scripts/recovery_escrow.py'),
+            'railshot_profile_source': str(profile_path), 'railshot_escrow_config_source': str(escrow_path),
+            'railshot_storage_manifest_source': storage['manifest_file'],
+            'railshot_eso_manifest_source': eso['manifest_file'],
+            'railshot_tls_cert_source': vault['tls']['cert_file'], 'railshot_tls_key_source': vault['tls']['key_file'],
+            'railshot_tls_ca_source': vault['tls']['ca_file'], 'railshot_seal_env_source': vault['seal_env_file'],
+            'railshot_escrow_ca_source': recovery['ca_file'], 'railshot_escrow_cert_source': recovery['client_cert_file'],
+            'railshot_escrow_key_source': recovery['client_key_file'],
+            'railshot_transit_ca_source': vault['seal']['ca_file'] if transit else None}
+
+
 def child_env():
     # Do not inherit arbitrary Ansible plugins, extra config, SSH agent or cloud credentials.
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR') if key in os.environ}
@@ -243,12 +377,31 @@ def read_receipt(path, request, stage, nonce):
     expected = {'request_id': request['request_id'], 'target_id': request['target']['id'],
                 'node_id': request['inventory']['control_plane'][0]['id'],
                 'stage': stage, 'nonce': nonce}
-    if not isinstance(receipt, dict) or any(receipt.get(k) != v for k, v in expected.items()) or receipt.get(stage + '_ready') is not True:
+    ready_key = 'secrets_ready' if stage.startswith('secrets-') else stage + '_ready'
+    if not isinstance(receipt, dict) or any(receipt.get(k) != v for k, v in expected.items()) or receipt.get(ready_key) is not True:
         raise ContractError('Readiness receipt does not match this request and stage')
-    return {**expected, stage + '_ready': True}
+    return {**expected, ready_key: True, **({'checks': receipt.get('checks')} if stage.startswith('secrets-') else {})}
 
 
-def _run(request, *, validate_only=False, runner=execute):
+def read_secrets_failure(path, request, stage, nonce):
+    try:
+        receipt = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    expected = {'request_id': request['request_id'], 'target_id': request['target']['id'],
+                'node_id': request['inventory']['control_plane'][0]['id'], 'stage': stage, 'nonce': nonce}
+    error = receipt.get('error')
+    if (any(receipt.get(key) != value for key, value in expected.items()) or receipt.get('secrets_ready') is not False
+            or receipt.get('status') not in ('blocked', 'unknown') or not isinstance(error, dict)
+            or not isinstance(error.get('code'), str) or re.fullmatch(r'[A-Z_]{1,64}', error['code']) is None
+            or type(error.get('outcome_unknown')) is not bool):
+        return None
+    return receipt
+
+
+def _run(request, *, validate_only=False, runner=execute, secrets_config_path=None, require_secrets=False):
     try:
         validate(request)
     except (ContractError, OSError, ValueError) as exc:
@@ -257,7 +410,17 @@ def _run(request, *, validate_only=False, runner=execute):
     blocked = support_error(request)
     if blocked:
         return fail(result, 'blocked', *blocked)
+    if request['operation'] in ('secrets.configure', 'secrets.verify') and secrets_config_path is None:
+        return fail(result, 'blocked', 'SECRETS_CONFIGURATION_REQUIRED', 'A trusted secrets provider profile is required')
+    if request['operation'] == 'runtime.install' and require_secrets and secrets_config_path is None:
+        return fail(result, 'blocked', 'SECRETS_CONFIGURATION_REQUIRED', 'A trusted secrets provider profile is required')
     if validate_only:
+        if secrets_config_path is not None:
+            with tempfile.TemporaryDirectory(prefix='railshot-secrets-validation-') as directory:
+                try:
+                    secrets_variables(secrets_config_path, request, Path(directory))
+                except (ContractError, OSError, ValueError) as exc:
+                    return fail(result, 'blocked', 'SECRETS_CONFIGURATION_INVALID', str(exc))
         result['status'] = 'validated'
         return result
     result['stage'] = 'executor_preflight'
@@ -281,44 +444,68 @@ def _run(request, *, validate_only=False, runner=execute):
         inventory = work / 'inventory.json'
         inventory.write_text(json.dumps(build_inventory(request, forwarded)))
         inventory.chmod(0o600)
-        for stage in ('guest', 'runtime') if request['operation'] == 'runtime.install' else ('guest',):
+        secret_vars = None
+        if request['operation'] in ('runtime.install', 'secrets.configure', 'secrets.verify') and secrets_config_path is not None:
+            try:
+                secret_vars = secrets_variables(secrets_config_path, request, work, provision=True)
+            except (ContractError, OSError, ValueError) as exc:
+                return fail(result, 'blocked', 'SECRETS_CONFIGURATION_INVALID', str(exc))
+        stages = ('guest', 'runtime') if request['operation'] == 'runtime.install' else (
+            ('secrets-configure', 'secrets-verify') if request['operation'] == 'secrets.configure' else
+            ('secrets-verify',) if request['operation'] == 'secrets.verify' else ('guest',))
+        if request['operation'] == 'runtime.install' and secret_vars is not None:
+            stages += ('secrets-configure', 'secrets-verify')
+        for stage in stages:
             result['stage'] = stage
             nonce = secrets.token_hex(16)
             receipt_path = work / f'{stage}-receipt.json'
             extra = {**playbook_variables(request), 'railshot_nonce': nonce,
                      'railshot_receipt_path': str(receipt_path)}
+            playbook_stage = 'secrets' if stage.startswith('secrets-') else stage
+            if stage.startswith('secrets-'):
+                extra.update(secret_vars, railshot_secrets_phase=stage.removeprefix('secrets-'))
             extra_path = work / f'{stage}-vars.json'
             extra_path.write_text(json.dumps(extra)); extra_path.chmod(0o600)
-            argv = [executable, '-i', str(inventory), str(PLAYBOOKS[stage]), '--extra-vars', '@' + str(extra_path)]
+            argv = [executable, '-i', str(inventory), str(PLAYBOOKS[playbook_stage]), '--extra-vars', '@' + str(extra_path)]
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return fail(result, 'failed', 'EXECUTION_TIMEOUT', 'Request deadline exceeded', unknown=stage == 'runtime')
+                return fail(result, 'failed', 'EXECUTION_TIMEOUT', 'Request deadline exceeded', unknown=stage != 'guest')
             try:
                 rc = runner(argv, remaining, child_env())
             except subprocess.TimeoutExpired:
-                return fail(result, 'failed', 'EXECUTION_TIMEOUT', 'Playbook deadline exceeded; inspect target state', unknown=stage == 'runtime')
+                return fail(result, 'failed', 'EXECUTION_TIMEOUT', 'Playbook deadline exceeded; inspect target state', unknown=stage != 'guest')
             except OSError:
                 return fail(result, 'failed', 'EXECUTOR_FAILURE', 'Unable to start the trusted Ansible executable')
             result['steps'].append({'stage': stage, 'exit_code': rc})
             if rc:
-                code = 'GUEST_CHECK_FAILED' if stage == 'guest' else 'RUNTIME_INSTALL_FAILED'
-                return fail(result, 'failed', code, 'Playbook failed; readiness was not established', unknown=stage == 'runtime')
+                if stage.startswith('secrets-'):
+                    receipt = read_secrets_failure(receipt_path, request, stage, nonce)
+                    if receipt is not None:
+                        result['steps'][-1]['receipt'] = {key: receipt[key] for key in (
+                            'request_id', 'target_id', 'node_id', 'stage', 'nonce', 'secrets_ready', 'status', 'error')}
+                        return fail(result, receipt['status'], receipt['error']['code'],
+                                    'Secrets runtime did not establish readiness', unknown=receipt['error']['outcome_unknown'])
+                code = 'GUEST_CHECK_FAILED' if stage == 'guest' else ('RUNTIME_INSTALL_FAILED' if stage == 'runtime' else 'SECRETS_RUNTIME_FAILED')
+                return fail(result, 'failed', code, 'Playbook failed; readiness was not established', unknown=stage != 'guest')
             try:
                 result['steps'][-1]['receipt'] = read_receipt(receipt_path, request, stage, nonce)
             except ContractError as exc:
-                return fail(result, 'failed', 'READINESS_UNPROVEN', str(exc), unknown=stage == 'runtime')
-            result[stage + '_ready'] = True
+                return fail(result, 'failed', 'READINESS_UNPROVEN', str(exc), unknown=stage != 'guest')
+            result['secrets_ready' if stage.startswith('secrets-') else stage + '_ready'] = True
     result['status'] = 'succeeded'
     return result
 
 
-def run(request, *, validate_only=False, runner=execute, state_dir=None):
+def run(request, *, validate_only=False, runner=execute, state_dir=None, secrets_config_path=None, require_secrets=False, resume_secrets=False):
     """Persist once-only request admission and lock both the logical and physical target."""
-    preview = _run(request, validate_only=True)
+    preview = _run(request, validate_only=True, secrets_config_path=secrets_config_path, require_secrets=require_secrets)
     if validate_only or preview['status'] != 'validated':
         return preview
+    if resume_secrets and request['operation'] != 'secrets.configure':
+        return fail(base_result(request), 'blocked', 'RESUME_OPERATION_INVALID', 'Only an explicit secrets configuration request may resume')
     return run_locked(request, base_result(request), lock_keys(request),
-                      lambda: _run(request, runner=runner), state_dir=state_dir)
+                      lambda: _run(request, runner=runner, secrets_config_path=secrets_config_path,
+                                   require_secrets=require_secrets), state_dir=state_dir, resume_secrets=resume_secrets)
 
 
 def normalize_lock_keys(keys):
@@ -349,7 +536,7 @@ def lock_keys(request):
     return normalize_lock_keys(keys)
 
 
-def run_locked(request, result, identities, operation, *, state_dir=None):
+def run_locked(request, result, identities, operation, *, state_dir=None, resume_secrets=False):
     """Shared admission for one runtime or every physical member of a DB cluster."""
     directory = Path(state_dir) if state_dir is not None else STATE_DIR
     execution_started = False
@@ -381,11 +568,20 @@ def run_locked(request, result, identities, operation, *, state_dir=None):
                 if prior.get('result') is not None:
                     saved = prior['result']
                     if not isinstance(saved, dict) or set(saved) != set(result) or saved.get('status') not in (
-                            'succeeded', 'invalid', 'blocked', 'failed') or saved.get('request_id') != request['request_id']:
+                            'succeeded', 'invalid', 'blocked', 'failed', 'unknown') or saved.get('request_id') != request['request_id']:
                         raise ContractError('Invalid saved request result')
-                    return {**prior['result'], 'replayed': True}
-                return fail(result, 'blocked', 'PREVIOUS_OUTCOME_UNKNOWN', 'Previous executor did not record completion; inspect target before a new request', unknown=True)
+                    if not (resume_secrets and request['operation'] == 'secrets.configure'
+                            and ((saved.get('error') or {}).get('outcome_unknown') is True or saved['status'] == 'blocked')):
+                        return {**prior['result'], 'replayed': True}
+                elif not resume_secrets:
+                    return fail(result, 'blocked', 'PREVIOUS_OUTCOME_UNKNOWN', 'Previous executor did not record completion; inspect target before a new request', unknown=True)
+                # The CLI opt-in holds the original physical locks and exact request digest.
+                # Preserve every prior attempt separately; no public API calls this opt-in.
+                history = directory / 'history'; history.mkdir(mode=0o700, exist_ok=True)
+                durable_write(history / (path.stem + '-' + secrets.token_hex(8) + '.json'), canonical_record(prior))
             for previous in directory.glob('*.json'):
+                if resume_secrets and previous == path:
+                    continue
                 private_file(previous, identity=True)
                 saved = json.loads(previous.read_text())
                 if not isinstance(saved, dict) or 'result' not in saved:
@@ -407,6 +603,10 @@ def run_locked(request, result, identities, operation, *, state_dir=None):
         return fail(result, 'failed' if execution_started else 'blocked', 'JOB_RECORD_UNAVAILABLE',
                     'Unable to read or persist the private job record',
                     unknown=execution_started and request['operation'] != 'guest.check')
+
+
+def canonical_record(record):
+    return json.dumps(record, sort_keys=True, separators=(',', ':')).encode()
 
 
 def from_descriptor(descriptor, *, request_id, operation, ssh, timeout_seconds=1200):
@@ -477,12 +677,15 @@ def main(argv=None):
     inputs.add_argument('--request', default='-', help='JSON file or - for stdin')
     inputs.add_argument('--node-descriptor', help='Terraform output -json node_descriptor file')
     parser.add_argument('--request-id')
-    parser.add_argument('--operation', choices=('guest.check', 'runtime.install'), default='runtime.install')
+    parser.add_argument('--operation', choices=('guest.check', 'runtime.install', 'secrets.configure', 'secrets.verify'),
+                        default='runtime.install')
     parser.add_argument('--ssh-user')
     parser.add_argument('--identity-file')
     parser.add_argument('--known-hosts-file')
     parser.add_argument('--timeout-seconds', type=int, default=1200)
     parser.add_argument('--state-dir', type=Path, default=STATE_DIR)
+    parser.add_argument('--secrets-config-file', type=Path)
+    parser.add_argument('--resume-secrets', action='store_true', help='Operator-only evidence-based resume of this exact secrets.configure request')
     parser.add_argument('--validate-only', action='store_true', help='No SSH or file-reference checks; never marks readiness')
     args = parser.parse_args(argv)
     try:
@@ -500,11 +703,14 @@ def main(argv=None):
             request = from_descriptor(request, request_id=args.request_id, operation=args.operation,
                                       ssh={'user': args.ssh_user, 'identity_file': args.identity_file,
                                            'known_hosts_file': args.known_hosts_file}, timeout_seconds=args.timeout_seconds)
-        result = run(request, validate_only=args.validate_only, state_dir=args.state_dir)
+        result = run(request, validate_only=args.validate_only, state_dir=args.state_dir,
+                     secrets_config_path=args.secrets_config_file,
+                     require_secrets=request.get('operation') in ('secrets.configure', 'secrets.verify') and not args.validate_only,
+                     resume_secrets=args.resume_secrets)
     except (OSError, ValueError, UnicodeError):
         result = fail(base_result(), 'invalid', 'INVALID_JSON', 'Unreadable, duplicate-key or invalid JSON request')
     print(json.dumps(result, separators=(',', ':')))
-    return {'succeeded': 0, 'validated': 0, 'invalid': 2, 'blocked': 3, 'failed': 4}[result['status']]
+    return {'succeeded': 0, 'validated': 0, 'invalid': 2, 'blocked': 3, 'failed': 4, 'unknown': 4}[result['status']]
 
 
 if __name__ == '__main__':

@@ -65,7 +65,7 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
     });
     child.stdin.end(JSON.stringify(request));
   });
-  async function deployPublished({ deploymentId, app, targetId, sourceCommit, publication, signal, onProgress }) {
+  async function deployPublished({ deploymentId, app, targetId, sourceCommit, publication, configuration, observeOnly = false, signal, onProgress }) {
     if (publication?.app !== app || publication?.target_id !== targetId || publication?.source_commit !== sourceCommit) {
       throw new Error('Published deployment binding differs.');
     }
@@ -73,8 +73,8 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
       throw new Error('Registered deployment application differs.');
     }
     const files = await loadPublished(publication);
-    const request = { action: 'apply', deployment_id: deploymentId, target_id: targetId,
-      config_sha256: configDigest, publication,
+    const request = { action: observeOnly ? 'observe' : 'apply', deployment_id: deploymentId, target_id: targetId,
+      config_sha256: configDigest, publication, ...(configuration ? { configuration } : {}),
       files: Object.fromEntries(files.map(({ path, content }) => [path, content.toString('base64')])) };
     const deadline = Date.now() + timeoutMs;
     let result = await invoke(request, signal, deadline - Date.now());

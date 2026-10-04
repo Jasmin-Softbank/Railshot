@@ -11,7 +11,8 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-from handoff import MIGRATION_ANNOTATIONS, database_binding, document_hash, http_path, require, secret_env
+from handoff import (MIGRATION_ANNOTATIONS, configuration_binding, database_binding, document_hash,
+                     http_path, require, secret_env)
 
 KINDS = [{'group': 'apps', 'kind': 'Deployment'}, {'group': '', 'kind': 'Service'},
          {'group': 'networking.k8s.io', 'kind': 'NetworkPolicy'}]
@@ -56,8 +57,12 @@ def validate_workload(work, name, namespace, target_id):
                     isinstance(container['command'], list) and 0 < len(container['command']) <= 20 and
                     all(isinstance(value, str) for value in container['command']),
                     'migration must use the reviewed image and container restrictions')
-            require(spec['template']['metadata'] == {'labels': {
-                'app.kubernetes.io/name': name, 'railshot.io/target': target_id, 'railshot.io/role': 'migration'}},
+            expected_meta = {'labels': {
+                'app.kubernetes.io/name': name, 'railshot.io/target': target_id, 'railshot.io/role': 'migration'}}
+            runtime_annotations = deployment['spec']['template']['metadata'].get('annotations')
+            if runtime_annotations:
+                expected_meta['annotations'] = runtime_annotations
+            require(spec['template']['metadata'] == expected_meta,
                 'migration workload labels differ')
         require(item['metadata'] == {'name': item_name, 'namespace': namespace, **annotations},
                 'workload namespace/name differs')
@@ -105,6 +110,22 @@ def load_review(directory):
             dest['namespace'] not in {'default', 'kube-system', 'kube-public', 'kube-node-lease', meta['namespace']},
             'dedicated runtime namespace required')
     validate_workload(work, receipt['app'], dest['namespace'], receipt['target_id'])
+    if 'configuration' in receipt:
+        configuration = configuration_binding(receipt['configuration'], dest['namespace'])
+        deployment = next(item for item in work['items'] if item['kind'] == 'Deployment')
+        template = deployment['spec']['template']
+        expected = [{'configMapRef': {'name': configuration['configmap_name']}}]
+        if configuration['secret_names']:
+            expected.append({'secretRef': {'name': configuration['secret_name']}})
+        require(template['metadata'].get('annotations') == {
+                    'railshot.io/configuration-revision': configuration['revision_id']} and
+                template['spec']['containers'][0].get('envFrom') == expected,
+                'workload configuration revision references differ')
+    else:
+        deployment = next(item for item in work['items'] if item['kind'] == 'Deployment')
+        require('annotations' not in deployment['spec']['template']['metadata'] and
+                'envFrom' not in deployment['spec']['template']['spec']['containers'][0],
+                'configuration references require a receipt')
     job = next((item for item in work['items'] if item['kind'] == 'Job'), None)
     if 'database' in receipt:
         database = database_binding(receipt['database'])

@@ -52,7 +52,7 @@ async function uploadedSource(request, strict = false, allowSelection = false, s
   const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
   const allowed = new Set(['app', 'target_id', 'plan_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
   if (sourceOnly) for (const name of ['app', 'target_id', 'plan_id']) allowed.delete(name);
-  if (allowSelection) for (const name of ['environment', 'provider', 'source_name']) allowed.add(name);
+  if (allowSelection) for (const name of ['environment', 'provider', 'source_name', 'project_id', 'revision_id']) allowed.add(name);
   for (const key of form.keys()) {
     if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
     if (key !== 'files' && form.getAll(key).length !== 1) fail('단일 입력 필드를 중복해서 보낼 수 없습니다.');
@@ -65,14 +65,16 @@ async function uploadedSource(request, strict = false, allowSelection = false, s
   if (strict && !selecting && !sourceOnly && !target_id) fail('대상 ID가 필요합니다.');
   const plan_id = form.has('plan_id') ? form.get('plan_id') : undefined;
   if (plan_id !== undefined && (!allowSelection || typeof plan_id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(plan_id))) fail('환경 계획 ID가 잘못되었습니다.');
-  let selected = {};
+  const project_id = form.get('project_id'), revision_id = form.get('revision_id');
+  if (Boolean(project_id) !== Boolean(revision_id) || project_id && (![project_id, revision_id].every(v => typeof v === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(v)))) fail('프로젝트와 설정 버전을 함께 지정하세요.');
+  let selected = project_id ? { project_id, revision_id } : {};
   if (selecting) {
     const environment = form.get('environment'), provider = form.get('provider');
     if (form.has('app') || form.has('target_id') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
     if (!(environment === 'cloud' && ['aws', 'gcp'].includes(provider) || environment === 'onprem' && ['openstack', 'proxmox'].includes(provider))) fail('배포 환경과 인프라 종류를 확인하세요.');
     const source_name = form.has('source_name') ? form.get('source_name') : undefined;
     if (source_name !== undefined && (typeof source_name !== 'string' || !source_name.length || source_name.length > 255 || /[\x00-\x1f]/.test(source_name))) fail('소스 이름을 확인하세요.');
-    selected = { deployment_selection: { environment, provider }, source_name };
+    selected = { ...selected, deployment_selection: { environment, provider }, source_name };
   } else if (form.has('source_name')) fail('소스 이름은 환경 선택과 함께 입력하세요.');
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);
@@ -178,7 +180,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.RAILSHOT_TENANT || process.env.JASMIN_TENANT,
     workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
-  deployPublished, environmentAdapter, applicationAdapter, observeMetrics, observeLogs, product, pollInterval,
+  deployPublished, environmentAdapter, applicationAdapter, secretsAdapter, projectCipher, projectKeyFile = process.env.RAILSHOT_PROJECT_KEY_FILE, observeMetrics, observeLogs, product, pollInterval,
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
 } = {}) {
   // Explicit adapter instances keep tests offline; production adapters consume only operator files.
@@ -189,6 +191,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       const { createCdAdapter } = await import('./cd.js');
       cd = await createCdAdapter({ configPath: process.env.RAILSHOT_CD_CONFIG, loadPublished: service.publishedFiles });
     }
+    const { createSecretsAdapter } = await import('./project-secrets.js');
+    const secrets = secretsAdapter || (process.env.RAILSHOT_SECRETS_FILE ? await createSecretsAdapter({ configPath: process.env.RAILSHOT_SECRETS_FILE, stateDirectory: join(stateDirectory, 'secrets-delivery') }) : undefined);
     const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments'), loadPublished: service?.publishedFiles }) : undefined);
     const { createApplicationAdapter } = await import('./applications.js');
     const applications = applicationAdapter || (process.env.RAILSHOT_APPLICATIONS_FILE ? await createApplicationAdapter({ configPath: process.env.RAILSHOT_APPLICATIONS_FILE, ciIdentity: service?.identity, loadPublished: service?.publishedFiles }) : undefined);
@@ -199,7 +203,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     const selections = providerTargets ?? (process.env.RAILSHOT_PROVIDER_TARGETS === undefined ? undefined : JSON.parse(process.env.RAILSHOT_PROVIDER_TARGETS));
     const { createAppLogsObserver } = await import('./logs.js');
     const logs = observeLogs || createAppLogsObserver({ configPath: process.env.RAILSHOT_CD_CONFIG });
-    return createProductService({ observeMetrics: observer, observeLogs: logs, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, pollInterval });
+    return createProductService({ observeMetrics: observer, observeLogs: logs, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, secretsAdapter: secrets, projectCipher, projectKeyFile, pollInterval });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
@@ -229,7 +233,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         // Public visitors are anonymous cookie sessions. Existing localhost maintenance clients
         // without a cookie retain their private maintenance channel and legacy contracts.
         const dashboardRoute = /^\/api\/v1\/(sessions|preferences|connections)(?:\/|$)/.test(url.pathname);
-        const scoped = access.remote || access.publicDemo || dashboardRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
+        const scoped = access.remote || access.publicDemo || dashboardRoute || url.pathname.startsWith('/api/v1/projects') || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`);
         const session = scoped ? products.dashboard.session(cookieToken(request.headers.cookie)) : null;
         const sessionId = session?.id ?? null;
         if (session?.token) response.setHeader('Set-Cookie', sessionCookie(session.token, access.remote));
@@ -265,6 +269,39 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
               }
             }
             throw new ServiceError('지원하지 않는 메서드입니다.', 405);
+          }
+          const projectRoute = /^\/api\/v1\/projects(?:\/([A-Za-z0-9._-]+))?(?:\/(variables|revisions|deliveries|transfers))?(?:\/([A-Za-z0-9._-]+))?(?:\/(actions))?$/.exec(url.pathname);
+          if (projectRoute) {
+            const [, projectId, child, childId, action] = projectRoute;
+            const allowed = !projectId ? ['GET', 'POST'] : !child || child === 'variables' ? ['GET']
+              : child === 'revisions' && !childId || ['deliveries', 'transfers'].includes(child) && !childId || ['deliveries', 'transfers'].includes(child) && childId && action ? ['POST']
+              : ['deliveries', 'transfers'].includes(child) && childId && !action ? ['GET'] : [];
+            if (!allowed.length || child && !projectId || action && !['deliveries', 'transfers'].includes(child) || childId && child === 'variables') throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+            if (!allowed.includes(request.method)) { const e = new ServiceError('지원하지 않는 메서드입니다.', 405); e.allow = allowed.join(', '); throw e; }
+            if (!projectId && request.method === 'GET') { json(response, 200, page(products.projects(sessionId), url.searchParams)); return; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (request.method === 'GET') {
+              const value = !child ? products.getProject(projectId, sessionId) : child === 'variables' ? products.variables(projectId, sessionId) : products.getProjectOperation(projectId, child, childId, sessionId);
+              json(response, 200, value); return;
+            }
+            if (projectId) products.getProject(projectId, sessionId);
+            const key = requestKey(request), input = await jsonInput(request);
+            if (!projectId) {
+              const value = await products.createProject(input, key, sessionId); json(response, 201, value, { Location: `/api/v1/projects/${value.id}` }); return;
+            }
+            if (child === 'revisions') {
+              const value = await products.createRevision(projectId, input, key, sessionId); json(response, 201, value, { Location: `/api/v1/projects/${projectId}/variables` }); return;
+            }
+            if (child === 'transfers' && !childId) {
+              const value = await products.createTransfer(projectId, input, key, sessionId); json(response, 201, value, { Location: `/api/v1/projects/${projectId}/transfers/${value.id}` }); return;
+            }
+            if (action && input.action === 'observe') {
+              const value = await products.observeProjectOperation(projectId, child, childId, input, key, sessionId);
+              json(response, 200, value, { Location: `/api/v1/projects/${projectId}/${child}/${childId}` }); return;
+            }
+            if (action && child === 'deliveries') throw new ServiceError('action=observe만 허용합니다.', 422);
+            const value = child === 'deliveries' ? await products.createDelivery(projectId, input, key, sessionId) : await products.executeProjectTransfer(projectId, childId, input, key, sessionId);
+            accepted(response, `projects/${projectId}/${child}`, value, requestId); return;
           }
           if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }

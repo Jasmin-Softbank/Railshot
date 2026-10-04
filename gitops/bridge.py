@@ -119,8 +119,8 @@ def git(config, *args):
 
 
 def validate_request(config, request):
-    handoff.require(isinstance(request, dict) and set(request) == {
-        'action', 'deployment_id', 'target_id', 'config_sha256', 'publication', 'files'} and
+    required = {'action', 'deployment_id', 'target_id', 'config_sha256', 'publication', 'files'}
+    handoff.require(isinstance(request, dict) and required <= set(request) <= required | {'configuration'} and
         request['action'] in ('apply', 'observe') and re.fullmatch(ID, request['deployment_id']),
         'bounded bridge request required')
     handoff.require(isinstance(request['config_sha256'], str) and re.fullmatch(r'[0-9a-f]{64}', request['config_sha256']) and
@@ -137,6 +137,9 @@ def validate_request(config, request):
                     'registered application/tenant mismatch')
     if 'edge' in registered:
         edge.validate_binding(registered['edge'], registered)
+    configuration = None
+    if request.get('configuration') is not None:
+        configuration = handoff.configuration_binding(request['configuration'], registered['target']['namespace'])
     handoff.require(isinstance(request['files'], dict), 'trusted publication files required')
     spec = handoff.spec_name(request['files'])
     handoff.require(set(request['files']) == {spec, 'images.json', 'verdict.json', 'manifest.json', 'handoff.json'},
@@ -153,7 +156,8 @@ def validate_request(config, request):
                     'verified publication receipt and artifact identity required')
     binding = {'publication': publication, 'config_sha256': request['config_sha256'],
                'target': registered, 'repository': config['repository'],
-               'branch': config['branch'], 'context': config['context']}
+               'branch': config['branch'], 'context': config['context'],
+               **({'configuration': configuration} if configuration else {})}
     return registered, files, hashlib.sha256(encoded(binding)).hexdigest()
 
 
@@ -223,6 +227,8 @@ def execute(config, request):
             for name, raw in files.items():
                 durable_write(published / name, raw)
             target = dict(registered['target'])
+            if request.get('configuration') is not None:
+                target['configuration'] = request['configuration']
             handoff.require(git(config, 'branch', '--show-current') == config['branch'] and
                             not git(config, 'status', '--porcelain'), 'dedicated clean registered branch required')
             remote = argo.https_url(git(config, 'remote', 'get-url', 'origin'))

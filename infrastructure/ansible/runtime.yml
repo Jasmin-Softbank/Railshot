@@ -133,6 +133,18 @@
       loop: [daemonset/cilium, deployment/cilium-operator, deployment/coredns]
       changed_when: false
 
+    - name: Read K3s Secret encryption status
+      ansible.builtin.command:
+        argv: [/usr/local/bin/k3s, secrets-encrypt, status]
+      register: railshot_secret_encryption
+      changed_when: false
+
+    - name: Require encrypted Kubernetes Secret storage
+      ansible.builtin.assert:
+        that:
+          - "'Encryption Status: Enabled' in railshot_secret_encryption.stdout"
+        fail_msg: K3s Secret encryption at rest is not enabled; explicit migration is required for an existing cluster.
+
     - name: Write a private receipt only after runtime checks passed
       ansible.builtin.copy:
         dest: "{{ railshot_receipt_path }}"

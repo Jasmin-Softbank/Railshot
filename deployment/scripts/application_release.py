@@ -37,7 +37,8 @@ def request_file(path):
 
 
 def _registration(config, request):
-    require(applications.exact(request, ('deployment_id', 'application_id', 'environment_id', 'publication', 'files')),
+    required = {'deployment_id', 'application_id', 'environment_id', 'publication', 'files'}
+    require(isinstance(request, dict) and required <= set(request) <= required | {'configuration'},
             'APPLICATION_REQUEST_INVALID')
     deployment_id = request['deployment_id']
     require(isinstance(deployment_id, str) and str(uuid.UUID(deployment_id)) == deployment_id, 'APPLICATION_REQUEST_INVALID')
@@ -70,6 +71,8 @@ def _registration(config, request):
               'argocd_namespace': 'argocd', 'cluster_server': endpoint, 'node_port': record.get('node_port'),
               'path': 'gitops/applications/' + registered['app'] + '/' + app_id,
               'image_pull_secret': {'namespace': app_id, 'name': 'ghcr-pull'}}
+    if request.get('configuration') is not None:
+        handoff.configuration_binding(request['configuration'], app_id)
     require(type(target['node_port']) is int and 30000 <= target['node_port'] <= 32767
             and registered['target'] == target and record.get('target') == target, 'APPLICATION_BINDING_CHANGED')
     hostname = applications.service_name(registered['app'], profile['tenant'], request['environment_id'],
@@ -124,7 +127,8 @@ def finalize(config_path, request):
         cd_bytes = runtime.bridge.encoded(cd)
         bridge_request = {'action': 'apply', 'deployment_id': request['deployment_id'], 'target_id': request['application_id'],
                           'config_sha256': hashlib.sha256(cd_bytes).hexdigest(),
-                          'publication': request['publication'], 'files': files}
+                          'publication': request['publication'], 'files': files,
+                          **({'configuration': request['configuration']} if request.get('configuration') is not None else {})}
         _, contents, _ = runtime.bridge.validate_request({**cd, '_sha256': bridge_request['config_sha256']}, bridge_request)
         # Validate original bytes through the existing release contract. No build, image pull,
         # registry request, Git fetch/push, Kubernetes action or public HTTP probe occurs here.
@@ -134,7 +138,10 @@ def finalize(config_path, request):
             _, images, publication = handoff.read_artifact(temporary, request['application_id'])
             revision = runtime.bridge.git(cd, 'rev-parse', '--verify', 'HEAD')
             require(re.fullmatch(r'[a-f0-9]{40}', revision), 'GITOPS_CHECKOUT_INVALID')
-            rendered = handoff.render(temporary, {**registered['target'], 'revision': revision})
+            render_target = {**registered['target'], 'revision': revision}
+            if request.get('configuration') is not None:
+                render_target['configuration'] = request['configuration']
+            rendered = handoff.render(temporary, render_target)
         require(rendered['app'] == registered['app'] and rendered['tenant'] == registered['tenant']
                 and rendered['source_commit'] == request['publication']['source_commit'], 'APPLICATION_PUBLICATION_MISMATCH')
         http = rendered['http']
@@ -151,6 +158,8 @@ def finalize(config_path, request):
             'publication_sha256': applications.digest(request['publication']),
             'files_sha256': {name: hashlib.sha256(raw).hexdigest() for name, raw in contents.items()},
             'binding_sha256': binding_sha, 'ingress': binding['ingress'], 'public_route_state': 'pending'}
+        if request.get('configuration') is not None:
+            route_request['configuration'] = request['configuration']
         result = {'status': 'succeeded', 'phase': 'cd_prepared', 'application_id': request['application_id'],
                   'environment_id': request['environment_id'], 'target_id': request['application_id'], 'app': registered['app'],
                   'public_route_state': 'pending'}

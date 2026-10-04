@@ -107,7 +107,7 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
     const ids = new Set(), targets = new Set();
     for (const profile of config.profiles) {
-      if (!exact(profile, ['id', 'label', 'provider', 'site', 'purposes', 'target_file', 'state_root', 'ssh', 'allow_apply'], ['timeout_seconds', 'database', 'deployment_file', 'enroll_ssh', 'create_per_request', 'registration_max_age_seconds', 'budget_refresh'])
+      if (!exact(profile, ['id', 'label', 'provider', 'site', 'purposes', 'target_file', 'state_root', 'ssh', 'allow_apply'], ['timeout_seconds', 'database', 'deployment_file', 'enroll_ssh', 'create_per_request', 'registration_max_age_seconds', 'budget_refresh', 'secrets_config_file', 'secrets_delivery_file'])
           || !validId(profile.id) || ids.has(profile.id) || typeof profile.label !== 'string' || !profile.label.trim()
           || typeof profile.site !== 'string' || !profile.site || !Array.isArray(profile.purposes)
           || profile.purposes.some((purpose) => !['runtime', 'database'].includes(purpose)) || typeof profile.allow_apply !== 'boolean'
@@ -130,6 +130,8 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       if (profile.budget_refresh !== undefined && (profile.provider !== 'aws' || !exact(profile.budget_refresh, [], ['retained_storage_hours'])
           || (profile.budget_refresh.retained_storage_hours !== undefined && profile.budget_refresh.retained_storage_hours !== 24)))
         throw new EnvironmentError('ENVIRONMENT_CONFIGURATION_INVALID', 503);
+      if (profile.secrets_config_file !== undefined) profile.secrets_configuration_sha256 = hash(await privateJson(profile.secrets_config_file));
+      if (profile.secrets_delivery_file !== undefined) profile.secrets_delivery_sha256 = hash(await privateJson(profile.secrets_delivery_file));
       if (profile.deployment_file !== undefined) profile.deployment = await privateJson(profile.deployment_file);
       if (profile.registration_max_age_seconds !== undefined && (!Number.isInteger(profile.registration_max_age_seconds)
           || profile.registration_max_age_seconds < 1800 || profile.registration_max_age_seconds > 604800
@@ -160,6 +162,7 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
     if (!['aws', 'gcp'].includes(profile.provider)) blockers.push('PROVIDER_RUNTIME_UNSUPPORTED');
     if (!profile.purposes.includes('runtime')) blockers.push('PROFILE_PURPOSE_UNSUPPORTED');
     if (!profile.allow_apply) blockers.push('PROFILE_EXECUTION_DISABLED');
+    if (!profile.secrets_config_file) blockers.push('SECRETS_CONFIGURATION_REQUIRED');
     return blockers;
   }
   // Reading current profiles also makes operator policy revocation effective before dispatch.
@@ -181,6 +184,13 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       const { createCdAdapter } = await import('./cd.js');
       const deploy = createCdAdapter({ configPath: join(stateDir, id, 'cd.json'), loadPublished, python });
       return deploy(args);
+    },
+    async observePublished(id, record) {
+      if (!validId(id) || !loadPublished) throw new EnvironmentError('CD_ADAPTER_NOT_CONFIGURED', 503);
+      const { createCdAdapter } = await import('./cd.js');
+      const deploy = createCdAdapter({ configPath: join(stateDir, id, 'cd.json'), loadPublished, python });
+      return deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id, sourceCommit: record.source_commit,
+        publication: record.publication, configuration: record.configuration, observeOnly: true });
     },
     async observeLogs(id, record) {
       if (!validId(id)) throw new EnvironmentError('INVALID_ENVIRONMENT_ID', 422);
@@ -339,7 +349,7 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       return {
         public: { id, ...structuredClone(input), runtime_target_id: executionProfile.target.target_id, policy_revision: listed.policy_revision,
           expires_at: new Date(expiresAt).toISOString(), executable: blockers.length === 0,
-          blockers: [...new Set(blockers)], cost, steps: ['resources', 'guest', 'runtime', ...(input.database.mode === 'none' ? [] : ['database', 'binding']), ...(profile.deployment ? ['registration'] : [])], plan_sha256: planDigest },
+          blockers: [...new Set(blockers)], cost, steps: ['resources', 'guest', 'runtime', 'secrets', ...(input.database.mode === 'none' ? [] : ['database', 'binding']), ...(profile.deployment ? ['registration'] : [])], plan_sha256: planDigest },
         private: { ...snapshot, snapshot_sha256: hash(snapshot) },
       };
     },
@@ -368,20 +378,40 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
       if (planDigest !== plan.plan_sha256) throw new EnvironmentError('PLAN_SNAPSHOT_CHANGED', 409);
     },
 
-    async execute(record, { id, onProgress = async () => {} }) {
+    async execute(record, { id, onProgress = async () => {}, operatorResume = false }) {
       if (!validId(id)) throw new EnvironmentError('INVALID_ENVIRONMENT_ID');
-      await this.verifyPlan(record);
+      if (!operatorResume) await this.verifyPlan(record);
       const { public: plan, private: { profile, nodes } } = record;
       const home = join(stateDir, id);
-      await mkdir(home, { mode: 0o700 });
-      const state = { status: 'running', stage: 'resources', resources: { status: 'running' },
-        guest: { status: 'queued' }, runtime: { status: 'queued' }, database: { status: 'skipped' },
+      if (!operatorResume) {
+        await mkdir(home, { mode: 0o700 });
+        await savePrivate(join(home, 'execution-snapshot.json'), { id, plan_sha256: hash({ public: plan, private: record.private }) });
+      } else {
+        const snapshot = await privateJson(join(home, 'execution-snapshot.json'));
+        if (snapshot.id !== id || snapshot.plan_sha256 !== hash({ public: plan, private: record.private }))
+          throw new EnvironmentError('RESUME_SNAPSHOT_CHANGED', 409);
+      }
+      const state = operatorResume ? await privateJson(join(home, 'execution-state.json')) : { status: 'running', stage: 'resources', resources: { status: 'running' },
+        guest: { status: 'queued' }, runtime: { status: 'queued' }, secrets: { status: 'queued' }, secrets_ready: false, database: { status: 'skipped' },
         runtime_target_id: null, deployment_supported: false, blockers: ['DEPLOYMENT_TARGET_NOT_REGISTERED'], error: null };
-      const progress = async () => onProgress(structuredClone(state));
+      if (operatorResume && (state.stage !== 'secrets' || state.resources.status !== 'succeeded'
+          || state.guest.status !== 'succeeded' || state.runtime.status !== 'succeeded'
+          || !['unknown', 'blocked', 'failed'].includes(state.status)))
+        throw new EnvironmentError('RESUME_STAGE_UNSUPPORTED', 409);
+      const progress = async () => { await savePrivate(join(home, 'execution-state.json'), state); await onProgress(structuredClone(state)); };
       await progress();
       try {
-        const registry = { version: 1, targets: {} }, descriptors = [];
+        const registry = operatorResume ? await privateJson(join(home, 'targets.json')) : { version: 1, targets: {} }, descriptors = [];
         for (const node of nodes) {
+          if (operatorResume) {
+            const reference = registry.targets[node.target.target_id];
+            if (!reference || reference.descriptor_file !== join(home, `${node.target.target_id}.json`))
+              throw new EnvironmentError('REGISTERED_TARGET_CHANGED', 409);
+            const descriptor = await privateJson(reference.descriptor_file);
+            if (descriptor.target_id !== node.target.target_id || descriptor.provider_kind !== node.profile.provider)
+              throw new EnvironmentError('REGISTERED_TARGET_CHANGED', 409);
+            descriptors.push(descriptor); continue;
+          }
           const applied = await runner(python, [PROVISION, 'apply', '--target', node.target_file, '--state-root', node.profile.state_root,
             '--plan-sha256', node.plan_sha256], { timeout: 30 * 60 * 1000, mutation: true });
           const descriptor = applied.node_descriptor;
@@ -405,9 +435,12 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
           await savePrivate(join(home, 'targets.json'), registry);
         }
         state.resources = { status: 'succeeded', nodes: descriptors.map((node) => ({ target_id: node.target_id, provider: node.provider_kind })) };
-        state.stage = 'guest'; state.guest = { status: 'running' }; await progress();
+        if (!operatorResume) { state.stage = 'guest'; state.guest = { status: 'running' }; }
+        await progress();
         const descriptor = descriptors[0], registered = registry.targets[descriptor.target_id];
         const descriptorFile = registered.descriptor_file;
+        const secretsProfileFile = join(home, 'secrets-profile.json');
+        if (!operatorResume) await savePrivate(secretsProfileFile, { ...await privateJson(profile.secrets_config_file), environment_id: descriptor.target_id });
         const nativeArgs = (operation) => [ANSIBLE, '--node-descriptor', registered.descriptor_file,
           '--request-id', `${id}.${operation}`, '--operation', operation, '--ssh-user', registered.ssh.user,
           '--identity-file', registered.ssh.identity_file, '--known-hosts-file', registered.ssh.known_hosts_file,
@@ -416,17 +449,24 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
         if (validated.status !== 'validated' || validated.target_id !== descriptor.target_id)
           throw new EnvironmentError('REGISTERED_TARGET_INVALID', 502, true);
         state.runtime_target_id = descriptor.target_id;
-        for (const [stage, operation] of [['guest', 'guest.check'], ['runtime', 'runtime.install']]) {
+        for (const [stage, operation] of [['guest', 'guest.check'], ['runtime', 'runtime.install'], ['secrets', 'secrets.configure']]) {
+          if (operatorResume && stage !== 'secrets') continue;
           state.stage = stage; state[stage] = { status: 'running' }; await progress();
           if (hash(await privateJson(descriptorFile)) !== hash(descriptor)
               || hash(await privateJson(join(home, 'targets.json'))) !== hash(registry))
             throw new EnvironmentError('REGISTERED_TARGET_CHANGED', 409);
-          const result = await runner(python, nativeArgs(operation), { timeout: (registered.timeout_seconds + 120) * 1000,
-            mutation: operation === 'runtime.install' });
+          const result = await runner(python, [...nativeArgs(operation), ...(stage === 'secrets' ? ['--secrets-config-file', secretsProfileFile,
+            ...(operatorResume ? ['--resume-secrets'] : [])] : [])], { timeout: (registered.timeout_seconds + 120) * 1000,
+            mutation: operation !== 'guest.check' });
           if (result.status !== 'succeeded' || result.request_id !== `${id}.${operation}` || result.target_id !== descriptor.target_id
               || result.operation !== operation || result[`${stage}_ready`] !== true)
-            throw new EnvironmentError('READINESS_RESULT_INVALID', 502, operation === 'runtime.install');
-          state[stage] = { status: 'succeeded', ansible_job_id: result.request_id }; await progress();
+            throw new EnvironmentError('READINESS_RESULT_INVALID', 502, operation !== 'guest.check');
+          state[stage] = { status: 'succeeded', ansible_job_id: result.request_id };
+          if (stage === 'secrets') {
+            state.secrets_ready = true;
+            await savePrivate(join(home, 'secrets-receipt.json'), { request_id: result.request_id, target_id: result.target_id, operation: result.operation, status: result.status, secrets_ready: true });
+          }
+          await progress();
         }
         let bindingFile;
         if (plan.database.mode === 'patroni') {
@@ -454,9 +494,37 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
             { timeout: 10 * 60 * 1000, mutation: true });
           if (result.status !== 'succeeded' || result.target_id !== descriptor.target_id)
             throw new EnvironmentError('DEPLOYMENT_REGISTRATION_UNVERIFIED', 502, true);
+          if (profile.secrets_delivery_file) {
+            const template = await privateJson(profile.secrets_delivery_file);
+            const deliveryFile = join(home, 'secrets-delivery.json');
+            const delivery = { ...template, environment_id: descriptor.target_id,
+              environment_registry_dir: stateDir, registry_file: join(home, 'targets.json'), target_id: descriptor.target_id };
+            if (typeof delivery.vault?.token_file === 'string') delivery.vault.token_file = delivery.vault.token_file.replaceAll('{environment_id}', descriptor.target_id);
+            const secretsConfiguration = await privateJson(secretsProfileFile);
+            if (secretsConfiguration.central_provisioning) {
+              const generated = await privateJson(join(secretsConfiguration.central_provisioning.state_dir, descriptor.target_id, 'transit-profile.json'));
+              if (generated.environment_id !== descriptor.target_id || typeof generated.delivery_recovery_config_file !== 'string')
+                throw new EnvironmentError('SECRETS_REGISTRATION_UNVERIFIED', 502, true);
+              delivery.vault.custody_config_file = generated.delivery_recovery_config_file;
+              delivery.vault.ca_file = generated.vault_tls.ca_file;
+              delivery.vault.credential_operation_id = createHash('sha256').update(`${descriptor.target_id}\0vault-delivery-approle\0initial`).digest('hex');
+            }
+            await savePrivate(deliveryFile, delivery);
+            const registrationFile = join(home, 'registration.json');
+            const registration = await privateJson(registrationFile);
+            if (registration.status !== 'succeeded' || registration.target_id !== descriptor.target_id || registration.environment_id !== id)
+              throw new EnvironmentError('SECRETS_REGISTRATION_UNVERIFIED', 502, true);
+            const fileHash = async path => createHash('sha256').update(await readFile(path)).digest('hex');
+            await savePrivate(join(home, 'secrets-registration.json'), { version: 1, status: 'succeeded',
+              environment_id: descriptor.target_id, environment_operation_id: id,
+              profile_secrets_config_file: secretsProfileFile, profile_sha256: await fileHash(secretsProfileFile),
+              delivery_config_file: deliveryFile, delivery_config_sha256: await fileHash(deliveryFile),
+              ansible_request_id: `${id}.secrets.configure`, secrets_receipt_sha256: await fileHash(join(home, 'secrets-receipt.json')),
+              registration_file: registrationFile, registration_sha256: await fileHash(registrationFile) });
+          }
           state.binding = { status: 'succeeded' }; state.deployment_supported = true; state.blockers = [];
         }
-        state.status = 'succeeded'; return state;
+        state.status = 'succeeded'; state.error = null; await progress(); return state;
       } catch (error) {
         state.status = error.outcomeUnknown ? 'unknown' : error.status === 409 || error.status === 503 ? 'blocked' : 'failed';
         state[state.stage] = { status: state.status };
@@ -464,6 +532,7 @@ export async function createEnvironmentAdapter({ profilesFile, stateDir, python 
           message: '환경 단계의 결과를 확인하고 서버 실행 기록을 점검하세요.', request_id: randomUUID(),
           retryable: false, outcome_unknown: error.outcomeUnknown || !(error instanceof EnvironmentError) };
         if (state.error.outcome_unknown) { state.status = 'unknown'; state[state.stage].status = 'unknown'; }
+        await progress();
         return state;
       }
     },

@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { createEnvironmentAdapter, EnvironmentError, runEnvironmentCommand } from '../src/environments.js';
 
@@ -20,6 +23,8 @@ async function fixture(t, { replaceRunner, modify, now } = {}) {
     target_file: join(home, 'target.json'), state_root: join(home, 'terraform'),
     ssh: { user: 'ubuntu', identity_file: join(home, 'identity'), known_hosts_file: join(home, 'knownhosts') } }] };
   const profile = config.profiles[0];
+  profile.secrets_config_file = join(home, 'secrets.json');
+  await writeFile(profile.secrets_config_file, JSON.stringify({ version: 1, test_profile: true }), { mode: 0o600 });
   await writeFile(profile.target_file, JSON.stringify({ schema_version: 'v1', target_id: 'demo-runtime',
     provider_kind: 'aws', variables: { target_id: 'demo-runtime' }, budget: { ledger_path: 'private' } }), { mode: 0o600 });
   for (const path of [profile.ssh.identity_file, profile.ssh.known_hosts_file]) await writeFile(path, 'private', { mode: 0o600 });
@@ -44,7 +49,7 @@ async function fixture(t, { replaceRunner, modify, now } = {}) {
     if (args.includes('--validate-only')) return runEnvironmentCommand(python, args, options); // Real checked-in descriptor/schema adapter; no SSH.
     const operation = args[args.indexOf('--operation') + 1];
     return { status: 'succeeded', target_id: 'demo-runtime', request_id: args[args.indexOf('--request-id') + 1],
-      operation, guest_ready: true, runtime_ready: operation === 'runtime.install' };
+      operation, guest_ready: true, runtime_ready: operation === 'runtime.install', secrets_ready: operation === 'secrets.configure' };
   }
   const adapter = await createEnvironmentAdapter({ profilesFile, stateDir: join(home, 'environments'), runner: fakeRunner, now });
   return { adapter, home, profilesFile, config, calls };
@@ -443,7 +448,7 @@ test('Patroni request plans every new VM, installs only runtime on app VM, binds
     if (args[0].endsWith('/environment.py')) return { status: 'succeeded', target_id: 'demo-runtime' };
     if (args.includes('--validate-only')) return { status: 'validated', target_id: 'demo-runtime' };
     const operation = args[args.indexOf('--operation') + 1];
-    return { status: 'succeeded', target_id: 'demo-runtime', request_id: args[args.indexOf('--request-id') + 1], operation, guest_ready: true, runtime_ready: true };
+    return { status: 'succeeded', target_id: 'demo-runtime', request_id: args[args.indexOf('--request-id') + 1], operation, guest_ready: true, runtime_ready: true, secrets_ready: true };
   };
   const adapter = await createEnvironmentAdapter({ profilesFile, stateDir: join(home, 'environments'), runner });
   const noDatabase = await adapter.plan(input, { id: 'missing-database' });
@@ -459,4 +464,140 @@ test('Patroni request plans every new VM, installs only runtime on app VM, binds
   assert.equal(calls.filter((args) => args.includes('runtime.install')).length, 1);
   assert.ok(!JSON.stringify(result).includes('never-in-status'));
   assert.ok(!JSON.stringify(result).includes(home));
+});
+
+test('missing secrets profile blocks provisioning and exact secrets receipt is required after runtime', async t => {
+  const missing = await fixture(t, { modify: config => { delete config.profiles[0].secrets_config_file; } });
+  const plan = await missing.adapter.plan(input, { id: 'no-secrets' });
+  assert.equal(plan.public.executable, false); assert.ok(plan.public.blockers.includes('SECRETS_CONFIGURATION_REQUIRED'));
+  assert.equal(missing.calls.length, 0);
+  const configured = await fixture(t, { replaceRunner: async (python, args, options, next) => {
+    const result = await next(python, args, options); if (args.includes('secrets.configure')) result.secrets_ready = false; return result;
+  } });
+  const prepared = await configured.adapter.plan(input, { id: 'secrets-failure' });
+  const result = await configured.adapter.execute(prepared, { id: 'secrets-run' });
+  assert.notEqual(result.status, 'succeeded'); assert.equal(result.secrets_ready, false);
+  assert.equal(result.deployment_supported, false);
+});
+
+test('environment secrets arguments pass the actual native CLI and private profile validation', async t => {
+  let validations = 0;
+  const f = await fixture(t, {
+    modify: async (config, home) => {
+      const artifact = join(home, 'isolated-provider-artifact');
+      await writeFile(artifact, 'isolated-test-material', { mode: 0o600 });
+      const digest = createHash('sha256').update('isolated-test-material').digest('hex');
+      await writeFile(config.profiles[0].secrets_config_file, JSON.stringify({ version: 1,
+        environment_id: 'demo-runtime', provider_profile: { provider: 'aws', namespace: 'railshot-secrets',
+          storage: { class_name: 'vault-retain', capacity: '10Gi', manifest_file: artifact, manifest_sha256: digest },
+          external_secrets: { manifest_file: artifact, manifest_sha256: digest },
+          vault: { image: 'hashicorp/vault@sha256:' + DIGEST, tls_secret: 'vault-tls', seal_secret: 'vault-seal',
+            seal: { type: 'awskms' }, tls: { cert_file: artifact, key_file: artifact, ca_file: artifact }, seal_env_file: artifact },
+          recovery: { helper: '/usr/local/libexec/railshot-recovery-escrow', endpoint: 'https://escrow.example.test',
+            ca_file: artifact, client_cert_file: artifact, client_key_file: artifact } } }), { mode: 0o600 });
+    },
+    replaceRunner: async (python, args, options, next) => {
+      if (args.includes('secrets.configure')) {
+        // Execute the checked-in argument parser, input schema and staging validator only.
+        // Validation exits before SSH, Ansible, Kubernetes or the escrow endpoint is invoked.
+        const result = await runEnvironmentCommand(python, [...args, '--validate-only'], options);
+        assert.equal(result.status, 'validated'); assert.equal(result.operation, 'secrets.configure');
+        assert.equal(result.secrets_ready, false); validations += 1;
+      }
+      return next(python, args, options);
+    },
+  });
+  const plan = await f.adapter.plan(input, { id: 'native-secrets-plan' });
+  const result = await f.adapter.execute(plan, { id: 'native-secrets-environment' });
+  assert.equal(result.status, 'succeeded'); assert.equal(validations, 1);
+});
+
+test('offline operator recovery updates the product ledger and resumes registration without reapplying resources', async t => {
+  let failed = false;
+  const f = await fixture(t, { replaceRunner: async (python, args, options, next) => {
+    if (args.includes('secrets.configure') && !args.includes('--resume-secrets')) {
+      failed = true; throw new EnvironmentError('ESCROW_RESPONSE_UNKNOWN', 502, true);
+    }
+    return next(python, args, options);
+  } });
+  const plan = await f.adapter.plan(input, { id: 'recovery-plan' }); plan.session_id = null;
+  const result = await f.adapter.execute(plan, { id: 'recovery-env' });
+  assert.equal(result.status, 'unknown'); assert.equal(failed, true);
+  const applyCount = f.calls.filter(call => call.args[1] === 'apply').length;
+  const { createProductStore } = await import('../src/product-store.js');
+  const directory = join(f.home, 'product');
+  let store = await createProductStore(directory);
+  await store.transaction(state => {
+    state.plans['recovery-plan'] = plan;
+    state.operations['recovery-env'] = { id: 'recovery-env', kind: 'environments', session_id: null, plan_id: 'recovery-plan', ...result };
+  });
+  const { recoverEnvironment } = await import('../src/recover-environment.js');
+  await assert.rejects(recoverEnvironment({ directory, environmentId: 'recovery-env', adapter: f.adapter }), /already open/);
+  await store.close();
+  const recovered = await recoverEnvironment({ directory, environmentId: 'recovery-env', adapter: f.adapter });
+  assert.equal(recovered.status, 'succeeded');
+  assert.equal(f.calls.filter(call => call.args[1] === 'apply').length, applyCount);
+  assert.equal(f.calls.filter(call => call.args.includes('runtime.install')).length, 1);
+  assert.equal(f.calls.filter(call => call.args.includes('--resume-secrets')).length, 1);
+  store = await createProductStore(directory);
+  assert.equal(store.read().operations['recovery-env'].status, 'succeeded');
+  assert.equal(store.read().operations['recovery-env'].session_id, null);
+  await store.close();
+});
+
+test('successful new environment automatically publishes a digest-bound delivery registry without editing static targets', async t => {
+  const f = await fixture(t, {
+    modify: async (config, home) => {
+      const profile = config.profiles[0]; profile.secrets_delivery_file = join(home, 'delivery-template.json');
+      const issuedRoot = join(home, 'central-issued'); const issued = join(issuedRoot, 'demo-runtime');
+      await mkdir(issued, { recursive: true, mode: 0o700 });
+      await writeFile(profile.secrets_config_file, JSON.stringify({ version: 1, test_profile: true,
+        central_provisioning: { helper: '/usr/local/libexec/railshot-provision-environment', state_dir: issuedRoot } }), { mode: 0o600 });
+      await writeFile(join(issued, 'transit-profile.json'), JSON.stringify({ environment_id: 'demo-runtime',
+        delivery_recovery_config_file: join(issued, 'delivery-recovery.json'), vault_tls: { ca_file: '/external/issued-ca.pem' } }), { mode: 0o600 });
+      await writeFile(profile.secrets_delivery_file, JSON.stringify({ version: 1, vault: { namespace: 'railshot-secrets', pod: 'vault-0', mount: 'railshot', auth_mount: 'kubernetes', ca_file: '/external/test-ca.pem', token_file: '/external/escrow/{environment_id}/delivery.json' } }), { mode: 0o600 });
+      profile.deployment_file = join(home, 'deployment-template.json');
+      await writeFile(profile.deployment_file, JSON.stringify({ version: 1, cd: { targets: { 'demo-runtime': { app: input.name, tenant: 'demo', target: { id: 'demo-runtime' } } } } }), { mode: 0o600 });
+    },
+    replaceRunner: async (python, args, options, next) => {
+      if (args[0].endsWith('/environment.py')) {
+        const home = args[args.indexOf('--state-dir') + 1];
+        const cd = JSON.stringify({ version: 1, targets: { 'demo-runtime': { app: input.name, target: { id: 'demo-runtime', namespace: 'dedicated-demo' } } } });
+        await writeFile(join(home, 'cd.json'), cd, { mode: 0o600 });
+        await writeFile(join(home, 'registration.json'), JSON.stringify({ status: 'succeeded', app: input.name, namespace: 'dedicated-demo', target_id: 'demo-runtime', environment_id: 'dynamic-environment', cd_sha256: createHash('sha256').update(cd).digest('hex') }), { mode: 0o600 });
+        return { status: 'succeeded', target_id: 'demo-runtime' };
+      }
+      return next(python, args, options);
+    },
+  });
+  const plan = await f.adapter.plan(input, { id: 'dynamic-plan' });
+  assert.equal(plan.public.executable, true);
+  const result = await f.adapter.execute(plan, { id: 'dynamic-environment' }); assert.equal(result.status, 'succeeded');
+  const home = join(f.home, 'environments', 'dynamic-environment');
+  const registration = JSON.parse(await readFile(join(home, 'secrets-registration.json')));
+  assert.equal(registration.environment_id, 'demo-runtime'); assert.equal(registration.status, 'succeeded');
+  const delivery = JSON.parse(await readFile(registration.delivery_config_file));
+  assert.equal(delivery.registry_file, join(home, 'targets.json')); assert.equal(delivery.vault.token_file, '/external/escrow/demo-runtime/delivery.json');
+  assert.equal(delivery.vault.custody_config_file, join(f.home, 'central-issued', 'demo-runtime', 'delivery-recovery.json'));
+  assert.equal(delivery.vault.ca_file, '/external/issued-ca.pem');
+  const { createSecretsAdapter } = await import('../src/project-secrets.js');
+  const configPath = join(f.home, 'delivery-registry.json'); await writeFile(configPath, JSON.stringify({ version: 1, environments: {}, environment_registry_dir: join(f.home, 'environments') }), { mode: 0o600 });
+  const adapter = await createSecretsAdapter({ configPath, stateDirectory: join(f.home, 'private-values'), runner: async (_, args) => {
+    assert.equal(args[args.indexOf('--config') + 1], registration.delivery_config_file);
+    // Cross-language contract test only: validate files and resolve namespace, never instantiate Executor.
+    const script = `import json,sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+import secrets_delivery as module
+request=module.validate_request(module.private_json(Path(sys.argv[2])))
+target,app=module.select_target(module.private_json(Path(sys.argv[1])),request)
+reference=module.refs(request,app)
+print(json.dumps(dict(status='succeeded',operation_id=request['operation_id'],project_id=request['project_id'],binding_id=request['binding_id'],revision_id=request['revision_id'],observed_revision_id=request['revision_id'],configuration=reference,checks=dict(synchronized=True,workload_ready=False,service_ready=False))))`;
+    return JSON.parse((await promisify(execFile)('python3', ['-c', script, registration.delivery_config_file, args[args.indexOf('--request') + 1], fileURLToPath(new URL('../../../deployment/scripts', import.meta.url))])).stdout);
+  } });
+  assert.equal(adapter.supports('demo-runtime'), true); assert.equal(adapter.supports('foreign'), false);
+  const receipt = await adapter.deliver({ operation_id: randomUUID(), project_id: randomUUID(), binding_id: randomUUID(), revision_id: randomUUID(), environment_id: 'demo-runtime', application_id: 'envapp-' + createHash('sha256').update(JSON.stringify(['demo-runtime', input.name])).digest('hex').slice(0, 24), app: input.name, phase: 'prepare', variables: [{ name: 'DEMO_TOKEN', kind: 'secret', value: 'isolated-canary', required: true }] });
+  assert.equal(receipt.configuration.namespace, 'dedicated-demo'); assert.equal(receipt.status, 'succeeded');
+  await writeFile(registration.registration_file, JSON.stringify({ status: 'succeeded', target_id: 'different' }), { mode: 0o600 });
+  assert.equal(adapter.supports('demo-runtime'), false);
 });

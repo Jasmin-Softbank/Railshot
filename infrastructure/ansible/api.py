@@ -248,7 +248,7 @@ class Jobs:
                 or any(result.get(key) != record[key] for key in ('request_id', 'target_id', 'operation'))
                 or result.get('status') not in ('succeeded', 'invalid', 'blocked', 'failed')
                 or any(type(result.get(key)) is not bool for key in (
-                    'guest_ready', 'runtime_ready', 'application_ready', 'public_http_verified'))
+                    'guest_ready', 'runtime_ready', 'secrets_ready', 'application_ready', 'public_http_verified'))
                 or result['application_ready'] or result['public_http_verified']):
             raise ValueError('executor result binding mismatch')
         if result['status'] == 'succeeded' and (not result['guest_ready'] or (
@@ -260,7 +260,7 @@ class Jobs:
             raise ValueError('database result binding mismatch')
         error = result.get('error')
         unknown = isinstance(error, dict) and error.get('outcome_unknown') is True
-        public_result = {key: result[key] for key in ('status', 'guest_ready', 'runtime_ready',
+        public_result = {key: result[key] for key in ('status', 'guest_ready', 'runtime_ready', 'secrets_ready',
                                                     'application_ready', 'public_http_verified', 'replayed')}
         public_result['stage'] = result['stage'] if result.get('stage') in (
             'validation', 'executor_preflight', 'guest', 'runtime', 'database') else 'unknown'

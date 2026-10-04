@@ -135,6 +135,7 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       const request = join(run, 'publication.json');
       const payload = { deployment_id: args.deploymentId, application_id: application.id,
         environment_id: application.environment_target_id, publication: args.publication,
+        ...(args.configuration ? { configuration: args.configuration } : {}),
         files: Object.fromEntries(files.map(({ path, content }) => [path, content.toString('base64')])) };
       let exists;
       try { exists = await lstat(request); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -146,6 +147,12 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       if (result.status !== 'succeeded') throw fail(result.error?.code || 'APPLICATION_PUBLIC_ROUTE_UNVERIFIED', 502, result.status === 'unknown');
       const deploy = createCdAdapter({ configPath: join(run, 'cd.json'), loadPublished, python });
       return deploy(args);
+    },
+    async observePublished(application, record) {
+      const home = await current(application);
+      const deploy = createCdAdapter({ configPath: join(home, 'deployments', record.id, 'cd.json'), loadPublished, python });
+      return deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
+        sourceCommit: record.source_commit, publication: record.publication, configuration: record.configuration, observeOnly: true });
     },
     async observeLogs(application, record) {
       const home = await current(application);

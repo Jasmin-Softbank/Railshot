@@ -96,6 +96,21 @@ class ApplicationReleaseTest(unittest.TestCase):
             self.assertNotIn('synthetic-secret', (self.prepared_dir / file).read_text())
         self.assertFalse(list(self.prepared_dir.glob('.publication-*')))
 
+    def test_configuration_references_cross_release_bridge_and_replace_source_values(self):
+        configuration = {'project_id': 'project-1', 'binding_id': 'binding-1', 'revision_id': 'revision-7',
+            'namespace': self.registered['namespace'], 'configmap_name': 'railshot-env-1234567890abcdef1234',
+            'secret_name': 'railshot-secret-1234567890abcdef1234',
+            'external_secret_name': 'railshot-external-1234567890abcdef1234',
+            'plain_names': ['LOG_LEVEL'], 'secret_names': ['API_TOKEN']}
+        self.spec['services'][0].setdefault('env', {})['LOG_LEVEL'] = 'source-value-must-not-win'
+        self.spec['services'][0]['secrets'] = ['API_TOKEN']
+        request = {**self.publication(), 'configuration': configuration}
+        self.prepare(request)
+        route = json.loads((self.prepared_dir / 'route-request.json').read_bytes())
+        self.assertEqual(route['configuration'], configuration)
+        _, render_target = self.render.call_args.args
+        self.assertEqual(render_target['configuration'], configuration)
+
     def test_exact_replay_reuses_bytes_without_git_or_renderer(self):
         result = self.prepare()
         before = {path.name: path.read_bytes() for path in self.prepared_dir.iterdir()}
