@@ -37,7 +37,7 @@ Understand the repository and make it deployable on Railshot with the smallest c
 - Final stage: create a numeric user (UID 65532 unless the image provides one), `USER` it. Keep app files owned by root and read-only; use `/tmp` for disposable files and the declared storage mount for persistent data.
 - The current host policy rejects explicit `USER root` and `USER 0` in any stage, even if a later instruction switches back to a non-root user. For an unprivileged base image, use supported configuration and `COPY --chown` where appropriate instead of switching to root or granting world-writable permissions. If required setup cannot comply, explain the limitation and return `give_up`.
 - `EXPOSE` the spec port. Exec-form `CMD [...]`. Bind `0.0.0.0` through a flag or env var the app already supports.
-- No secrets, no `COPY .env`, no remote scripts piped to a shell, no `HEALTHCHECK`.
+- No secrets, no `COPY .env`, no remote scripts piped to a shell. Existing Docker `HEALTHCHECK` instructions are allowed; platform readiness still uses the declared HTTP health path. Build stages may use `USER root` for installation; the final runtime USER must follow C3.
 - Always write `.dockerignore`: `.git`, `.env*`, `node_modules`, `**/__pycache__`, build outputs, caches, test artifacts, and large files the runtime does not need.
 
 ## Must not

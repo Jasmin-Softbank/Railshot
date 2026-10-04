@@ -18,6 +18,21 @@ class SemanticsTest(unittest.TestCase):
         self.spec = {"apiVersion": "railshot/v0", "app": "memo", "services": [
             {"name": "api", "build": {"dockerfile": "Dockerfile"}, "port": 8000, "route": "/"}]}
 
+    def test_build_root_and_docker_healthcheck_allowance_keeps_final_root_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            dockerfile = workspace / "Dockerfile"
+            text = ('FROM node:22-slim AS build\nUSER root\nRUN mkdir /output\n'
+                    'FROM node:22-slim\nUSER 65532\n'
+                    'HEALTHCHECK CMD curl -f http://localhost:8000/ || exit 1\n'
+                    'CMD ["node", "app.js"]\n')
+            dockerfile.write_text(text)
+            with patch.object(gate, "base_allowed", return_value=True):
+                self.assertEqual([], gate.check_dockerfile(workspace, self.spec['services'][0], {}))
+                dockerfile.write_text(text.replace('USER 65532', 'USER root'))
+                self.assertTrue(any('final USER' in error for error in
+                                    gate.check_dockerfile(workspace, self.spec['services'][0], {})))
+
     def test_unsupported_autoscaling_and_invalid_static_inputs_are_rejected(self):
         mutations = [lambda s: s.update(autoscaling={"minReplicas": 1, "maxReplicas": 3, "cpu": 70}),
                      lambda s: s.update(replicas=0), lambda s: s.update(replicas=4),
