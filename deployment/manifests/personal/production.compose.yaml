@@ -105,6 +105,9 @@ services:
     environment:
       RAILSHOT_API_TOKEN_FILE: /run/secrets/api/token
       RAILSHOT_API_UPSTREAM: "api:4173"
+      # This local acceptance stack has no MCP service. A resolvable private
+      # upstream keeps Nginx startup deterministic; /mcp remains unavailable.
+      RAILSHOT_MCP_UPSTREAM: "api:4173"
     ports: ["127.0.0.1:${RAILSHOT_PERSONAL_DASHBOARD_PORT:-4194}:8080/tcp"]
     volumes: ["dashboard-token:/run/secrets/api:ro"]
     tmpfs: [/tmp:mode=1777]
