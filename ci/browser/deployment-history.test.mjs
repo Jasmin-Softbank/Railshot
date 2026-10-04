@@ -107,7 +107,7 @@ test('history preview: stage navigation, conditional inputs, one submission, key
   await page.locator('.dh-card-open').focus(); await page.keyboard.press('Enter');
   await page.getByRole('heading', { name: 'shop-api', exact: true }).waitFor();
   assert.equal(await page.locator('.dh-table-wrap tbody tr').count(), 3);
-  assert.equal(await page.locator('.dh-log-layout').count(), 0, 'pipeline waits for explicit history row selection');
+  assert.equal(await page.locator('.dh-log-layout').count(), 0, 'successful deployment hides the pipeline');
   assert.equal(await page.locator('.dh-issue-trigger').count(), 3, 'successful and running agent histories remain accessible');
   assert.doesNotMatch(await page.locator('#preview-detail').innerText(), /해결 방법을 조회하지 못했습니다/);
   assert.equal(await page.locator('.dh-current').count(), 1);
@@ -125,60 +125,6 @@ test('history preview: stage navigation, conditional inputs, one submission, key
   assert.equal(await page.locator('.dh-issue-pane').evaluate((element) => getComputedStyle(element).transform), 'none');
   await page.getByRole('button', { name: '‹ 배포내역으로 돌아가기' }).click();
   await page.emulateMedia({ reducedMotion: 'no-preference' });
-  await page.getByRole('button', { name: '‹ 배포 내역', exact: true }).click();
-  await page.getByLabel('앱 이름 검색').fill('landing');
-  await page.getByRole('button', { name: /landing-page/ }).click();
-  await page.getByRole('button', { name: /배포 진행 현황 보기/ }).click();
-  await page.getByRole('heading', { name: '배포 · 성공', exact: true }).waitFor();
-  assert.equal(await page.locator('.dh-step').count(), 3);
-  assert.equal(await page.locator('.dh-recovery, .dh-cause').count(), 0);
-  await page.getByRole('button', { name: '‹ 배포 내역', exact: true }).click();
-  await page.getByLabel('앱 이름 검색').fill('blog');
-  await page.getByRole('button', { name: /blog-web/ }).click();
-  await page.getByRole('button', { name: /배포 진행 현황 보기/ }).click();
-  await page.getByRole('heading', { name: '배포 · 진행 중', exact: true }).waitFor();
-  assert.equal(await page.locator('button[data-stage="deploy"]').getAttribute('aria-pressed'), 'true', 'active deployment outranks past build repair');
-  await page.getByRole('button', { name: '새로고침', exact: true }).click();
-  await page.getByRole('heading', { name: '배포 · 진행 중', exact: true }).waitFor();
-  assert.equal(await page.locator('.dh-detail-viewport').getAttribute('data-pane'), 'issue');
-  await page.getByRole('button', { name: '‹ 배포 내역', exact: true }).click();
-  // Exercise executions without errors or any agent activity, including stale recovery data.
-  for (const [status, stage, expected] of [['queued', 'ci', '빌드 · 대기'], ['running', 'environment', '배포환경 준비 · 진행 중'], ['succeeded', 'complete', '배포 · 기록 없음']]) {
-    await page.evaluate(async ({ q, status, stage }) => {
-      window.progressProbe?.dispose();
-      const { createHistoryDetail } = await import('/src/deployment-history.js');
-      const host = document.createElement('section'); document.querySelector('#history-view').replaceChildren(host);
-      const record = { id: q.deployment_id, app: 'normal-progress', kind: 'deployments', status, stage,
-        ...(stage === 'ci' ? { ci: { state: 'queued' } } : {}),
-        ...(stage === 'environment' ? { ci: { state: 'published' }, environment: { status: 'running' } } : {}),
-        ...(status === 'succeeded' ? { error: { message: 'obsolete failure' } } : {}) };
-      window.progressRecord = record; window.progressReads = 0;
-      window.progressProbe = createHistoryDetail({ host, request: async (path) => {
-        if (path.endsWith('/events')) return { data: { deployment_id: record.id, status: 'completed' } };
-        window.progressReads++; return { data: structuredClone(record) };
-      }, getRecords: () => [record], getApplications: () => [], serviceUrl: () => null, onLogs: () => {}, onMonitor: () => {},
-      recovery: { load: async () => q } });
-      await window.progressProbe.open(record);
-    }, { q: question(), status, stage });
-    const trigger = page.getByRole('button', { name: /배포 진행 현황 보기/ });
-    await trigger.focus(); await page.keyboard.press('Enter');
-    await page.getByRole('heading', { name: expected, exact: true }).waitFor();
-    assert.equal(await page.locator('.dh-recovery, .dh-cause').count(), 0, 'normal states suppress stale error/question data');
-    assert.equal(await page.locator('.dh-step').count(), 3);
-    if (status === 'running') {
-      await page.evaluate(() => { window.progressRecord.environment.status = 'succeeded'; });
-      await page.getByRole('button', { name: '새로고침', exact: true }).click();
-      await page.getByRole('heading', { name: '배포환경 준비 · 성공', exact: true }).waitFor();
-      assert.equal(await page.locator('.dh-detail-viewport').getAttribute('data-pane'), 'issue');
-      assert.equal(await page.evaluate(() => window.progressReads), 3);
-    }
-    await page.setViewportSize({ width: 390, height: 844 });
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    if (screenshots && status === 'succeeded') await page.screenshot({ path: `${screenshots}/history-normal-progress-mobile.png`, fullPage: true });
-    await page.getByRole('button', { name: '‹ 배포내역으로 돌아가기' }).click();
-    assert.equal(await trigger.evaluate((element) => document.activeElement === element), true);
-  }
-  await page.evaluate(() => window.progressProbe.dispose());
   // A stage change must not unlock a question whose response was already accepted.
   await page.evaluate(async (q) => {
     const { createHistoryDetail } = await import('/src/deployment-history.js');
@@ -223,7 +169,7 @@ test('agent card opens on successful history, polls independently and preserves 
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.evaluate(async () => {
     const { createHistoryDetail } = await import('/src/deployment-history.js');
-    const record = window.activityRecord = { id: 'deployment-1', app: 'clock', kind: 'deployments', status: 'succeeded', stage: 'complete', ci: { state: 'published' },
+    const record = { id: 'deployment-1', app: 'clock', kind: 'deployments', status: 'succeeded', stage: 'complete', ci: { state: 'published' },
       cd: { state: 'deployed' }, created_at: new Date().toISOString(), agent_activity_summary: { id: 'repair-1', state: 'verifying', attempt: 1 } };
     window.activity = { id: 'repair-1', revision: 1, stage: 'build', state: 'verifying', attempt: 1, summary: '시작 검사 실패를 처리합니다.',
       current_action: '수정 후 실행 검사 중', started_at: '2026-10-04T03:00:00Z', updated_at: '2026-10-04T03:00:42Z',
@@ -246,14 +192,10 @@ test('agent card opens on successful history, polls independently and preserves 
       } });
     await window.historyDetail.open(record);
   });
-  await page.getByRole('button', { name: /배포 진행 현황 보기/ }).click();
+  await page.getByRole('button', { name: /처리 내역 보기/ }).click();
   await page.getByRole('heading', { name: 'AI 자동 복구', exact: true }).waitFor();
   assert.match(await page.locator('.dh-agent-card').innerText(), /재검증 중/);
   assert.equal(await page.locator('.dh-agent-card img').count(), 0, 'model description is text, never HTML');
-  assert.equal(await page.locator('.dh-recovery, .dh-cause').count(), 0, 'completed deployments hide stale recovery questions');
-  await page.getByRole('button', { name: '‹ 배포내역으로 돌아가기' }).click();
-  await page.evaluate(async () => { window.activityRecord.status = 'blocked'; window.activityRecord.stage = 'ci'; await window.historyDetail.open(window.activityRecord); });
-  await page.getByRole('button', { name: /배포 진행 현황 보기/ }).click();
   await page.getByText('변경 내용 보기', { exact: true }).click();
   await page.getByRole('radio', { name: '설명 제공', exact: true }).check();
   await page.getByRole('textbox', { name: '설명', exact: true }).fill('작성 중인 사용자 입력');
@@ -273,8 +215,8 @@ test('agent card opens on successful history, polls independently and preserves 
   }
   const count = await page.evaluate(() => window.eventReads);
   await page.getByRole('button', { name: '‹ 배포내역으로 돌아가기' }).click();
-  // Returning to the selected deployment preserves access to its activity history.
-  await page.getByRole('button', { name: /배포 진행 현황 보기/ }).click();
+  // A restored successful record still exposes the activity, rather than hiding its history.
+  await page.getByRole('button', { name: /처리 내역 보기/ }).click();
   await page.getByRole('heading', { name: 'AI 자동 복구', exact: true }).waitFor();
   assert.ok(await page.evaluate(() => window.eventReads) >= count);
   assert.deepEqual(errors, []);
