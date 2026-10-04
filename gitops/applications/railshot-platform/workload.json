@@ -369,7 +369,7 @@
             "initContainers": [
               {
                 "name": "private-config",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:97b30545b698a3ff4446dbd69598743bc0444d7685353bfbfb4dd4469753bcbc",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:e70a308af2947cb9c897dce175fa28067f9ebbb655b5f01d43fb82ed0b08159e",
                 "command": [
                   "node",
                   "/app/apps/api/prepare-state.js"
@@ -439,7 +439,7 @@
             "containers": [
               {
                 "name": "api",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:97b30545b698a3ff4446dbd69598743bc0444d7685353bfbfb4dd4469753bcbc",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:e70a308af2947cb9c897dce175fa28067f9ebbb655b5f01d43fb82ed0b08159e",
                 "ports": [
                   {
                     "name": "http",
@@ -610,7 +610,7 @@
                   },
                   {
                     "name": "RAILSHOT_POD_TEMPLATE_ID",
-                    "value": "99caee34351d9e52c03dd43813fcd2a257c05c7d67ad46fa0245ee7bdaa2aef6"
+                    "value": "099e75d78a6eef4e0ebb3f8389f3bb01852bcec2d7ac4464b232143579ffa08b"
                   }
                 ],
                 "resources": {
@@ -895,7 +895,7 @@
             "containers": [
               {
                 "name": "prepare",
-                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:97b30545b698a3ff4446dbd69598743bc0444d7685353bfbfb4dd4469753bcbc",
+                "image": "ghcr.io/jasmin-softbank/railshot-api@sha256:e70a308af2947cb9c897dce175fa28067f9ebbb655b5f01d43fb82ed0b08159e",
                 "command": [
                   "node",
                   "/app/apps/api/src/prepare-release.js"
@@ -907,7 +907,7 @@
                   },
                   {
                     "name": "RAILSHOT_DESIRED_TEMPLATE_ID",
-                    "value": "99caee34351d9e52c03dd43813fcd2a257c05c7d67ad46fa0245ee7bdaa2aef6"
+                    "value": "099e75d78a6eef4e0ebb3f8389f3bb01852bcec2d7ac4464b232143579ffa08b"
                   }
                 ],
                 "resources": {
