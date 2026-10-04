@@ -6,7 +6,11 @@
 
 # RAILSHOT
 
-**One Action, Infinite Clouds — 한 번의 요청으로 배포하고, 관리·운영까지.**
+**한국어** | [日本語](README.ja.md)
+
+**One Action, Infinite Clouds**
+
+한 번의 요청으로 배포하고, 관리·운영까지.
 
 RAILSHOT은 웹이나 자신의 AI 에이전트에서 프로젝트를 제출하면, 배포에 필요한 파일 준비와 실패 수정, 컨테이너 이미지 게시, 클라우드·온프레미스 적용, 공개 URL 확인까지 이어주는 배포 플랫폼입니다. 배포 후에도 같은 화면에서 앱 상태와 작업 로그를 확인하고 업데이트·중지·재개·삭제를 관리할 수 있습니다.
 
@@ -24,11 +28,11 @@ RAILSHOT은 웹이나 자신의 AI 에이전트에서 프로젝트를 제출하�
 
 ### 실제 배포·운영 화면
 
-**배포 완료와 공개 URL** — 검사와 배포가 끝나면 결과를 확인하고 앱을 열 수 있습니다.
+**배포 완료와 공개 URL.** 검사와 배포가 끝나면 결과를 확인하고 앱을 열 수 있습니다.
 
 [![AWS 앱 배포 완료와 접속 링크 화면](docs/assets/readme/aws-deployment-complete.jpg)](docs/assets/readme/aws-deployment-complete.jpg)
 
-**앱 관리** — 검증된 서비스 상태와 최근 배포 시도를 구분하고, 업데이트·중지·재개 작업으로 이어집니다.
+**앱 관리.** 검증된 서비스 상태와 최근 배포 시도를 구분하고, 업데이트·중지·재개 작업으로 이어집니다.
 
 [![OpenStack 앱의 검증된 서비스 주소와 관리 화면](docs/assets/readme/application-management.png)](docs/assets/readme/application-management.png)
 
@@ -108,10 +112,10 @@ RAILSHOT 웹을 사용하던 브라우저에서 연결을 승인하면 해당 �
 ```sh
 npm ci --ignore-scripts
 
-# 터미널 1: API — http://127.0.0.1:4173
+# 터미널 1: API: http://127.0.0.1:4173
 npm start --workspace railshot-api
 
-# 터미널 2: 대시보드 — http://127.0.0.1:4181
+# 터미널 2: 대시보드: http://127.0.0.1:4181
 npm run dev
 ```
 
