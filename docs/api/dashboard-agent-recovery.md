@@ -242,7 +242,7 @@ it never blindly repeats a dispatch after a lost response. Pre-checkpoint source
 work may be rebuilt from saved input only for protocol-2 queued deployments.
 Legacy failed submissions without a durable commit remain operator-reviewed.
 
-Local checkpoint interruptions use `CI_SUBMISSION_INTERRUPTED`, not a GitHub
+Local checkpoint interruptions use `SOURCE_CHECKPOINT_FAILED`, not a GitHub
 communication error. API failure logs preserve only allowlisted exception types
 and transport codes, without raw exception text. Every 30 seconds and at shutdown,
 `api.runtime_observation` records event-loop max/p99 delay, interval CPU time, RSS
