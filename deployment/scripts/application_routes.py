@@ -78,7 +78,7 @@ def _ensure(config, publication_request, prepared):
             native = gcp_routes.ensure(ingress['edge_config_file'], {
                 'application_id': app_id, 'hostname': request['hostname'], 'node_port': request['node_port'],
                 'health_path': request['health_path'],
-            })
+            }, dns_config_path=ingress['dns_config_file'])
         except gcp_routes.RouteError as error:
             raise applications.RegistrationError(error.code, unknown=error.unknown) from error
         applications.require(native['hostname'] == request['hostname'], 'APPLICATION_ROUTE_BINDING_MISMATCH')

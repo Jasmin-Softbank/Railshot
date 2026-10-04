@@ -197,6 +197,23 @@ resource "google_certificate_manager_dns_authorization" "routes" {
   domain     = each.value.hostname
   type       = "PER_PROJECT_RECORD"
   depends_on = [google_project_service.certificates]
+
+  # Complete public DNS before the dependent certificate starts authorization.
+  # Reuse the application's DNS writer and ownership journal; add no resource.
+  provisioner "local-exec" {
+    interpreter = ["python3", "-c"]
+    command     = "from gcp_routes import certificate_dns; certificate_dns()"
+    environment = {
+      RAILSHOT_GCP_CERTIFICATE_DNS_REQUEST = jsonencode({
+        application_id       = each.key
+        purpose              = "certificate"
+        application_hostname = each.value.hostname
+        hostname             = trimsuffix(self.dns_resource_record[0].name, ".")
+        type                 = "CNAME"
+        content              = trimsuffix(self.dns_resource_record[0].data, ".")
+      })
+    }
+  }
 }
 
 resource "google_certificate_manager_certificate" "routes" {
