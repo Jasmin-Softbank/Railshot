@@ -552,7 +552,9 @@ export async function createProductService({ service, directory, target, provide
       const result = await writeSource(() => service.deploy({ ...input, operation_id: record.id,
         onPrepared: async ({ source_commit }) => {
           if (!/^[a-f0-9]{40}$/.test(source_commit || '')) throw new Error('Invalid prepared source');
-          if (abort.signal.aborted || deletionRequested(record.id)) throw new Error('Submission interrupted before dispatch');
+          // Graceful shutdown waits for this already-started submission to bind its run.
+          // Aborting here loses a successfully published source before CI is requested.
+          if (deletionRequested(record.id)) throw new Error('Submission cancelled before dispatch');
           await update(record.id, { source_commit, dispatch: { state: 'requesting', prepared_at: new Date().toISOString() } });
         } }));
       await bindRun(record, result);
@@ -1196,6 +1198,20 @@ export async function createProductService({ service, directory, target, provide
       const reserved = await reserve('deployments', input, idempotencyKey(key), materialize, sessionId);
       if (!reserved.replay) void pump();
       return publicRecord(reserved.record);
+    },
+    // Private operator route only: reuse verified stored bytes and preserve the original owner.
+    async replaySubmittedSource(id, environmentTargetId) {
+      const record = find('deployments', id);
+      const sameTarget = environmentTargetId === record.environment_target_id;
+      const notSent = record.status === 'failed' && record.stage === 'ci' && !record.ci?.run_id
+        && !record.error?.outcome_unknown && record.dispatch?.state !== 'requesting'
+        && ['SOURCE_REGISTRATION_FAILED', 'SOURCE_CHECKPOINT_FAILED', 'CI_DISPATCH_NOT_SENT'].includes(record.error?.code);
+      if (record.deletion_requested || !(sameTarget ? notSent : successfulDeployment(record))
+          || !applicationAdapter?.targets?.[environmentTargetId])
+        throw new ProductError(409, 'SOURCE_REPLAY_REJECTED', '미접수로 확인된 요청 또는 성공한 배포의 저장 소스만 사용할 수 있습니다.');
+      const files = await submittedFiles(record);
+      return this.createDeployment({ app: record.app, target_id: environmentTargetId, source_type: 'folder', files },
+        `source-replay.${record.id}.${environmentTargetId}`, undefined, record.session_id);
     },
     async resumeDeployment(id, sessionId = null) {
       const record = await store.transaction((state) => {

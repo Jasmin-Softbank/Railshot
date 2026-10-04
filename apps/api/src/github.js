@@ -67,6 +67,11 @@ const transientRead = (error) => error.retryable === true || error instanceof Ty
 
 export class SubmissionError extends ServiceError {
   constructor(phase, cause) {
+    if (phase === 'source_checkpoint') {
+      super('소스 브랜치는 반영됐지만 서버의 접수 기록 저장이 중단되었습니다. CI 실행은 아직 요청하지 않았습니다.', 503, 'SOURCE_CHECKPOINT_FAILED');
+      Object.assign(this, { phase, upstream_status: null, reason: 'local_checkpoint_failure', outcomeUnknown: false });
+      return;
+    }
     const labels = { source_lookup: '소스 저장소 조회', source_upload: '소스 파일 업로드',
       source_tree: '소스 파일 목록 등록', source_commit: '소스 커밋 생성', source_ref: '소스 브랜치 반영', ci_dispatch: 'CI 실행 접수' };
     const upstreamStatus = Number.isInteger(cause?.upstreamStatus) ? cause.upstreamStatus : null;
@@ -286,6 +291,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
           method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
         });
       }
+      phase = 'source_checkpoint';
       await onPrepared?.({ source_commit: sourceCommit });
       phase = 'ci_dispatch';
       const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
