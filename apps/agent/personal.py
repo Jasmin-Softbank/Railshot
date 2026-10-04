@@ -3,7 +3,6 @@
 import argparse
 import base64
 import fcntl
-import getpass
 import hashlib
 import ipaddress
 import json
@@ -52,9 +51,10 @@ def run(args, *, input=None, timeout=30):
     return result.stdout.strip()
 
 
-def https_url(value):
+def https_url(value, *, test_allow_http=False):
     parsed = urllib.parse.urlsplit(value)
-    require(parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password
+    schemes = ('https', 'http') if test_allow_http is True else ('https',)
+    require(parsed.scheme in schemes and parsed.hostname and not parsed.username and not parsed.password
             and not parsed.query and not parsed.fragment and not any(c.isspace() for c in value), 'HTTPS_REQUIRED')
     return value.rstrip('/')
 
@@ -64,10 +64,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError('HTTP_REDIRECT_REJECTED')
 
 
-def api(base, path, token, body):
+def api(base, path, token, body=None, *, test_allow_http=False, method='POST'):
     require(path.startswith('/api/v1/') and '\n' not in token and '\r' not in token)
-    request = urllib.request.Request(https_url(base) + path, data=json.dumps(body).encode(),
-                                    headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}, method='POST')
+    require(method in ('GET', 'POST'))
+    request = urllib.request.Request(https_url(base, test_allow_http=test_allow_http) + path,
+                                    data=None if method == 'GET' else json.dumps(body).encode(),
+                                    headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}, method=method)
     with urllib.request.build_opener(NoRedirect).open(request, timeout=45) as response:
         raw = response.read(1048577)
         require(len(raw) <= 1048576, 'RESPONSE_TOO_LARGE')
@@ -152,31 +154,30 @@ def save_config(config):
 
 def enroll(args):
     require(os.geteuid() == 0, 'ROOT_REQUIRED')
+    test_allow_http = getattr(args, 'test_allow_http', False) is True
+    api_url = https_url(args.api_url, test_allow_http=test_allow_http)
     private_directory(CONFIG)
     private_directory(STATE)
     existing = CONFIG / 'client.json'
     if existing.exists():
         config = json.loads(read_private(existing))
-        require(config['api_url'] == https_url(args.api_url) and config['enrollment_id'] == args.enrollment_id, 'INSTALLATION_BINDING_CHANGED')
+        require(config['api_url'] == api_url and config['enrollment_id'] == args.enrollment_id
+                and config.get('test_allow_http', False) is test_allow_http, 'INSTALLATION_BINDING_CHANGED')
         install_tunnel(config)
         install_runtime_access(config)
         install_service()
         wait_control_ready(config)
+        prepare_runtime(config, args)
         return
     require(IDENT.fullmatch(args.enrollment_id))
-    vault = CredentialStore(CONFIG)
-    if vault.path.exists():
-        auth = vault.load()
-    else:
-        # Use existing project-scoped Application Credentials, never create admin
-        # users, roles, networks, VMs, or provider credentials during enrollment.
-        auth = {'auth_url': https_url(input('OpenStack 인증 URL (HTTPS): ').strip()),
-                'application_credential_id': input('OpenStack Application Credential ID: ').strip(),
-                'application_credential_secret': getpass.getpass('OpenStack Application Credential Secret: ')}
-        require(auth['application_credential_id'] and auth['application_credential_secret'])
-        OpenStackCLI(auth).run(['server', 'list'])
-        vault.save(auth)
-    project_id = args.project_id or input('OpenStack 프로젝트 ID: ').strip()
+    from client_setup.personal_identity import prepare_personal_identity
+    identity = prepare_personal_identity(CONFIG, STATE, project_id=args.project_id,
+                                         test_allow_http=test_allow_http)
+    require(isinstance(identity, dict) and set(identity) == {'auth', 'project_id', 'ownership'},
+            'OPENSTACK_IDENTITY_INVALID')
+    auth = identity['auth']
+    https_url(auth['auth_url'], test_allow_http=test_allow_http)
+    project_id = identity['project_id']
     require(IDENT.fullmatch(project_id))
     token_info = OpenStackCLI(auth).run(['token', 'issue'])
     require(token_info.get('project_id') == project_id, 'OPENSTACK_PROJECT_MISMATCH')
@@ -193,7 +194,7 @@ def enroll(args):
     body['runtime'] = {'ssh_host_key': ' '.join(host_key.with_suffix('.pub').read_text().split()[:2])}
     if args.profile_id:
         body['runtime']['profile_id'] = args.profile_id
-    response = api(args.api_url, '/api/v1/enrollments/' + args.enrollment_id + '/claims', token, body)
+    response = api(args.api_url, '/api/v1/enrollments/' + args.enrollment_id + '/claims', token, body, test_allow_http=test_allow_http)
     del token
     require(IDENT.fullmatch(response['target_id']) and type(response['generation']) is int and response['generation'] > 0)
     require(isinstance(response['client_token'], str) and response['client_token'])
@@ -201,7 +202,7 @@ def enroll(args):
     config = {k: response[k] for k in ('target_id', 'generation', 'client_token', 'tunnel')}
     if response.get('runtime_access'):
         config['runtime_access'] = response['runtime_access']
-    config.update(api_url=https_url(args.api_url), enrollment_id=args.enrollment_id, project_id=project_id)
+    config.update(api_url=api_url, enrollment_id=args.enrollment_id, project_id=project_id, test_allow_http=test_allow_http)
     # Save the issued credential before any OS configuration. A subsequent local
     # failure is resumable without replaying the consumed enrollment credential.
     save_config(config)
@@ -209,6 +210,53 @@ def enroll(args):
     install_runtime_access(config)
     install_service()
     wait_control_ready(config)
+    prepare_runtime(config, args)
+
+
+def prepare_runtime(config, args):
+    from apps.agent.personal_runtime import prepare
+    from apps.agent.runtime_access import install
+    path = '/api/v1/targets/' + config['target_id'] + '/runtimes'
+    options = {'test_allow_http': config.get('test_allow_http') is True}
+    current = api(config['api_url'], path, config['client_token'], method='GET', **options)
+    if current.get('deployable') is True and current.get('runtime_preparation', {}).get('status') == 'succeeded':
+        return
+    existing = current.get('runtime_preparation', {})
+    require(existing.get('status') != 'unknown', 'RUNTIME_PRIOR_OUTCOME_UNKNOWN')
+    submitted = existing.get('stage') in ('registration', 'verification', 'complete')
+    if not submitted:
+        print('OpenStack 제어 연결을 확인했습니다. 앱 실행용 별도 VM을 준비합니다.', flush=True)
+        stage = 'client_selection'
+        def progress(value):
+            nonlocal stage
+            stage = value
+            api(config['api_url'], path, config['client_token'], {'generation': config['generation'],
+                'progress': {'stage': value, 'status': 'running'}}, **options)
+        try:
+            runtime = prepare(config, OpenStackCLI(CredentialStore(CONFIG).load()), CONFIG, STATE,
+                              plan_path=getattr(args, 'runtime_config', None), progress=progress)
+            access = install(config, runtime)
+            evidence = {k: runtime[k] for k in ('resource_id', 'private_ipv4', 'management_network', 'placement', 'architecture', 'initialization')}
+            evidence.update({k: access[k] for k in ('ssh_user', 'ssh_port', 'ssh_host_key')})
+        except Exception as exc:
+            code = str(exc) if isinstance(exc, ValueError) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,95}', str(exc)) else 'RUNTIME_CLIENT_PREPARATION_FAILED'
+            try:
+                api(config['api_url'], path, config['client_token'], {'generation': config['generation'],
+                    'progress': {'stage': stage, 'status': 'blocked', 'blockers': [code]}}, **options)
+            except Exception:
+                pass
+            raise
+        api(config['api_url'], path, config['client_token'], {'generation': config['generation'], 'evidence': evidence}, **options)
+    deadline = time.monotonic() + 900
+    while time.monotonic() < deadline:
+        state = api(config['api_url'], path, config['client_token'], method='GET', **options)
+        preparation = state.get('runtime_preparation', {})
+        if state.get('status') == 'ready' and state.get('deployable') is True and preparation.get('status') == 'succeeded':
+            print('클러스터 접속·전용 인증·배포 권한 검증을 마쳤습니다. 테스트 앱은 배포하지 않았습니다.', flush=True)
+            return
+        require(preparation.get('status') not in ('blocked', 'failed', 'unknown'), 'RUNTIME_REGISTRATION_BLOCKED')
+        time.sleep(5)
+    raise ValueError('RUNTIME_REGISTRATION_UNVERIFIED')
 
 
 def install_cli_account(config):
@@ -216,10 +264,10 @@ def install_cli_account(config):
     try:
         account = pwd.getpwnam(CLI_USER)
     except KeyError:
-        run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', str(CLI_HOME), '--shell', '/bin/sh', CLI_USER])
+        run(['useradd', '--system', '--user-group', '--no-create-home', '--home-dir', str(CLI_HOME), '--shell', '/bin/sh', CLI_USER], timeout=180)
         # Disabled password authentication, but account is not marked locked for
         # OpenSSH public-key authentication with UsePAM=no.
-        run(['usermod', '--password', '*', CLI_USER])
+        run(['usermod', '--password', '*', CLI_USER], timeout=180)
         account = pwd.getpwnam(CLI_USER)
         atomic_private_write(marker, json.dumps({'user': CLI_USER, 'uid': account.pw_uid, 'gid': account.pw_gid}).encode())
     require(marker.exists(), 'CLI_ACCOUNT_NOT_OWNED')
@@ -303,8 +351,9 @@ def wait_control_ready(config, transport=api, checker=checks, sleeper=time.sleep
     while time.monotonic() < deadline:
         response = transport(config['api_url'], '/api/v1/targets/' + config['target_id'] + '/heartbeats',
                              config['client_token'], {'generation': config['generation'], 'client_version': VERSION,
-                             'project_id': config['project_id'], 'checks': checker(config), 'capabilities': CAPABILITIES})
-        if response.get('status') == 'ready':
+                             'project_id': config['project_id'], 'checks': checker(config), 'capabilities': CAPABILITIES},
+                             test_allow_http=config.get('test_allow_http') is True)
+        if response.get('connection_status', response.get('status')) == 'ready':
             return
         require(response.get('status') not in ('deleted', 'deleting', 'attention'), 'CONTROL_CONNECTION_FAILED')
         sleeper(5)
@@ -327,34 +376,81 @@ def install_service():
 
 
 def receipt(config, result):
-    return api(config['api_url'], '/api/v1/targets/' + config['target_id'] + '/receipts', config['client_token'], result)
+    return api(config['api_url'], '/api/v1/targets/' + config['target_id'] + '/receipts', config['client_token'], result,
+               test_allow_http=config.get('test_allow_http') is True)
+
+
+def removal_module():
+    from apps.agent import personal_remove
+    return personal_remove
+
+
+def handle_inspection(config, command, sender):
+    require(IDENT.fullmatch(command.get('operation_id', '')) and command.get('reconciliation_id') == command['id'])
+    require(command.get('generation') == config['generation'], 'GENERATION_MISMATCH')
+    previous = command.get('previous_attempt_id')
+    require(previous is None or isinstance(previous, str) and IDENT.fullmatch(previous))
+    job_path = STATE / ('job-' + command['operation_id'] + '.json')
+    require(job_path.exists(), 'REMOVAL_JOB_UNKNOWN')
+    job = json.loads(read_private(job_path))
+    require(job.get('attempt_id') == previous, 'REMOVAL_ATTEMPT_CHANGED')
+    inspection = removal_module().inspect_intact(config, command['operation_id'], previous)
+    record = {'operation_id': command['operation_id'], 'generation': config['generation'],
+              'previous_attempt_id': previous, 'checked_at': time.time(), 'inspection': inspection}
+    atomic_private_write(STATE / ('job-inspect-' + command['id'] + '.json'), json.dumps(record).encode())
+    sender(config, {'operation_id': command['operation_id'], 'generation': config['generation'],
+                    'status': 'inspected', 'reconciliation_id': command['id'], 'inspection': inspection,
+                    'steps': [], 'residuals': ['client'], 'client_removed': False})
 
 
 def handle_command(config, command, sender=receipt, launch=None):
     require(isinstance(command, dict) and IDENT.fullmatch(command.get('id', '')), 'COMMAND_INVALID')
+    if command.get('kind') == 'environment.inspect':
+        return handle_inspection(config, command, sender)
     require(command.get('kind') == 'environment.delete' and command.get('applications') == [], 'APPLICATIONS_NOT_REMOVED')
     require(command.get('generation', config['generation']) == config['generation'], 'GENERATION_MISMATCH')
     require(command.get('delete_data') in (False, True), 'COMMAND_INVALID')
+    require(command.get('operation_id', command['id']) == command['id'], 'COMMAND_INVALID')
+    attempt = command.get('attempt_id')
+    require(attempt is None or isinstance(attempt, str) and IDENT.fullmatch(attempt))
     job_path = STATE / ('job-' + command['id'] + '.json')
-    fingerprint = hashlib.sha256(json.dumps(command, sort_keys=True).encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps({k: v for k, v in command.items()
+                                            if k not in ('attempt_id', 'reconciliation_id')}, sort_keys=True).encode()).hexdigest()
+    result = {'operation_id': command['id'], 'generation': config['generation'], 'status': 'running',
+              'steps': [], 'residuals': ['client'], 'client_removed': False,
+              **({'attempt_id': attempt} if attempt is not None else {})}
     if job_path.exists():
         job = json.loads(read_private(job_path))
         require(job['fingerprint'] == fingerprint, 'JOB_ID_CONFLICT')
-        # After process interruption we cannot infer whether destructive effects
-        # happened. Never replay a removal merely because its receipt is missing.
-        sender(config, {'operation_id': command['id'], 'generation': config['generation'], 'status': 'unknown',
-                        'steps': [], 'residuals': ['client_removal_unverified'], 'client_removed': False})
-        return
-    atomic_private_write(job_path, json.dumps({'fingerprint': fingerprint, 'status': 'removing'}).encode())
-    sender(config, {'operation_id': command['id'], 'generation': config['generation'], 'status': 'running',
-                    'steps': [], 'residuals': ['client'], 'client_removed': False})
-    (launch or launch_removal)(config, command['id'])
+        if job.get('attempt_id') == attempt:
+            if job.get('receipt'):
+                sender(config, job['receipt'])
+            else:
+                if removal_module().helper_active(command['id'], attempt) is not True:
+                    result.update(status='unknown', residuals=['client_removal_unverified'])
+                sender(config, result)
+            return
+        reconciliation = command.get('reconciliation_id')
+        require(attempt is not None and isinstance(reconciliation, str) and IDENT.fullmatch(reconciliation), 'REMOVAL_RECONCILIATION_REQUIRED')
+        saved = json.loads(read_private(STATE / ('job-inspect-' + reconciliation + '.json')))
+        require(saved['operation_id'] == command['id'] and saved['generation'] == config['generation']
+                and saved['previous_attempt_id'] == job.get('attempt_id') and 0 <= time.time() - saved['checked_at'] <= 300
+                and saved['inspection'] == {'state': 'intact', 'preflight_ok': True, 'helper_active': False},
+                'REMOVAL_RECONCILIATION_REQUIRED')
+        require(removal_module().inspect_intact(config, command['id'], job.get('attempt_id')) == saved['inspection'],
+                'REMOVAL_STATE_CHANGED')
+    atomic_private_write(job_path, json.dumps({'fingerprint': fingerprint, 'status': 'removing', 'attempt_id': attempt}).encode())
+    sender(config, result)
+    (launch or launch_removal)({**config, **({'attempt_id': attempt} if attempt else {})}, command['id'])
 
 
 def launch_removal(config, operation_id):
     require(IDENT.fullmatch(operation_id))
+    attempt = config.get('attempt_id')
+    require(attempt is None or isinstance(attempt, str) and IDENT.fullmatch(attempt))
+    identity = operation_id + ('.' + attempt if attempt else '')
     source = Path(__file__).with_name('personal_remove.py')
-    target = Path('/run') / ('railshot-remove-' + operation_id + '.py')
+    target = Path('/run') / ('railshot-remove-' + identity + '.py')
     secret = target.with_suffix('.json')
     require(not target.exists() and not secret.exists(), 'REMOVAL_ALREADY_STARTED')
     # A stdlib-only helper outlives the installed Python environment and removes
@@ -362,10 +458,12 @@ def launch_removal(config, operation_id):
     fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o700)
     with os.fdopen(fd, 'wb') as stream:
         stream.write(source.read_bytes())
+        stream.flush(); os.fsync(stream.fileno())
     fd = os.open(secret, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'w') as stream:
         json.dump({**config, 'operation_id': operation_id}, stream)
-    run(['systemd-run', '--unit=railshot-remove-' + operation_id, '--collect', '--property=Type=exec',
+        stream.flush(); os.fsync(stream.fileno())
+    run(['systemd-run', '--unit=railshot-remove-' + identity, '--collect', '--property=Type=exec',
          '/usr/bin/python3', str(target), str(secret)])
 
 
@@ -436,7 +534,7 @@ def daemon():
                 response = api(config['api_url'], '/api/v1/targets/' + config['target_id'] + '/heartbeats',
                                config['client_token'], {'generation': config['generation'], 'client_version': VERSION,
                                'project_id': config['project_id'], 'checks': checks(config), 'capabilities': CAPABILITIES,
-                               'metrics': metrics.collect()})
+                               'metrics': metrics.collect()}, test_allow_http=config.get('test_allow_http') is True)
                 if response.get('command'):
                     handle_command(config, response['command'])
             except Exception as exc:
@@ -455,6 +553,8 @@ def main():
     install.add_argument('--enrollment-id', required=True)
     install.add_argument('--profile-id')
     install.add_argument('--project-id')
+    install.add_argument('--test-allow-http', action='store_true', help='명시적으로 승인된 시험에서만 HTTP 주소 허용')
+    install.add_argument('--runtime-config', help='선택 사항: 별도 VM 선택 및 SSH 입력을 담은 root 전용 JSON 파일')
     commands.add_parser('daemon')
     args = parser.parse_args()
     try:
@@ -462,6 +562,10 @@ def main():
         enroll(args) if args.command == 'enroll' else daemon()
     except Exception as exc:
         print('RailShot 작업 실패: ' + type(exc).__name__ + '. 비밀정보를 보호하기 위해 원문 오류를 숨깁니다.', file=sys.stderr)
+        if isinstance(exc, ValueError) and re.fullmatch(r'[A-Z][A-Z0-9_]{0,95}', str(exc)):
+            print('확인할 상태 코드: ' + str(exc), file=sys.stderr)
+        if isinstance(exc, urllib.error.HTTPError) and exc.code in (401, 410) and args.command == 'enroll':
+            print('등록 자격의 만료·사용 여부를 확인하십시오. 미등록 상태라면 화면에서 새 일회용 등록 토큰을 발급받아 재실행하십시오. 저장된 설치 파일과 인증정보는 유지됩니다.', file=sys.stderr)
         return 1
     return 0
 

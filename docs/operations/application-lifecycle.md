@@ -157,10 +157,86 @@ through the existing operator deployment path before enabling its lifecycle RPCs
 API image update alone does not update that host file. Unsupported/old worker responses
 fail closed. The on-prem integration on 2026-10-03 installed the worker whose SHA-256 is
 `5ccb8f6e1bf4e0d65c681c9a9f62045e66661f8bc3f3a01da1b5d1d9a8efb230`;
-the source includes that version. Its isolated acceptance verified health-path
+that historical revision's isolated acceptance verified health-path
 replacement, strict TLS/HTTP 200, native route/SG deletion and identical-request replay.
 Do not replace it with the earlier worker during the API release. A health-path change
 recreates only that app's verified route and briefly interrupts its traffic.
+
+Personal environment registration additionally requires the current worker revision;
+the historical acceptance above does not verify these new registration operations.
+The existing fixed SSH command remains the only entry point. The operator-owned
+`/opt/railshot/octavia/route-config.json` may contain its existing legacy configuration,
+or a static base containing `version`, the load balancer's `project_id`,
+`loadbalancer_id`, `listener_id`, `member_subnet_id`, `base_domain`, and a `network`
+object with `amphora_port_id`, `amphora_server_id`, `amphora_private_address`.
+The customer `railshot` project ID and VM identity are supplied at registration;
+they are not manually copied into the shared base. The central operator profile's
+`worker_base_file` must describe this same static base.
+
+The controller's existing `cloud-cli.py` authentication wrapper must allow these
+read-only OpenStack commands in addition to its existing route commands:
+
+- `project show <project-id> -f json`
+- `server show <server-id> -f json`
+- `port show <port-id> -f json`
+- `port list --project <project-id> -c ID -f json`
+- `security group show <group-id> -f json`
+- `loadbalancer show <loadbalancer-id> -f json`
+- `loadbalancer listener show <listener-id> -f json`
+
+Provider results must prove the project, VM, port, private address, subnet and one
+exclusive security group. A security group shared with another VM or project is
+rejected. Existing VM ownership properties, if present, must match the environment;
+registration never edits those properties. A read-only `verify-runtime` call checks
+worker support and provider evidence before central registration writes. A missing
+or outdated worker is a preparation failure, not a successfully connected runtime.
+
+`register-runtime` atomically fixes each binding under the root-owned
+`/var/lib/railshot/octavia/environments/<environment-id>/binding.json`. Incoming
+requests cannot select a file path. Identical retries return the same binding;
+another environment cannot claim its VM, port, security group or private address.
+Routes and lifecycle operations select this binding by ID and hash. After all
+application routes have verified deletion, `unregister-runtime` marks the binding
+released and prevents further route operations. It retains an audit tombstone;
+legacy routes, other environments and the operator's load balancer remain untouched.
+
+### Reviewed controller worker update
+
+Read-only inspection of the integration controller on 2026-10-04 confirmed that
+its existing `cloud-cli.py` forwards arguments to OpenStackClient without a command
+allowlist. The additional read commands above therefore require no authentication
+wrapper change on that host. Keep its existing `inputs.json` and `clouds.yaml` in
+place; do not copy production AWS configuration into the local central deployment.
+The controller worker was still the historical SHA-256 shown above. Its load
+balancer and HTTPS listener were both `ACTIVE`/`ONLINE`; these observations do not
+attest that the new registration operations have been installed or exercised.
+
+For that existing controller installation, the operator update tool is:
+
+```sh
+python3 deployment/scripts/personal-worker-update.py \
+  --ssh-config /absolute/path/to/reviewed/ssh_config --host octavia \
+  --expected-current-sha256 <verified-installed-sha256> \
+  --candidate-sha256 <reviewed-local-worker-sha256>
+```
+
+The candidate defaults to the adjacent `openstack_route_worker.py`; `--candidate`
+can identify another reviewed local copy. Both SHA-256 values are mandatory. The
+tool compiles the candidate without executing it, acquires the existing load
+balancer's file lock without waiting, checks the old worker again under that lock,
+writes a root-only backup, atomically replaces the worker with mode `0600`, and
+verifies its new digest. Configuration, authentication-wrapper and application
+journal digests must remain identical. An active route operation causes the update
+to stop before replacement; it never restarts OpenStack or changes cloud resources.
+Only the fixed worker, its private backup and update receipt may be written.
+
+A lost SSH response is not proof of failure. Repeat only the same reviewed pair
+of hashes: a verified installed candidate returns `already_current`; an interrupted
+post-check is completed only if the saved preservation evidence still matches.
+Other unexpected states remain unverified for operator inspection. Perform a
+read-only runtime registration check and recheck existing public-service health
+after installing the new worker. The local central API image alone cannot update
+the remote controller file.
 
 ## Storage and verification limits
 

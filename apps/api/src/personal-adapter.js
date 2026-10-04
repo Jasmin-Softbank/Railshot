@@ -5,9 +5,11 @@ import { readFile, lstat, writeFile, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { privateJson, privateDirectory, savePrivate, runEnvironmentCommand } from './environments.js';
+import { createApplicationAdapter } from './applications.js';
 
 const run = promisify(execFile);
 const gatewayScript = fileURLToPath(new URL('../../../deployment/scripts/personal_wireguard.py', import.meta.url));
+const runtimeScript = fileURLToPath(new URL('../../../deployment/scripts/personal_runtime.py', import.meta.url));
 const MAX_RESPONSE = 1024 * 1024;
 
 function sshTransport(executable, args, { input, timeout = 60000 }) {
@@ -26,16 +28,68 @@ function sshTransport(executable, args, { input, timeout = 60000 }) {
 }
 
 /** Private server adapter. Browser requests cannot choose executables, hosts, paths or credentials. */
-export async function createPersonalAdapter({ configPath, stateDirectory, base, python = 'python3', runner = runEnvironmentCommand, transport = sshTransport }) {
+export async function createPersonalAdapter({ configPath, stateDirectory, base, service, python = 'python3', runner = runEnvironmentCommand, transport = sshTransport, env = process.env, applicationFactory = createApplicationAdapter }) {
   const config = await privateJson(configPath);
   if (config.version !== 1 || !config.gateway?.config_path?.startsWith('/')) throw new Error('Invalid personal configuration');
+  const testHttp = env.RAILSHOT_PERSONAL_TEST_ALLOW_HTTP;
+  if (testHttp !== undefined && !['0', '1'].includes(testHttp)) throw new Error('RAILSHOT_PERSONAL_TEST_ALLOW_HTTP must be 0 or 1');
+  // Test transport is an operator process setting, never a browser input or a URL-derived default.
+  config.test_allow_http = testHttp === '1';
   for (const key of ['public_url', 'installer_url', 'artifact_url']) {
     const url = new URL(config[key]);
-    if (url.protocol !== 'https:' || url.username || url.password || url.hash || url.search) throw new Error('Personal endpoints require HTTPS');
+    if (!(url.protocol === 'https:' || config.test_allow_http && url.protocol === 'http:')
+        || !url.hostname || url.username || url.password || url.hash || url.search || /\s/.test(config[key])) throw new Error('Personal endpoints require HTTPS (HTTP is test-only opt-in) and credential-free URLs');
   }
   if (!/^[a-f0-9]{64}$/.test(config.artifact_sha256 || '')) throw new Error('Pinned personal artifact required');
   if (config.gateway.command && !config.gateway.command.startsWith('/')) throw new Error('Absolute privileged gateway wrapper required');
+  if (config.runtime && (Object.keys(config.runtime).length !== 1 || !config.runtime.config_path?.startsWith('/'))) throw new Error('Invalid runtime operator configuration');
   const accessKeys = new Map();
+  const dynamicApplications = new Map();
+  const application = {
+    get targets() { return Object.assign({}, base?.targets || {}, ...[...dynamicApplications.values()].map((entry) => entry.targets)); },
+    describe(id, app) {
+      const selected = dynamicApplications.get(id) || base;
+      if (!selected) throw new Error('Application environment is not registered');
+      return selected.describe(id, app);
+    },
+  };
+  for (const method of ['register', 'deployPublished', 'observeLogs', 'planPendingDeletion', 'planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle']) {
+    application[method] = (app, ...args) => {
+      const selected = dynamicApplications.get(app.environment_target_id) || base;
+      if (!selected?.[method]) throw new Error('Application environment is not registered');
+      return selected[method](app, ...args);
+    };
+  }
+  const blockerMessage = {
+    RUNTIME_OPERATOR_NOT_CONFIGURED: '개인 실행환경 운영 설정이 없습니다.',
+    APPLICATION_CI_NOT_CONFIGURED: '공통 빌드·배포 연결이 설정되지 않았습니다.',
+    APPLICATION_CI_CONFIGURATION_MISMATCH: '공통 빌드 설정과 개인 실행환경 템플릿이 일치하지 않습니다.',
+    RUNTIME_ROUTE_PROFILE_INVALID: '개인 환경 공개 경로 프로필을 확인해야 합니다.',
+    RUNTIME_EDGE_TEMPLATE_INVALID: 'OpenStack 공개 경로 기본 설정을 확인해야 합니다.',
+    RUNTIME_EDGE_REGISTRATION_UNSUPPORTED: 'OpenStack 실행환경별 공개 경로 등록 기능을 사용할 수 없습니다.',
+    RUNTIME_TUNNEL_TEMPLATE_INVALID: '터널 기본 설정을 확인해야 합니다.',
+    RUNTIME_DNS_CONFIGURATION_INVALID: '공개 DNS 운영 설정을 확인해야 합니다.',
+  };
+  async function readiness() {
+    const codes = [];
+    if (!config.runtime) codes.push('RUNTIME_OPERATOR_NOT_CONFIGURED');
+    if (!service?.identity || typeof service.publishedFiles !== 'function') codes.push('APPLICATION_CI_NOT_CONFIGURED');
+    if (config.runtime) {
+      try {
+        const result = await runner(python, [runtimeScript, '--config', config.runtime.config_path, '--check'], { mutation: false, timeout: 30000 });
+        if (result?.ready !== true) codes.push(...(result?.blockers || []).map((row) => row?.code));
+        const runtimeConfig = await privateJson(config.runtime.config_path);
+        const template = await privateJson(runtimeConfig.application_template);
+        const profile = template.environments?.[runtimeConfig.template_environment];
+        if (service?.identity && (profile?.tenant !== service.identity.tenant
+            || profile?.source_repository !== service.identity.sourceRepository)) codes.push('APPLICATION_CI_CONFIGURATION_MISMATCH');
+      } catch { codes.push('RUNTIME_OPERATOR_NOT_CONFIGURED'); }
+    }
+    const unique = [...new Set(codes.filter((code) => /^[A-Z][A-Z0-9_]{0,95}$/.test(code || '')))];
+    return { scope: 'personal', ready: unique.length === 0, verification_scope: 'configuration_only',
+      message: '운영 파일과 로컬 비밀값 참조를 검사했습니다. 외부 자격의 유효성이나 실제 클라우드 연결은 등록 과정에서 별도로 검증합니다.',
+      blockers: unique.map((code) => ({ code, message: blockerMessage[code] || '개인 환경 운영 설정을 확인해야 합니다.' })) };
+  }
   async function gateway(action, target) {
     const folder = join(stateDirectory, 'gateway'); await privateDirectory(folder);
     const request = join(folder, `${target.id}-${target.generation}-${action}.json`);
@@ -72,9 +126,63 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
         || result.ok && result.error !== null || !result.ok && (!result.error || typeof result.error.code !== 'string')) throw new Error('OpenStack response binding invalid');
     return result;
   }
+  async function runtime(action, target, evidence) {
+    const blocked = (code) => { dynamicApplications.delete(target.id); return { status: 'blocked', stage: 'operator_configuration', blockers: [code] }; };
+    if (!config.runtime) return blocked('RUNTIME_OPERATOR_NOT_CONFIGURED');
+    if (!service?.identity || typeof service.publishedFiles !== 'function') return blocked('APPLICATION_CI_NOT_CONFIGURED');
+    const folder = join(stateDirectory, target.id); await privateDirectory(folder);
+    const observed = await execute(target, { argv: ['server', 'show', evidence.resource_id] });
+    if (!observed.ok || !observed.result || Array.isArray(observed.result)) return blocked('RUNTIME_RESOURCE_UNVERIFIED');
+    const normalized = Object.fromEntries(Object.entries(observed.result).map(([key, value]) => [key.toLowerCase().replaceAll(' ', '_'), value]));
+    if (normalized.id !== evidence.resource_id || (normalized.project_id ?? normalized.tenant_id) !== target.project_id || normalized.status !== 'ACTIVE') return blocked('RUNTIME_RESOURCE_MISMATCH');
+    const ports = await execute(target, { argv: ['port', 'list'] });
+    if (!ports.ok || !Array.isArray(ports.result)) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
+    const rows = ports.result.map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.toLowerCase().replaceAll(' ', '_'), value])));
+    const fixedAddress = (value) => Array.isArray(value) && value.some((item) => typeof item === 'string'
+      ? item === evidence.private_ipv4 : item?.ip_address === evidence.private_ipv4 || item?.address === evidence.private_ipv4);
+    const selectedPorts = rows.filter((row) => row.device_id === evidence.resource_id && fixedAddress(row.fixed_ips));
+    if (selectedPorts.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(selectedPorts[0].id || '')) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
+    const groups = (selectedPorts[0].security_groups || []).map((item) => typeof item === 'string' ? item : item?.id).filter(Boolean);
+    if (groups.length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(groups[0])) return blocked('RUNTIME_NETWORK_BINDING_UNVERIFIED');
+    const address = target.tunnel.address.split('/')[0], knownHosts = join(folder, 'runtime_known_hosts');
+    // Existing Ansible transport pins HostKeyAlias to the selected VM's private IP.
+    const known = `${evidence.private_ipv4} ${evidence.ssh_host_key}\n`;
+    try { if (await readFile(knownHosts, 'utf8') !== known) return blocked('RUNTIME_HOST_IDENTITY_CHANGED'); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; await writeFile(knownHosts, known, { mode: 0o600, flag: 'wx' }); }
+    const { ssh_host_key, ...nativeEvidence } = evidence;
+    const request = join(folder, `runtime-${action}-request.json`);
+    await savePrivate(request, { action, target_id: target.id, generation: target.generation, project_id: target.project_id,
+      profile_id: target.runtime?.profile_id || null, expected_resource_id: target.runtime?.resource_id || null,
+      address, identity_file: join(folder, 'runtime_ed25519'), known_hosts_file: knownHosts,
+      evidence: { ...nativeEvidence, provider_binding: { port_id: selectedPorts[0].id,
+        security_group_id: groups[0] }, server: observed.result } });
+    const result = await runner(python, [runtimeScript, '--config', config.runtime.config_path, '--request', request], { mutation: action !== 'verify', timeout: action === 'verify' ? 180_000 : 1_800_000 });
+    if (result.target_id !== target.id || result.generation !== target.generation || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw new Error('Runtime response binding invalid');
+    const blockers = (result.blockers || []).map((item) => typeof item === 'string' ? item : item?.code).filter((item) => /^[A-Z][A-Z0-9_]{0,95}$/.test(item || ''));
+    if (result.status !== 'succeeded') { dynamicApplications.delete(target.id); return { status: result.status,
+      stage: /^[a-z_]{1,48}$/.test(result.stage || '') ? result.stage : 'verification', cluster_verified: result.cluster_verified === true,
+      blockers: blockers.length ? blockers : ['RUNTIME_VERIFICATION_FAILED'] }; }
+    if (action === 'delete') {
+      if (result.revocation_verified !== true || !Array.isArray(result.residuals) || result.residuals.length) throw new Error('Runtime revocation unverified');
+      dynamicApplications.delete(target.id);
+      return { status: 'succeeded', residuals: [], revocation_verified: true };
+    }
+    const runtimeConfig = await privateJson(config.runtime.config_path);
+    if (result.application_config_path !== join(runtimeConfig.state_dir, target.id, 'applications.json')
+        || !/^[a-f0-9]{64}$/.test(result.binding_sha256 || '') || !Number.isFinite(Date.parse(result.verified_at))
+        || Math.abs(Date.now() - Date.parse(result.verified_at)) > 180000) throw new Error('Runtime verification receipt invalid');
+    const selected = await applicationFactory({ configPath: result.application_config_path, ciIdentity: service.identity, loadPublished: service.publishedFiles, python, runner });
+    if (Object.keys(selected.targets).length !== 1 || selected.targets[target.id]?.automaticDelivery !== true) return blocked('RUNTIME_APPLICATION_BINDING_INCOMPLETE');
+    dynamicApplications.set(target.id, selected);
+    return { status: 'succeeded', stage: 'complete', cluster_verified: true, blockers: [], binding_sha256: result.binding_sha256, verified_at: result.verified_at };
+  }
   return {
-    config, application: base, execute,
-    deploymentReady: (target) => Boolean(base?.targets?.[target.id]?.automaticDelivery),
+    config, application, execute,
+    readiness,
+    prepareRuntime: (target, evidence) => runtime('prepare', target, evidence),
+    verifyRuntime: (target, evidence) => runtime('verify', target, evidence),
+    removeRuntime: (target) => runtime('delete', target, target.runtime_evidence),
+    deploymentReady: (target) => dynamicApplications.has(target.id),
     runtimeAccess: (target) => accessKeys.get(target.id),
     async prepare(target) {
       const folder = join(stateDirectory, target.id); await privateDirectory(folder);
@@ -91,8 +199,7 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
       try { if (await readFile(knownHosts, 'utf8') !== known) throw new Error('Management host identity changed'); }
       catch (error) { if (error.code !== 'ENOENT') throw error; await writeFile(knownHosts, known, { mode: 0o600, flag: 'wx' }); }
       accessKeys.set(target.id, { public_key: (await readFile(identity + '.pub', 'utf8')).trim() });
-      // Runtime creation/configuration belongs to its existing integration. Registration does not create a cluster.
-      return Boolean(base?.targets?.[target.id]?.automaticDelivery);
+      return false; // Host access alone is not proof of a prepared Kubernetes deployment environment.
     },
     register: (target) => gateway('register', target),
     async verify(target) {

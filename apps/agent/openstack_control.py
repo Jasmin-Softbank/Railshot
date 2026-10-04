@@ -186,6 +186,8 @@ def execute(request, config, cli, home=HOME, secrets=()):
         scoped = list(argv)
         if verb == 'list' and resource in ('network', 'subnet', 'router', 'port', 'floating ip', 'security group', 'security group rule'):
             scoped += ['--project', config['project_id']]
+        if resource == 'limits':
+            scoped += ['--absolute']
         result = cli.run(scoped)
         if isinstance(result, dict):
             project = result.get('project_id', result.get('tenant_id'))

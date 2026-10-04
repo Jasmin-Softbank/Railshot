@@ -8,10 +8,11 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { createAppServer } from '../src/server.js';
 import { apiAccessConfig } from '../src/access.js';
 import { DatabaseSync } from 'node:sqlite';
+import { createPersonalEnvironments } from '../src/personal-environments.js';
 
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'personal-api-'));
-  const calls = { deploy: [], delete: [], gateway: [], verify: [], execute: [] }, targets = {}, runs = new Map();
+  const calls = { deploy: [], delete: [], gateway: [], verify: [], execute: [], runtime: [], revoke: [] }, targets = {}, runs = new Map();
   const appAdapter = { targets,
     describe: (id, app) => ({ id: 'app-' + createHash('sha256').update(id + app).digest('hex').slice(0, 24), app,
       target_id: 'app-' + createHash('sha256').update(id + app).digest('hex').slice(0, 24), environment_target_id: id, provider: 'openstack' }),
@@ -22,8 +23,13 @@ async function fixture(t) {
     applyLifecycle: async (app, plan, options) => { calls.delete.push({ app, options }); return { status: 'succeeded', residuals: [], steps: [] }; },
   };
   const personalAdapter = { config: { public_url: 'https://api.example.test', installer_url: 'https://api.example.test/install.sh', artifact_url: 'https://api.example.test/client.tgz', artifact_sha256: 'b'.repeat(64) },
+    readiness: async () => ({ scope: 'personal', ready: true, blockers: [] }),
     execute: async (target, input) => { calls.execute.push({ target_id: target.id, input }); return {ok:true,result:[{id:'server-one',name:'customer VM',status:'ACTIVE'}]}; },
-    prepare: async (target) => { targets[target.id] = { provider: 'openstack', automaticDelivery: true }; return true; },
+    prepare: async () => false,
+    prepareRuntime: async (target) => { calls.runtime.push(target.id); targets[target.id] = { provider: 'openstack', automaticDelivery: true }; return { status: 'succeeded', blockers: [], binding_sha256: 'a'.repeat(64), verified_at: new Date().toISOString() }; },
+    verifyRuntime: async () => ({ status: 'succeeded', blockers: [], binding_sha256: 'a'.repeat(64), verified_at: new Date().toISOString() }),
+    deploymentReady: (target) => Boolean(targets[target.id]),
+    removeRuntime: async (target) => { calls.revoke.push(target.id); return { status: 'succeeded', residuals: [], revocation_verified: true }; },
     register: async (target) => { calls.gateway.push(target.id); return { status: 'succeeded', tunnel: { server_public_key: 'B'.repeat(43) + '=', endpoint: 'wg.example.test:51820', address: '10.80.0.2/32', allowed_ips: '10.80.0.1/32' } }; },
     verify: async (target) => { calls.verify.push(target.id); return { status: 'succeeded', reachable: true, openstack_verified: true }; },
     cleanup: async () => ({ status: 'succeeded', residuals: [] }),
@@ -58,7 +64,14 @@ async function fixture(t) {
   }
   const heartbeat = (client, row) => client.request(`/api/v1/targets/${row.id}/heartbeats`, { generation: row.claim.body.generation, client_version: '1.0', checks: { tunnel: true, openstack: true, runtime: true } }, { headers: { Authorization: `Bearer ${row.claim.body.client_token}` } });
   async function until(client, path, predicate) { let last; for (let i = 0; i < 100; i++) { const r = await client.request(path); last = r.body; if (predicate(r.body)) return r; await pause(10); } assert.fail('operation did not reach expected state: ' + JSON.stringify(last)); }
-  return { directory, calls, client, target, heartbeat, until, personalAdapter, get base() { return base; }, restart: async () => { await stop(); await start(); } };
+  const evidence = { resource_id: 'vm-one', private_ipv4: '10.0.0.2', management_network: 'private', placement: 'nova', architecture: 'amd64', initialization: 'preconfigured', ssh_user: 'railshot-runtime', ssh_port: 2223, ssh_host_key: 'ssh-ed25519 ' + 'A'.repeat(68) };
+  async function runtime(client, row) {
+    await heartbeat(client, row);
+    const response = await client.request(`/api/v1/targets/${row.id}/runtimes`, { generation: row.claim.body.generation, evidence }, { headers: { Authorization: `Bearer ${row.claim.body.client_token}` } });
+    assert.equal(response.status, 202);
+    await until(client, `/api/v1/targets/${row.id}`, (r) => r.runtime_preparation.status === 'succeeded');
+  }
+  return { directory, calls, client, target, heartbeat, until, runtime, evidence, personalAdapter, get base() { return base; }, restart: async () => { await stop(); await start(); } };
 }
 
 test('current browser owns registration immediately and can query instances as soon as the client is ready without recovery', async (t) => {
@@ -83,7 +96,10 @@ test('current browser owns registration immediately and can query instances as s
     public_key: 'A'.repeat(43) + '=', client_version: '1', project_id: 'project-one', runtime: { ssh_host_key: 'ssh-ed25519 ' + 'A'.repeat(68) },
   }, { headers: { Authorization: `Bearer ${token}` } });
   assert.equal(claim.status, 201);
-  assert.equal((await f.heartbeat(owner, { id, claim })).body.status, 'ready');
+  const connected = await f.heartbeat(owner, { id, claim });
+  assert.equal(connected.body.connection_status, 'ready');
+  assert.equal(connected.body.status, 'preparing');
+  assert.equal(connected.body.deployable, false);
   assert.equal((await other.request(`${path}/instances`)).status, 404);
   assert.equal(f.calls.execute.length, 0, 'unready or foreign requests never reach the customer executor');
   const instances = await owner.request(`${path}/instances`);
@@ -122,6 +138,45 @@ test('enrollment is single-use and rotates stale credentials without requiring p
   assert.equal((await claim(second)).status, 201); assert.equal((await claim(second)).status, 401);
   assert.equal((await a.request(`/api/v1/targets/${id}/enrollments`, {})).status, 409);
   assert.match(second.body.install_command, /sudo --preserve-env=RAILSHOT_ENROLLMENT_TOKEN bash/);
+  assert.match(second.body.install_command, /--personal-registration/);
+});
+
+test('public personal readiness blocks enrollment before installer side effects when operator prerequisites are missing', async (t) => {
+  const f = await fixture(t), a = f.client();
+  f.personalAdapter.readiness = async () => ({ scope: 'personal', ready: false,
+    blockers: [{ code: 'RUNTIME_OPERATOR_NOT_CONFIGURED', message: '개인 실행환경 운영 설정이 없습니다.' }] });
+  const readiness = await a.request('/api/v1/readiness?scope=personal');
+  assert.equal(readiness.status, 200); assert.equal(readiness.body.ready, false);
+  assert.equal(readiness.body.blockers[0].code, 'RUNTIME_OPERATOR_NOT_CONFIGURED');
+  await a.request('/api/v1/owners', {});
+  const created = await a.request('/api/v1/targets', { label: '준비 전 환경' });
+  const enrollment = await a.request(`/api/v1/targets/${created.body.id}/enrollments`, {});
+  assert.equal(enrollment.status, 409); assert.equal(enrollment.body.error.code, 'RUNTIME_OPERATOR_NOT_CONFIGURED');
+  assert.equal(f.calls.gateway.length, 0);
+});
+
+test('installation test transport follows operator configuration and cannot be selected by browser input', async (t) => {
+  const f = await fixture(t), client = f.client();
+  await client.request('/api/v1/owners', {});
+  assert.equal((await client.request('/api/v1/targets', { label: 'test', test_allow_http: true })).status, 422);
+  const target = await client.request('/api/v1/targets', { label: '시험 환경' });
+  const path = `/api/v1/targets/${target.body.id}/enrollments`;
+  assert.equal((await client.request(path, { test_allow_http: true })).status, 422);
+  assert.equal((await client.request(path, { public_url: 'http://browser.example.test' })).status, 422);
+  const standard = await client.request(path, {});
+  assert.equal(standard.status, 201);
+  assert.match(standard.body.install_command, /--proto '=https'/);
+  assert.ok(!standard.body.install_command.includes('--test-allow-http'));
+  // Only the trusted adapter can supply this normalized operator setting.
+  Object.assign(f.personalAdapter.config, { test_allow_http: true, public_url: 'http://api.example.test',
+    installer_url: 'http://release.example.test/install.sh', artifact_url: 'http://release.example.test/client.tgz' });
+  const testMode = await client.request(path, {});
+  assert.equal(testMode.status, 201);
+  assert.match(testMode.body.install_command, /--proto '=http,https'/);
+  assert.match(testMode.body.install_command, /--api-url 'http:\/\/api.example.test'/);
+  assert.match(testMode.body.install_command, /--artifact-sha256 '[a-f0-9]{64}' --test-allow-http;/);
+  assert.match(testMode.body.install_command, /--max-redirs 0/);
+  assert.ok(!testMode.body.install_command.includes('--insecure'));
 });
 
 test('client assertion alone cannot report deployment readiness and foreign heartbeat cannot mutate', async (t) => {
@@ -132,13 +187,15 @@ test('client assertion alone cannot report deployment readiness and foreign hear
   f.personalAdapter.verify = async () => ({ status: 'succeeded', reachable: true });
   assert.equal((await f.heartbeat(a, row)).body.status, 'connecting', 'gateway alone is not OpenStack control verification');
   f.personalAdapter.verify = async () => ({ status: 'succeeded', reachable: true, openstack_verified: true });
+  assert.equal((await f.heartbeat(a, row)).body.status, 'preparing');
+  await f.runtime(a, row);
   assert.equal((await f.heartbeat(a, row)).body.status, 'ready');
   const changed = { ...row, claim: { body: { ...row.claim.body } } }; changed.claim.body.client_token = 'Z'.repeat(43);
   assert.equal((await f.heartbeat(a, changed)).status, 401);
 });
 
 test('chosen personal target routes deployment and deletes only its RailShot app after explicit data consent', async (t) => {
-  const f = await fixture(t), a = f.client(), b = f.client(), row = await f.target(a); await f.heartbeat(a, row);
+  const f = await fixture(t), a = f.client(), b = f.client(), row = await f.target(a); await f.runtime(a, row);
   const form = () => { const value = new FormData(); value.set('environment', 'onprem'); value.set('provider', 'openstack'); value.set('target_id', row.id); value.set('source_name', 'hello-app'); value.append('files', new Blob(['console.log(1)']), 'app.js'); value.set('paths', '["app.js"]'); return value; };
   const deployment = await a.request('/api/v1/deployments', undefined, { method: 'POST', body: form(), headers: { 'Idempotency-Key': 'deploy-one' } });
   assert.equal(deployment.status, 202); await f.until(a, `/api/v1/deployments/${deployment.body.resource_id}`, (r) => r.status === 'succeeded');
@@ -151,9 +208,10 @@ test('chosen personal target routes deployment and deletes only its RailShot app
   const accepted = await a.request(`/api/v1/targets/${row.id}/operations`, input, { headers: { 'Idempotency-Key': 'remove-one' } }); assert.equal(accepted.status, 202);
   assert.equal((await a.request('/api/v1/deployments', undefined, { method: 'POST', body: form(), headers: { 'Idempotency-Key': 'deploy-after-delete' } })).status, 409);
   const operation = await f.until(a, `/api/v1/operations/${accepted.body.id}`, (r) => r.stage === 'client');
+  assert.deepEqual(f.calls.revoke, [row.id]);
   assert.equal(f.calls.delete.length, 1); assert.equal(f.calls.delete[0].options.deleteData, true);
   const hb = await f.heartbeat(a, row); assert.deepEqual(hb.body.command.applications, []);
-  const receipt = { operation_id: operation.body.id, generation: row.claim.body.generation, status: 'running', steps: [], residuals: [], client_removed: false };
+  const receipt = { operation_id: operation.body.id, attempt_id: hb.body.command.attempt_id, generation: row.claim.body.generation, status: 'running', steps: [], residuals: [], client_removed: false };
   assert.equal((await a.request(`/api/v1/targets/${row.id}/receipts`, receipt, { headers: { Authorization: `Bearer ${row.claim.body.client_token}` } })).status, 200);
   assert.equal((await a.request(`/api/v1/targets/${row.id}/receipts`, { ...receipt, status: 'succeeded', client_removed: true }, { headers: { Authorization: `Bearer ${row.claim.body.client_token}` } })).body.status, 'succeeded');
   assert.equal((await a.request(`/api/v1/targets/${row.id}`)).body.status, 'deleted');
@@ -220,7 +278,184 @@ test('host measurements retain their own freshness and incomplete client removal
   const plan = await a.request(`/api/v1/targets/${row.id}/plans`, { action: 'delete', delete_data: true });
   const operation = await a.request(`/api/v1/targets/${row.id}/operations`, { action: 'delete', delete_data: true, plan_id: plan.body.id, plan_hash: plan.body.plan_hash, confirmation: row.created.body.label }, { headers: { 'Idempotency-Key': 'partial' } });
   await f.until(a, `/api/v1/operations/${operation.body.id}`, (r) => r.stage === 'client');
-  await a.request(`/api/v1/targets/${row.id}/receipts`, {operation_id:operation.body.id,generation:row.claim.body.generation,status:'unknown',steps:[],residuals:[{kind:'Client',name:row.id}],client_removed:false},auth);
+  await a.request(`/api/v1/targets/${row.id}/receipts`, {operation_id:operation.body.id,attempt_id:(await f.heartbeat(a,row)).body.command.attempt_id,generation:row.claim.body.generation,status:'unknown',steps:[],residuals:[{kind:'Client',name:row.id}],client_removed:false},auth);
   assert.equal((await a.request(`/api/v1/targets/${row.id}`)).body.status, 'attention');
   assert.equal((await f.heartbeat(a, row)).body.command, null, 'uncertain client cleanup is never replayed');
+});
+
+test('runtime preparation reports client progress, rejects foreign credentials, and only verified binding enables deployments', async (t) => {
+  const f = await fixture(t), a = f.client(), row = await f.target(a);
+  const path = `/api/v1/targets/${row.id}/runtimes`, auth = { headers: { Authorization: `Bearer ${row.claim.body.client_token}` } };
+  assert.equal((await a.request(path)).status, 401, 'owner cookie cannot impersonate runtime client');
+  assert.equal((await a.request(path, { generation: 99, evidence: f.evidence }, auth)).status, 401);
+  assert.equal((await a.request(path, { generation: 1, progress: { stage: 'client_installation', status: 'succeeded' } }, auth)).status, 422);
+  assert.equal((await a.request(path, { generation: 1, progress: { stage: 'client_installation', status: 'running' } }, auth)).status, 202);
+  assert.equal((await a.request(path, undefined, auth)).body.runtime_preparation.stage, 'client_installation');
+  await f.runtime(a, row);
+  const ready = (await a.request(`/api/v1/targets/${row.id}`)).body;
+  assert.equal(ready.deployable, true);
+  assert.equal(ready.runtime_preparation.client_reported_ready, true);
+  await a.request(path, { generation: 1, evidence: f.evidence }, auth);
+  assert.equal(f.calls.runtime.length, 1, 'completed binding replays without provisioning');
+  assert.equal((await a.request(path, { generation: 1, evidence: { ...f.evidence, resource_id: 'different-vm' } }, auth)).status, 409);
+  f.personalAdapter.verifyRuntime = async () => ({ status: 'blocked', stage: 'permission_verification', blockers: ['RUNTIME_DEPLOYMENT_PERMISSION_MISMATCH'] });
+  const failed = await f.heartbeat(a, row);
+  assert.equal(failed.body.connection_status, 'ready');
+  assert.equal(failed.body.deployable, false);
+  assert.equal(failed.body.runtime_preparation.stage, 'permission_verification');
+});
+
+test('known blocked runtime can retry the same binding but unknown cannot replay after restart', async (t) => {
+  const f = await fixture(t), a = f.client(), row = await f.target(a);
+  await f.heartbeat(a, row);
+  const path = `/api/v1/targets/${row.id}/runtimes`, auth = { headers: { Authorization: `Bearer ${row.claim.body.client_token}` } };
+  let calls = 0;
+  f.personalAdapter.prepareRuntime = async () => { calls++; return { status: calls === 1 ? 'blocked' : 'unknown', blockers: ['RUNTIME_OPERATOR_NOT_CONFIGURED'] }; };
+  await a.request(path, { generation: 1, evidence: f.evidence }, auth);
+  await f.until(a, `/api/v1/targets/${row.id}`, (target) => target.runtime_preparation.status === 'blocked');
+  await a.request(path, { generation: 1, evidence: f.evidence }, auth);
+  await f.until(a, `/api/v1/targets/${row.id}`, (target) => target.runtime_preparation.status === 'unknown');
+  await f.restart();
+  await f.heartbeat(a, row);
+  await a.request(path, { generation: 1, evidence: f.evidence }, auth);
+  assert.equal(calls, 2);
+  const plan = await a.request(`/api/v1/targets/${row.id}/plans`, { action: 'delete', delete_data: true });
+  assert.ok(plan.body.blockers.includes('RUNTIME_RECONCILIATION_REQUIRED'));
+});
+
+test('failed runtime revocation never issues the client removal command', async (t) => {
+  const f = await fixture(t), a = f.client(), row = await f.target(a);
+  await f.runtime(a, row);
+  f.personalAdapter.removeRuntime = async () => ({ status: 'unknown', residuals: [{ kind: 'ServiceAccount' }] });
+  const plan = await a.request(`/api/v1/targets/${row.id}/plans`, { action: 'delete', delete_data: true });
+  const operation = await a.request(`/api/v1/targets/${row.id}/operations`, { action: 'delete', delete_data: true,
+    plan_id: plan.body.id, plan_hash: plan.body.plan_hash, confirmation: row.created.body.label }, { headers: { 'Idempotency-Key': 'revoke-failure' } });
+  await f.until(a, `/api/v1/operations/${operation.body.id}`, (r) => r.status === 'unknown');
+  const heartbeat = await f.heartbeat(a, row);
+  assert.equal(heartbeat.body.status, 'attention');
+  assert.equal(heartbeat.body.command, null);
+});
+
+
+async function deletionFixture(t) {
+  const f=await fixture(t), owner=f.client(), other=f.client(), row=await f.target(owner);
+  await other.request('/api/v1/owners',{}); await f.heartbeat(owner,row);
+  const path=`/api/v1/targets/${row.id}`, plan=await owner.request(path+'/plans',{action:'delete',delete_data:true});
+  const op=await owner.request(path+'/operations',{action:'delete',delete_data:true,plan_id:plan.body.id,plan_hash:plan.body.plan_hash,confirmation:row.created.body.label},{headers:{'Idempotency-Key':'delete-once'}});
+  const operation=(await f.until(owner,`/api/v1/operations/${op.body.id}`,(r)=>r.stage==='client')).body;
+  const auth={headers:{Authorization:`Bearer ${row.claim.body.client_token}`}};
+  const receipt={operation_id:operation.id,attempt_id:operation.active_attempt_id,generation:row.claim.body.generation,status:'unknown',steps:[],residuals:['client'],client_removed:false};
+  return {...f,owner,other,row,path,operation,auth,receipt};
+}
+
+test('owner explicitly reconciles intact client and resumes same deletion with a fresh attempt; stale responses cannot alter it',async(t)=>{
+  const f=await deletionFixture(t), {owner,other,path,row,operation,auth,receipt}=f;
+  assert.equal((await owner.request(path+'/receipts',receipt,auth)).body.status,'unknown');
+  assert.equal((await other.request(path+'/reconciliations',{operation_id:operation.id})).status,404);
+  assert.equal((await owner.request(path+'/reconciliations',{operation_id:operation.id},{headers:{'X-Railshot-Request':''}})).status,403);
+  const check=await owner.request(path+'/reconciliations',{operation_id:operation.id});assert.equal(check.status,202);
+  assert.equal(check.body.reconciliation.status,'pending');
+  const probe=(await f.heartbeat(owner,row)).body.command;assert.equal(probe.kind,'environment.inspect');
+  assert.equal(probe.previous_attempt_id,operation.active_attempt_id);
+  const resume={action:'resume',operation_id:operation.id,reconciliation_id:probe.reconciliation_id,confirmation:row.created.body.label,delete_data:true};
+  const headers={headers:{'Idempotency-Key':'resume-one'}};
+  assert.equal((await owner.request(path+'/operations',resume,headers)).status,409,'no browser assertion replaces inspection');
+  const inspected={operation_id:operation.id,generation:1,status:'inspected',steps:[],residuals:[],client_removed:false,reconciliation_id:probe.reconciliation_id,
+    inspection:{state:'intact',preflight_ok:true,helper_active:false}};
+  assert.equal((await owner.request(path+'/receipts',inspected)).status,401);
+  assert.equal((await owner.request(path+'/receipts',{...inspected,generation:2},auth)).status,401);
+  assert.equal((await owner.request(path+'/receipts',inspected,auth)).status,200);
+  assert.equal((await owner.request(path+'/receipts',inspected,auth)).status,200,'identical probe replay is harmless');
+  assert.equal((await other.request(path+'/operations',resume,headers)).status,404);
+  const resumed=await owner.request(path+'/operations',resume,headers);assert.equal(resumed.status,202);assert.equal(resumed.body.id,operation.id);
+  assert.notEqual(resumed.body.active_attempt_id,operation.active_attempt_id);assert.equal(resumed.body.attempts.length,2);
+  const command=(await f.heartbeat(owner,row)).body.command;assert.equal(command.reconciliation_id,probe.reconciliation_id);
+  assert.equal(command.attempt_id,resumed.body.active_attempt_id);
+  assert.equal((await owner.request(path+'/operations',resume,headers)).body.active_attempt_id,command.attempt_id);
+  assert.equal((await owner.request(path+'/operations',{...resume,confirmation:'other'},headers)).status,409);
+  assert.equal((await owner.request(path+'/receipts',receipt,auth)).status,409,'old failed attempt cannot poison new attempt');
+  assert.equal((await owner.request(path+'/receipts',{...receipt,status:'succeeded',client_removed:true,residuals:[]},auth)).status,409);
+  const final={...receipt,attempt_id:command.attempt_id,status:'succeeded',client_removed:true,residuals:[]};
+  assert.equal((await owner.request(path+'/receipts',final,auth)).body.status,'succeeded');
+  assert.equal((await owner.request(path+'/receipts',final,auth)).body.status,'succeeded','lost final acknowledgement can be retried');
+  assert.equal((await owner.request(path+'/receipts',{...final,steps:[{name:'changed'}]},auth)).status,401);
+  assert.equal((await f.heartbeat(owner,row)).status,401);
+  assert.equal((await owner.request('/api/v1/targets?scope=owned&provider=openstack')).body.items.length,0);
+  assert.equal((await owner.request(path)).body.status,'deleted');assert.equal((await other.request(path)).status,404);
+  await f.restart();assert.equal((await owner.request(path+'/receipts',final,auth)).body.status,'succeeded');
+});
+
+test('partial inspection, active removal and blocked preflight never authorize automatic retries',async(t)=>{
+  const f=await deletionFixture(t), {owner,path,row,operation,auth,receipt}=f;
+  assert.equal((await owner.request(path+'/receipts',{...receipt,status:'blocked',mutation_started:false,error_code:'REMOVAL_PREFLIGHT_FAILED'},auth)).body.status,'blocked');
+  assert.equal((await owner.request(path+'/receipts',{...receipt,status:'blocked',mutation_started:false,error_code:'REMOVAL_PREFLIGHT_FAILED'},auth)).body.status,'blocked','same terminal failure receipt is acknowledged without resending deletion');
+  assert.equal((await f.heartbeat(owner,row)).body.command,null);
+  for(const inspection of [{state:'partial',preflight_ok:true,helper_active:false},{state:'intact',preflight_ok:true,helper_active:true},{state:'intact',preflight_ok:false,helper_active:false}]) {
+    const check=(await owner.request(path+'/reconciliations',{operation_id:operation.id})).body.reconciliation;
+    await owner.request(path+'/receipts',{operation_id:operation.id,generation:1,status:'inspected',steps:[],residuals:['client'],client_removed:false,reconciliation_id:check.id,inspection},auth);
+    const op=(await owner.request(`/api/v1/operations/${operation.id}`)).body;
+    assert.equal(op.reconciliation.status,'blocked');assert.equal(op.reconciliation.resumable,false);
+    assert.equal((await owner.request(path+'/operations',{action:'resume',operation_id:operation.id,reconciliation_id:check.id,confirmation:row.created.body.label,delete_data:true},{headers:{'Idempotency-Key':check.id}})).status,409);
+  }
+});
+
+test('interrupted attempt can be inspected after restart but is never resent without explicit confirmation',async(t)=>{
+  const f=await deletionFixture(t),{owner,path,row,operation,auth}=f;
+  await f.restart();assert.equal((await f.heartbeat(owner,row)).body.command,null);
+  const check=(await owner.request(path+'/reconciliations',{operation_id:operation.id})).body.reconciliation;
+  await owner.request(path+'/receipts',{operation_id:operation.id,generation:1,status:'inspected',steps:[],residuals:[],client_removed:false,reconciliation_id:check.id,inspection:{state:'intact',preflight_ok:true,helper_active:false}},auth);
+  await f.restart();assert.equal((await f.heartbeat(owner,row)).body.command,null);
+  const resumed=await owner.request(path+'/operations',{action:'resume',operation_id:operation.id,reconciliation_id:check.id,confirmation:row.created.body.label,delete_data:true},{headers:{'Idempotency-Key':'restart-resume'}});
+  assert.equal(resumed.status,202);assert.notEqual(resumed.body.active_attempt_id,operation.active_attempt_id);
+});
+
+test('verified client removal survives gateway failure and owner resumes only gateway cleanup',async(t)=>{
+  const f=await deletionFixture(t),{owner,path,row,operation,auth,receipt}=f;let removes=0;
+  f.personalAdapter.remove=async()=>({status:++removes===1?'unknown':'succeeded'});
+  const final={...receipt,status:'succeeded',client_removed:true,residuals:[]};
+  assert.equal((await owner.request(path+'/receipts',final,auth)).body.status,'unknown');
+  assert.equal((await owner.request(path+'/receipts',final,auth)).body.status,'unknown');assert.equal(removes,1);
+  await f.restart();
+  const check=(await owner.request(path+'/reconciliations',{operation_id:operation.id})).body.reconciliation;
+  assert.equal(check.resumable,true);assert.equal((await f.heartbeat(owner,row)).body.command,null);
+  await owner.request(path+'/operations',{action:'resume',operation_id:operation.id,reconciliation_id:check.id,confirmation:row.created.body.label,delete_data:true},{headers:{'Idempotency-Key':'gateway-only'}});
+  await f.until(owner,`/api/v1/operations/${operation.id}`,(r)=>r.status==='succeeded');assert.equal(removes,2);
+  assert.equal((await owner.request(path+'/receipts',final,auth)).body.status,'succeeded');
+});
+
+
+test('legacy unknown deletion without attempt metadata resumes through inspection, never by rewriting persisted status',async()=>{
+  const id='personal-11111111-1111-4111-8111-111111111111', operationId='22222222-2222-4222-8222-222222222222', planId='33333333-3333-4333-8333-333333333333';
+  const owner='fixture-owner', token='A'.repeat(43), auth='Bearer '+token;
+  let state={applications:{},keys:{},personal:{targets:{[id]:{id,label:'legacy',generation:1,session_id:owner,status:'attention',client_hash:createHash('sha256').update(token).digest('hex'),deletion_operation_id:operationId,
+    command:{id:operationId,operation_id:operationId,kind:'environment.delete',applications:[],delete_data:true,generation:1}}},enrollments:{}},
+    operations:{[operationId]:{id:operationId,target_id:id,session_id:owner,kind:'target-lifecycle',action:'delete',delete_data:true,plan_id:planId,status:'unknown',stage:'reconciliation',steps:[{name:'client',status:'unknown'},{name:'gateway',status:'unknown'}],error:{code:'REMOVAL_UNVERIFIED'}}},
+    plans:{[planId]:{kind:'target-lifecycle',session_id:owner,public:{target_id:id},children:[]}}};
+  const store={read:()=>structuredClone(state),transaction:async(fn)=>{const next=structuredClone(state);const result=await fn(next);state=next;return result;}};
+  const personal=createPersonalEnvironments({store,adapter:{},launch:()=>assert.fail('inspection/resume must not rerun application workers'),publicApplication:()=>{}});
+  const check=(await personal.reconcile(id,{operation_id:operationId},owner)).reconciliation;
+  assert.equal(check.status,'pending');assert.equal(state.personal.targets[id].command.previous_attempt_id,undefined);
+  await personal.receipt(id,{operation_id:operationId,generation:1,status:'inspected',steps:[],residuals:[],client_removed:false,reconciliation_id:check.id,inspection:{state:'intact',preflight_ok:true,helper_active:false}},auth);
+  const input={action:'resume',operation_id:operationId,reconciliation_id:check.id,confirmation:'legacy',delete_data:true};
+  const ready=structuredClone(state);
+  state.operations[operationId].reconciliation.expires_at='2000-01-01T00:00:00Z';
+  await assert.rejects(()=>personal.remove(id,input,'new-attempt',owner),/최신 삭제 재확인/);
+  state=structuredClone(ready);state.applications.foreign={id:'foreign',environment_target_id:id,status:'ready',session_id:'other'};
+  await assert.rejects(()=>personal.remove(id,input,'new-attempt',owner),/최신 삭제 재확인/);
+  state=structuredClone(ready);
+  const result=await personal.remove(id,input,'new-attempt',owner);
+  assert.equal(result.id,operationId);assert.equal(result.attempts[0].id,'legacy');assert.equal(result.attempts[0].status,'unknown');
+  assert.match(result.active_attempt_id,/^[a-f0-9-]{36}$/);
+  await assert.rejects(()=>personal.receipt(id,{operation_id:operationId,generation:1,status:'unknown',steps:[],residuals:['client'],client_removed:false},auth),/삭제 시도/);
+});
+
+
+test('a late proven success for the same attempt can close uncertainty before any resumed attempt exists',async(t)=>{
+  const f=await deletionFixture(t),{owner,path,row,operation,auth,receipt}=f;
+  await owner.request(path+'/receipts',receipt,auth);
+  const check=await owner.request(path+'/reconciliations',{operation_id:operation.id});assert.equal(check.body.reconciliation.status,'pending');
+  const final={...receipt,status:'succeeded',client_removed:true,residuals:[]};
+  assert.equal((await owner.request(path+'/receipts',final,auth)).body.status,'succeeded');
+  assert.equal((await owner.request(path)).body.status,'deleted');
+  assert.equal((await owner.request(path+'/operations',{action:'resume',operation_id:operation.id,reconciliation_id:check.body.reconciliation.id,confirmation:row.created.body.label,delete_data:true},{headers:{'Idempotency-Key':'late-resume'}})).status,409);
 });

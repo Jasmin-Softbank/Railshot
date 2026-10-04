@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +14,50 @@ import openstack_routes as routes
 
 
 class OpenStackRoutesTest(unittest.TestCase):
+    def test_environment_registration_transport_is_fixed_and_receipt_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            def private(name):
+                path = root / name
+                path.write_text('test-only'); path.chmod(0o600)
+                return str(path)
+            connection = {'host': '10.0.0.34', 'port': 22, 'user': 'railshot-operator',
+                'identity_file': private('key'), 'known_hosts_file': private('known'), 'host_key_alias': '10.0.0.34'}
+            config = {'version': 1, 'provider': 'openstack', 'base_domain': 'railshot.io',
+                      'runtime_private_address': '10.0.0.18', 'controller': connection, 'proxy': connection}
+            base = {'version': 1, 'project_id': '1' * 32, 'loadbalancer_id': str(uuid.UUID(int=1)),
+                'listener_id': str(uuid.UUID(int=2)), 'member_subnet_id': str(uuid.UUID(int=3)),
+                'base_domain': 'railshot.io', 'network': {'amphora_port_id': str(uuid.UUID(int=4)),
+                    'amphora_server_id': str(uuid.UUID(int=5)), 'amphora_private_address': '10.0.0.40'}}
+            runtime = {'project_id': '2' * 32, 'server_id': str(uuid.UUID(int=6)),
+                'port_id': str(uuid.UUID(int=7)), 'security_group_id': str(uuid.UUID(int=8)), 'private_address': '10.0.0.18'}
+            args = {'environment_id': 'personal-' + str(uuid.UUID(int=100)), 'generation': 1, 'base': base, 'runtime': runtime}
+            binding = routes.worker.registration_binding(base, args['environment_id'], 1, runtime)
+            def respond(command, **kwargs):
+                self.assertEqual(command[-1], routes.COMMAND)
+                self.assertNotIn(args['environment_id'], ' '.join(command))
+                self.assertFalse(kwargs['shell'])
+                payload = json.loads(kwargs['input'])
+                self.assertEqual(payload['binding'], binding)
+                statuses = {'register-runtime': 'registered', 'verify-runtime': 'verified', 'unregister-runtime': 'unregistered'}
+                return subprocess.CompletedProcess(command, 0, json.dumps({'status': statuses[payload['operation']],
+                    'https_verified': False, 'binding': binding}), '')
+            with patch.object(routes.subprocess, 'run', side_effect=respond):
+                self.assertEqual(routes.verify_runtime(config, **args), binding)
+                self.assertEqual(routes.register_runtime(config, **args), binding)
+                self.assertEqual(routes.unregister_runtime({**config, 'worker_binding': binding})['status'], 'unregistered')
+            with patch.object(routes.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 600)):
+                with self.assertRaises(routes.RouteError) as raised:
+                    routes.register_runtime(config, **args)
+                self.assertTrue(raised.exception.unknown)
+                with self.assertRaises(routes.RouteError) as raised:
+                    routes.verify_runtime(config, **args)
+                self.assertFalse(raised.exception.unknown)
+            with patch.object(routes.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0,
+                json.dumps({'status': 'registered', 'https_verified': False, 'binding': {**binding, 'generation': 2}}), '')):
+                with self.assertRaises(routes.RouteError):
+                    routes.register_runtime(config, **args)
+
     def test_fixed_worker_private_transport_and_bound_readback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

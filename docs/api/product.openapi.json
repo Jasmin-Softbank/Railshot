@@ -3034,6 +3034,12 @@
     },
     "/api/v1/targets/{id}/instances": {
       "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1instances"
+    },
+    "/api/v1/targets/{id}/runtimes": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1runtimes"
+    },
+    "/api/v1/targets/{id}/reconciliations": {
+      "$ref": "./personal.openapi.json#/paths/~1api~1v1~1targets~1{id}~1reconciliations"
     }
   },
   "components": {

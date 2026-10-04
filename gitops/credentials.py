@@ -235,9 +235,24 @@ def renew(target, now=None):
     return {'secret': target['secret'], 'status': 'unknown', 'code': 'RENEWAL_READBACK_UNKNOWN'}
 
 
-def render(policy, image):
+def render(policy, image, *, platform_arch='amd64', local_provenance=None):
     validate_policy(policy)
-    require(re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-api@sha256:[a-f0-9]{64}', image), 'published API digest required')
+    require(platform_arch in ('amd64', 'arm64'), 'supported platform architecture required')
+    local = local_provenance is not None
+    if local:
+        require(isinstance(local_provenance, dict) and set(local_provenance) == {
+            'source_sha256', 'oci_archive_sha256', 'manifest_digest', 'image_id'},
+            'exact local image provenance required')
+        require(all(isinstance(local_provenance[key], str) and re.fullmatch(r'[a-f0-9]{64}', local_provenance[key])
+                    for key in ('source_sha256', 'oci_archive_sha256')), 'local content hashes required')
+        require(all(isinstance(local_provenance[key], str) and re.fullmatch(r'sha256:[a-f0-9]{64}', local_provenance[key])
+                    for key in ('manifest_digest', 'image_id')), 'local OCI digests required')
+        match = re.fullmatch(r'localhost/railshot-api@(sha256:[a-f0-9]{64})', image or '')
+        require(match and match.group(1) == local_provenance['manifest_digest'],
+                'imported local API manifest digest required')
+    else:
+        require(re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-api@sha256:[a-f0-9]{64}', image or ''),
+                'published API digest required')
     name = 'railshot-credentials'
     meta = {'name': name, 'namespace': 'argocd'}
     sa_path = '/var/run/secrets/kubernetes.io/serviceaccount/'
@@ -257,8 +272,7 @@ def render(policy, image):
         {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': meta,
          'data': {'policy.json': json.dumps(policy), 'kubeconfig': json.dumps(kubeconfig)}}]
     pod = {'serviceAccountName': name, 'automountServiceAccountToken': True, 'restartPolicy': 'Never',
-           'nodeSelector': {'kubernetes.io/arch': 'amd64', 'railshot.io/node-role': 'platform'},
-           'imagePullSecrets': [{'name': 'ghcr-pull'}],
+           'nodeSelector': {'kubernetes.io/arch': platform_arch, 'railshot.io/node-role': 'platform'},
            'securityContext': {'runAsNonRoot': True, 'runAsUser': 1000, 'runAsGroup': 1000,
                                'seccompProfile': {'type': 'RuntimeDefault'}},
            'containers': [{'name': 'renew', 'image': image,
@@ -271,11 +285,22 @@ def render(policy, image):
                            'volumeMounts': [{'name': 'policy', 'mountPath': '/etc/railshot/credentials', 'readOnly': True},
                                             {'name': 'tmp', 'mountPath': '/tmp'}]}],
            'volumes': [{'name': 'policy', 'configMap': {'name': name}}, {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '16Mi'}}]}
+    template = {'spec': pod}
+    if local:
+        pod.update(hostNetwork=True, dnsPolicy='ClusterFirstWithHostNet')
+        pod['containers'][0]['imagePullPolicy'] = 'Never'
+        template['metadata'] = {'annotations': {
+            'railshot.io/local-source-sha256': local_provenance['source_sha256'],
+            'railshot.io/local-oci-archive-sha256': local_provenance['oci_archive_sha256'],
+            'railshot.io/local-manifest-digest': local_provenance['manifest_digest'],
+            'railshot.io/local-image-id': local_provenance['image_id']}}
+    else:
+        pod['imagePullSecrets'] = [{'name': 'ghcr-pull'}]
     items.append({'apiVersion': 'batch/v1', 'kind': 'CronJob', 'metadata': meta,
                   'spec': {'schedule': '0 */2 * * *', 'timeZone': 'Etc/UTC', 'concurrencyPolicy': 'Forbid',
                            'startingDeadlineSeconds': 600, 'successfulJobsHistoryLimit': 1, 'failedJobsHistoryLimit': 3,
                            'jobTemplate': {'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 300,
-                                                    'template': {'spec': pod}}}}})
+                                                    'template': template}}}})
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
 
 

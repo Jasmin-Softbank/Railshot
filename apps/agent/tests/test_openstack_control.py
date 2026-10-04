@@ -209,3 +209,17 @@ def test_cross_project_floating_ip_port_assignment_is_rejected(tmp_path):
 def test_create_positional_must_be_last_to_prevent_reference_scope_bypass():
     with pytest.raises(control.ProtocolError):
         control.decode(json.dumps(request(['security', 'group', 'rule', 'create', 'foreign-group', '--remote-group', 'owned-group'])).encode())
+
+
+
+def test_limits_show_adds_fixed_absolute_without_exposing_cli_options(tmp_path):
+    calls = []
+    class Cli:
+        def run(self, argv):
+            calls.append(argv)
+            return {'project_id': 'project1'} if argv == ['token', 'issue'] else [{'Name': 'maxTotalInstances', 'Value': 10}]
+    assert control.execute(request(['limits', 'show']), CONFIG, Cli(), tmp_path) == [{'Name': 'maxTotalInstances', 'Value': 10}]
+    assert calls == [['token', 'issue'], ['limits', 'show', '--absolute']]
+    for flag in ('--absolute', '--rate', '--project'):
+        with pytest.raises(control.ProtocolError):
+            control.decode(json.dumps(request(['limits', 'show', flag])).encode())

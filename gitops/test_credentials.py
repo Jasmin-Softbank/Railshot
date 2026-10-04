@@ -91,7 +91,8 @@ class CredentialsTest(unittest.TestCase):
         self.assertEqual((cron['schedule'], cron['concurrencyPolicy']), ('0 */2 * * *', 'Forbid'))
         self.assertEqual(cron['jobTemplate']['spec']['backoffLimit'], 0)
         pod = cron['jobTemplate']['spec']['template']['spec']
-        self.assertEqual(pod['nodeSelector']['railshot.io/node-role'], 'platform')
+        self.assertEqual(pod['nodeSelector'], {
+            'kubernetes.io/arch': 'amd64', 'railshot.io/node-role': 'platform'})
         self.assertNotIn('hostNetwork', pod)
         self.assertNotIn('hostPath', json.dumps(pod))
         config = json.loads(next(x for x in items if x['kind'] == 'ConfigMap')['data']['kubeconfig'])
@@ -105,6 +106,51 @@ class CredentialsTest(unittest.TestCase):
         customer_role = list(yaml.safe_load_all(Path(__file__).with_name('credentials-customer.yaml').read_text()))[0]
         self.assertEqual(customer_role['rules'], [{'apiGroups': [''], 'resources': ['serviceaccounts/token'],
                                                  'resourceNames': ['railshot-argocd'], 'verbs': ['create']}])
+
+    def test_renderer_selects_an_explicit_supported_control_architecture_only(self):
+        image = 'ghcr.io/jasmin-softbank/railshot-api@sha256:' + 'a' * 64
+        items = credentials.render({'version': 1, 'targets': []}, image, platform_arch='arm64')['items']
+        pod = next(x for x in items if x['kind'] == 'CronJob')['spec']['jobTemplate']['spec']['template']['spec']
+        self.assertEqual(pod['nodeSelector'], {
+            'kubernetes.io/arch': 'arm64', 'railshot.io/node-role': 'platform'})
+        for invalid in ('aarch64', 'x86_64', '', None, True, 64):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                credentials.render({'version': 1, 'targets': []}, image, platform_arch=invalid)
+
+    def test_local_renderer_binds_real_import_receipt_and_never_pulls_or_forwards(self):
+        provenance = {'source_sha256': 'b' * 64, 'oci_archive_sha256': 'c' * 64,
+                      'manifest_digest': 'sha256:' + 'd' * 64, 'image_id': 'sha256:' + 'e' * 64}
+        image = 'localhost/railshot-api@' + provenance['manifest_digest']
+        items = credentials.render({'version': 1, 'targets': []}, image, platform_arch='arm64',
+                                   local_provenance=provenance)['items']
+        template = next(x for x in items if x['kind'] == 'CronJob')['spec']['jobTemplate']['spec']['template']
+        pod, container = template['spec'], template['spec']['containers'][0]
+        self.assertEqual(pod['nodeSelector'], {
+            'kubernetes.io/arch': 'arm64', 'railshot.io/node-role': 'platform'})
+        self.assertEqual((pod['hostNetwork'], pod['dnsPolicy']), (True, 'ClusterFirstWithHostNet'))
+        self.assertNotIn('imagePullSecrets', pod)
+        self.assertEqual((container['image'], container['imagePullPolicy']), (image, 'Never'))
+        self.assertEqual(template['metadata']['annotations'], {
+            'railshot.io/local-source-sha256': provenance['source_sha256'],
+            'railshot.io/local-oci-archive-sha256': provenance['oci_archive_sha256'],
+            'railshot.io/local-manifest-digest': provenance['manifest_digest'],
+            'railshot.io/local-image-id': provenance['image_id']})
+
+        invalid = [
+            None,
+            {**provenance, 'extra': 'x'},
+            {**provenance, 'source_sha256': 'B' * 64},
+            {**provenance, 'oci_archive_sha256': 'c' * 63},
+            {**provenance, 'manifest_digest': 'sha256:' + 'f' * 64},
+            {**provenance, 'image_id': 'e' * 64},
+        ]
+        for value in invalid[1:]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                credentials.render({'version': 1, 'targets': []}, image, platform_arch='arm64',
+                                   local_provenance=value)
+        # Omitting local provenance retains the production-only GHCR contract.
+        with self.assertRaises(ValueError):
+            credentials.render({'version': 1, 'targets': []}, image, platform_arch='arm64')
 
     def test_projectless_environment_registration_renews_without_broadening_namespaces(self):
         self.target['project'] = ''

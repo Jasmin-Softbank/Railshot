@@ -197,7 +197,11 @@ def runtime_kubectl(request):
                   '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15', host['ansible_user'] + '@' + host['ansible_host']]
         def kubectl(namespace, *args, document=None):
             remote = shlex.join(['sudo', '-n', 'k3s', 'kubectl', '--request-timeout=20s', '-n', namespace, *args])
-            raw = argo.native([*prefix, remote], document=document)
+            # Personal relay rechecks the complete app ownership/storage inventory
+            # before lifecycle mutations. Keep ordinary commands on their short deadline.
+            lifecycle = (node['ssh'].get('port') == 2223 and re.fullmatch(r'app-[a-f0-9]{24}', namespace)
+                         and args and args[0] in ('delete', 'patch'))
+            raw = argo.native([*prefix, remote], document=document, **({'timeout': 300} if lifecycle else {}))
             return json.loads(raw) if raw.strip() else None
         yield kubectl
 

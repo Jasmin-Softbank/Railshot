@@ -8,6 +8,23 @@ import json
 from pathlib import Path
 import tarfile
 
+RUNTIME_FILES = (
+    'deployment/bootstrap/uninstall.sh', 'deployment/bootstrap/install_payload.py',
+    'deployment/bootstrap/revoke_personal_identity.py',
+    'deployment/bootstrap/requirements.lock',
+    'deployment/bootstrap/templates/agent-authorized-keys.README',
+    'infrastructure/providers/openstack/templates/cloud-init.yaml.tmpl',
+    'infrastructure/ansible/run.py', 'infrastructure/ansible/transport.py',
+    'infrastructure/ansible/runtime.yml', 'infrastructure/ansible/guest.yml',
+    'infrastructure/ansible/ansible.cfg', 'infrastructure/ansible/tasks/guest-checks.yml',
+    'ci/scripts/storage.py', 'contracts/ansible-request.schema.json',
+    'deployment/scripts/common.sh', 'deployment/scripts/lifecycle_runtime.py', 'deployment/bootstrap/preflight.sh',
+    'deployment/cloudflared/render.py',
+    'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh',
+    'deployment/bootstrap/runtime-healthz.py', 'deployment/cilium/install.sh',
+    'deployment/cilium/preflight.py', 'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
+)
+
 
 def package(source, output):
     source, output = Path(source), Path(output)
@@ -20,8 +37,17 @@ def package(source, output):
                 raise ValueError('Artifact symlink rejected')
             if path.is_file():
                 files.append(path)
-    files.append(source / 'deployment/bootstrap/personal-install.sh')
+    files.extend(source / name for name in RUNTIME_FILES)
+    files.extend(source / name for name in (
+        'deployment/bootstrap/install.sh',
+        'deployment/bootstrap/personal-install.sh',
+        'deployment/bootstrap/personal-registration.sh',
+    ))
+    if any(not path.is_file() or path.is_symlink() for path in files):
+        raise ValueError('Required runtime file missing or unsafe')
     required = {'apps/agent/personal.py', 'apps/agent/personal_remove.py', 'apps/agent/openstack_control.py',
+                'deployment/bootstrap/install.sh', 'deployment/bootstrap/personal-registration.sh',
+                'deployment/cloudflared/render.py',
                 'deployment/bootstrap/client_setup/state.py', 'infrastructure/providers/openstack/cli.py'}
     if not required <= {str(path.relative_to(source)) for path in files}:
         raise ValueError('Required client files missing')

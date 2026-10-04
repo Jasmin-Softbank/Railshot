@@ -2,6 +2,7 @@
 """Root-owned WireGuard gateway adapter. JSON stdin/stdout; never log key material."""
 import argparse
 import base64
+from contextlib import contextmanager
 import fcntl
 import ipaddress
 import json
@@ -16,6 +17,7 @@ import time
 
 MARKER = '# Managed by RailShot personal gateway v1\n'
 ID = re.compile(r'[A-Za-z0-9_-]{1,128}')
+WIREGUARD_DIRECTORY = Path('/etc/wireguard')
 
 
 def require(value, code='GATEWAY_INVALID'):
@@ -83,16 +85,104 @@ def validate(config):
     require(re.fullmatch(r'[A-Za-z0-9.-]+:[0-9]{1,5}', config['endpoint']))
     require(1 <= int(config['endpoint'].rsplit(':', 1)[1]) <= 65535)
     require(type(config['listen_port']) is int and 1 <= config['listen_port'] <= 65535)
+    require(config.get('lifecycle', 'systemd') in ('systemd', 'direct'), 'GATEWAY_LIFECYCLE_INVALID')
     return pool, address.ip
+
+
+def server_public_key(config, runner):
+    return key(runner(['wg', 'pubkey'], input=private(config['private_key_file']).strip() + '\n'))
+
+
+def existing_interface(config, runner):
+    links = json.loads(runner(['ip', '-j', '-d', 'link', 'show']))
+    require(isinstance(links, list), 'GATEWAY_LINK_UNVERIFIED')
+    matches = [link for link in links if link.get('ifname') == config['interface']]
+    require(len(matches) <= 1, 'GATEWAY_LINK_UNVERIFIED')
+    if not matches:
+        return False
+    path = WIREGUARD_DIRECTORY / (config['interface'] + '.conf')
+    require(path.exists() and private(path).startswith(MARKER), 'GATEWAY_INTERFACE_NOT_OWNED')
+    require(matches[0].get('linkinfo', {}).get('info_kind') == 'wireguard', 'GATEWAY_INTERFACE_NOT_OWNED')
+    require(runner(['wg', 'show', config['interface'], 'public-key']) == server_public_key(config, runner),
+            'GATEWAY_INTERFACE_IDENTITY_CHANGED')
+    return True
+
+
+def forwarding_rules(config):
+    return [f'-A FORWARD {direction} {config["interface"]} -j DROP' for direction in ('-i', '-o')]
+
+
+def verify_forwarding(config, runner):
+    verify_forwarding_guard(config, runner)
+    rules = [line for line in runner(['iptables', '-w', '-S', 'FORWARD']).splitlines() if line.startswith('-A ')]
+    # A DROP behind an ACCEPT would not isolate customers. Require both rules
+    # at the beginning, ahead of any existing forwarding policy.
+    require(set(rules[:2]) == set(forwarding_rules(config)), 'GATEWAY_FORWARDING_UNVERIFIED')
+
+
+def verify_forwarding_guard(config, runner):
+    # Netfilter's mangle FORWARD hook precedes filter FORWARD. A later
+    # kube-proxy filter ACCEPT cannot resurrect packets dropped at this hook.
+    # Only forwarded packets match: gateway-local INPUT/OUTPUT is unaffected.
+    rules = [line for line in runner(['iptables', '-w', '-t', 'mangle', '-S', 'FORWARD']).splitlines()
+             if line.startswith('-A ')]
+    require(set(rules[:2]) == set(forwarding_rules(config)), 'GATEWAY_FORWARD_GUARD_UNVERIFIED')
+
+
+def ensure_forwarding(config, runner):
+    try:
+        verify_forwarding_guard(config, runner)
+    except ValueError:
+        for direction in ('-i', '-o'):
+            runner(['iptables', '-w', '-t', 'mangle', '-I', 'FORWARD', '1', direction, config['interface'], '-j', 'DROP'])
+    verify_forwarding_guard(config, runner)
+    try:
+        verify_forwarding(config, runner)
+    except ValueError:
+        for direction in ('-i', '-o'):
+            runner(['iptables', '-w', '-I', 'FORWARD', '1', direction, config['interface'], '-j', 'DROP'])
+    verify_forwarding(config, runner)
+
+
+def verify_applied(config, ledger, runner):
+    require(existing_interface(config, runner), 'GATEWAY_INTERFACE_MISSING')
+    interface = config['interface']
+    require(runner(['wg', 'show', interface, 'listen-port']) == str(config['listen_port']), 'GATEWAY_PORT_UNVERIFIED')
+    addresses = json.loads(runner(['ip', '-j', '-4', 'address', 'show', 'dev', interface]))
+    observed = [f'{item["local"]}/{item["prefixlen"]}' for row in addresses for item in row.get('addr_info', [])
+                if item.get('family') == 'inet']
+    require(observed == [config['server_address']], 'GATEWAY_ADDRESS_UNVERIFIED')
+    peers = {}
+    for row in runner(['wg', 'show', interface, 'allowed-ips']).splitlines():
+        parts = row.split()
+        require(len(parts) == 2 and parts[0] not in peers, 'GATEWAY_PEERS_UNVERIFIED')
+        peers[parts[0]] = parts[1]
+    expected = {peer['public_key']: peer['address'] for peer in ledger.values() if not peer['removed']}
+    require(peers == expected, 'GATEWAY_PEERS_UNVERIFIED')
+    routes = json.loads(runner(['ip', '-j', '-4', 'route', 'show', 'dev', interface]))
+    destinations = {str(ipaddress.ip_network(route['dst'])) for route in routes if route.get('dst') != 'default' and 'dst' in route}
+    require(set(expected.values()) <= destinations and not any(peer['address'] in destinations for peer in ledger.values() if peer['removed']),
+            'GATEWAY_ROUTES_UNVERIFIED')
+    verify_forwarding(config, runner)
 
 
 def apply(config, ledger, runner):
     interface = config['interface']
-    path = Path('/etc/wireguard') / (interface + '.conf')
+    path = WIREGUARD_DIRECTORY / (interface + '.conf')
+    exists = existing_interface(config, runner)  # Check ownership before writing the marker/config.
     secret = key(private(config['private_key_file']).strip())
     lines = [MARKER, '[Interface]\n', 'PrivateKey = ' + secret + '\n',
-             'Address = ' + config['server_address'] + '\n', 'ListenPort = ' + str(config['listen_port']) + '\n',
-             'PostUp = iptables -w -I FORWARD -i %i -j DROP; iptables -w -I FORWARD -o %i -j DROP\n']
+             'Address = ' + config['server_address'] + '\n', 'ListenPort = ' + str(config['listen_port']) + '\n']
+    # systemd starts wg-quick independently on host boot: retain its automatic
+    # AllowedIPs routes. Only the direct entrypoint always invokes --restore.
+    if config.get('lifecycle', 'systemd') == 'direct':
+        lines.append('Table = off\n')
+    # Independent wg-quick/systemd starts also establish the earlier guard
+    # before loading peers or bringing the link up, including after a cold boot.
+    # Inserting exact DROP rules preserves other owners' chains and rules.
+    lines.append('PreUp = iptables -w -t mangle -I FORWARD 1 -i %i -j DROP; '
+                 'iptables -w -t mangle -I FORWARD 1 -o %i -j DROP\n')
+    lines.append('PostUp = iptables -w -I FORWARD -i %i -j DROP; iptables -w -I FORWARD -o %i -j DROP\n')
     for peer in ledger.values():
         if not peer.get('removed'):
             lines.extend(['\n[Peer]\n', 'PublicKey = ' + key(peer['public_key']) + '\n', 'AllowedIPs = ' + peer['address'] + '\n'])
@@ -101,13 +191,11 @@ def apply(config, ledger, runner):
     save(path, ''.join(lines))
     # Block forwarding in both directions before enabling peers: customers receive
     # only a server /32 route and cannot use this gateway as a network transit.
-    for direction in ('-i', '-o'):
-        rule = ['FORWARD', direction, interface, '-j', 'DROP']
-        try:
-            runner(['iptables', '-w', '-C', *rule])
-        except Exception:
-            runner(['iptables', '-w', '-I', *rule])
-    runner(['systemctl', 'enable', '--now', 'wg-quick@' + interface])
+    ensure_forwarding(config, runner)
+    if config.get('lifecycle', 'systemd') == 'systemd':
+        runner(['systemctl', 'enable', '--now', 'wg-quick@' + interface])
+    elif not exists:
+        runner(['wg-quick', 'up', str(path)])
     stripped = runner(['wg-quick', 'strip', str(path)])
     fd, tmp = tempfile.mkstemp(prefix='railshot-wg-')
     try:
@@ -121,9 +209,53 @@ def apply(config, ledger, runner):
                 if existing:
                     runner([*route, 'del', peer['address'], 'dev', interface])
             else:
+                other = json.loads(runner(['ip', '-j', '-4', 'route', 'show', 'exact', peer['address']]))
+                require(all(row.get('dev') == interface for row in other), 'GATEWAY_ROUTE_ALREADY_OWNED')
                 runner([*route, 'replace', peer['address'], 'dev', interface])
     finally:
         os.unlink(tmp)
+    verify_applied(config, ledger, runner)
+
+
+def validate_ledger(config, ledger):
+    pool, server_ip = validate(config)
+    require(isinstance(ledger, dict), 'GATEWAY_LEDGER_INVALID')
+    addresses, keys = set(), set()
+    for ident, peer in ledger.items():
+        require(isinstance(ident, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}:[1-9][0-9]*', ident), 'GATEWAY_LEDGER_INVALID')
+        require(isinstance(peer, dict) and set(peer) == {'public_key', 'address', 'removed'} and type(peer['removed']) is bool,
+                'GATEWAY_LEDGER_INVALID')
+        address = ipaddress.ip_interface(peer['address'])
+        require(address.version == 4 and address.network.prefixlen == 32 and address.ip in pool
+                and address.ip not in (server_ip, pool.network_address, pool.broadcast_address)
+                and str(address) == peer['address'] and peer['address'] not in addresses, 'GATEWAY_LEDGER_INVALID')
+        require(key(peer['public_key']) not in keys, 'GATEWAY_LEDGER_INVALID')
+        addresses.add(peer['address']); keys.add(peer['public_key'])
+    return ledger
+
+
+@contextmanager
+def locked_ledger(config):
+    path = Path(config['ledger_path'])
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    require(not any(p.is_symlink() for p in (path.parent, *path.parent.parents)))
+    require(path.parent.stat().st_uid == os.geteuid() and not path.parent.stat().st_mode & 0o022, 'GATEWAY_LEDGER_UNSAFE')
+    lock = path.with_suffix('.lock')
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        private(lock)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield validate_ledger(config, json.loads(private(path)) if path.exists() else {})
+    finally:
+        os.close(fd)
+
+
+def restore(config, runner=run):
+    """Root-only startup, never exposed through the API's sudo wrapper."""
+    validate(config)
+    with locked_ledger(config) as ledger:
+        apply(config, ledger, runner)
+        return {'status': 'succeeded', 'restored_peers': sum(not peer['removed'] for peer in ledger.values())}
 
 
 def execute(config, request, runner=run, apply_fn=apply, now=time.time):
@@ -133,14 +265,7 @@ def execute(config, request, runner=run, apply_fn=apply, now=time.time):
     require(type(request['generation']) is int and request['generation'] > 0)
     public_key = key(request['public_key'])
     ledger_path = Path(config['ledger_path'])
-    ledger_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    require(not any(p.is_symlink() for p in (ledger_path.parent, *ledger_path.parent.parents)))
-    lock = ledger_path.with_suffix('.lock')
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    try:
-        private(lock)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        ledger = json.loads(private(ledger_path)) if ledger_path.exists() else {}
+    with locked_ledger(config) as ledger:
         ident = request['target_id'] + ':' + str(request['generation'])
         peer = ledger.get(ident)
         if peer:
@@ -164,28 +289,40 @@ def execute(config, request, runner=run, apply_fn=apply, now=time.time):
             apply_fn(config, ledger, runner)
         else:
             require(peer and not peer['removed'], 'GATEWAY_PEER_UNKNOWN')
+            if apply_fn is apply:
+                verify_applied(config, ledger, runner)
         reachable = False
         if not peer['removed']:
             for row in runner(['wg', 'show', config['interface'], 'latest-handshakes']).splitlines():
                 fields = row.split()
                 if len(fields) == 2 and fields[0] == public_key:
                     reachable = 0 < int(fields[1]) <= now() and now() - int(fields[1]) <= 180
-        public = key(runner(['wg', 'pubkey'], input=private(config['private_key_file']).strip() + '\n'))
+        public = server_public_key(config, runner)
         return {'status': 'succeeded', 'reachable': reachable, 'tunnel': {
             'server_public_key': public, 'endpoint': config['endpoint'], 'address': peer['address'],
             'allowed_ips': str(server_ip) + '/32'}}
-    finally:
-        os.close(fd)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--request', help='Private JSON request file; otherwise read stdin')
+    parser.add_argument('--restore', action='store_true', help='Restore persisted peers during root-owned service startup')
+    parser.add_argument('--verify-forwarding', action='store_true', help='Read-only verification of both forwarding barriers')
     args = parser.parse_args()
     try:
         require(os.geteuid() == 0, 'GATEWAY_ROOT_REQUIRED')
         config = json.loads(private(args.config))
+        if args.verify_forwarding:
+            require(not args.restore and not args.request, 'GATEWAY_REQUEST_INVALID')
+            validate(config)
+            verify_forwarding(config, run)
+            print(json.dumps({'status': 'succeeded', 'forwarding_isolated': True}))
+            return 0
+        if args.restore:
+            require(not args.request, 'GATEWAY_REQUEST_INVALID')
+            print(json.dumps(restore(config)))
+            return 0
         if args.request:
             request_path = Path(args.request)
             request_root = Path(config.get('request_root', '/var/lib/railshot/personal/gateway'))

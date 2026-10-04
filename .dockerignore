@@ -18,5 +18,6 @@
 **/credentials*
 # Public renewal implementation; credential data remains excluded.
 !gitops/credentials.py
+!deployment/bootstrap/client_setup/credentials.py
 **/secrets
 **/.token-usage

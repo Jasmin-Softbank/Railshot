@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "lifecycle": "systemd",
   "interface": "railshotwg",
   "address_pool": "10.253.240.0/24",
   "server_address": "10.253.240.1/32",

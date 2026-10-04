@@ -1,9 +1,10 @@
 import { createServer } from 'node:http';
+import { lstatSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import yazl from 'yazl';
 import { createDeploymentService, ServiceError } from './github.js';
 import { archiveLimits, inspectArchive, validateFiles } from './archive.js';
@@ -21,6 +22,33 @@ const assets = new Map([
   ['/contracts/application.mjs', ['../../contracts/application.mjs', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['styles.css', 'text/css; charset=utf-8']],
 ]);
+
+export function readGithubToken(env = process.env) {
+  if (env.GITHUB_TOKEN !== undefined && env.GITHUB_TOKEN_FILE !== undefined) {
+    throw new Error('Set only one of GITHUB_TOKEN and GITHUB_TOKEN_FILE');
+  }
+  if (env.GITHUB_TOKEN_FILE === undefined) return env.GITHUB_TOKEN;
+  try {
+    const path = env.GITHUB_TOKEN_FILE;
+    if (typeof path !== 'string' || !isAbsolute(path)) throw new Error();
+    const info = lstatSync(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid() || info.nlink !== 1
+        || (info.mode & 0o777) !== 0o600 || info.size < 1 || info.size > 4097) throw new Error();
+    const raw = readFileSync(path, 'utf8');
+    const token = raw.endsWith('\n') ? raw.slice(0, -1) : raw;
+    if (!/^[\x21-\x7e]{1,4096}$/.test(token)) throw new Error();
+    return token;
+  } catch {
+    throw new Error('GITHUB_TOKEN_FILE must be a private operator-owned 0600 regular file');
+  }
+}
+
+function configuredDeploymentService(env = process.env) {
+  const token = readGithubToken(env);
+  return token && env.RAILSHOT_TARGET_ID ? createDeploymentService({ token,
+    owner: env.GITHUB_OWNER, repo: env.GITHUB_REPO, ref: env.GITHUB_REF, tenant: env.RAILSHOT_TENANT || env.JASMIN_TENANT,
+    workflow: env.GITHUB_WORKFLOW, targetId: env.RAILSHOT_TARGET_ID, targetIds: env.RAILSHOT_TARGET_IDS?.split(',') }) : null;
+}
 function json(response, code, data, headers = {}) {
   response.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...headers });
   response.end(JSON.stringify(data));
@@ -175,9 +203,7 @@ async function sourceArchive(files) {
 }
 
 export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
-  service = process.env.GITHUB_TOKEN && process.env.RAILSHOT_TARGET_ID ? createDeploymentService({ token: process.env.GITHUB_TOKEN,
-    owner: process.env.GITHUB_OWNER, repo: process.env.GITHUB_REPO, ref: process.env.GITHUB_REF, tenant: process.env.RAILSHOT_TENANT || process.env.JASMIN_TENANT,
-    workflow: process.env.GITHUB_WORKFLOW, targetId: process.env.RAILSHOT_TARGET_ID, targetIds: process.env.RAILSHOT_TARGET_IDS?.split(',') }) : null,
+  service = configuredDeploymentService(),
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
   deployPublished, environmentAdapter, applicationAdapter, personalAdapter, observeMetrics, observeLogs, product, pollInterval,
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets,
@@ -224,13 +250,20 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       }
       if (url.pathname.startsWith('/api/')) {
         if (request.headers['sec-fetch-site'] === 'cross-site') throw new ServiceError('다른 사이트에서 보낸 요청은 허용되지 않습니다.', 403);
-        const clientRoute = /^\/api\/v1\/(enrollments\/[A-Za-z0-9._-]+\/claims|targets\/[A-Za-z0-9._-]+\/(heartbeats|receipts))$/.test(url.pathname);
-        if (!clientRoute && !access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
+        const clientRoute = /^\/api\/v1\/(enrollments\/[A-Za-z0-9._-]+\/claims|targets\/[A-Za-z0-9._-]+\/(heartbeats|receipts|runtimes))$/.test(url.pathname);
+        const prerequisiteRoute = url.pathname === '/api/v1/readiness';
+        if (!clientRoute && !prerequisiteRoute && !access.publicDemo && !allowsToken(request.headers.authorization, access.token)) {
           response.setHeader('www-authenticate', 'Bearer');
           throw new ServiceError('API authentication required', 401);
         }
         let products;
         try { products = await productReady; } catch { throw new ServiceError('제품 저장소 또는 서버 설정을 확인할 수 없습니다.', 503); }
+        if (prerequisiteRoute) {
+          if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }
+          if (url.searchParams.getAll('scope').length !== 1 || url.searchParams.get('scope') !== 'personal'
+              || [...url.searchParams].length !== 1) throw new ServiceError('조회 조건이 잘못되었습니다.', 422);
+          json(response, 200, await products.personal.readiness()); return;
+        }
         // Public visitors are anonymous cookie sessions. Existing localhost maintenance clients
         // without a cookie retain their private maintenance channel and legacy contracts.
         const dashboardRoute = /^\/api\/v1\/(sessions|preferences|connections)(?:\/|$)/.test(url.pathname);
@@ -242,7 +275,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         response.setHeader('Vary', 'Cookie');
         if (versioned) {
           const claimRoute = /^\/api\/v1\/enrollments\/([A-Za-z0-9._-]+)\/claims$/.exec(url.pathname);
-          const personalRoute = /^\/api\/v1\/targets(?:\/([A-Za-z0-9._-]+))?(?:\/(enrollments|heartbeats|receipts|applications|instances|plans|operations))?$/.exec(url.pathname);
+          const personalRoute = /^\/api\/v1\/targets(?:\/([A-Za-z0-9._-]+))?(?:\/(enrollments|heartbeats|receipts|runtimes|applications|instances|plans|operations|reconciliations))?$/.exec(url.pathname);
           const ownerRoute = /^\/api\/v1\/(owners|recoveries)$/.exec(url.pathname);
           const personalHandled = claimRoute || ownerRoute || personalRoute && (personalRoute[2] || personalRoute[1] || request.method === 'POST' || url.searchParams.has('scope') || url.searchParams.has('provider'));
           if (personalHandled) {
@@ -261,6 +294,12 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             }
             if (claimRoute) { method(['POST']); const result = await products.personal.claim(claimRoute[1], await jsonInput(request), request.headers.authorization); json(response, 201, result, { Location: `/api/v1/targets/${result.target_id}` }); return; }
             const [, id, child] = personalRoute;
+            if (child === 'runtimes') {
+              method(['GET', 'POST']);
+              if (request.method === 'GET') json(response, 200, products.personal.runtimeStatus(id, request.headers.authorization));
+              else json(response, 202, await products.personal.prepareRuntime(id, await jsonInput(request), request.headers.authorization));
+              return;
+            }
             if (child === 'heartbeats' || child === 'receipts') { method(['POST']); json(response, 200, await products.personal[child === 'heartbeats' ? 'heartbeat' : 'receipt'](id, await jsonInput(request), request.headers.authorization)); return; }
             const ownerId = owner?.session_id || null;
             if (!id) {
@@ -275,6 +314,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             if (child === 'instances') { json(response, 200, { items: await products.personal.instances(id, ownerId), next_marker: null }); return; }
             if (child === 'applications') { json(response, 200, { items: products.personal.applications(id, ownerId), next_marker: null }); return; }
             if (child === 'enrollments') { const result = await products.personal.enrollment(id, await jsonInput(request), ownerId); json(response, 201, result, { Location: `/api/v1/targets/${id}` }); return; }
+            if (child === 'reconciliations') { const result = await products.personal.reconcile(id, await jsonInput(request), ownerId); json(response, 202, result, { Location: `/api/v1/operations/${result.id}`, 'Retry-After': '2' }); return; }
             if (child === 'plans') { const result = await products.personal.plan(id, await jsonInput(request), ownerId); json(response, 201, result, { Location: `/api/v1/plans/${result.id}` }); return; }
             accepted(response, 'operations', await products.personal.remove(id, await jsonInput(request), requestKey(request), ownerId), requestId, 'delete'); return;
           }
