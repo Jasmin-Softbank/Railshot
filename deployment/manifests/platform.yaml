@@ -205,6 +205,7 @@ spec:
             - {name: RAILSHOT_ALLOWED_ORIGINS, value: "https://railshot.io"}
             - {name: RAILSHOT_API_TOKEN_FILE, value: /run/secrets/api/token}
             - {name: RAILSHOT_STATE_DIR, value: /var/lib/railshot/state}
+            - {name: RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS, value: "3"}
             - {name: RAILSHOT_CD_CONFIG, value: /var/lib/railshot/config/cd.json}
             - {name: RAILSHOT_PERSONAL_CONFIG, value: /var/lib/railshot/config/personal.json}
             - name: RAILSHOT_APPLICATIONS_FILE

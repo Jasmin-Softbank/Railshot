@@ -668,6 +668,37 @@ class GateNetworkTest(unittest.TestCase):
         self.assertIn(["docker", "rm", "-f", net + "-web"], commands)
         self.assertEqual(commands[-1], ["docker", "network", "rm", net])
 
+    def test_runtime_empty_address_reports_exited_app_or_unknown_network(self):
+        net = "railshot-gate-" + "a" * 16
+        spec = {"services": [{"name": "web", "port": 8080}]}
+        for status in ("exited", "running"):
+            def command(cmd, **kwargs):
+                if cmd[:3] == ["docker", "network", "inspect"]:
+                    return SimpleNamespace(returncode=0, stdout=json.dumps([{
+                        "Driver": "bridge", "Internal": True, "EnableIPv6": False,
+                        "Options": {"com.docker.network.bridge.name": "rsrun-aaaaaaaa"}}]))
+                if cmd[:3] == ["docker", "inspect", "--format"]:
+                    data = {"Status": status, "ExitCode": 1} if cmd[3] == "{{json .State}}" else {net: {"IPAddress": ""}}
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(data))
+                if cmd[:2] == ["docker", "logs"]:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="unable to load evlib plugin evlib_uv")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            with self.subTest(status=status), patch.object(gate, "require_ci_network"), \
+                 patch.object(gate, "sh", side_effect=command) as shell, patch.object(gate, "http_status") as http:
+                if status == "exited":
+                    errors = gate.l3(spec, {"web": "sha256:" + "b" * 64}, "a" * 16, network=gate.CI_NETWORK)
+                    self.assertIn("container exited before health check (exit code 1)", errors[0])
+                    self.assertIn("unable to load evlib plugin evlib_uv", errors[0])
+                else:
+                    with self.assertRaises(gate.OperationError) as raised:
+                        gate.l3(spec, {"web": "sha256:" + "b" * 64}, "a" * 16, network=gate.CI_NETWORK)
+                    self.assertEqual(raised.exception.phase, "runtime-network")
+                    self.assertEqual(raised.exception.outcome, "UNKNOWN")
+                http.assert_not_called()
+                commands = [call.args[0] for call in shell.call_args_list]
+                self.assertIn(["docker", "rm", "-f", net + "-web"], commands)
+                self.assertEqual(commands[-1], ["docker", "network", "rm", net])
+
     def test_worker_installer_and_native_verifier_shell_parse(self):
         infra = gate.PLATFORM.parents[1] / "infrastructure/ansible"
         tasks = gate.yaml.safe_load((infra / "ci.yml").read_text())[0]["tasks"]
