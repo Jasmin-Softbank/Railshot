@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "railshot": {
+      "type": "http",
+      "url": "https://railshot.io/mcp"
+    }
+  }
+}
