@@ -1,0 +1,1 @@
+{"schema_version": "0.1", "action": "cleanup", "provider": "openstack", "environment_id": "railshot-runtime-demo", "status": "cleaned", "cluster_status": "absent", "cilium_status": "absent", "workload_status": "absent", "endpoint": null, "endpoint_scope": null, "error": null, "states": [{"state": "NODE_READY", "timestamp": "2026-10-01T22:22:07.884295+00:00"}]}

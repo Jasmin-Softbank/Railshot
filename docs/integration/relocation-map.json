@@ -1,0 +1,70 @@
+{
+  "changes": [
+    {
+      "path": "apps/api/src/server.js",
+      "reason": "selected source relocation only",
+      "before_sha256": "351ac860651ae67ee1be68073477a4a61db121404c424b95da57cfaf7f7723d3",
+      "after_sha256": "52d7d5c7febbd8c6f35ad51b6d7f86b164e106d1842b1d33346d0ec0064140a3"
+    },
+    {
+      "path": "ci/scripts/codebuild.py",
+      "reason": "selected source relocation only",
+      "before_sha256": "d99326cdb9a8a6c92135c5eb94d88a99f750b9a3f24608b9b014c093ab95fb4e",
+      "after_sha256": "cdd2d9514f87dfc03cd963bda49995e04b630c5f4937d214251a02d99620762c"
+    },
+    {
+      "path": "ci/scripts/codebuild_release.py",
+      "reason": "selected source relocation only",
+      "before_sha256": "f4414ec26d48456ad63765204b330dbb1eb0e39ae02f127e118ebe279a1ed012",
+      "after_sha256": "1bd1597b1f6214c5b7f014a2cd39560817af307af3c9ea16256f855ef63985ba"
+    },
+    {
+      "path": "ci/scripts/test_codebuild.py",
+      "reason": "selected source relocation only",
+      "before_sha256": "c86cbdabc3edf8d740e63b2d76ef1d50ecec5f7e09c23420f238b1fed3c5c51f",
+      "after_sha256": "561fc7b6aab6930b8a672d73d0b118843d4d8612b892297fa7d5fe326b4e4c26"
+    },
+    {
+      "path": "ci/scripts/test_workflow_policy.py",
+      "reason": "selected source relocation only",
+      "before_sha256": "958fe43d1bb4d8f1142df1f011a7f992f0572ce44bc2c4dc20dde1fea2b4cdea",
+      "after_sha256": "f6e38d501c09515f96c5a1a62dc81f81755b65b88ebe47c46479edc63d50262b"
+    },
+    {
+      "path": "ci/workflows/codebuild-release.yml",
+      "reason": "selected source relocation only",
+      "before_sha256": "8e508996f5648a28f57b05b08bad6e8619af74a60464461e61f658b37ba3db0d",
+      "after_sha256": "ae57a8c9af2ee8c66665949f71394fb05aa344b1d81076a672da07b1dfe55577"
+    },
+    {
+      "path": "ci/workflows/railshot-deploy.yml",
+      "reason": "selected source relocation only",
+      "before_sha256": "71d78e47f54de7445442079ee543b78128320aaf2aaa2a9df955c9e3675dfa5b",
+      "after_sha256": "9cef5c38a459a7257eb31cd6ea5888887cee8ed114f12b07fa2f25fd953a286e"
+    },
+    {
+      "path": "ci/scripts/gate/test_pipeline.py",
+      "reason": "selected source relocation only",
+      "before_sha256": "88ca1f426ec522b14d95ec09aed46e64146cd813fab3fe17b7f9d407d6c94b4c",
+      "after_sha256": "3723e3d3591054558500543db4bbefc8962062addbccc7d8cb65f12a8ed98684"
+    },
+    {
+      "path": "infrastructure/ansible/ci.yml",
+      "reason": "selected source relocation only",
+      "before_sha256": "1110cce09e79e8f4912a171f2090dc58f25617b3e6147468d500b3805c60f3ca",
+      "after_sha256": "ec5de79227fab12e2a18ad9c10f27fcad19b023d38c3c6c2f39ee0343dc217ca"
+    },
+    {
+      "path": "infrastructure/terraform/ci/cloud-init.yaml.tftpl",
+      "reason": "selected source relocation only",
+      "before_sha256": "9c5b3048f6f58ed524cb4779f4bb6e156f775ee396a69bb8dbec5b0960019998",
+      "after_sha256": "b6f44422c537e8e886b9118d856c1010ab7973e3336efd47fb7498ffb31cc208"
+    },
+    {
+      "path": "infrastructure/providers/terraform_tools/provision.py",
+      "reason": "selected source relocation only",
+      "before_sha256": "45e145905b1b3c7dce08f386113f3233e9039e1f25ff3d8bf3dbb91dc59aafcb",
+      "after_sha256": "1bf5bb1545fd5505afd689b03e20efeab45c386f7af92fa26d6b913efbce61f3"
+    }
+  ]
+}

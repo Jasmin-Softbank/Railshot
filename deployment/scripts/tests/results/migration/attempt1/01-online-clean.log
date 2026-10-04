@@ -1,0 +1,96 @@
+[2026-10-02T05:50:45Z] [preflight] Linux node prerequisites ready
+[NODE_READY]
+[NETWORK_CHECKING]
+[K3S_INSTALLING]
+[2026-10-02T05:50:46Z] [install-k3s] 공식 installer로 K3s v1.34.11+k3s1 설치 (kube-proxy 유지)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+100 36455  100 36455    0     0   115k      0 --:--:-- --:--:-- --:--:--  115k
+Created symlink /etc/systemd/system/multi-user.target.wants/k3s.service → /etc/systemd/system/k3s.service.
+[2026-10-02T05:50:55Z] [install-k3s] Kubernetes API 준비 대기. Node Ready는 Cilium 설치 후 확인합니다.
+[K3S_READY]
+[CILIUM_INSTALLING]
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+
+ 22 69.5M   22 15.4M    0     0  22.0M      0  0:00:03 --:--:--  0:00:03 22.0M
+ 60 69.5M   60 41.9M    0     0  24.2M      0  0:00:02  0:00:01  0:00:01 25.6M
+ 85 69.5M   85 59.6M    0     0  21.4M      0  0:00:03  0:00:02  0:00:01 21.2M
+100 69.5M  100 69.5M    0     0  19.2M      0  0:00:03  0:00:03 --:--:-- 18.6M
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+
+100    92  100    92    0     0    286      0 --:--:-- --:--:-- --:--:--   286
+[2026-10-02T05:51:00Z] [install] 공식 Cilium CLI로 설치: 1.20.2
+[33m    /¯¯\
+[36m /¯¯[33m\__/[32m¯¯\[0m    Cilium:             [31m1 errors[0m, [33m1 warnings[0m
+[36m \__[31m/¯¯\[32m__/[0m    Operator:           [31m1 errors[0m, [33m2 warnings[0m
+[32m /¯¯[31m\__/[35m¯¯\[0m    Envoy DaemonSet:    [32mOK[0m
+[32m \__[34m/¯¯\[35m__/[0m    Hubble Relay:       [36mdisabled[0m
+[34m[34m[34m    \__/[0m       ClusterMesh:        [36mdisabled[0m
+
+DaemonSet              cilium                   Desired: 1, Unavailable: [31m1/1[0m
+DaemonSet              cilium-envoy             Desired: 1, Ready: [32m1/1[0m, Available: [32m1/1[0m
+Deployment             cilium-operator          Desired: 1, Unavailable: [31m1/1[0m
+Containers:            cilium                   Pending: [32m1[0m
+                       cilium-envoy             Running: [32m1[0m
+                       cilium-operator          Pending: [32m1[0m
+                       clustermesh-apiserver
+                       hubble-relay
+Cluster Pods:          0/1 managed by Cilium
+Helm chart version:    1.20.2
+Image versions         cilium             quay.io/cilium/cilium@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01: 1
+                       cilium-envoy       quay.io/cilium/cilium-envoy@sha256:af7382699576b9e65e9184efa52eeca0b58aea70ad6e511bf260c91d9f740463: 1
+                       cilium-operator    quay.io/cilium/operator-generic@sha256:64d8798350e8569b8e7622563fed6e44dce2625f311e4651b774816516c744fc: 1
+Errors:                cilium             cilium                              1 pods of DaemonSet cilium are not ready
+                       cilium-operator    cilium-operator                     1 pods of Deployment cilium-operator are not ready
+Warnings:              cilium             cilium-l5pv6                        pod is pending
+                       cilium-operator    cilium-operator-5ccfb4f5c8-mn2gr    pod is pending
+                       cilium-operator    cilium-operator-5ccfb4f5c8-mn2gr    pod is pending
+
+Error: Unable to determine status:  timeout while waiting for status to become successful: context deadline exceeded
+[2026-10-02T05:54:01Z] [install] ERROR: 단계=install, line=69, exit=1
+[2026-10-02T05:54:01Z] [install] FAILED: 단계=install, exit=1. JSON error와 로그의 원인을 확인한 뒤 runtime 명령을 재실행하세요.
+[2026-10-02T05:54:01Z] [install] 실패 원인 진단: Pod 상태·Service·최근 이벤트
+NAMESPACE     NAME                               READY   STATUS              RESTARTS   AGE    IP             NODE              NOMINATED NODE   READINESS GATES
+kube-system   cilium-envoy-zh4fp                 1/1     Running             0          3m     192.168.5.15   ip-10-250-10-11   <none>           <none>
+kube-system   cilium-l5pv6                       0/1     Init:0/6            0          3m     192.168.5.15   ip-10-250-10-11   <none>           <none>
+kube-system   cilium-operator-5ccfb4f5c8-mn2gr   0/1     ContainerCreating   0          3m     192.168.5.15   ip-10-250-10-11   <none>           <none>
+kube-system   coredns-fddcf74bb-hn5dt            0/1     ContainerCreating   0          3m1s   <none>         ip-10-250-10-11   <none>           <none>
+No resources found in railshot-airgap-test namespace.
+kube-system   3m4s        Normal    ApplyingManifest                 addon/coredns                           Applying manifest at "/var/lib/rancher/k3s/server/manifests/coredns.yaml"
+default       3m3s        Normal    Synced                           node/ip-10-250-10-11                    Node synced successfully
+default       3m3s        Normal    RegisteredNode                   node/ip-10-250-10-11                    Node ip-10-250-10-11 event: Registered Node ip-10-250-10-11 in Controller
+kube-system   3m3s        Normal    AppliedManifest                  addon/coredns                           Applied manifest at "/var/lib/rancher/k3s/server/manifests/coredns.yaml"
+kube-system   3m2s        Normal    AppliedManifest                  addon/runtimes                          Applied manifest at "/var/lib/rancher/k3s/server/manifests/runtimes.yaml"
+kube-system   3m2s        Normal    ApplyingManifest                 addon/runtimes                          Applying manifest at "/var/lib/rancher/k3s/server/manifests/runtimes.yaml"
+kube-system   3m2s        Normal    ScalingReplicaSet                deployment/coredns                      Scaled up replica set coredns-fddcf74bb from 0 to 1
+kube-system   3m2s        Normal    AppliedManifest                  addon/rolebindings                      Applied manifest at "/var/lib/rancher/k3s/server/manifests/rolebindings.yaml"
+kube-system   3m2s        Normal    SuccessfulCreate                 replicaset/coredns-fddcf74bb            Created pod: coredns-fddcf74bb-hn5dt
+kube-system   3m2s        Normal    ApplyingManifest                 addon/rolebindings                      Applying manifest at "/var/lib/rancher/k3s/server/manifests/rolebindings.yaml"
+kube-system   3m2s        Normal    DeletingManifest                 addon/local-storage                     Deleting manifest at "/var/lib/rancher/k3s/server/manifests/local-storage.yaml"
+kube-system   3m1s        Normal    SuccessfulCreate                 daemonset/cilium                        Created pod: cilium-l5pv6
+kube-system   3m1s        Normal    SuccessfulCreate                 daemonset/cilium-envoy                  Created pod: cilium-envoy-zh4fp
+kube-system   3m1s        Normal    ScalingReplicaSet                deployment/cilium-operator              Scaled up replica set cilium-operator-5ccfb4f5c8 from 0 to 1
+kube-system   3m1s        Normal    SuccessfulCreate                 replicaset/cilium-operator-5ccfb4f5c8   Created pod: cilium-operator-5ccfb4f5c8-mn2gr
+kube-system   3m1s        Normal    DeletingManifest                 addon/traefik                           Deleting manifest at "/var/lib/rancher/k3s/server/manifests/traefik.yaml"
+kube-system   2m57s       Normal    Pulling                          pod/cilium-operator-5ccfb4f5c8-mn2gr    Pulling image "quay.io/cilium/operator-generic@sha256:64d8798350e8569b8e7622563fed6e44dce2625f311e4651b774816516c744fc"
+kube-system   2m57s       Normal    Pulling                          pod/cilium-envoy-zh4fp                  Pulling image "quay.io/cilium/cilium-envoy@sha256:af7382699576b9e65e9184efa52eeca0b58aea70ad6e511bf260c91d9f740463"
+kube-system   2m57s       Normal    Pulling                          pod/cilium-l5pv6                        Pulling image "quay.io/cilium/cilium@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01"
+kube-system   109s        Warning   FailedCreatePodSandBox           pod/coredns-fddcf74bb-hn5dt             Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "08da641a87ee014a7dc5b404b532c214399bd67c52d6445e6784bcfc32c75238": plugin type="cilium-cni" failed (add): unable to connect to Cilium agent: failed to create cilium agent client after 30.000000 seconds timeout: Get "http://localhost/v1/config": dial unix /var/run/cilium/cilium.sock: connect: no such file or directory...
+kube-system   99s         Normal    Started                          pod/cilium-envoy-zh4fp                  Started container cilium-envoy
+kube-system   99s         Normal    Created                          pod/cilium-envoy-zh4fp                  Created container: cilium-envoy
+kube-system   99s         Normal    Pulled                           pod/cilium-envoy-zh4fp                  Successfully pulled image "quay.io/cilium/cilium-envoy@sha256:af7382699576b9e65e9184efa52eeca0b58aea70ad6e511bf260c91d9f740463" in 1m17.559s (1m17.559s including waiting). Image size: 73789298 bytes.
+kube-system   45s         Warning   Unhealthy                        pod/cilium-envoy-zh4fp                  Startup probe failed: Get "http://127.0.0.1:9878/healthz": dial tcp 127.0.0.1:9878: connect: connection refused
+kube-system   24s         Warning   FailedCreatePodSandBox           pod/coredns-fddcf74bb-hn5dt             Failed to create pod sandbox: rpc error: code = Unknown desc = failed to setup network for sandbox "1e952b37eaafe6c76921ca4df55c1f87c630c5339a2e7a9a8e7ed7d415d506b6": plugin type="cilium-cni" failed (add): unable to connect to Cilium agent: failed to create cilium agent client after 30.000000 seconds timeout: Get "http://localhost/v1/config": dial unix /var/run/cilium/cilium.sock: connect: no such file or directory...
+[2026-10-02T05:54:02Z] [install] 진단: journalctl -u k3s -n 100; k3s kubectl get pods -A -o wide; k3s kubectl get events -A --sort-by=.lastTimestamp
+[FAILED]

@@ -1,0 +1,72 @@
+[2026-10-01T22:20:17Z] [preflight] Linux node prerequisites ready
+[NODE_READY]
+[K3S_READY]
+[33m    /¯¯\
+[36m /¯¯[33m\__/[32m¯¯\[0m    Cilium:             [31m1 errors[0m, [33m1 warnings[0m
+[36m \__[31m/¯¯\[32m__/[0m    Operator:           [32mOK[0m
+[32m /¯¯[31m\__/[35m¯¯\[0m    Envoy DaemonSet:    [32mOK[0m
+[32m \__[34m/¯¯\[35m__/[0m    Hubble Relay:       [36mdisabled[0m
+[34m[34m[34m    \__/[0m       ClusterMesh:        [36mdisabled[0m
+
+DaemonSet              cilium                   Desired: 1, Unavailable: [31m1/1[0m
+DaemonSet              cilium-envoy             Desired: 1, Ready: [32m1/1[0m, Available: [32m1/1[0m
+Deployment             cilium-operator          Desired: 1, Ready: [32m1/1[0m, Available: [32m1/1[0m
+Containers:            cilium                   Pending: [32m1[0m
+                       cilium-envoy             Running: [32m1[0m
+                       cilium-operator          Running: [32m1[0m
+                       clustermesh-apiserver    
+                       hubble-relay             
+Cluster Pods:          4/4 managed by Cilium
+Helm chart version:    1.20.2
+Image versions         cilium             invalid@@@: 1
+                       cilium-envoy       quay.io/cilium/cilium-envoy:v1.37.6-1789133542-cbec91f666af0bf742da986d43832932dbb26b82@sha256:af7382699576b9e65e9184efa52eeca0b58aea70ad6e511bf260c91d9f740463: 1
+                       cilium-operator    quay.io/cilium/operator-generic:v1.20.2@sha256:64d8798350e8569b8e7622563fed6e44dce2625f311e4651b774816516c744fc: 1
+Errors:                cilium             cilium          1 pods of DaemonSet cilium are not ready
+Warnings:              cilium             cilium-pgsfq    pod is pending
+
+Error: Unable to determine status:  timeout while waiting for status to become successful: context deadline exceeded
+[2026-10-01T22:20:34Z] [health] ERROR: 단계=health, line=6, exit=1
+[2026-10-01T22:20:34Z] [health] FAILED: 단계=health, exit=1. JSON error와 로그의 원인을 확인한 뒤 runtime 명령을 재실행하세요.
+[2026-10-01T22:20:34Z] [health] 실패 원인 진단: Pod 상태·Service·최근 이벤트
+NAMESPACE          NAME                                 READY   STATUS            RESTARTS   AGE     IP             NODE                         NOMINATED NODE   READINESS GATES
+kube-system        cilium-envoy-5672w                   1/1     Running           0          5m38s   192.168.5.15   lima-railshot-runtime-test   <none>           <none>
+kube-system        cilium-operator-7dcb85f7-8hvtz       1/1     Running           0          5m38s   192.168.5.15   lima-railshot-runtime-test   <none>           <none>
+kube-system        cilium-pgsfq                         0/1     PodInitializing   0          17s     192.168.5.15   lima-railshot-runtime-test   <none>           <none>
+kube-system        coredns-fddcf74bb-z6kph              1/1     Running           0          5m38s   10.42.0.100    lima-railshot-runtime-test   <none>           <none>
+railshot-demo      railshot-workload-56b77967cd-rnrjj   1/1     Running           0          2m8s    10.42.0.18     lima-railshot-runtime-test   <none>           <none>
+railshot-generic   railshot-workload-697c5fc758-4z2h2   1/1     Running           0          114s    10.42.0.136    lima-railshot-runtime-test   <none>           <none>
+railshot-generic   railshot-workload-697c5fc758-nlprl   1/1     Running           0          114s    10.42.0.178    lima-railshot-runtime-test   <none>           <none>
+NAME                        TYPE       CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE     SELECTOR
+service/railshot-workload   NodePort   10.43.4.182   <none>        80:30080/TCP   4m41s   railshot.io/app=railshot-workload
+
+NAME                                                     ADDRESSTYPE   PORTS   ENDPOINTS    AGE
+endpointslice.discovery.k8s.io/railshot-workload-5n958   IPv4          80      10.42.0.18   4m41s
+railshot-workload-56b77967cd-rnrjj
+app:  
+railshot-demo      21s         Normal    Created                          pod/railshot-check-c5cfc139               Created container: check
+railshot-demo      21s         Normal    Pulled                           pod/railshot-check-c5cfc139               Container image "curlimages/curl:8.12.1" already present on machine
+kube-system        18s         Normal    Pulled                           pod/cilium-pgsfq                          Container image "quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01" already present on machine
+kube-system        18s         Normal    Started                          pod/cilium-pgsfq                          Started container config
+kube-system        18s         Normal    Created                          pod/cilium-pgsfq                          Created container: config
+kube-system        18s         Normal    SuccessfulCreate                 daemonset/cilium                          Created pod: cilium-pgsfq
+kube-system        18s         Normal    Killing                          pod/cilium-q7h7g                          Stopping container cilium-agent
+kube-system        18s         Normal    SuccessfulDelete                 daemonset/cilium                          Deleted pod: cilium-q7h7g
+kube-system        17s         Normal    Pulled                           pod/cilium-pgsfq                          Container image "quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01" already present on machine
+kube-system        17s         Normal    Created                          pod/cilium-pgsfq                          Created container: mount-cgroup
+kube-system        17s         Normal    Started                          pod/cilium-pgsfq                          Started container mount-cgroup
+kube-system        16s         Normal    Pulled                           pod/cilium-pgsfq                          Container image "quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01" already present on machine
+kube-system        16s         Normal    Started                          pod/cilium-pgsfq                          Started container apply-sysctl-overwrites
+kube-system        16s         Normal    Created                          pod/cilium-pgsfq                          Created container: apply-sysctl-overwrites
+kube-system        15s         Normal    Created                          pod/cilium-pgsfq                          Created container: mount-bpf-fs
+kube-system        15s         Normal    Pulled                           pod/cilium-pgsfq                          Container image "quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01" already present on machine
+kube-system        15s         Normal    Started                          pod/cilium-pgsfq                          Started container mount-bpf-fs
+kube-system        14s         Normal    Started                          pod/cilium-pgsfq                          Started container clean-cilium-state
+kube-system        14s         Normal    Pulled                           pod/cilium-pgsfq                          Container image "quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01" already present on machine
+kube-system        14s         Normal    Created                          pod/cilium-pgsfq                          Created container: clean-cilium-state
+kube-system        13s         Normal    Started                          pod/cilium-pgsfq                          Started container install-cni-binaries
+kube-system        13s         Normal    Pulled                           pod/cilium-pgsfq                          Container image "quay.io/cilium/cilium:v1.20.2@sha256:2939231d0d3e3ebddcd80fffa168b7ddcc78fdf0dc864d1c8c126ff523c54f01" already present on machine
+kube-system        13s         Normal    Created                          pod/cilium-pgsfq                          Created container: install-cni-binaries
+kube-system        12s         Warning   InspectFailed                    pod/cilium-pgsfq                          Failed to apply default image tag "invalid@@@": couldn't parse image name "invalid@@@": invalid reference format
+kube-system        12s         Warning   Failed                           pod/cilium-pgsfq                          Error: InvalidImageName
+[2026-10-01T22:20:35Z] [health] 진단: journalctl -u k3s -n 100; k3s kubectl get pods -A -o wide; k3s kubectl get events -A --sort-by=.lastTimestamp
+[FAILED]

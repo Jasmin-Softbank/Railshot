@@ -1,0 +1,313 @@
+{
+  "recorded_at": "2026-10-02T07:37:47.833657+00:00",
+  "repository": "Jasmin-Softbank/Railshot",
+  "branch": "feature/deployment-runtime-seungmin",
+  "start_head": "c732b3bc83ad1b9cab416f1d763cfee9be26ea05",
+  "scope": "Documentation and audit evidence only; no runtime code, other repository areas or other branch changes",
+  "historical_audit": {
+    "origin_refs": {
+      "origin/codex/integrate-jihwan-20261002": "1b1ebfe80e5a09f55438a18b17e780804b93e9c7",
+      "origin/codex/integrate-runtime-20261002": "d3f29d0e0ca1e94d0f630ecbd685df6b0f5e0732",
+      "origin/feature/dashboard-ui": "4fb39c88e17070d2ac048ec0667083f0252b644c",
+      "origin/feature/deployment-runtime-seungmin": "c732b3bc83ad1b9cab416f1d763cfee9be26ea05",
+      "origin/feature/poc-cloud-jihwan": "efa4d7c599bf9af512112a353b3d5324c036db68",
+      "origin/integration/team-assembly-20261002": "362e235550928d63b4d09d287af54a339870323c",
+      "origin/main": "cc1f084bf8453fa3ba3afeac9fd44ba8d01f92e6"
+    },
+    "local_integration": "adda5c7532c22da95e938a3cf1a7ba4c05e4ca47",
+    "own_unpushed_at_start": false,
+    "own_main_direct_commit_or_push_found": false,
+    "own_integration_direct_commit_or_push_found": false,
+    "own_other_team_branch_direct_change_found": false,
+    "own_railshot_runtime_commit_outside_deployment": [],
+    "team_merge": {
+      "actor": "mangowhoiscloud",
+      "merge_commit": "4f97f82103476ced4c84407d33f167774eafd824",
+      "pr1_state": "MERGED",
+      "pr1_merged_at": "2026-10-02T07:21:56Z"
+    },
+    "source_jasmin_prior_authorized_outside_deployment": {
+      "c3be75003c2187061197c641cea4707aa3fb862c": [
+        "README.md",
+        "deployment-poc/"
+      ],
+      "fb503fd609161dc94cd167f75da0eef456d148e2": [
+        "README.md",
+        "deployment-poc/README.md"
+      ],
+      "b93d3a1d7a7ede54d1ac2c07e0148df8cd138146": [
+        "AGENTS.md"
+      ],
+      "4b5e22cb575c6b7ab8fb69f0b0dbe101064bc034": [
+        "README.md"
+      ]
+    }
+  },
+  "vercel": {
+    "classification": "pre_existing",
+    "detailed_build_cause": "unknown",
+    "runtime_pr_root_or_app_config_changed": false,
+    "pre_runtime_integration_failures": [
+      "1b1ebfe80e5a09f55438a18b17e780804b93e9c7",
+      "021b8b2c4fc86e90d0029213b4e89b571036ec81"
+    ],
+    "logs_access": "login_required; Vercel CLI absent",
+    "settings_changed": false
+  },
+  "file_audit": {
+    "original_pr_files": 368,
+    "bytes": 1036036,
+    "A_source_test_schema_docs_metadata": 35,
+    "A_summary_minimum_evidence": 17,
+    "B_C_raw_evidence": 316,
+    "raw_non_markdown_result_files": 330,
+    "raw_result_bytes": 780840,
+    "exact_duplicate_groups": 22,
+    "duplicate_extra_files": 69,
+    "removed_files": 0,
+    "decision": "retain original traceability; small total size and already integrated"
+  },
+  "current_tests": {
+    "unit_contract_airgap_network_release": {
+      "PASS": 49,
+      "FAIL": 0,
+      "SKIP": 0
+    },
+    "cloud_runtime_smoke": {
+      "PASS": 0,
+      "FAIL": 0,
+      "SKIP": 2
+    },
+    "counts": {
+      "PASS": 49,
+      "FAIL": 0,
+      "SKIP": 2
+    }
+  },
+  "static_validation": {
+    "status": "passed",
+    "shell_files": 19,
+    "python_files": 20,
+    "actual_input_output_pairs": 21,
+    "supplement_outputs": 3,
+    "new_linux_installation": false
+  },
+  "current_preflight": {
+    "scope": "Actual endpoint probes from macOS controller; not Linux node installation validation",
+    "network_capabilities": {
+      "dns": true,
+      "https_443": true,
+      "k3s_source": true,
+      "github": true,
+      "cilium_cli_source": true,
+      "cilium_chart": true,
+      "quay": true,
+      "registry_k8s": true,
+      "docker_hub": true,
+      "ghcr": true,
+      "workload_registry": null,
+      "cloudflare_tunnel": null,
+      "wireguard_udp_51820": null
+    },
+    "network_details": {
+      "k3s_source": {
+        "available": true,
+        "url": "https://raw.githubusercontent.com/k3s-io/k3s/v1.34.11%2Bk3s1/install.sh",
+        "protocol": "TLS/TCP",
+        "http_status": 200,
+        "resolved_ip": "185.199.109.133",
+        "curl_exit_code": 0,
+        "error": null,
+        "duration_seconds": 0.321
+      },
+      "github": {
+        "available": true,
+        "url": "https://github.com/k3s-io/k3s/releases/download/v1.34.11%2Bk3s1/k3s-arm64",
+        "protocol": "TLS/TCP",
+        "http_status": 200,
+        "resolved_ip": "185.199.108.133",
+        "curl_exit_code": 0,
+        "error": null,
+        "duration_seconds": 0.601
+      },
+      "cilium_cli_source": {
+        "available": true,
+        "url": "https://github.com/cilium/cilium-cli/releases/download/v0.20.1/cilium-linux-arm64.tar.gz",
+        "protocol": "TLS/TCP",
+        "http_status": 200,
+        "resolved_ip": "185.199.108.133",
+        "curl_exit_code": 0,
+        "error": null,
+        "duration_seconds": 0.608
+      },
+      "cilium_chart": {
+        "available": true,
+        "url": "https://helm.cilium.io/cilium-1.20.2.tgz",
+        "protocol": "TLS/TCP",
+        "http_status": 200,
+        "resolved_ip": "185.199.108.153",
+        "curl_exit_code": 0,
+        "error": null,
+        "duration_seconds": 0.383
+      },
+      "quay": {
+        "available": true,
+        "url": "https://quay.io/v2/",
+        "protocol": "TLS/TCP",
+        "http_status": 401,
+        "resolved_ip": "34.202.214.13",
+        "curl_exit_code": 0,
+        "error": null,
+        "duration_seconds": 0.809
+      },
+      "registry_k8s": {
+        "available": true,
+        "url": "https://registry.k8s.io/v2/",
+        "protocol": "TLS/TCP",
+        "http_status": 401,
+        "resolved_ip": "34.96.108.209",
+        "curl_exit_code": 0,
+        "error": null,
+        "duration_seconds": 0.471
+      },
+      "docker_hub": {
+        "available": true,
+        "url": "https://registry-1.docker.io/v2/",
+        "protocol": "TLS/TCP",
+        "http_status": 401,
+        "resolved_ip": "100.30.41.220",
+        "curl_exit_code": 0,
+        "error": null,
+        "duration_seconds": 0.803
+      },
+      "ghcr": {
+        "available": true,
+        "url": "https://ghcr.io/v2/",
+        "protocol": "TLS/TCP",
+        "http_status": 401,
+        "resolved_ip": "20.200.245.241",
+        "curl_exit_code": 0,
+        "error": null,
+        "duration_seconds": 0.309
+      },
+      "required": [
+        "cilium_chart",
+        "cilium_cli_source",
+        "docker_hub",
+        "github",
+        "k3s_source",
+        "quay",
+        "registry_k8s"
+      ],
+      "required_unavailable": [],
+      "duration_seconds": 0.816,
+      "wireguard_udp_51820": {
+        "available": null,
+        "reason": "Authenticated WireGuard peer/key contract absent; UDP send is not proof"
+      },
+      "note": "TLS reachability/registry challenge only; image authorization, QUIC and tunnel credentials are not proven"
+    }
+  },
+  "existing_public_http": [
+    {
+      "provider": "aws",
+      "url": "https://fixture-npm-js-8461c33ac524.railshot.io/health",
+      "http_status": 200,
+      "body": "{\"status\":\"ready\"}",
+      "elapsed_seconds": 0.208,
+      "scope": "Existing team application endpoint, read-only external observation; not runtime deployment validation"
+    },
+    {
+      "provider": "gcp",
+      "url": "https://fixture-npm-js-3feba5a1b1cf.railshot.io/health",
+      "http_status": 200,
+      "body": "{\"status\":\"ready\"}",
+      "elapsed_seconds": 0.221,
+      "scope": "Existing team application endpoint, read-only external observation; not runtime deployment validation"
+    }
+  ],
+  "cloud_smoke": {
+    "aws": {
+      "auth": "ready",
+      "ready_node": "reported_existing_by_team; current_node_readiness_unverified",
+      "runtime_deploy": "not-run",
+      "k3s": "not-run",
+      "cilium": "not-run",
+      "workload": "not-run",
+      "internal_http": "not-run",
+      "verify": "not-run",
+      "cleanup": "not-run",
+      "redeploy": "not-run",
+      "scenario_status": "SKIP",
+      "status": "BLOCKED_AWS_READ_PERMISSION",
+      "reason": "ec2:DescribeInstances UnauthorizedOperation; no verified current node transport"
+    },
+    "gcp": {
+      "auth": "not-ready",
+      "ready_node": "reported_existing_by_team; current_node_readiness_unverified",
+      "runtime_deploy": "not-run",
+      "k3s": "not-run",
+      "cilium": "not-run",
+      "workload": "not-run",
+      "internal_http": "not-run",
+      "verify": "not-run",
+      "cleanup": "not-run",
+      "redeploy": "not-run",
+      "scenario_status": "SKIP",
+      "status": "BLOCKED_GCP_AUTH_NOT_READY",
+      "reason": "gcloud executable/default install/config absent; no verified current node transport"
+    }
+  },
+  "previous_validation": {
+    "PASS": 65,
+    "FAIL": 0,
+    "SKIP": 0,
+    "scope": "Previous unit 49 plus actual Linux 16; not rerun in current task"
+  },
+  "bundle_verification": {
+    "status": "verified",
+    "bundle_version": "2026-10-02.1",
+    "manifest_sha256": "0772caa341314645645a42e0f41c39936d1ee535679bd38761fde263d6a7a0c3"
+  },
+  "archive": {
+    "name": "railshot-airgap-arm64-v0.1.0.tar.zst",
+    "bytes": 747700166,
+    "sha256": "9951caad0711cba40608eb2dabc27122723d028a4233c0d09c8a03d378b806ac",
+    "checksum_reverified": true,
+    "git_tracked": false,
+    "architecture": "arm64",
+    "amd64_verified": false
+  },
+  "release": {
+    "tag": "airgap-bundle-v0.1.0",
+    "lookup_http_status": 404,
+    "uploaded_this_run": false,
+    "status": "local_prepared"
+  },
+  "timeout": {
+    "json_readiness_default_seconds": 180,
+    "json_allowed_range_seconds": [
+      5,
+      900
+    ],
+    "standalone_shell_default_seconds": 300,
+    "team_ansible_wait_seconds": 300,
+    "changed": false,
+    "recommendation": "Keep default; explicit cold input 600 pending team contract; consider stage budgets later"
+  },
+  "cloudflare": {
+    "optional": true,
+    "provisioned": false,
+    "authenticated_tunnel_verified": false
+  },
+  "merge_performed_by_this_task": false,
+  "not_verified": [
+    "New AWS/GCP Runtime deploy",
+    "Cloud internal HTTP",
+    "amd64 artifact/install",
+    "GitHub Release remote roundtrip",
+    "Vercel detailed cause",
+    "authenticated Cloudflare/WireGuard",
+    "long-running operations"
+  ]
+}

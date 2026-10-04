@@ -1,0 +1,28 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Arial, Apple SD Gothic Neo, sans-serif","fontSize":"16px","primaryColor":"#dbeafe","primaryBorderColor":"#2563eb","primaryTextColor":"#172033","signalColor":"#475569","noteBkgColor":"#fef3c7","noteTextColor":"#172033"},"sequence":{"actorMargin":24,"messageMargin":24,"noteMargin":12,"wrap":true,"width":130}}}%%
+sequenceDiagram
+ autonumber
+ actor U as 사용자
+ participant A as 제품 API
+ participant CI as Actions CI / 게시 job
+ participant R as GHCR / artifact
+ actor O as 운영자 / CD CLI
+ participant G as config Git
+ participant C as Argo CD
+ participant K as 고객 K3s
+ Note over U,K: bc61a5a 기준 · 준비된 대상 / 게시 성공 이후의 주요 호출
+ U->>A: 소스 제출 / 승인 target
+ A->>CI: 앱 Git commit / workflow_dispatch
+ Note over CI: 기본 검사 → 필요한 AI 수정 → 같은 검사
+ CI->>R: 통과 bundle 그대로 게시 / receipt
+ A->>R: source / target / attempt / hash 대조
+ A-->>U: API 판정: published / URL null
+ Note over A,O: 제품 API에서 운영자 CD 절차로 자동 인계되지 않음
+ O->>R: 게시 artifact 읽기 / handoff.py 검증
+ O->>G: manifest 검토 / commit
+ O->>C: argo.py로 정확한 revision sync 요청
+ Note over G,K: Argo는 고정 config Git을 읽고 containerd는 지정 image digest를 pull
+ C->>K: Deployment / Service / NetworkPolicy 적용
+ O->>C: revision / Synced / Healthy 확인
+ O->>K: 공개 HTTPS로 기대 앱 응답 검사
+ K-->>O: 실제 공개 응답
+ Note over A,K: Argo 검증과 공개 응답의 제품 API 결과 소비는 별도 연결 필요

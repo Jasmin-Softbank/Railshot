@@ -1,0 +1,6 @@
+[2026-10-01T22:20:05Z] [preflight] Linux node prerequisites ready
+[NODE_READY]
+[K3S_READY]
+[CILIUM_READY]
+[WORKLOAD_READY]
+[FAILED]

@@ -1,0 +1,285 @@
+# Application stop, start and permanent deletion
+
+The dashboard exposes management actions for a session-owned, registered application
+in deployment history and its deployment detail. The trash icon opens a native warning
+dialog. **Cancel** closes it; **Permanently delete** is the additional confirmation
+click and sends `delete_data: true`. No typed name or extra checkbox is required.
+The dialog displays a server-generated plan, including retained shared resources.
+
+## API and state
+
+| Request | Result |
+| --- | --- |
+| `POST /api/v1/applications/{id}/plans` with `action` | Read-only inventory, public resource names, retained resources, plan hash and ten-minute expiry |
+| `POST /api/v1/applications/{id}/operations` | Durable operation intent; `202` with a status `Location`; requires `Idempotency-Key`, plan ID/hash and app-name confirmation |
+| `GET /api/v1/operations/{id}` | Steps, outcome and potentially remaining resources, scoped to the same session |
+
+The confirmation dialog supplies the known app name itself. The API still binds it to
+the session-owned application and the approved plan. The same idempotency key/body
+returns the existing operation; changing the body is a conflict. Reads do not retry
+mutations. Restarted in-flight operations become `unknown` and need reconciliation.
+
+| Action | App state after verified success | Resource effect |
+| --- | --- | --- |
+| Stop | `stopped` | Disable CI target and GitOps reconciliation; remove app-specific external backend/route; scale workloads to zero and suspend jobs; retain data, namespace, credentials and route identity |
+| Start | `ready` | Restore saved replicas/suspend values; wait for workload readiness; recreate app route; restore reconciliation and CI target |
+| Delete | `deleted` tombstone | Stop writers, remove app route/DNS, revoke credential renewal, delete namespace and supported storage, delete scoped Argo/credential registration, release NodePort allocation |
+
+Completed Job Pods may remain while stopped. Start verifies Kubernetes readiness, provider resource readback and HTTPS 200 at
+the registered hostname and health path before marking the app ready.
+Deployment history, operation receipts, uploaded source/build artifacts and immutable
+GitOps source history are retained as audit/build records. Delete removes the running
+app's data and allocations; it is not a repository or account-erasure endpoint.
+
+A queued/running deployment of the same registered app can be deleted. The API first
+persists `deletion_requested`, waits for its local worker to stop, cancels the exact
+bound GitHub run once and observes completion. Worker guards precede and follow
+registration, CI dispatch and CD. Cleanup begins only after the remote writer is
+known to be stopped. Explicitly resumed CD workers use the same deployment tracking,
+so deletion waits for their completion too. A successful stop/start operation remains
+an audit reference and does not permanently block later deployment resumption.
+The inventory is refreshed after cancellation: an expanded scope
+requires a new confirmation. Queued/registering apps use a deletion plan scoped to their exact application ID
+and deployment. After the writer stops, a fresh private plan must prove ownership.
+If registration never began, absence of its durable pre-write intent and binding under
+the registrar lock permits a local tombstone with zero remote changes. A partial
+registration or unknown remote outcome is blocked; resource ownership is never guessed
+from a display name.
+
+A stopped CD observation (`blocked`, `outcome_unknown: true`) after verified image
+publication does not prevent deleting the same registered application. The API requires
+an exact application, environment, target and session match and no local deployment
+worker. A new native plan inventories live resources even when the CD journal is
+missing; apply retains every ownership, active-sync and provider-state check below.
+Unknown writers, uncertain CI, incomplete registration and prior uncertain lifecycle
+operations still require reconciliation. The old deployment error remains in the audit
+history. The dashboard labels an uncertain delivery as requiring result verification
+and offers deletion while disabling stop/start.
+
+## Execution and ownership
+
+`deployment/scripts/application_lifecycle.py` is the existing application adapter's
+private CLI, using the same registrar configuration and registration lock. It persists
+a private plan with registration/binding hash, Kubernetes UIDs, saved declarations and
+provider authority snapshot. The public API only receives bounded resource names and
+step states. Credentials and Terraform state never cross that boundary.
+
+Apply checks expiry, action/app/environment, saved-plan hash, immutable registration,
+namespace and registered ServiceAccount UID, workload declarations, provider lineage,
+exact resource IDs and DNS ownership. Pod/Endpoint churn does not invalidate the
+approved namespace's declaration. Kubernetes writes use UID/resourceVersion
+preconditions. Shared policy changes use resourceVersion checks and preserve other
+apps. An empty credential-renewal policy produces an empty Role, never an unrestricted
+`resourceNames: []` rule.
+
+Each physical environment has one canonical Argo cluster credential. Application
+credentials retain their own namespace, ServiceAccount and AppProject but use the
+`railshot-application` discovery label. The plan binds the canonical Secret UID and
+renewal scope; token rotation alone does not invalidate it. The sole permitted
+cross-namespace RoleBinding is the app-owned `railshot-environment-argocd`, pointing at
+the registered environment ServiceAccount and the app's local Role. Its live UID is
+checked again before runtime cleanup; the environment ServiceAccount is never deleted.
+
+Deletion order is deliberate:
+
+1. Persist intent and block future registration/publication for this app.
+2. Remove its CI binding and exact Argo Application after checking no sync is active.
+3. Remove its external traffic resources and owned DNS through the existing provider writer.
+4. CAS-remove only its namespace from the canonical environment credential and renewal
+   scope; preserve every other namespace and the environment anchor. Remove the app's
+   renewal-policy entry and exact Secret permission.
+5. Delete the UID-bound namespace and wait for supported backing-storage reclamation.
+6. Delete its private Argo credential and AppProject; remove exact control permissions.
+7. Save the deleted tombstone and release the reserved NodePort only after all checks pass.
+
+Every provider writer revalidates its approved plan immediately before its own writes.
+A late drift or timeout can therefore leave a partially completed operation. It remains
+`unknown`, with conservative residual resource names; there is no automatic force,
+rollback, finalizer removal, or mutation retry. Other writes remain blocked until an
+operator reconciles actual state and the durable journals. Never clear a journal merely
+to make a retry possible.
+The last app leaves the canonical environment credential and renewal entry intact.
+Shared credential access remains `get/patch`; cleanup adds separate `delete` grants
+for the exact app-owned Application, AppProject and private Secret only.
+The shared renewal policy first records the new scope plus the exact previous scope,
+then the Secret scope changes, and finally the previous scope and app renewal entry
+are removed. A failure between these CAS writes still permits environment token renewal
+with either recorded scope. New lifecycle operations block until that transition is
+reconciled; namespace deletion starts only after final readback succeeds.
+
+## Provider resources
+
+| Provider | App-owned resources | Always shared/retained |
+| --- | --- | --- |
+| AWS | ALB listener rule, target group/attachment, app-specific NodePort SG rule; owned DNS on delete | ALB/listener, shared certificates, VM, VPC/subnets, cluster |
+| GCP | URL-map app host/path entry, backend service, NEG/endpoint, health check, NodePort firewall contribution; app certificate/map entry and DNS on delete | Shared HTTPS frontend/IP/proxy/map, VM/network/cluster, legacy baseline |
+| OpenStack | Exact route policy/rule, pool/member/health monitor, app NodePort SG rule, tunnel ingress entry and owned DNS | Octavia listener/LB, tunnel/Deployment/Secret, VM/network/cluster |
+
+Stop removes active app backends instead of leaving an unhealthy target pointing at
+an absent workload. Start restores the recorded app route. The last application may
+be removed without destroying the shared edge. Terraform is applied only from a saved
+plan whose permitted changes are the exact owned deletions/recreations plus bounded
+shared route-list edits. AWS/GCP also read provider inventories after deletion to
+check exact resource IDs and target-group/NEG parents are absent. Broad
+`terraform destroy` is never used.
+
+The older GCP baseline `.app` resources are not registered app-owned routes. This
+feature does **not** adopt or delete those resources; the previously observed fixture
+backend requires a separately reviewed ownership migration. Legacy deployment records
+without an application ID and dedicated environment/VM deletion are likewise outside
+this app deletion API.
+
+## Rollout
+
+Apply the reviewed AWS product-edge IAM policy first: it adds app-scoped deletion
+and SG-rule revocation while retaining explicit protection for bootstrap targets.
+GCP/OpenStack operator identities must also permit the corresponding app-owned deletes
+and readback checks. This source change does not itself apply live cloud IAM.
+AWS Access Analyzer `ValidatePolicy` returned zero findings on 2026-10-03 for
+`product-edge-policy.json` SHA-256
+`fb401be9f21ee946592cd56f1e2991359df0d60785bca03ddf36decb7a118dfb`.
+That validates the policy document; it is not an effective-permission or deletion test.
+The reviewed policy was applied once from the saved full Terraform plan on 2026-10-03.
+Live readback confirmed default version `v3`, attached only to `railshot-control-poc`,
+with the exact reviewed document; all five scope checks passed against that live policy.
+Only `aws_iam_policy.product_edge[0]` changed. Actual app deletion and organization-level
+effective access still require disposable-app acceptance.
+The reviewed GCP IAM plan was also applied once on 2026-10-03: one existing-role
+update, one conditional role and its member binding, with no infrastructure changes.
+Live readback matched all 67 existing-role permissions and the two conditional
+permissions; both roles remained bound only to the existing edge service account.
+The actual API Pod's WIF identity passed all 67 project permission checks and the
+runtime VM use check. VM deletion and deletion of the shared baseline backend were
+denied. WIF trust and the API PVC's GCP authority files were unchanged.
+The 23 added project/parent permissions are not app-isolated by IAM; the executor's
+ownership and saved-plan checks enforce the application boundary. No registered app
+backend existed for a positive conditional-delete test, so that test and actual
+stop/start/delete execution remain part of disposable-app acceptance.
+
+The API image packages the CLI, runtime inventory helper and provider cleanup writer;
+existing CI discovers their Python and API/browser tests. Dashboard and API must be
+released together because the operation response/polling contract is shared. Kubernetes
+control permissions are upgraded only for registered exact names during execution.
+
+OpenStack additionally runs a fixed controller-host executable at
+`/opt/railshot/octavia/openstack_route_worker.py`. Install the reviewed worker revision
+through the existing operator deployment path before enabling its lifecycle RPCs; an
+API image update alone does not update that host file. Unsupported/old worker responses
+fail closed. The on-prem integration on 2026-10-03 installed the worker whose SHA-256 is
+`5ccb8f6e1bf4e0d65c681c9a9f62045e66661f8bc3f3a01da1b5d1d9a8efb230`;
+that historical revision's isolated acceptance verified health-path
+replacement, strict TLS/HTTP 200, native route/SG deletion and identical-request replay.
+Do not replace it with the earlier worker during the API release. A health-path change
+recreates only that app's verified route and briefly interrupts its traffic.
+
+Personal environment registration additionally requires the current worker revision;
+the historical acceptance above does not verify these new registration operations.
+The existing fixed SSH command remains the only entry point. The operator-owned
+`/opt/railshot/octavia/route-config.json` may contain its existing legacy configuration,
+or a static base containing `version`, the load balancer's `project_id`,
+`loadbalancer_id`, `listener_id`, `member_subnet_id`, `base_domain`, and a `network`
+object with `amphora_port_id`, `amphora_server_id`, `amphora_private_address`.
+The customer `railshot` project ID and VM identity are supplied at registration;
+they are not manually copied into the shared base. The central operator profile's
+`worker_base_file` must describe this same static base.
+
+The controller's existing `cloud-cli.py` authentication wrapper must allow these
+read-only OpenStack commands in addition to its existing route commands:
+
+- `project show <project-id> -f json`
+- `server show <server-id> -f json`
+- `port show <port-id> -f json`
+- `port list --project <project-id> -c ID -f json`
+- `security group show <group-id> -f json`
+- `loadbalancer show <loadbalancer-id> -f json`
+- `loadbalancer listener show <listener-id> -f json`
+
+Provider results must prove the project, VM, port, private address, subnet and one
+exclusive security group. A security group shared with another VM or project is
+rejected. Existing VM ownership properties, if present, must match the environment;
+registration never edits those properties. A read-only `verify-runtime` call checks
+worker support and provider evidence before central registration writes. A missing
+or outdated worker is a preparation failure, not a successfully connected runtime.
+
+`register-runtime` atomically fixes each binding under the root-owned
+`/var/lib/railshot/octavia/environments/<environment-id>/binding.json`. Incoming
+requests cannot select a file path. Identical retries return the same binding;
+another environment cannot claim its VM, port, security group or private address.
+Routes and lifecycle operations select this binding by ID and hash. After all
+application routes have verified deletion, `unregister-runtime` marks the binding
+released and prevents further route operations. It retains an audit tombstone;
+legacy routes, other environments and the operator's load balancer remain untouched.
+
+### Reviewed controller worker update
+
+Read-only inspection of the integration controller on 2026-10-04 confirmed that
+its existing `cloud-cli.py` forwards arguments to OpenStackClient without a command
+allowlist. The additional read commands above therefore require no authentication
+wrapper change on that host. Keep its existing `inputs.json` and `clouds.yaml` in
+place; do not copy production AWS configuration into the local central deployment.
+The controller worker was still the historical SHA-256 shown above. Its load
+balancer and HTTPS listener were both `ACTIVE`/`ONLINE`; these observations do not
+attest that the new registration operations have been installed or exercised.
+
+For that existing controller installation, the operator update tool is:
+
+```sh
+python3 deployment/scripts/personal-worker-update.py \
+  --ssh-config /absolute/path/to/reviewed/ssh_config --host octavia \
+  --expected-current-sha256 <verified-installed-sha256> \
+  --candidate-sha256 <reviewed-local-worker-sha256>
+```
+
+The candidate defaults to the adjacent `openstack_route_worker.py`; `--candidate`
+can identify another reviewed local copy. Both SHA-256 values are mandatory. The
+tool compiles the candidate without executing it, acquires the existing load
+balancer's file lock without waiting, checks the old worker again under that lock,
+writes a root-only backup, atomically replaces the worker with mode `0600`, and
+verifies its new digest. Configuration, authentication-wrapper and application
+journal digests must remain identical. An active route operation causes the update
+to stop before replacement; it never restarts OpenStack or changes cloud resources.
+Only the fixed worker, its private backup and update receipt may be written.
+
+A lost SSH response is not proof of failure. Repeat only the same reviewed pair
+of hashes: a verified installed candidate returns `already_current`; an interrupted
+post-check is completed only if the saved preservation evidence still matches.
+Other unexpected states remain unverified for operator inspection. Perform a
+read-only runtime registration check and recheck existing public-service health
+after installing the new worker. The local central API image alone cannot update
+the remote controller file.
+
+## Storage and verification limits
+
+The runtime performs full namespaced API discovery. Supported built-in resources must
+belong to the registered namespace and its ownership chain. A CiliumEndpoint is allowed
+only when it belongs to a real Pod UID in that namespace. Other CRs, external controllers,
+foreign owners and external database bindings block automatic deletion.
+
+PVC deletion is supported for exclusively bound, dynamically provisioned CSI volumes
+with a `Delete` reclaim policy and the external-provisioner deletion finalizer. It
+checks PVC→PV UID binding, provisioning identity, StorageClass, duplicate/shared volume
+handles and attachment state. Completion requires namespace, PV and VolumeAttachment
+absence. This uses the CSI controller's backing-volume deletion guarantee, rather than
+claiming a separate native cloud API verification. Retain/static/shared volumes, local
+paths and unowned external storage require explicit ownership/reclamation support
+before this operation can proceed. See Kubernetes documentation on
+[PV deletion protection](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#persistentvolume-deletion-protection-finalizer)
+and [finalizers](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/).
+The GitOps stop uses the documented
+[skip reconciliation annotation](https://argo-cd.readthedocs.io/en/stable/user-guide/skip_reconcile/).
+
+The automated checks use simulated Kubernetes/provider/GitHub interfaces and a local
+browser/API. They exercise confirmation, session isolation, cancellation races,
+idempotency, ownership drift, partial writes, storage retention and unknown outcomes.
+They do not delete a production app or establish live three-provider teardown success.
+A live acceptance run must use a disposable registered app on each provider, record its
+namespace and edge IDs, test stop/start/delete, then verify the app resources are absent
+and another app plus shared infrastructure remain healthy.
+
+OpenStack storage component acceptance on 2026-10-03 separately verified Cinder PVC
+creation, data preservation across Pod recreation, 1Gi-to-2Gi expansion, and deletion
+through PVC/PV/VolumeAttachment absence to the original Cinder volume's HTTP 404.
+The native storage inventory accepted that real volume with the source helper hash
+`a0dc1e04bdc0377727d910e05094aeb40f7d65672b632f97574a327fb2221b73`.
+This component evidence does not establish dashboard/API application deletion on all
+three providers. The Cinder installation contract is in [deployment/cinder/README.md](../../deployment/cinder/README.md).

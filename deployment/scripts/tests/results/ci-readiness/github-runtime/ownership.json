@@ -1,0 +1,12 @@
+{
+  "binding": {
+    "GITHUB_JOB": "runtime-smoke",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_RUN_ID": "37015888888",
+    "GITHUB_SHA": "003fc3ba0f84b4179ca697dfa31d4de5bc844b4d",
+    "output": "/home/runner/work/_temp/railshot-runtime-e2e",
+    "request_sha256": "2f9dbc824dac1d71eca4eaaa17dd6b30eeaaa63041778c8b10880460f1440cfb"
+  },
+  "cleanup": "succeeded",
+  "smoke": "passed"
+}

@@ -1,0 +1,13 @@
+NAME              STATUS   ROLES           AGE    VERSION         INTERNAL-IP    EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION      CONTAINER-RUNTIME
+ip-10-250-10-11   Ready    control-plane   109s   v1.34.11+k3s1   10.250.10.11   <none>        Ubuntu 24.04.4 LTS   6.8.0-134-generic   containerd://2.2.7-k3s1
+NAME                                READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES                SELECTOR
+deployment.apps/railshot-workload   1/1     1            1           56s   app          nginx:1.28.1-alpine   railshot.io/app=railshot-workload
+
+NAME                                     READY   STATUS    RESTARTS   AGE   IP            NODE              NOMINATED NODE   READINESS GATES
+pod/railshot-workload-86769c5d97-kjgwf   1/1     Running   0          20s   10.42.0.175   ip-10-250-10-11   <none>           <none>
+
+NAME                        TYPE       CLUSTER-IP     EXTERNAL-IP   PORT(S)        AGE   SELECTOR
+service/railshot-workload   NodePort   10.43.197.87   <none>        80:30080/TCP   56s   railshot.io/app=railshot-workload
+
+NAME                                                     ADDRESSTYPE   PORTS   ENDPOINTS     AGE
+endpointslice.discovery.k8s.io/railshot-workload-xm2rv   IPv4          80      10.42.0.175   56s

@@ -1,0 +1,22 @@
+{
+  "checked_at": "2026-10-02T06:19:58.445784+00:00",
+  "endpoints": [
+    {
+      "endpoint": "http://127.0.0.1:30080",
+      "http_status": 200,
+      "body": "Jasmin Deployment PoC OK"
+    },
+    {
+      "endpoint": "http://127.0.0.1:30081",
+      "http_status": 200,
+      "body": "Jasmin Deployment PoC OK"
+    },
+    {
+      "endpoint": "http://127.0.0.1:30082",
+      "http_status": 200,
+      "body": "Railshot Runtime OK"
+    }
+  ],
+  "test_vm_cleanup": "K3s and test nft table removed; sync completed before stop",
+  "test_vm_stop": "normal stop timed out; forced stop of dedicated test VM; no VM deleted"
+}

@@ -1,0 +1,60 @@
+test_cli_invalid_input_and_flags_always_return_one_json (test_contract.ContractTests.test_cli_invalid_input_and_flags_always_return_one_json) ... ok
+test_fixtures_and_cli_failure_against_published_schemas (test_contract.ContractTests.test_fixtures_and_cli_failure_against_published_schemas) ... ok
+test_generic_image_preserves_custom_port_path_replicas (test_contract.ContractTests.test_generic_image_preserves_custom_port_path_replicas) ... ok
+test_invalid_inputs_rejected_before_engine (test_contract.ContractTests.test_invalid_inputs_rejected_before_engine) ... ok
+test_malformed_duplicate_and_nonfinite_json (test_contract.ContractTests.test_malformed_duplicate_and_nonfinite_json) ... ok
+test_provider_normalization_has_identical_core_spec_and_manifests (test_contract.ContractTests.test_provider_normalization_has_identical_core_spec_and_manifests) ... ok
+test_result_context_is_added_only_at_boundary (test_contract.ContractTests.test_result_context_is_added_only_at_boundary) ... ok
+test_cleanup_only_deletes_named_owned_resources (test_engine.EngineTests.test_cleanup_only_deletes_named_owned_resources) ... [NODE_READY]
+[K3S_READY]
+ok
+test_failed_rollout_reports_stage_and_diagnostic (test_engine.EngineTests.test_failed_rollout_reports_stage_and_diagnostic) ... [NODE_READY]
+[K3S_INSTALLING]
+[K3S_READY]
+[CILIUM_INSTALLING]
+[CILIUM_READY]
+[WORKLOAD_DEPLOYING]
+[FAILED]
+ok
+test_foreign_namespace_is_never_overwritten (test_engine.EngineTests.test_foreign_namespace_is_never_overwritten) ... [NODE_READY]
+[K3S_INSTALLING]
+[K3S_READY]
+[CILIUM_INSTALLING]
+[CILIUM_READY]
+[FAILED]
+ok
+test_full_cleanup_requires_explicit_flag_before_commands (test_engine.EngineTests.test_full_cleanup_requires_explicit_flag_before_commands) ... [FAILED]
+ok
+test_lock_contention_stops_before_mutation (test_engine.EngineTests.test_lock_contention_stops_before_mutation) ... [FAILED]
+ok
+test_requested_image_drift_is_failure (test_engine.EngineTests.test_requested_image_drift_is_failure) ... [NODE_READY]
+[K3S_READY]
+[CILIUM_READY]
+[FAILED]
+ok
+test_success_states_and_provider_independence (test_engine.EngineTests.test_success_states_and_provider_independence) ... [NODE_READY]
+[K3S_INSTALLING]
+[K3S_READY]
+[CILIUM_INSTALLING]
+[CILIUM_READY]
+[WORKLOAD_DEPLOYING]
+[WORKLOAD_READY]
+[ENDPOINT_READY]
+ok
+test_timeout_stops_descendant_from_mutating_after_failure (test_engine.EngineTests.test_timeout_stops_descendant_from_mutating_after_failure) ... ok
+test_verify_does_not_install_or_apply (test_engine.EngineTests.test_verify_does_not_install_or_apply) ... [NODE_READY]
+[K3S_READY]
+[CILIUM_READY]
+[WORKLOAD_READY]
+[ENDPOINT_READY]
+ok
+test_artifact_extraction_rejects_paths_and_links (test_provider_simulation.SimulationHarnessTests.test_artifact_extraction_rejects_paths_and_links) ... ok
+test_core_hashes_cover_engine_and_bootstrap_without_test_files (test_provider_simulation.SimulationHarnessTests.test_core_hashes_cover_engine_and_bootstrap_without_test_files) ... ok
+test_failed_vm_stop_returns_json_and_does_not_start_the_next_vm (test_provider_simulation.SimulationHarnessTests.test_failed_vm_stop_returns_json_and_does_not_start_the_next_vm) ... ok
+test_host_http_200_with_wrong_body_is_rejected (test_provider_simulation.SimulationHarnessTests.test_host_http_200_with_wrong_body_is_rejected) ... ok
+test_profiles_change_environment_only_and_keep_provider_out_of_core (test_provider_simulation.SimulationHarnessTests.test_profiles_change_environment_only_and_keep_provider_out_of_core) ... ok
+
+----------------------------------------------------------------------
+Ran 21 tests in 1.851s
+
+OK

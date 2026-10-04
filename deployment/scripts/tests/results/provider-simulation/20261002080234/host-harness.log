@@ -1,0 +1,8 @@
+<SOURCE_REPOSITORY>/deployment/scripts/tests/provider_simulation.py:155: SyntaxWarning: 'break' in a 'finally' block
+  break
+[RUN] aws: railshot-sim-aws-20261002080234
+[PASS] aws: clean/bootstrap/Cilium/workload/health/update/cleanup + host HTTP
+[RUN] gcp: railshot-sim-gcp-20261002080234
+[PASS] gcp: clean/bootstrap/Cilium/workload/health/update/cleanup + host HTTP
+[RUN] openstack: railshot-sim-openstack-20261002080234
+[PASS] openstack: clean/bootstrap/Cilium/workload/health/update/cleanup + host HTTP

@@ -1,0 +1,7 @@
+{
+  "status": "passed",
+  "http_status": 200,
+  "body": "Railshot Runtime OK",
+  "url": "http://127.0.0.1:30084/",
+  "scope": "Mac host -> Lima SSH forwarding -> VM NodePort (not cloud ingress)"
+}
