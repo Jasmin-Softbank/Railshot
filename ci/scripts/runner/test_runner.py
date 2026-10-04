@@ -45,6 +45,21 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(run_agent.path_ok(rel, [pattern], []), expected)
         self.assertFalse(run_agent.path_ok('src/tests/a.py', ['**/*.py'], ['**/tests/**']))
 
+    def test_forbidden_proposal_reports_rule_location_without_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            files = [{"path": "first.txt", "content": "safe"},
+                     {"path": "Dockerfile", "content": "FROM scratch\nRUN private-canary || true\n"}]
+            with self.assertRaises(run_agent.ProposalPolicyError) as caught:
+                run_agent.apply_files(workspace, files, ["*"], [])
+            receipt = run_agent.proposal_rejection(caught.exception)
+            self.assertEqual("files[1].content", receipt["field"])
+            self.assertEqual(2, receipt["line"])
+            self.assertEqual("BYPASS_FORBIDDEN", receipt["reason"])
+            self.assertEqual(64, len(receipt["rule_sha256"]))
+            self.assertNotIn("private-canary", json.dumps(receipt))
+            self.assertEqual([], list(workspace.iterdir()))
+
     def test_patch_is_validated_before_any_write(self):
         with tempfile.TemporaryDirectory() as d:
             ws = Path(d) / 'work'; ws.mkdir()
@@ -56,12 +71,51 @@ class RunnerTest(unittest.TestCase):
             self.assertFalse((ws/'Dockerfile').exists())
             self.assertEqual(run_agent.apply_files(ws, [{'path':'.railshot/test','content':'x'}], allow, deny), ['.railshot/test'])
 
+    def test_delete_is_explicit_scoped_and_validated_before_mutation(self):
+        for scope in ('packaging', 'source'):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as d:
+                ws = Path(d)
+                (ws / 'Dockerfile').write_text('old')
+                (ws / 'app.py').write_text('print("app")')
+                (ws / 'app_test.py').write_text('assert True')
+                (ws / 'package.json').write_text('{}')
+                allow, protect = run_agent.writable_rules('contract/paths.yaml', scope)
+                for rejected in ('package.json', 'app_test.py', 'missing.Dockerfile'):
+                    with self.assertRaises(ValueError):
+                        run_agent.apply_files(ws, [
+                            {'path': 'Dockerfile', 'content': 'new'},
+                            {'path': rejected, 'action': 'delete', 'content': ''}],
+                            allow, protect, repair_scope=scope)
+                    self.assertEqual((ws / 'Dockerfile').read_text(), 'old')
+                patch_files = [{'path': 'app.py', 'action': 'delete', 'content': ''}]
+                if scope == 'packaging':
+                    with self.assertRaises(ValueError):
+                        run_agent.apply_files(ws, patch_files, allow, protect, repair_scope=scope)
+                else:
+                    run_agent.apply_files(ws, patch_files, allow, protect, repair_scope=scope)
+                    self.assertFalse((ws / 'app.py').exists())
+                run_agent.apply_files(ws, [{'path': 'Dockerfile', 'action': 'delete', 'content': ''}], allow, protect)
+                self.assertFalse((ws / 'Dockerfile').exists())
+
+    def test_deletion_preserves_symlink_binary_and_size_boundaries(self):
+        with tempfile.TemporaryDirectory() as d:
+            ws = Path(d)
+            (ws / 'real.Dockerfile').write_text('old')
+            (ws / 'link.Dockerfile').symlink_to(ws / 'real.Dockerfile')
+            (ws / 'binary.Dockerfile').write_bytes(b'abc\0def')
+            (ws / 'large.Dockerfile').write_text('x' * 20001)
+            allow, protect = run_agent.writable_rules('contract/paths.yaml')
+            for name in ('link.Dockerfile', 'binary.Dockerfile', 'large.Dockerfile'):
+                with self.assertRaises(ValueError):
+                    run_agent.apply_files(ws, [{'path': name, 'action': 'delete', 'content': ''}], allow, protect)
+                self.assertTrue((ws / name).exists())
+
     def test_sdk_contract(self):
         import openai_codex
         profile = run_agent.load_yaml(run_agent.PLATFORM / 'runner/profiles.yaml')
         cfg = profile['providers']['codex']
         self.assertEqual(cfg['model'], 'gpt-6.1-sol')
-        self.assertEqual(cfg['reasoning_effort'], 'xhigh')
+        self.assertEqual(cfg['reasoning_effort'], 'medium')
         result = SimpleNamespace(status='completed', final_response='{"status":"proposed"}', id='turn-test')
         observed = []
         def complete():
@@ -91,9 +145,9 @@ class RunnerTest(unittest.TestCase):
             self.assertTrue(args['ephemeral'])
             self.assertEqual(args['model'], 'gpt-6.1-sol')
             thread.turn.assert_called_once()
-            self.assertEqual(thread.turn.call_args.kwargs['effort'], 'xhigh')
+            self.assertEqual(thread.turn.call_args.kwargs['effort'], 'medium')
             self.assertEqual(meta['requested_model'], 'gpt-6.1-sol')
-            self.assertEqual(meta['requested_reasoning_effort'], 'xhigh')
+            self.assertEqual(meta['requested_reasoning_effort'], 'medium')
             self.assertEqual(meta['session_id'], 'thread-test')
             self.assertEqual(meta['turn_id'], 'turn-test')
             self.assertEqual([event for event, _ in observed if event != 'turn.progress'],
@@ -556,15 +610,17 @@ class RunnerTest(unittest.TestCase):
     def test_partial_atomic_patch_is_preserved_in_failure_receipt(self):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
-            return {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
-                    'gate_plan':[{'gate':layer,'action':'check fixture'} for layer in ('L0','L1','Q','L2','L4','L3')],
+            from runner.test_repair_evidence import bind_proposal
+            return bind_proposal(run, {'status':'proposed', 'summary':'offline', 'root_cause':'Dockerfile fixture requires repair',
                     'files_changed':[{'path':name,'why':'fixture repair'} for name in ('Dockerfile','.dockerignore')], 'assumptions':[], 'confidence':'high',
-                    'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}, {}
+                    'files':[{'path':name,'content':'after'} for name in ('Dockerfile','.dockerignore')]}), {}
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory).resolve(); workspace=base/'workspace'; workspace.mkdir()
             run, task = base/'run', base/'task.md'; task.write_text('offline task')
             for name in ('Dockerfile','.dockerignore'): (workspace/name).write_text('before')
             (workspace/'Dockerfile').chmod(0o755)
+            from runner.test_repair_evidence import case_fixture
+            case_fixture(workspace, run)
             original_replace = os.replace
             def fail_second(source, target):
                 if Path(target) == workspace/'.dockerignore':
@@ -586,13 +642,16 @@ class RunnerTest(unittest.TestCase):
     def test_validation_only_rejection_has_safe_replan_guidance_without_source_writes(self):
         def provider(cfg, system, task, schema, workspace, run, deny, emit):
             emit('session.finished', sdk_status='completed', session_id='offline-fixture')
-            return {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
-                    'gate_plan':[{'gate':layer,'action':'inspect fixture'} for layer in ('L0','L1','Q','L2','L4','L3')],
+            from runner.test_repair_evidence import bind_proposal
+            return bind_proposal(run, {'status':'proposed', 'summary':'offline', 'root_cause':'fixture needs repair',
                     'files_changed':[{'path':'../private-canary.py','why':'invalid fixture'}], 'assumptions':[], 'confidence':'high',
-                    'files':[{'path':'../private-canary.py','content':'wrong'}]}, {}
+                    'files':[{'path':'../private-canary.py','content':'wrong'}]}), {}
         with tempfile.TemporaryDirectory() as directory:
             base=Path(directory); workspace=base/'work'; workspace.mkdir()
             run, task=base/'run', base/'task.md'; task.write_text('fixture')
+            from runner.test_repair_evidence import case_fixture
+            (workspace/'app.py').write_text('print(1)\n')
+            case_fixture(workspace,run)
             argv=['runner','fixer','--workspace',str(workspace),'--run',str(run),'--task',str(task)]
             with patch.object(run_agent, 'run_codex', side_effect=provider), patch('sys.argv', argv), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(run_agent.main(), 1)
@@ -603,6 +662,72 @@ class RunnerTest(unittest.TestCase):
             self.assertTrue(receipt['proposal_rejection']['safe_to_replan'])
             self.assertNotIn('private-canary', json.dumps(receipt['proposal_rejection']))
             self.assertFalse((base/'private-canary.py').exists())
+
+    def test_structured_evidence_feedback_and_host_drift_never_write_invalid_proposals(self):
+        from runner.test_repair_evidence import bind_proposal, case_fixture
+        cases = [
+            ('valid', {}, None, None),
+            ('path', {'path': 'private-canary.py'}, 'EVIDENCE_SOURCE_NOT_FOUND', 'evidence_refs[0].path'),
+            ('line', {'line': 999}, 'EVIDENCE_LINE_OUT_OF_RANGE', 'evidence_refs[0].line'),
+            ('hash', {'sha256': '0' * 64}, 'EVIDENCE_HASH_MISMATCH', 'evidence_refs[0].sha256'),
+            ('binding', {}, 'EVIDENCE_BINDING_MISMATCH', 'addresses_failure'),
+            ('log-id', {}, 'EVIDENCE_LOG_NOT_FOUND', 'evidence_refs[0].id'),
+            ('log-hash', {}, 'EVIDENCE_HASH_MISMATCH', 'evidence_refs[0].sha256'),
+            ('host-drift', {}, None, None),
+            ('model-plan', {}, 'PROPOSAL_CONTRACT', None),
+        ]
+        for name, change, reason, field in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory).resolve(); workspace = base/'workspace'; workspace.mkdir()
+                run, task = base/'run', base/'task.md'; task.write_text('prepare container')
+                source = workspace/'Dockerfile'; source.write_text('FROM node:22-alpine\n')
+                raw = case_fixture(workspace, run)
+                digest = json.loads(raw)['source']['files']['Dockerfile']['sha256']
+
+                def provider(cfg, system, task, schema, workspace, run, deny, emit):
+                    emit('session.finished', sdk_status='completed', session_id='offline-fixture')
+                    proposal = bind_proposal(run, {
+                        'status': 'proposed', 'summary': 'offline', 'confidence': 'high',
+                        'root_cause': 'The listener defaults to 0.0.0.0:8080.',
+                        'assumptions': ['An endpoint such as https://example.com:443 is prose, not a citation.'],
+                        'files_changed': [{'path': 'Dockerfile', 'why': 'fixture repair'}],
+                        'files': [{'path': 'Dockerfile', 'content': 'FROM node:22-alpine\nEXPOSE 8080\n'}]})
+                    proposal['evidence_refs'] = [{
+                        'kind': 'source', 'path': 'Dockerfile', 'line': 1, 'sha256': digest, **change}]
+                    if name == 'binding':
+                        proposal['addresses_failure'] = 'private-canary'
+                    if name in ('log-id', 'log-hash'):
+                        proposal['evidence_refs'] = [{'kind': 'log', 'sha256': '0' * 64,
+                                                     'id': 'process-999' if name == 'log-id' else 'failure'}]
+                    if name == 'host-drift':
+                        source.write_text('FROM node:24-alpine\n')
+                    if name == 'model-plan':
+                        proposal['gate_plan'] = [{'gate': 'L2', 'action': 'skip validation'}]
+                    return proposal, {}
+
+                argv = ['runner', 'adapter', '--workspace', str(workspace), '--run', str(run), '--task', str(task)]
+                with patch.object(run_agent, 'run_codex', side_effect=provider), patch('sys.argv', argv), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(run_agent.main(), 0 if name == 'valid' else 1)
+                receipt = json.loads((run/'adapter.json').read_text())
+                if name == 'valid':
+                    self.assertEqual(receipt['written'], ['Dockerfile'])
+                    plan = json.loads((run/'adapter-plan.json').read_text())
+                    self.assertEqual(plan['plan_owner'], 'host')
+                    self.assertFalse(plan['execution_verified'])
+                    self.assertFalse(plan['evidence']['causal_claim_verified'])
+                else:
+                    self.assertEqual(receipt['written'], [])
+                    self.assertNotIn('EXPOSE', source.read_text())
+                    self.assertFalse((run/'adapter-plan.json').exists())
+                    if name == 'host-drift':
+                        self.assertNotIn('proposal_rejection', receipt)
+                    else:
+                        rejection = receipt['proposal_rejection']
+                        self.assertEqual(rejection['reason'], reason)
+                        self.assertEqual(rejection.get('field'), field)
+                        self.assertTrue(rejection['safe_to_replan'])
+                        self.assertNotIn('private-canary', json.dumps(rejection))
 
     def test_private_directory_refuses_foreign_owner_and_auth_route_has_no_secret(self):
         from runtime_boundary import private_directory, effective_auth_route

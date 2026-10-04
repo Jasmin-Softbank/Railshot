@@ -56,7 +56,7 @@ class PlatformTests(unittest.TestCase):
         self.assertEqual(project["spec"]["sourceRepos"], ["https://github.com/Jasmin-Softbank/Railshot.git"])
         self.assertEqual(project["spec"]["clusterResourceWhitelist"], [])
         self.assertEqual({(item["group"], item["kind"]) for item in project["spec"]["namespaceResourceWhitelist"]},
-                         {("apps", "Deployment"), ("", "Service"), ("", "PersistentVolumeClaim"), ("networking.k8s.io", "NetworkPolicy")})
+                         {("batch", "Job"), ("apps", "Deployment"), ("", "Service"), ("", "PersistentVolumeClaim"), ("networking.k8s.io", "NetworkPolicy")})
         destination = {"server": "https://kubernetes.default.svc", "namespace": "railshot-system"}
         self.assertEqual(project["spec"]["destinations"], [destination])
         self.assertEqual(application["spec"]["destination"], destination)
@@ -134,6 +134,11 @@ class PlatformTests(unittest.TestCase):
     def test_pinned_images_private_api_and_configured_readiness(self):
         images = {name: f"ghcr.io/jasmin-softbank/railshot-{name}@sha256:" + "a" * 64 for name in ("dashboard", "api")}
         output = module.render(images, "k3s-aws")
+        self.assertFalse(any(item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-mcp' for item in output['items']))
+        self.assertTrue(any(item['kind'] == 'Service' and item['metadata']['name'] == 'railshot-mcp' for item in output['items']))
+        with_mcp = module.render({**images, 'mcp': f"ghcr.io/jasmin-softbank/railshot-mcp@sha256:{'b' * 64}"}, "k3s-aws")
+        mcp = next(item for item in with_mcp['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-mcp')
+        self.assertEqual(mcp['spec']['template']['spec']['containers'][0]['image'], f"ghcr.io/jasmin-softbank/railshot-mcp@sha256:{'b' * 64}")
         api = next(item for item in output["items"] if item["kind"] == "Deployment" and item["metadata"]["name"] == "railshot-api")
         container = api["spec"]["template"]["spec"]["containers"][0]
         for item in output['items']:
@@ -163,7 +168,8 @@ class PlatformTests(unittest.TestCase):
                              {'name': 'railshot-environments', 'key': 'observer_file', 'optional': True})
         self.assertEqual(environment['RAILSHOT_OBSERVER_CONFIG'], '/var/lib/railshot/config/observer.json')
         self.assertIn({'name': 'state', 'mountPath': '/var/lib/railshot'}, container['volumeMounts'])
-        self.assertIn("configured", container["readinessProbe"]["exec"]["command"][-1])
+        self.assertEqual(container["readinessProbe"]["httpGet"]["path"], "/readyz")
+        self.assertEqual(container["readinessProbe"]["periodSeconds"], 2)
         self.assertTrue(all(item["spec"]["type"] == "ClusterIP" for item in output["items"] if item["kind"] == "Service"))
         public = module.render(images, "k3s-aws", 31080)
         services = {item["metadata"]["name"]: item["spec"] for item in public["items"] if item["kind"] == "Service"}
@@ -176,6 +182,23 @@ class PlatformTests(unittest.TestCase):
                 module.render({**images, "api": bad}, "k3s-aws")
         with self.assertRaises(ValueError):
             module.render(images, "../target")
+
+    def test_api_preparation_uses_incoming_image_on_the_existing_api_node_without_state_mounts(self):
+        images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + 'a' * 64 for name in ('dashboard', 'api')}
+        output = module.render(images, 'k3s-aws', prepare_api_rollout=True)
+        job = next(item for item in output['items'] if item['kind'] == 'Job')
+        self.assertEqual(job['metadata']['annotations']['argocd.argoproj.io/hook'], 'PreSync')
+        pod = job['spec']['template']['spec']
+        self.assertEqual(pod['containers'][0]['image'], images['api'])
+        self.assertFalse(pod['automountServiceAccountToken'])
+        self.assertEqual([volume['name'] for volume in pod['volumes']], ['api-token'])
+        self.assertEqual(pod['affinity']['podAffinity']['requiredDuringSchedulingIgnoredDuringExecution'][0],
+                         {'labelSelector': {'matchLabels': {'app': 'railshot-api'}}, 'topologyKey': 'kubernetes.io/hostname'})
+        api = next(item for item in output['items'] if item['kind'] == 'Deployment' and item['metadata']['name'] == 'railshot-api')
+        api_env = {value['name']: value.get('value') for value in api['spec']['template']['spec']['containers'][0]['env']}
+        hook_env = {value['name']: value.get('value') for value in pod['containers'][0]['env']}
+        self.assertEqual(api_env['RAILSHOT_POD_TEMPLATE_ID'], hook_env['RAILSHOT_DESIRED_TEMPLATE_ID'])
+        self.assertRegex(hook_env['RAILSHOT_DESIRED_TEMPLATE_ID'], r'^[a-f0-9]{64}$')
 
     def test_optional_provider_targets_preserve_aws_and_render_matching_ci_admission(self):
         images = {name: f'ghcr.io/jasmin-softbank/railshot-{name}@sha256:' + 'a' * 64 for name in ('dashboard', 'api')}

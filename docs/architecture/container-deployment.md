@@ -4,7 +4,7 @@
 
 고객 앱은 **AWS·GCP·온프레미스의 서로 독립된 K3s**에서 실행한다. DB는 모든 K3s 밖에 두며, 현재 DB 담당 구현은 **여러 거점에 걸친 하나의 PostgreSQL/Patroni 클러스터**다. 환경마다 독립 DB 클러스터가 하나씩 있다는 뜻이 아니다.
 
-대시보드, 제품 API, MCP, CI runner는 별도 이미지로 빌드한다. CD는 공식 Argo CD 컨테이너를 재사용하고 고객 앱은 기존 CI가 검사한 이미지 digest로 배포한다. MCP는 현재 stdio 방식이므로 연결한 클라이언트에서 컨테이너를 실행한다. 새 로컬 Kubernetes는 구성하지 않는다.
+대시보드, 제품 API, MCP, CI runner는 별도 이미지로 빌드한다. CD는 공식 Argo CD 컨테이너를 재사용하고 고객 앱은 기존 CI가 검사한 이미지 digest로 배포한다. MCP 이미지는 로컬 stdio와 운영 원격 HTTP 두 진입점을 제공한다. 새 로컬 Kubernetes는 구성하지 않는다.
 
 이 문서는 배치 설계와 현재 컨테이너·CI 선언을 설명한다. [제품 API](../api/product.md)·[OpenAPI](../api/product.openapi.json)에 v1 빌드·배포·환경 연결을 정의했고, Dashboard는 같은 origin의 `/api/`를 호출한다. 사용자 계정·로그인·팀원 allowlist 없이 같은 workspace를 사용한다. 코드 연결을 기존 빌드 EC2의 운영 K3s 가입, 이미지 게시·운영 설치, 실제 클라우드 E2E 완료로 해석하지 않는다.
 
@@ -64,7 +64,7 @@ flowchart TB
 
 두 번째 그림의 DB 세 상자는 **같은 Patroni 클러스터의 거점별 멤버 배치를 표현한 예시**다. 고정된 DB 대수나 거점별 독립 standby 클러스터를 정한 것이 아니다. HAProxy는 현재 primary로 접속을 중계하는 논리적 접속점이며 그림의 위치가 실제 서버 위치를 지정하지 않는다. etcd·복제·백업 경로는 이 배치 그림에서 생략했다. DB 연결 점선은 설계이며 현재 자동 배포가 DB 설치·앱 자격·접속 정책까지 완료한다는 뜻이 아니다.
 
-MCP는 현재 stdio 방식으로 클라이언트 측 컨테이너에서 실행한다. 운영 노드에 별도 MCP 서버를 추가하지 않으며, 허가된 관리 경로/port-forward로 내부 API에 연결한다.
+로컬 MCP는 stdio 방식으로 클라이언트 측 컨테이너에서 실행한다. 원격 MCP는 운영 플랫폼의 별도 Pod에서 HTTP로 실행하며 대시보드 Nginx의 `/mcp`를 통해 접근한다. 두 방식 모두 내부 API의 공통 입력·소유권 검사를 사용한다.
 
 **빌드 워커의 EC2 이름은 `railshot-build-worker-aws-01`이다.** 기존 `railshot-ci-k3s-aws`의 표시 이름만 바꿨으며 인스턴스 ID는 `i-09955d23ad1d8dbe2`다. 이름에서 빌드 역할을 드러내고 고객 배포 대상인 K3s와 구분한다. 2026-10-02 이름 변경 확인 당시에는 중지 상태였고 새 컨테이너 배포나 클러스터 가입을 실행하지 않았다. 이후 실제 상태·가입·job 결과는 운영 검증 기록으로 별도 확인한다.
 
@@ -99,7 +99,7 @@ DB 배치는 화균 담당의 [고정된 README](https://github.com/Jasmin-Softb
 | 구성 | 소유 위치 | 실행 환경 |
 |---|---|---|
 | 프런트 이미지 | `apps/dashboard/Dockerfile`, `nginx.conf` | 운영 K3s / 로컬 Docker |
-| HTTP API·CLI·MCP | `apps/api/Dockerfile`의 `api`, `mcp` target | API는 운영 K3s, MCP는 연결한 클라이언트가 프로세스로 실행 |
+| HTTP API·CLI / MCP | `apps/api/Dockerfile`의 `api` target / `apps/agent/src/mcp.js`와 `remote-mcp.js`를 패키징한 `mcp` target | API는 운영 K3s, MCP는 로컬 stdio 또는 운영 K3s의 OAuth HTTP Pod |
 | 플랫폼 이미지 검증·게시 | `.github/workflows/platform-containers.yml` | Railshot 저장소 CI. `railshot-ci.yml`이 변경 경로에 맞게 호출 |
 | 고객 소스의 검사·AI 수정·게시 | `ci/workflows/`, `ci/scripts/` | 검사는 운영 K3s의 전용 빌드 워커, 검사한 이미지 게시는 별도 GitHub-hosted job |
 | CI runner | `deployment/manifests/build-runner.yaml`, `ci/scripts/runner/` | `railshot-build-worker-aws-01`에 배치하는 일회성 Job. 기존 Compose는 독립 VM 실행용이며 같은 runner를 중복 실행하지 않음 |
@@ -132,6 +132,8 @@ HOME은 쓰기 가능한 `/var/lib/railshot`이며 Ansible·gcloud의 실행 파
 ```sh
 mkdir -p .local/container-secrets
 chmod 700 .local/container-secrets
+mkdir -p .local/mcp-sessions
+chmod 700 .local/mcp-sessions
 python3 -c 'import pathlib,secrets; p=pathlib.Path(".local/container-secrets/api-token"); p.touch(mode=0o600, exist_ok=False); p.write_text(secrets.token_hex(32))'
 export RAILSHOT_API_TOKEN_PATH="$PWD/.local/container-secrets/api-token"
 export RAILSHOT_LOCAL_UID="$(id -u)" RAILSHOT_LOCAL_GID="$(id -g)"
@@ -147,7 +149,7 @@ MCP 클라이언트의 command는 `docker`, args는 아래와 같다. `-T`로 �
 compose -f /absolute/path/to/Railshot/deployment/compose.yaml run --rm -T --no-deps mcp
 ```
 
-MCP에는 HTTP 포트가 없다. 로컬 폴더를 배포하려면 필요한 폴더만 `/sources` 같은 경로에 읽기 전용으로 마운트하고 `RAILSHOT_SOURCE_ROOT=/sources`를 지정한다. 전체 home, Docker socket, cloud 자격을 마운트하지 않는다. 공개 GitHub URL 입력에는 소스 폴더 mount가 필요 없다.
+MCP에는 HTTP 포트가 없다. 현재 `apps/agent` MCP는 공개 GitHub 저장소 URL만 배포 입력으로 받는다. `deploy_repository` 호출은 곧바로 제품 API에 요청하므로, 외부 AI 호스트에서 배포 도구의 사용자 확인을 설정해야 한다. Compose의 `.local/mcp-sessions`는 API 세션 쿠키를 보관하며 현재 실행 UID만 읽고 쓸 수 있어야 한다. 전체 home, Docker socket, cloud 자격을 마운트하지 않는다.
 
 ## CI와 이미지 게시
 
@@ -203,7 +205,7 @@ python3 deployment/scripts/render-platform.py /private/images.json \
 4. 기본 Service는 모두 ClusterIP다. 우선 승인된 운영 context에서 `kubectl -n railshot-system port-forward service/railshot-dashboard 4181:8080`, API는 `service/railshot-api 4173:4173`으로 검증한다. API readiness는 `configured:true`도 확인하지만 GitHub 자격의 실제 권한을 보증하지 않으므로 실요청 검증이 별도로 필요하다.
 5. 공개 UI에는 renderer에 할당한 `--dashboard-node-port`를 추가하고 기존 `infrastructure/terraform/aws-edge`의 host route로 운영 노드 사설 IP와 연결한다. health path는 `/healthz`. `externalTrafficPolicy:Local`이므로 ALB target 노드에 실제 UI Pod가 있어야 한다. 보안 그룹은 ALB에서 오는 해당 포트만 허용한다. Dashboard Nginx의 `/api/`가 ClusterIP API로 연결되며 API 자체에 별도 public NodePort를 열지 않는다. API ingress NetworkPolicy는 등록한 Dashboard client label만 허용한다.
 
-Dashboard의 [start.sh](../../apps/dashboard/start.sh)는 서버의 token 파일을 읽어 `/api/` upstream과 Authorization 주입 설정을 `/tmp`에 만든다. 업로드 상한과 긴 API 요청의 proxy 제한 시간도 여기서 맞춘다. 사용자 계정·로그인 없이 같은 workspace를 사용하며 Host·Origin·등록 대상·입력·실행 한도 검사는 API에서 계속 적용한다. API를 직접 공개하는 별도 구성은 `RAILSHOT_PUBLIC_DEMO=1`과 명시적 allowed hosts/origins를 사용한다. 현재 gateway 구성의 내부 token을 브라우저 Bearer나 사용자 계정으로 해석하지 않는다.
+Dashboard의 [start.sh](../../apps/dashboard/start.sh)는 서버의 token 파일을 읽어 `/api/` upstream과 Authorization 주입 설정을 `/tmp`에 만든다. `/mcp`와 OAuth 메타데이터는 별도 MCP Service로 전달한다. 업로드 상한과 긴 API 요청의 proxy 제한 시간도 여기서 맞춘다. 웹과 AI는 승인 시 같은 익명 세션 쿠키에 연결할 수 있으며, AI별 Bearer 토큰이 해당 쿠키에 바인딩된다. Host·Origin·등록 대상·입력·실행 한도 검사는 API에서 계속 적용한다. API를 직접 공개하는 별도 구성은 `RAILSHOT_PUBLIC_DEMO=1`과 명시적 allowed hosts/origins를 사용한다. 현재 gateway 구성의 내부 token을 브라우저 Bearer나 사용자 계정으로 해석하지 않는다.
 
 제품 환경 어댑터는 API 이미지의 native CLI를 호출하므로 별도 상시 Ansible HTTP 서버를 운영 클러스터로 옮기지 않는다. 승인 DB HA를 실행하는 내부 HTTP 서버의 배치·검증은 DB 담당 작업이다. 등록 설정이나 Pod Ready만으로 고객 클라우드의 CI→CD→공개 HTTP 성공을 판정하지 않는다.
 

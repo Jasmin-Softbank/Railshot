@@ -1,6 +1,6 @@
-# 사용자 API · CLI · MCP
+# 사용자 API · CLI
 
-홍진기의 `feature/fe-mcp-jingi@6840d1387798d375234bbf97919210eec96709a3`를 바탕으로 통합했다. 정적 화면은 `../dashboard`, Node 서버·CLI·MCP는 이 package에 있다. API는 기본적으로 `127.0.0.1:4173`만 수신하며 localhost Host/Origin 검사를 유지한다. 컨테이너 내부 접근에는 아래 명시적 설정과 운영자 Bearer 인증을 사용한다. 사용자 로그인·유저별 target 인가·공개 API는 구현하지 않았다.
+홍진기의 `feature/fe-mcp-jingi@6840d1387798d375234bbf97919210eec96709a3`를 바탕으로 통합했다. 정적 화면은 `../dashboard`, Node 서버·CLI는 이 package에 있다. MCP 도구 서버는 `../agent`에 있다. API는 기본적으로 `127.0.0.1:4173`만 수신하며 localhost Host/Origin 검사를 유지한다. 컨테이너 내부 접근에는 아래 명시적 설정과 운영자 Bearer 인증을 사용한다. 사용자 로그인·유저별 target 인가·공개 API는 구현하지 않았다.
 
 ## 로컬 시작
 
@@ -18,18 +18,17 @@ Node 22 이상에서 `npm ci --ignore-scripts`, `npm start`를 실행한다. 이
 | `RAILSHOT_TARGET_IDS` | 선택 CI 대상 ID의 쉼표 목록. 기본 target을 포함해야 하며 생략 시 기본 target만 허용 |
 | `RAILSHOT_TARGET_PROVIDER` | 기본 target의 명시적 provider. 플랫폼 기본값은 `aws` |
 | `RAILSHOT_PROVIDER_TARGETS` | 선택 JSON provider→target 매핑. 예: `{"openstack":"k3s-openstack"}`. 해당 ID의 CI 허용 및 CD 등록이 모두 있어야 선택 가능 |
-| `RAILSHOT_API_URL` | CLI/MCP의 API 주소. 기본 `http://127.0.0.1:4173` |
-| `RAILSHOT_SOURCE_ROOT` | MCP local source의 허용 root |
+| `RAILSHOT_API_URL` | CLI와 `../agent` MCP의 API 주소. 기본 `http://127.0.0.1:4173` |
 
 `npm run cli -- deploy <폴더 또는 ZIP 또는 공개 GitHub URL> --app my-app --target aws-demo`, `npm run cli -- status <run_id>`가 같은 HTTP API를 사용한다. target 생략 시 API의 운영자 설정을 사용한다. 임의 target은 거부한다. 이 제출 명령은 실제 설정이 있을 때 GitHub에 소스를 등록하고 CI를 실행하므로 로컬 검증 과정에서는 실행하지 않는다.
 
 provider 매핑은 기존 AWS 기본 대상을 덮어쓰지 않고 추가한다. 서로 다른 provider에 같은 ID를 지정할 수 없다. 대상 등록 후 플랫폼 저장소의 같은 이름 Actions 변수를 설정하면 [플랫폼 릴리스](../../docs/architecture/container-deployment.md)가 매핑과 기본값을 포함한 `RAILSHOT_TARGET_IDS`를 계속 렌더링한다. 매핑 설정은 인프라 생성이나 배포 성공의 증거가 아니다. OpenStack의 기존 서버 등록 범위는 [런타임 등록 계약](../../docs/api/runtime-registration.md)을 따른다.
 
-MCP는 `npm run mcp`로 stdio transport를 사용한다. 기존 deploy/status 도구를 유지하며 CI의 published 상태를 앱 deployed로 바꾸지 않는다.
+MCP는 `npm run mcp --workspace @railshot/agent`로 실행한다. `deploy_repository`는 `/api/v1/deployments`를 호출하고 `get_deployment`는 접수된 배포의 실제 상태를 조회한다.
 
 ## 컨테이너와 내부 접근
 
-저장소 루트에서 `docker build -f apps/api/Dockerfile --target api -t railshot-api .`와 `--target mcp -t railshot-mcp`로 두 이미지를 만든다. 두 이미지는 Node 22와 lockfile의 production 의존성을 사용하고 UID 1000으로 실행한다. `NODE_IMAGE` build argument에는 검토한 base image digest를 전달할 수 있다. 소스 코드, Terraform, SSH 키, Docker socket을 추가로 mount할 필요가 없다.
+저장소 루트에서 `docker build -f apps/api/Dockerfile --target api -t railshot-api .`와 `--target mcp -t railshot-mcp`로 두 이미지를 만든다. `mcp` target은 `../agent`의 도구 서버를 패키징한다. 두 이미지는 Node 22와 lockfile의 production 의존성을 사용하고 UID 1000으로 실행한다. `NODE_IMAGE` build argument에는 검토한 base image digest를 전달할 수 있다. 소스 코드, Terraform, SSH 키, Docker socket을 추가로 mount할 필요가 없다.
 
 | 변수 | 컨테이너 계약 |
 | --- | --- |
@@ -40,13 +39,12 @@ MCP는 `npm run mcp`로 stdio transport를 사용한다. 기존 deploy/status �
 | `RAILSHOT_API_TOKEN_FILE` | 권장: 읽기 전용 Secret 파일. 32–4096자의 공백 없는 ASCII 토큰. API 시작 시 읽고 CLI/MCP는 요청마다 읽음 |
 | `RAILSHOT_API_TOKEN` | Secret 환경변수 대안. `_FILE`과 동시에 설정하면 시작/요청 실패 |
 | `RAILSHOT_API_URL` | MCP/CLI가 접근하는 내부 API URL. Compose에서는 `http://api:4173`처럼 실제 Service 이름 사용 |
-| `RAILSHOT_SOURCE_ROOT` | MCP 컨테이너 안에 읽기 전용으로 mount한 소스 디렉터리. 호스트 경로가 자동 전달되지는 않음 |
 
 비로컬 bind 또는 비로컬 Host를 허용하면 명시한 Host 목록과 API 토큰이 없을 때 시작을 거부한다. `/api/*`는 해당 토큰을 `Authorization: Bearer ...`로 요구하며 CLI/MCP가 이를 전달한다. `x-railshot-request: deploy`는 계속 필요한 교차 사이트 요청 방어 헤더이며 인증을 대신하지 않는다. Host/Origin은 프록시의 `X-Forwarded-*`를 신뢰하지 않고 실제 요청 헤더로 검사한다. CORS endpoint나 브라우저 토큰 배포는 추가하지 않았다.
 
 `/healthz`는 Host/Origin 검사 후 Bearer 없이 조회한다. 비로컬 모드에서는 `ok`와 `configured`만 반환하며, `configured: true`도 GitHub 권한·CI worker·배포 대상의 실시간 준비 상태를 보장하지 않는다. 이미지의 자체 healthcheck에는 `127.0.0.1`을 Host 목록에 포함해야 한다. Kubernetes HTTP probe도 허용된 Host를 명시한다. 토큰을 교체하면 API를 재시작하고 클라이언트의 파일도 교체한다.
 
-MCP 이미지는 `docker run --rm -i ... railshot-mcp` 또는 Compose의 `run --rm -T mcp`로 시작한다. stdin/stdout JSON-RPC만 제공하며 HTTP 포트·Service·Ingress를 만들지 않는다. `GITHUB_TOKEN`은 API에만 주입한다. API 토큰은 운영자 클라이언트 인증이며 사용자별 로그인·target 인가를 대체하지 않으므로 API는 내부 ClusterIP 또는 루프백 포트로 먼저 배치한다.
+MCP 이미지는 `docker run --rm -i ... railshot-mcp` 또는 Compose의 `run --rm -T mcp`로 시작한다. stdin/stdout JSON-RPC만 제공하며 HTTP 포트·Service·Ingress를 만들지 않는다. Compose는 소유자 전용 `.local/mcp-sessions`에 API 세션 쿠키를 보관한다. `GITHUB_TOKEN`은 API에만 주입한다. API 토큰은 운영자 클라이언트 인증이며 사용자별 로그인·target 인가를 대체하지 않으므로 API는 내부 ClusterIP 또는 루프백 포트로 먼저 배치한다.
 
 제품 API는 기존 source HTML 경로를 유지한다. 배포용 Vite `dist/`는 별도 dashboard 이미지가 제공하며 아직 `/api` 프록시나 UI 제출 연결은 없다. 나중에 프록시를 연결할 때 `/api` 경로를 보존하고 최대 101 MiB multipart 본문·업스트림 처리 시간·HTTPS Origin·사용자 인증을 함께 검토한다.
 
@@ -60,4 +58,9 @@ MCP 이미지는 `docker run --rm -i ... railshot-mcp` 또는 Compose의 `run --
 
 [API 계약](docs/interface.md), [소스 형식](docs/source-formats.md), [CI→CD 경계](../../docs/api/ci-publication.md)를 함께 참고한다.
 
-Legacy `JASMIN_TENANT`, `JASMIN_API_URL`, and `JASMIN_SOURCE_ROOT` remain fallback aliases; `RAILSHOT_*` values take precedence. The server accepts `x-jasmin-request` for older clients. CLI/MCP send both request headers with the same value for existing servers. Historical `jasmin.yaml` artifacts keep their original hashes. See [naming compatibility](../../docs/api/naming-compatibility.md).
+Legacy `JASMIN_TENANT` and `JASMIN_API_URL` remain fallback aliases; `RAILSHOT_*` values take precedence. The server accepts `x-jasmin-request` for older clients. The CLI sends both request headers with the same value for existing servers. Historical `jasmin.yaml` artifacts keep their original hashes. See [naming compatibility](../../docs/api/naming-compatibility.md).
+
+개인 OpenStack 환경의 장기 소유권·등록·상태·동적 대상 배포·삭제 계약은
+[개인 환경 API](../../docs/api/personal-environments.md)를 참조하세요.
+`RAILSHOT_PERSONAL_CONFIG`는 비공개 운영자 설정 파일을 가리킵니다.
+무구성 상태에서는 등록 기록과 복구키를 관리할 수 있지만, 실제 설치 자격·배포는 준비되지 않았다고 응답합니다.

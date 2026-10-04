@@ -1,0 +1,34 @@
+[2026-10-02T13:52:26Z] [preflight] Linux node prerequisites ready
+[NODE_READY]
+[NETWORK_CHECKING]
+[K3S_INSTALLING]
+[2026-10-02T13:52:26Z] [install-k3s] 공식 installer로 K3s v1.34.11+k3s1 설치 (kube-proxy 유지)
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+100 36455  100 36455    0     0   235k      0 --:--:-- --:--:-- --:--:--  237k
+Created symlink /etc/systemd/system/multi-user.target.wants/k3s.service → /etc/systemd/system/k3s.service.
+[2026-10-02T13:52:39Z] [install-k3s] Kubernetes API 준비 대기. Node Ready는 Cilium 설치 후 확인합니다.
+[K3S_READY]
+[CILIUM_INSTALLING]
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+
+ 73 73.2M   73 53.6M    0     0  75.0M      0 --:--:-- --:--:-- --:--:-- 75.0M
+100 73.2M  100 73.2M    0     0  85.6M      0 --:--:-- --:--:-- --:--:--  141M
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+
+100    92  100    92    0     0    278      0 --:--:-- --:--:-- --:--:--   278
+[2026-10-02T13:52:49Z] [install] 공식 Cilium CLI로 설치: 1.20.2
+[CILIUM_READY]
+[WORKLOAD_DEPLOYING]
+[WORKLOAD_READY]
+[ENDPOINT_READY]

@@ -13,6 +13,7 @@ COMPONENTS = ('dashboard', 'api', 'mcp', 'ci-runner')
 SHA = re.compile(r'[0-9a-f]{40}')
 # Native controller files copied into the API stage, in addition to apps/api and dashboard assets.
 API_NATIVE_FILES = {
+    'ci/scripts/contract/telemetry.json', 'ci/scripts/contract/stages.json', 'gitops/workload_diagnostics.py',
     'observability/register.py', 'observability/bootstrap.py', 'observability/render.py', 'observability/compose.yaml', 'observability/runtime_health.py',
     'gitops/bridge.py', 'gitops/argo.py', 'gitops/handoff.py', 'gitops/credentials.py',
     'gitops/edge.py', 'gitops/service_name.py', 'gitops/logs.py',
@@ -33,15 +34,27 @@ API_NATIVE_FILES = {
     'deployment/scripts/applications.py', 'deployment/scripts/application_release.py', 'deployment/scripts/application_routes.py',
     'deployment/scripts/openstack_route_worker.py', 'deployment/scripts/application_lifecycle.py',
     'deployment/scripts/lifecycle_runtime.py',
+    'deployment/scripts/personal_wireguard.py', 'deployment/scripts/personal_runtime.py',
     'deployment/cloudflared/register.py', 'deployment/cloudflared/render.py',
     'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
     'deployment/cilium/health.sh', 'deployment/airgap/versions.json',
+    'deployment/bootstrap/install.sh', 'deployment/bootstrap/uninstall.sh',
+    'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/claim_token.py',
+    'deployment/bootstrap/requirements.lock',
+    'deployment/bootstrap/templates/agent-authorized-keys.README',
+    'infrastructure/providers/openstack/__init__.py',
+    'infrastructure/providers/openstack/cli.py', 'infrastructure/providers/openstack/identity.py',
+    'infrastructure/providers/openstack/discovery.py', 'infrastructure/providers/openstack/access.py',
+    'infrastructure/providers/openstack/templates/cloud-init.yaml.tmpl',
+    'apps/agent/__init__.py', 'apps/agent/install_forced_command.py',
+    'apps/agent/protocol.py', 'apps/agent/runner.py', 'apps/agent/sender.py',
 }
 API_NATIVE_PREFIXES = ('infrastructure/ansible/roles/', 'infrastructure/ansible/playbooks/',
                        'infrastructure/providers/terraform_tools/',
                        'infrastructure/terraform/aws/', 'infrastructure/terraform/gcp/',
-                       'infrastructure/terraform/aws-edge/', 'infrastructure/terraform/gcp-edge/')
+                       'infrastructure/terraform/aws-edge/', 'infrastructure/terraform/gcp-edge/',
+                       'deployment/bootstrap/client_setup/')
 
 
 def api_native_dependency(path):
@@ -54,30 +67,40 @@ def documentation(path):
             or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
 
 
+def test_only(path):
+    return (path.startswith(('apps/api/test/', 'ci/browser/')) or
+            path.startswith(('ci/scripts/', 'deployment/scripts/tests/'))
+            and PurePosixPath(path).name.startswith('test_') and path.endswith('.py'))
+
+
 def release_required(paths):
-    """Release common runtime/worker/IaC policy too; only proven docs-only diffs skip."""
+    """Release common runtime/worker/IaC policy too; proven documentation/test-only diffs skip."""
     return paths is None or any(not path or path.startswith('/') or '..' in PurePosixPath(path).parts
-                                or not documentation(path) for path in paths)
+                                or not (documentation(path) or test_only(path)) for path in paths)
 
 
 def container_components(paths):
     components = set()
     for path in paths:
-        if documentation(path) or path == 'docs/api/product.openapi.json':
+        if documentation(path) or test_only(path) or path == 'docs/api/product.openapi.json':
             continue
         if api_native_dependency(path):
             components.add('api')
         if path.startswith(('.github/', 'contracts/')) or path in {
-                '.dockerignore', 'ci/scripts/container-smoke.py'}:
+                '.dockerignore', 'ci/scripts/container-smoke.py', 'ci/scripts/ci_scope.py'}:
             components.update(COMPONENTS)
         elif path in {'package.json', 'package-lock.json', 'apps/api/package.json',
                       'apps/dashboard/package.json'}:
             components.update(('dashboard', 'api', 'mcp'))
-        elif path.startswith('apps/dashboard/'):
-            components.update(('dashboard', 'api'))  # API image retains source asset routes.
-        elif path.startswith('apps/api/'):
+        elif path == 'apps/api/Dockerfile':
             components.update(('api', 'mcp'))
-        elif path.startswith('ci/scripts/') or path == 'ci/runner-compose.yml':
+        elif path == 'apps/agent/package.json' or path.startswith(('apps/agent/src/', 'apps/agent/test/')):
+            components.add('mcp')
+        elif path.startswith('apps/dashboard/'):
+            components.add('dashboard')  # Production assets are served by the dashboard gateway.
+        elif path.startswith('apps/api/'):
+            components.add('api')
+        elif path.startswith(('ci/scripts/', 'ci/workflows/')) or path == 'ci/runner-compose.yml':
             components.add('ci-runner')  # The runner image COPYs all CI scripts.
         elif path == 'deployment/manifests/build-runner.yaml' or path == 'infrastructure/ansible/ci.yml':
             components.add('ci-runner')
@@ -119,10 +142,13 @@ def select(paths):
             continue  # Container job below checks all affected image contexts.
         elif path.startswith(('apps/api/', 'apps/dashboard/', 'ci/browser/')):
             selected.add('api-browser')
+        elif path.startswith(('apps/agent/src/', 'apps/agent/test/')) or path == 'apps/agent/package.json':
+            pass  # The MCP container job runs the agent tests.
         elif path.startswith(('apps/agent/', 'deployment/bootstrap/client_setup/',
                               'deployment/bootstrap/templates/')) or path in {
                 'deployment/bootstrap/install.sh', 'deployment/bootstrap/uninstall.sh',
-                'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/requirements.lock'}:
+                'deployment/bootstrap/install_payload.py', 'deployment/bootstrap/claim_token.py',
+                'deployment/bootstrap/requirements.lock'}:
             selected.add('openstack')
         elif path.startswith('infrastructure/providers/openstack/'):
             selected.update(('openstack', 'contracts'))
@@ -185,16 +211,47 @@ def changed_paths(event_name, event, cwd):
     return [os.fsdecode(path) for path in output.split(b'\0') if path]
 
 
+def previous_release_complete(before):
+    """A skipped/superseded predecessor cannot be used as the deployed baseline."""
+    if not isinstance(before, str) or not SHA.fullmatch(before) or before == '0' * 40:
+        return False
+    repository = 'repos/Jasmin-Softbank/Railshot/'
+    def read(path):
+        return json.loads(subprocess.check_output(['gh', 'api', repository + path],
+                                                 stderr=subprocess.PIPE, timeout=20))
+    try:
+        runs = read('actions/workflows/railshot-ci.yml/runs?event=push&head_sha=' + before + '&per_page=5')
+        for run in runs['workflow_runs']:
+            if run.get('head_branch') != os.environ.get('GITHUB_REF_NAME') or run.get('conclusion') != 'success':
+                continue
+            jobs = read(f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
+            # The run may be green because its source was superseded. Require an
+            # actual successful verification step, not the aggregate job status.
+            successful = {step.get('name') for job in jobs['jobs'] for step in job.get('steps', [])
+                          if step.get('conclusion') == 'success'}
+            runner_published = any(job.get('name', '').endswith('publish (ci-runner)')
+                                   and job.get('conclusion') == 'success' for job in jobs['jobs'])
+            return (jobs['total_count'] <= 100
+                    and 'Verify the exact Argo revision, running digests and public edge' in successful
+                    and (not runner_published or
+                         'Promote the tested CI controller runner and workflow source' in successful))
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    # No new admission gate: uncertain history builds every platform image.
+    return False
+
+
 def validate_gate(checks):
-    if set(checks) != set(JOBS) | {'changes'}:
+    jobs = set(checks) - {'changes'}
+    if jobs not in (set(JOBS), {'containers'}) or 'changes' not in checks:
         raise ValueError('Gate dependencies do not match the complete check set')
     if checks['changes']['result'] != 'success':
         raise ValueError('Change selection failed or was cancelled')
     selected = json.loads(checks['changes']['outputs']['selected'])
     if (not isinstance(selected, list) or not all(isinstance(job, str) for job in selected)
-            or len(selected) != len(set(selected)) or not set(selected) <= set(JOBS)):
+            or len(selected) != len(set(selected)) or not set(selected) <= jobs):
         raise ValueError('Invalid selected check set')
-    for job in JOBS:
+    for job in jobs:
         expected = 'success' if job in selected else 'skipped'
         if checks[job]['result'] != expected:
             raise ValueError(f'{job}: expected {expected}, got {checks[job]["result"]}')
@@ -220,11 +277,15 @@ def main():
     selected = set(JOBS) if paths is None else select(paths)
     components = set(COMPONENTS) if paths is None else container_components(paths)
     release = release_required(paths)
-    # A trusted automatic release exports all images once, even when only the
-    # native runtime/edge/worker source changes. The gate must require that job.
-    if release and os.environ.get('AUTO_RELEASE') == 'true':
-        selected.add('containers')
-        components = set(COMPONENTS)
+    if os.environ.get('AUTO_RELEASE') == 'true':
+        if not previous_release_complete(event.get('before')):
+            print('Previous release incomplete or unconfirmed; include platform and CI runner updates.')
+            components = set(COMPONENTS)
+        if 'ci-runner' in components:
+            components.update(('dashboard', 'api'))
+        release = bool(components)
+    if os.environ['GITHUB_EVENT_NAME'] in ('push', 'pull_request'):
+        selected = {'containers'} if components else set()
     result = json.dumps([job for job in JOBS if job in selected])
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         stream.write(f'selected={result}\n')

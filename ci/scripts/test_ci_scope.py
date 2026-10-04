@@ -19,43 +19,85 @@ class ScopeTests(unittest.TestCase):
                      'infrastructure/terraform/gcp-edge/main.tf', 'infrastructure/terraform/openstack-edge/main.tf',
                      'infrastructure/ansible/runtime.yml', 'gitops/credentials.py',
                      'observability/register.py', 'ci/workflows/railshot-deploy.yml',
-                     'deployment/scripts/tests/test_runtime_update.py', 'docs/api/ansible.openapi.json',
+                     'docs/api/ansible.openapi.json',
                      'new-scope/policy.json', '../README.md'):
             with self.subTest(path=path):
                 self.assertTrue(ci_scope.release_required([path]))
-        for paths in ([], ['README.md'], ['docs/operations/release.md', 'apps/api/README.md']):
+        for paths in ([], ['apps/api/test/product.test.js'], ['deployment/scripts/tests/test_runtime_update.py'], ['README.md'], ['docs/operations/release.md', 'apps/api/README.md']):
             self.assertFalse(ci_scope.release_required(paths))
         self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
 
-    def test_automatic_release_selects_all_same_run_images_and_gate_requires_them(self):
-        for automatic in (False, True):
-            for paths in (['deployment/scripts/platform_workers.py'], ['infrastructure/terraform/gcp-edge/main.tf'],
-                          ['docs/operations/release.md'], [], None):
-                with self.subTest(automatic=automatic, paths=paths), tempfile.TemporaryDirectory() as tmp:
+    def test_normal_runs_build_only_images_and_manual_runs_keep_full_checks(self):
+        cases = [(['apps/api/src/server.js'], ['api']), (['apps/dashboard/app.js'], ['dashboard']),
+                 (['apps/agent/src/remote-mcp.js'], ['mcp']),
+                 (['ci/scripts/ci_scope.py'], ['dashboard', 'api', 'mcp', 'ci-runner']),
+                 (['ci/workflows/railshot-deploy.yml'], ['dashboard', 'api', 'ci-runner']),
+                 (['deployment/scripts/platform_workers.py'], []),
+                 (['docs/operations/release.md'], []), (['apps/api/test/product.test.js'], []),
+                 (['ci/scripts/loop/test_native_packaging.py'], []), ([], []),
+                 (None, ['dashboard', 'api', 'mcp', 'ci-runner'])]
+        for event in ('push', 'pull_request', 'workflow_dispatch'):
+            for paths, automatic_components in cases:
+                with self.subTest(event=event, paths=paths), tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
                     (root / 'event').write_text('{}')
-                    env = {'AUTO_RELEASE': str(automatic).lower(), 'GITHUB_EVENT_NAME': 'push',
+                    env = {'AUTO_RELEASE': str(event == 'push').lower(), 'GITHUB_EVENT_NAME': event,
                            'GITHUB_EVENT_PATH': str(root / 'event'), 'GITHUB_OUTPUT': str(root / 'output'),
                            'GITHUB_STEP_SUMMARY': str(root / 'summary')}
                     with patch.dict(os.environ, env), patch('sys.argv', ['ci_scope.py', 'select']), \
-                            patch.object(ci_scope, 'changed_paths', return_value=paths):
+                            patch.object(ci_scope, 'changed_paths', return_value=paths), \
+                            patch.object(ci_scope, 'previous_release_complete', return_value=True):
                         ci_scope.main()
                     values = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
-                    release = ci_scope.release_required(paths)
-                    self.assertEqual(values['release'], str(release).lower())
-                    selected = set(json.loads(values['selected']))
-                    expected = set(ci_scope.JOBS) if paths is None else ci_scope.select(paths)
-                    if automatic and release:
-                        expected.add('containers')
-                        self.assertEqual(json.loads(values['container_components']), list(ci_scope.COMPONENTS))
-                    self.assertEqual(selected, expected)
-                    checks = {job: {'result': 'success' if job in selected else 'skipped'} for job in ci_scope.JOBS}
+                    components = json.loads(values['container_components'])
+                    if event == 'push':
+                        self.assertEqual(components, automatic_components)
+                        self.assertEqual(values['release'], str(bool(components)).lower())
+                    expected = (set(ci_scope.JOBS) if paths is None else ci_scope.select(paths)) \
+                        if event == 'workflow_dispatch' else ({'containers'} if components else set())
+                    self.assertEqual(set(json.loads(values['selected'])), expected)
+                    checks = {job: {'result': 'success' if job in expected else 'skipped'}
+                              for job in (ci_scope.JOBS if event == 'workflow_dispatch' else ['containers'])}
                     checks['changes'] = {'result': 'success', 'outputs': values}
                     ci_scope.validate_gate(checks)
-                    if automatic and release:
-                        checks['containers']['result'] = 'skipped'
+                    if components:
+                        checks['containers']['result'] = 'failure'
                         with self.assertRaises(ValueError):
                             ci_scope.validate_gate(checks)
+
+    def test_unfinished_predecessor_catches_up_all_deployed_images(self):
+        for paths in (['apps/api/src/server.js'], ['docs/operations/release.md'], []):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); (root / 'event').write_text('{}')
+                env = {'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push',
+                       'GITHUB_EVENT_PATH': str(root / 'event'), 'GITHUB_OUTPUT': str(root / 'output'),
+                       'GITHUB_STEP_SUMMARY': str(root / 'summary')}
+                with patch.dict(os.environ, env), patch('sys.argv', ['ci_scope.py', 'select']), \
+                        patch.object(ci_scope, 'changed_paths', return_value=paths), \
+                        patch.object(ci_scope, 'previous_release_complete', return_value=False):
+                    ci_scope.main()
+                values = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
+                self.assertEqual(json.loads(values['container_components']), list(ci_scope.COMPONENTS))
+                self.assertEqual(values['release'], 'true')
+                self.assertEqual(json.loads(values['selected']), ['containers'])
+
+    def test_previous_green_but_skipped_deploy_is_not_a_completed_release(self):
+        runs = {'workflow_runs': [{'id': 12, 'run_attempt': 1, 'head_branch': 'integration/test', 'conclusion': 'success'}]}
+        for conclusion, expected in [('success', True), ('skipped', False), ('failure', False)]:
+            jobs = {'total_count': 1, 'jobs': [{'steps': [{
+                'name': 'Verify the exact Argo revision, running digests and public edge', 'conclusion': conclusion}]}]}
+            with patch.dict(os.environ, {'GITHUB_REF_NAME': 'integration/test'}), \
+                    patch.object(subprocess, 'check_output', side_effect=[json.dumps(runs), json.dumps(jobs)]):
+                self.assertEqual(ci_scope.previous_release_complete('a' * 40), expected)
+        jobs = {'total_count': 2, 'jobs': [
+            {'name': 'Build, smoke and publish images / publish (ci-runner)', 'conclusion': 'success'},
+            {'steps': [{'name': 'Verify the exact Argo revision, running digests and public edge', 'conclusion': 'success'},
+                       {'name': 'Promote the tested CI controller runner and workflow source', 'conclusion': 'skipped'}]}]}
+        with patch.dict(os.environ, {'GITHUB_REF_NAME': 'integration/test'}), \
+                patch.object(subprocess, 'check_output', side_effect=[json.dumps(runs), json.dumps(jobs)]):
+            self.assertFalse(ci_scope.previous_release_complete('a' * 40))
+        with patch.object(subprocess, 'check_output', side_effect=subprocess.TimeoutExpired('gh', 20)):
+            self.assertFalse(ci_scope.previous_release_complete('a' * 40))
 
     def test_directory_dependencies_and_document_fixtures(self):
         cases = {
@@ -70,13 +112,14 @@ class ScopeTests(unittest.TestCase):
             'package-lock.json': {'api-browser', 'containers'},
             '.dockerignore': {'containers'},
             'infrastructure/providers/openstack/pyproject.toml': {'contracts', 'openstack'},
-            'apps/agent/sender.py': {'openstack'},
-            'deployment/bootstrap/client_setup/main.py': {'openstack'},
+            'apps/agent/sender.py': {'openstack', 'api-browser', 'containers'},
+            'deployment/bootstrap/client_setup/main.py': {'openstack', 'api-browser', 'containers'},
             'deployment/bootstrap/templates/wg-client.conf.tmpl': {'openstack'},
-            'deployment/bootstrap/install.sh': {'openstack'},
-            'deployment/bootstrap/uninstall.sh': {'openstack'},
-            'deployment/bootstrap/install_payload.py': {'openstack'},
-            'deployment/bootstrap/requirements.lock': {'openstack'},
+            'deployment/bootstrap/install.sh': {'openstack', 'api-browser', 'containers'},
+            'deployment/bootstrap/uninstall.sh': {'openstack', 'api-browser', 'containers'},
+            'deployment/bootstrap/install_payload.py': {'openstack', 'api-browser', 'containers'},
+            'deployment/bootstrap/claim_token.py': {'openstack', 'api-browser', 'containers'},
+            'deployment/bootstrap/requirements.lock': {'openstack', 'api-browser', 'containers'},
             'infrastructure/providers/terraform_tools/costs.py': {'contracts', 'terraform', 'api-browser', 'containers'},
             'infrastructure/terraform/aws-edge/main.tf': {'contracts', 'terraform', 'api-browser', 'containers'},
             'infrastructure/terraform/openstack-edge/main.tf': {'contracts', 'terraform'},
@@ -109,14 +152,19 @@ class ScopeTests(unittest.TestCase):
 
     def test_image_build_context_dependencies(self):
         cases = {
-            'apps/dashboard/styles.css': {'dashboard', 'api'},
+            'apps/dashboard/styles.css': {'dashboard'},
             'apps/dashboard/package.json': {'dashboard', 'api', 'mcp'},
-            'apps/api/src/server.js': {'api', 'mcp'},
-            'apps/agent/sender.py': set(),
+            'apps/api/src/server.js': {'api'},
+            'apps/api/Dockerfile': {'api', 'mcp'},
+            'apps/agent/src/mcp.js': {'mcp'},
+            'apps/agent/test/agent.test.js': {'mcp'},
+            'apps/agent/package.json': {'mcp'},
+            'apps/agent/sender.py': {'api'},
             'apps/api/package.json': {'dashboard', 'api', 'mcp'},
             'package-lock.json': {'dashboard', 'api', 'mcp'},
             '.dockerignore': set(ci_scope.COMPONENTS),
             'ci/scripts/publication.py': {'api', 'ci-runner'},
+            'ci/scripts/ci_scope.py': set(ci_scope.COMPONENTS),
             'ci/scripts/runner/entrypoint.sh': {'ci-runner'},
             'ci/scripts/runner/replenish.py': {'api', 'ci-runner'},
             'ci/runner-compose.yml': {'ci-runner'},
@@ -126,6 +174,7 @@ class ScopeTests(unittest.TestCase):
             'infrastructure/ansible/ci.yml': {'ci-runner'},
             'deployment/scripts/render-platform.py': set(ci_scope.COMPONENTS),
             'deployment/bootstrap/install-k3s.sh': {'api'},
+            'deployment/bootstrap/claim_token.py': {'api'},
             'docs/architecture/README.md': set(),
             'docs/api/product.openapi.json': set(),
             'gitops/bridge.py': {'api'},
@@ -153,7 +202,14 @@ class ScopeTests(unittest.TestCase):
                 files = [file for file in path.rglob('*') if file.is_file()] if path.is_dir() else [path]
                 for file in files:
                     relative = file.relative_to(root).as_posix()
+                    # Bundled static files support standalone API use; production serves the separate FE image.
+                    if relative.startswith('apps/dashboard/') and relative != 'apps/dashboard/package.json':
+                        continue
                     if ci_scope.documentation(relative):
+                        continue
+                    if relative.startswith('apps/agent/src/') or relative == 'apps/agent/package.json':
+                        with self.subTest(path=relative):
+                            self.assertIn('mcp', ci_scope.container_components([relative]))
                         continue
                     with self.subTest(path=relative):
                         self.assertIn('api', ci_scope.container_components([relative]))

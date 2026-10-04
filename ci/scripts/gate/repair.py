@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import shlex
 import tempfile
+import time
 import uuid
 
 from bundle import stage_source
@@ -27,7 +28,7 @@ def dependency_fields(package):
     return {key: package.get(key) for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")}
 
 
-def prepare_locks(workspace, run, *, network, selected_root=None):
+def prepare_locks(workspace, run, *, network, selected_root=None, observer=None):
     """Runs before a gate snapshot; receipts are outside the uploaded workspace."""
     from gate import require_ci_network
     from runner.run_agent import source_change_allowed
@@ -93,7 +94,13 @@ def prepare_locks(workspace, run, *, network, selected_root=None):
             plan = {"path": root.relative_to(ws).as_posix(), "image": "node:" + node + "-bookworm-slim",
                     "commands": setup + [install, emit]}
             try:
-                result = run_bounded(docker_command(staged, plan, name, network), timeout=600)
+                started = time.monotonic()
+                result = None
+                try:
+                    result = run_bounded(docker_command(staged, plan, name, network), timeout=600)
+                finally:
+                    if observer is not None:
+                        observer(["native.dependencies"], result, started, None if result is not None else "ProcessUnavailable")
                 if result.returncode:
                     raise ValueError("native lock resolution failed; dependency/network configuration needs repair")
                 rows = [line.partition("=")[2] for line in result.stdout.splitlines() if line.startswith("RAILSHOT_NATIVE_LOCK=")]

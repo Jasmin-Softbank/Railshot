@@ -39,6 +39,22 @@ class SemanticsTest(unittest.TestCase):
                     self.assertEqual(result.returncode, 2)
                     self.assertIn("unrecognized arguments", result.stderr)
 
+    def test_persistent_service_admission_preserves_single_writer_and_safe_mounts(self):
+        self.spec['services'][0]['storage'] = {'mountPath': '/var/opt/memos', 'sizeGi': 1}
+        gate.validate_semantics(self.spec)
+        for path in ('/', '/tmp', '/etc', '/var/lib/../etc', '/data//db', '/data/./db'):
+            bad = copy.deepcopy(self.spec)
+            bad['services'][0]['storage']['mountPath'] = path
+            with self.subTest(path=path), self.assertRaises(jsonschema.ValidationError):
+                gate.validate_semantics(bad)
+        for mutation in ('replicas', 'migration', 'services'):
+            bad = copy.deepcopy(self.spec)
+            if mutation == 'replicas': bad['services'][0]['replicas'] = 2
+            if mutation == 'migration': bad['services'][0]['migrate'] = {'command': ['migrate']}
+            if mutation == 'services': bad['services'].append({**bad['services'][0], 'name': 'other'})
+            with self.subTest(mutation=mutation), self.assertRaises((ValueError, jsonschema.ValidationError)):
+                gate.validate_semantics(bad)
+
     def test_duplicate_services_and_reserved_bindings_still_fail_l1(self):
         original = copy.deepcopy(self.spec)
         mutations = [lambda s: s["services"].append(copy.deepcopy(s["services"][0]))]

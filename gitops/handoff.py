@@ -216,6 +216,19 @@ def render(directory, target):
                   'ingress': [{'from': [{'ipBlock': {'cidr': c}} for c in cidrs],
                                'ports': [{'protocol': 'TCP', 'port': svc['port']}]}]}}
     items = [workload, service, policy]
+    if svc.get('storage'):
+        storage = svc['storage']
+        require(svc.get('replicas', 1) == 1 and not svc.get('migrate'),
+                'persistent storage requires one replica without a migration Job')
+        claim = name + '-data'
+        workload['spec']['strategy'] = {'type': 'Recreate'}
+        container['volumeMounts'].append({'name': 'data', 'mountPath': storage['mountPath']})
+        workload['spec']['template']['spec']['volumes'].append(
+            {'name': 'data', 'persistentVolumeClaim': {'claimName': claim}})
+        items.append({'apiVersion': 'v1', 'kind': 'PersistentVolumeClaim',
+                      'metadata': {'name': claim, 'namespace': namespace},
+                      'spec': {'accessModes': ['ReadWriteOnce'], 'storageClassName': 'railshot-persistent',
+                               'resources': {'requests': {'storage': str(storage['sizeGi']) + 'Gi'}}}})
     migration = None
     if database:
         policy['metadata']['annotations'] = {'argocd.argoproj.io/sync-wave': '-2'}

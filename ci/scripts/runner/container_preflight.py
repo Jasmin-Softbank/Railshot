@@ -256,7 +256,10 @@ def check_host():
             raise ValueError("operational credentials must not enter the CI runner: " + key)
     if os.environ.get("DOCKER_HOST") != "unix:///var/run/docker.sock":
         raise ValueError("only this CI VM's Docker socket is supported")
-    if os.environ.get("TMPDIR") != ROOT + "/work/_temp":
+    runner_name = os.environ.get("RAILSHOT_RUNNER_NAME", "")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", runner_name):
+        raise ValueError("reviewed runner workspace identity required")
+    if os.environ.get("TMPDIR") != ROOT + "/work/" + runner_name + "/_temp":
         raise ValueError("TMPDIR must be inside the workspace's same-path host mount")
     mode = host_mode()
     owned_file("/usr/local/sbin/railshot-ci-network", 0o755)

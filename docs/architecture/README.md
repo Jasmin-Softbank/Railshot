@@ -28,7 +28,7 @@ RAILSHOT은 앱 소스를 검사하고, 필요한 경우 AI가 제한된 범위�
 
 | 영역 | 정본 | 책임 |
 |---|---|---|
-| UI·API·CLI·MCP | `apps/dashboard`, `apps/api/src` | 소스 검증, GitHub 요청, 게시 상태 소비. MCP는 클라이언트 측 stdio |
+| UI·API·CLI·MCP | `apps/dashboard`, `apps/api/src`, `apps/agent/src/mcp.js` | 소스 검증, GitHub 요청, 게시 상태 소비. MCP는 클라이언트 측 stdio |
 | CI·AI·게시 | `ci/workflows/railshot-deploy.yml`, `ci/scripts/loop`, `ci/scripts/publication.py` | 기본 검사 → 필요한 AI 수정 → 같은 검사 → 통과 bundle 게시 |
 | VM 준비 | `infrastructure/providers`, `infrastructure/terraform` | Provider의 SDK 실행과 Terraform 실행은 별도 진입점 |
 | guest/runtime 연결 | `infrastructure/ansible/api.py`, `run.py`, `runtime.yml` | 등록된 descriptor/target 검증, guest 검사, 공통 설치 호출, nonce 영수증 확인 |

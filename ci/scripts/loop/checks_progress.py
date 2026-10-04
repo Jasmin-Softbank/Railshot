@@ -1,6 +1,7 @@
 """Bounded, best-effort GitHub Checks transport for safe supervisor observations.
 
-This channel never decides gate outcomes and never forwards provider text or errors.
+This channel never decides gate outcomes. Only bounded, redacted change descriptions
+from host-confirmed writes are forwarded; raw provider output and errors stay private.
 The job token lives only in this process; callers remove it from the environment
 before any child process starts.
 """
@@ -17,7 +18,8 @@ NAME = 'Railshot agent events'
 APP_ID = 15368  # github-actions on github.com; this transport has no configurable host.
 MAX_BYTES, MAX_ITEMS, MAX_RESPONSE = 60000, 60, 2 * 1024 * 1024
 OUTCOMES = {'RUNNING', 'PASS', 'FAIL', 'BLOCKED', 'UNKNOWN', 'NOT_RUN', 'INCOMPLETE'}
-EVENTS = {'loop.started', 'loop.completed', 'agent.heartbeat', 'agent.observation'}
+EVENTS = {'loop.started', 'loop.completed', 'agent.heartbeat', 'agent.observation',
+          'gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat', 'agent.repair'}
 
 
 def integer(value):
@@ -46,6 +48,49 @@ def row(event):
         if event.get('phase') != 'loop' or event.get('outcome') not in OUTCOMES or not (count is None or integer(count)):
             raise ValueError('invalid loop observation')
         result.update(phase='loop', outcome=event['outcome'], sdk_invocations=count)
+        if 'agent_budget' in attributes:
+            budget = attributes['agent_budget']
+            if (not isinstance(budget, dict) or set(budget) != {'enabled', 'max_invocations'}
+                    or type(budget['enabled']) is not bool or type(budget['max_invocations']) is not int
+                    or not 0 <= budget['max_invocations'] <= 3
+                    or budget['enabled'] != (budget['max_invocations'] > 0)):
+                raise ValueError('invalid agent budget')
+            result['agent_budget'] = dict(budget)
+    elif name == 'agent.repair':
+        repair = attributes.get('repair')
+        if (not identifier(event.get('attempt_id')) or not isinstance(repair, dict)
+                or set(repair) != {'state', 'role', 'changes', 'omitted_changes', 'failure_layer'}
+                or repair['state'] not in {'verifying', 'succeeded', 'failed', 'unknown'}
+                or repair['role'] not in {'adapter', 'fixer'}
+                or repair['failure_layer'] not in {None, 'L0', 'L1', 'Q', 'L2', 'L3', 'L4'}
+                or not integer(repair['omitted_changes']) or not isinstance(repair['changes'], list)
+                or len(repair['changes']) > 24):
+            raise ValueError('invalid repair observation')
+        for change in repair['changes']:
+            if (not isinstance(change, dict) or set(change) != {'path', 'summary', 'status'}
+                    or not isinstance(change['path'], str) or len(change['path']) > 240
+                    or not re.fullmatch(r'[A-Za-z0-9_./@-]+', change['path'])
+                    or change['path'].startswith('/') or any(p in ('', '.', '..') for p in change['path'].split('/'))
+                    or not isinstance(change['summary'], str) or not 1 <= len(change['summary']) <= 300
+                    or change['status'] != 'applied'):
+                raise ValueError('invalid repair change')
+        # Only these bounded, host-confirmed fields may cross the Checks boundary.
+        from diagnostics import redact
+        repair = {**repair, 'changes': [{**c, 'summary': redact(c['summary'])} for c in repair['changes']]}
+        result.update(attempt_id=event['attempt_id'], repair=repair)
+    elif name.startswith('gate.layer.'):
+
+        if (not identifier(event.get('attempt_id')) or event.get('phase') not in {'L0', 'L1', 'Q', 'L2', 'L4', 'L3'}
+                or event.get('outcome') not in OUTCOMES
+                or any(not integer(attributes.get(key)) for key in ('completed_steps', 'total_steps'))
+                or not 1 <= attributes['total_steps'] <= 6 or attributes['completed_steps'] > attributes['total_steps']):
+            raise ValueError('invalid gate observation')
+        duration = attributes.get('duration_s', 0)
+        if type(duration) not in (int, float) or not 0 <= duration <= 86400:
+            raise ValueError('invalid gate duration')
+        result.update(attempt_id=event['attempt_id'], phase=event['phase'], outcome=event['outcome'],
+                      completed_steps=attributes['completed_steps'], total_steps=attributes['total_steps'],
+                      duration_s=duration)
     else:
         if (not identifier(event.get('attempt_id')) or attributes.get('role') not in {'adapter', 'fixer'}
                 or attributes.get('provider') not in {'codex', 'claude'}
@@ -82,6 +127,11 @@ def unavailable():
         print('{"event_name":"progress.unavailable","code":"PROGRESS_UNAVAILABLE"}', file=sys.stderr, flush=True)
     except OSError:
         pass
+
+
+# Twelve active jobs produce at most 720 periodic updates/hour, leaving room
+# in the repository GITHUB_TOKEN budget for registration/final publications.
+PUBLISH_INTERVAL_SECONDS = 60
 
 
 class ChecksProgress:
@@ -198,7 +248,9 @@ class ChecksProgress:
             self.items.append({**item, 'sequence': self.sequence})
         self.pending.clear()
         if len(self.items) > MAX_ITEMS:
-            self.items = self.items[-MAX_ITEMS:]
+            receipts = {r['attempt_id']: r for r in self.items if r['event_name'] == 'agent.repair'}
+            keep = list(receipts.values())[-3:]
+            self.items = sorted(keep + [r for r in self.items if r not in keep][-(MAX_ITEMS - len(keep)):], key=lambda r: r['sequence'])
             self.truncated = True
         while True:
             value = {**self.binding, 'updated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
@@ -208,7 +260,8 @@ class ChecksProgress:
                 return {'title': NAME, 'summary': 'Structured supervisor observations only; gate results remain authoritative.', 'text': text}
             if not self.items:
                 raise ValueError('oversized progress binding')
-            self.items.pop(0)
+            removable = next((i for i, r in enumerate(self.items) if r['event_name'] not in {'agent.repair', 'loop.completed'}), 0)
+            self.items.pop(removable)
             self.truncated = True
 
     def emit(self, event, *, final=False):
@@ -227,7 +280,7 @@ class ChecksProgress:
                 return
             if now < self.next_at and not final:
                 return
-            self.next_at = now + 20
+            self.next_at = now + PUBLISH_INTERVAL_SECONDS
             if self.check_id is None:
                 self.locate()
             self.completed = self.completed or final
@@ -246,7 +299,7 @@ class ChecksProgress:
             else:
                 self.request('PATCH', f'/repos/{self.repository}/check-runs/{self.check_id}', payload)
         except Exception:
-            self.next_at = max(time.monotonic() + 20, self.backoff_until)
+            self.next_at = max(time.monotonic() + PUBLISH_INTERVAL_SECONDS, self.backoff_until)
             unavailable()
 
 

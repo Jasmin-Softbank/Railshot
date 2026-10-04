@@ -193,14 +193,34 @@ def admit(source_sha, ref, run_id=None, *, read=github):
     raise ValueError('EXACT_SOURCE_CI_GATE_REQUIRED')
 
 
-if __name__ == '__main__':
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-sha', required=True)
     parser.add_argument('--ref', required=True)
     parser.add_argument('--ci-run-id', default='')
-    args = parser.parse_args()
+    parser.add_argument('--skip-superseded', action='store_true',
+                        help='Report superseded sources as a non-mutating Actions skip; requires GITHUB_OUTPUT')
+    args = parser.parse_args(argv)
+    if args.skip_superseded and not os.environ.get('GITHUB_OUTPUT'):
+        parser.error('--skip-superseded requires GITHUB_OUTPUT')
+    exit_code = 0
     try:
-        print(json.dumps(admit(args.source_sha, args.ref, args.ci_run_id)))
+        result = admit(args.source_sha, args.ref, args.ci_run_id)
     except Exception as error:
-        print(json.dumps({'status': 'blocked', 'code': str(error) if isinstance(error, ValueError) else 'CI_ADMISSION_UNAVAILABLE'}))
-        raise SystemExit(1)
+        code = str(error) if isinstance(error, ValueError) else 'CI_ADMISSION_UNAVAILABLE'
+        superseded = args.skip_superseded and code == 'SUPERSEDED_RELEASE_SOURCE'
+        result = {'status': 'superseded' if superseded else 'blocked', 'code': code}
+        exit_code = 0 if superseded else 1
+    if args.skip_superseded:
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write('admitted=' + str(result['status'] == 'admitted').lower() + '\n')
+        if result['status'] == 'superseded' and os.environ.get('GITHUB_STEP_SUMMARY'):
+            with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+                summary.write('### Release superseded\nA newer source replaced this release. '
+                              'No mutation follows this check; this is not deployment verification.\n')
+    print(json.dumps(result))
+    return exit_code
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

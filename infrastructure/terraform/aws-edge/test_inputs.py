@@ -112,6 +112,24 @@ class EdgeInputsTest(unittest.TestCase):
             with self.subTest(key=key, invalid=invalid), self.assertRaises(ValueError):
                 evaluate(rejected, 'var.openstack_proxy_egress')
 
+    def test_shared_service_egress_is_explicit_and_independent_of_app_routes(self):
+        values = fixture()
+        self.assertEqual(evaluate(values, 'var.shared_service_egress'), {})
+        rules = {'observability': {'target_private_ip': '172.31.2.249', 'port': 3000,
+                                   'description': 'shared-observer'}}
+        values['shared_service_egress'] = rules
+        values['routes'] = {}
+        self.assertEqual(evaluate(values, '{rules=var.shared_service_egress, apps=local.active_routes}'),
+                         {'rules': rules, 'apps': {}})
+        for key, invalid in (('target_private_ip', '8.8.8.8'), ('target_private_ip', '169.254.169.254'),
+                             ('target_private_ip', '172.31.2.249/24'), ('target_private_ip', '10.999.0.1'),
+                             ('port', 0), ('port', 65536), ('port', 3.5),
+                             ('description', ''), ('description', 'bad\nline')):
+            rejected = copy.deepcopy(values)
+            rejected['shared_service_egress']['observability'][key] = invalid
+            with self.subTest(key=key, invalid=invalid), self.assertRaises(ValueError):
+                evaluate(rejected, 'var.shared_service_egress')
+
     def test_app_relay_and_skyline_egress_coexist_without_new_routes(self):
         values = fixture()
         self.assertIsNone(evaluate(values, 'var.openstack_app_egress'))

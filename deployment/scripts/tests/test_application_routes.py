@@ -179,7 +179,7 @@ class ApplicationRoutesTest(unittest.TestCase):
             case.gcp.assert_called_once_with(ingress['edge_config_file'], {
                 'application_id': case.registered['application_id'], 'hostname': case.registered['hostname'],
                 'node_port': case.registered['node_port'], 'health_path': '/alive',
-            })
+            }, dns_config_path=ingress['dns_config_file'])
             self.assertEqual([call.args for call in case.dns.call_args_list], [
                 (ingress['dns_config_file'], {'application_id': case.registered['application_id'], 'purpose': 'certificate',
                     'application_hostname': case.registered['hostname'], 'hostname': '_acme-challenge_123.' + case.registered['hostname'],
@@ -188,6 +188,16 @@ class ApplicationRoutesTest(unittest.TestCase):
                     'hostname': case.registered['hostname'], 'type': 'A', 'content': '34.100.10.20'}),
             ])
             case.edge.assert_not_called(); case.registration.native.assert_not_called()
+
+    def test_gcp_shared_certificate_only_registers_application_dns(self):
+        with self.fixture('gcp') as case:
+            case.gcp_result['dns_authorization_record'] = None
+            result = routes.ensure(case.config_path, case.request)
+            self.assert_configured_only(case, result)
+            self.assertEqual(case.dns.call_count, 1)
+            self.assertEqual(case.dns.call_args.args[1], {
+                'application_id': case.registered['application_id'],
+                'hostname': case.registered['hostname'], 'type': 'A', 'content': '34.100.10.20'})
 
     def test_openstack_finalized_binding_runs_octavia_then_tunnel_then_proxied_dns(self):
         with self.fixture('openstack') as case:

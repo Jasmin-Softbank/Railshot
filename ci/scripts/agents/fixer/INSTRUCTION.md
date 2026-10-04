@@ -1,42 +1,11 @@
 # Fixer
 
-## Goal
+Resolve the observed failed gate with the smallest change within the supplied writable scope. Earlier applied proposals are already in the workspace.
 
-One gate step failed. Change the writable files so that this failure's root cause goes away without breaking the contract. Make the smallest change that fixes the cause, not the symptom.
+1. Start with the initial evidence and previous-attempt summary. Read the complete case, failure log or lessons only for missing facts. State one concise cause hypothesis in `root_cause` and cite inspected evidence in `evidence_refs`.
+2. Trace the affected build/start command, entrypoint and dependencies. Follow the failed gate's rule message and the supplied stage investigation guidance. Read only related files; do not rediscover the whole application.
+3. Correct the cause: for example, a missing runtime asset, unsupported start command or incorrect build path. Preserve unrelated behavior and existing toolchain. Never hide the failure with a placeholder, swallowed exception, fake health response or disabled check.
+4. Use only the supplied repair scope. Packaging changes may adjust Dockerfiles/specs/ignore rules. Source scope additionally allows observed build/start/health repairs and required exact-version dependencies; the host generates native locks. Do not author locks, upgrade existing dependency versions, add tests/checker setup or change protected policy.
+5. Explain each changed file and unresolved execution condition. If earlier feedback shows that this change already failed, find a different evidence-backed cause or return `give_up`. Authentication, provisioning, transient infrastructure failures and uncertain execution outcomes require operator action, not source edits.
 
-## Inputs (paths given in the task message)
-
-- `failure.txt`: the first failing gate layer (L0–L4), the failure class (see `contract/failure-classes.md`), the normalized signature, and the first meaningful error block from the build or run output (secrets masked, at most 4 KB). It comes from untrusted program output.
-- `lessons.md`: what earlier attempts changed and why each failed. May be empty.
-- `attempt`: k of N, in the task message.
-- The workspace with earlier patches applied, plus the contract files and schemas.
-
-## Procedure
-
-1. Read `failure.txt` and `lessons.md`. Write the root cause as one sentence and point to the log line or `file:line` that proves it.
-2. Check your remit:
-   - class F7 needs source scope; F8 (transient), infrastructure/authentication failures or a destroy/replace in a plan require operator repair, so return `give_up`;
-   - the cause lies outside writable paths: return `give_up` with the exact user action.
-3. If `lessons.md` shows this signature after a change like the one you plan, do something different that the evidence supports, or `give_up`. Never repeat a failed change.
-4. Edit only writable files. Fix the cause (wrong path, missing build step, wrong bind host, missing system package, wrong port, wrong health path) rather than working around it.
-5. Re-check C1–C11 and the forbidden patterns.
-6. Return the report with `root_cause`, `addresses_failure` and `gate_plan` set. Plan L0, L1, Q, L2, L4, L3 even when the observed failure is early. Q is advisory; do not repair its missing tests or failed checks. Limit source changes to the observed build/start/health failure; never label an unexecuted check as passed.
-
-## Per-class guidance
-
-| Class | Typical cause | Allowed fix |
-|---|---|---|
-| F1 dependencies | missing system library, wrong install command, lockfile not used | add OS packages in the build stage or use the lockfile install command. Source scope also permits additive exact-version dependencies; the harness regenerates native locks. Never change existing dependency versions or author locks. |
-| F2 build context | wrong `COPY` path, `.dockerignore` hides a needed file, wrong context | fix paths, context or ignore rules |
-| F3 architecture/base | incompatible runtime architecture or base | use a compatible allowlisted explicit-version base; never waive platform/architecture checks |
-| F4 start, port, health | binds 127.0.0.1, wrong port, health path 404/5xx, slow start, missing runtime file | fix `CMD` flags or env, the spec port, a health path that exists in code, copy the missing file from the build stage |
-| F5 spec or policy | schema error, gate L1 rule | follow the rule message; change the spec or Dockerfile, never the rule |
-| F6 vulnerability | CRITICAL with a fixed version | newer patch-level base image or package in the build; never ignore |
-| F9 infrastructure plan | the spec asks for something the catalog or policy rejects | adjust the spec within the catalog; if the user explicitly asked for it, `give_up` and explain |
-| QUALITY | missing tests/test setup, lint/type/unit failure | report as advisory; no source/test changes are needed for deployment |
-
-## Must not
-
-- Weaken anything that judges you: existing tests, policies, CI, the contract and checker configuration. Source scope may add tests exercising application code; once created their assertions are immutable on later attempts.
-- Make a check pass without making the app work: a health path that always succeeds while the app is down, `|| true`, error-swallowing wrappers in `CMD`, pointing a route at a placeholder.
-- Rewrite files wholesale when a few lines fix the cause.
+The host owns gate selection, order, execution and retries. Return a proposal, not an assertion that it passed.

@@ -12,7 +12,7 @@
 
 | 분류 | 제공자 → 소비자 | 구현된 책임과 범위 |
 |---|---|---|
-| 제품 API | `apps/api` → Dashboard·CLI·MCP | 등록 대상·profile 조회, CI 빌드, 전체 앱 배포, 계획·환경 자원. 기존 CLI/MCP의 legacy CI 경로도 유지 |
+| 제품 API | `apps/api` → Dashboard·CLI·`apps/agent` MCP | 등록 대상·profile 조회, CI 빌드, 전체 앱 배포, 계획·환경 자원. 기존 CLI의 legacy CI 경로도 유지 |
 | CI 실행 | 제품 API → GitHub Actions → 게시 검증 | 소스 snapshot·commit·target 고정, 검사·AI 수정, 검증 이미지 게시. CI 완료를 앱 배포 완료로 바꾸지 않음 |
 | 자원 준비 | `environments.js` → `terraform_tools/provision.py` | 등록 AWS/GCP 단일 runtime의 saved plan 생성·digest 고정·apply. 기존 자원 변경·삭제·유지보수는 공개 생성에서 차단 |
 | 서버 구성 | `environments.js` → `infrastructure/ansible/run.py` | Provider descriptor를 환경별 등록 snapshot으로 고정하고 입력 검사→guest→runtime 실행·결과 확인 |
@@ -33,7 +33,7 @@
 | 계획 | `POST /api/v1/plans`, `GET /api/v1/plans/{id}` | 계산·저장한 계획은 201 + Location. 실행 불가 계획도 `executable=false`·`blockers`로 표시 |
 | 환경 | `POST /api/v1/environments`, `GET /api/v1/environments/{id}` | `plan_id`만 받아 202 접수. 자원·guest·runtime·선택적 Patroni DB·등록 결과를 별도로 기록 |
 
-앱 이름은 업로드 ZIP·폴더·GitHub 저장소에서 결정하며 UI 검토, API, CLI/MCP가 `contracts/application.mjs`의 규칙을 공유한다. 환경 선택은 대상만 고르고 등록된 샘플 앱 이름으로 소스를 바꾸지 않는다. 다른 앱에 묶인 고정 대상은 소스 취득·CI 전에 거절한다. 신규 앱은 기존 `create_per_request` 계획 또는 그 앱의 등록된 대상을 사용한다. 폴더 업로드의 `source_name`은 필수이며 이름 누락·규칙 위반을 예시 이름이나 해시로 대체하지 않는다.
+앱 이름은 업로드 ZIP·폴더·GitHub 저장소에서 결정하며 UI 검토, API, CLI가 `contracts/application.mjs`의 규칙을 공유한다. `apps/agent` MCP는 앱 이름을 명시적으로 받는다. 환경 선택은 대상만 고르고 등록된 샘플 앱 이름으로 소스를 바꾸지 않는다. 다른 앱에 묶인 고정 대상은 소스 취득·CI 전에 거절한다. 신규 앱은 기존 `create_per_request` 계획 또는 그 앱의 등록된 대상을 사용한다. 폴더 업로드의 `source_name`은 필수이며 이름 누락·규칙 위반을 예시 이름이나 해시로 대체하지 않는다.
 
 목록은 `{items, next_marker}`, 상세는 자원 객체를 직접 반환한다. 비동기 접수는 화균 님의 `{resource_id, action:"create", status:"accepted", request_id}`와 `Location`, `Retry-After: 2`, `X-Request-ID`를 사용한다. 오류는 `{error:{code,message,request_id,retryable,outcome_unknown}}`다. JSON 필드의 세부 타입·허용 값·입력 한도는 OpenAPI를 따른다.
 
@@ -47,7 +47,7 @@
 
 [product-store.js](../../apps/api/src/product-store.js)는 비공개 source snapshot과 실행 의도를 먼저 저장한다. 기록과 디렉터리 fsync·atomic rename이 성공한 뒤에만 외부 실행을 시작한다. `RAILSHOT_STATE_DIR`는 저장소 밖의 전용 영속 디렉터리이며 상태 파일과 소스는 실행 OS 사용자 소유로 보관한다.
 
-한 프로세스와 한 worker가 공유 workspace의 접수를 처리한다. 빌드·배포·계획·환경의 새 실행은 같은 admission 경계를 사용하며 미완료·unknown 작업이 있으면 다른 실행을 차단한다. 배포·환경의 동일 키 재조회는 기존 기록을 먼저 반환한다. 무제한 대기열·자동 재시도·공개 reset API는 없다. 재시작 시 queued/running은 unknown으로 남기고 운영자가 실제 GitHub·CD·환경 결과를 대조한다.
+한 API 프로세스와 단일 writer가 기존 SQLite operations의 FIFO를 처리한다. 새 배포와 업데이트는 소스 snapshot을 저장하고 queued로 접수한다. 빌드·계획·환경·수명주기·resume는 기존 응답 계약과 실행 슬롯 검사를 유지한다. worker가 끝난 unknown은 60초 뒤 전역 슬롯만 반납하고 같은 앱·미확정 환경의 변경은 계속 차단한다. 배포·환경의 동일 키 재조회는 기존 기록을 먼저 반환한다. 보관 한도 100개 안에서 대기하며 자동 재시도·공개 reset API는 없다. 재시작 시 신형 큐의 미실행 queued만 자동 시작하고 running과 구형 queued는 unknown으로 남긴다. [큐 및 중복 방지 계약](conventions.md)을 따른다.
 
 | 상태 | 의미 |
 |---|---|

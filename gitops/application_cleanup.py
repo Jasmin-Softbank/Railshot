@@ -114,7 +114,7 @@ def addresses(provider, key, route, values, action):
     suffix = ('.app[' if provider == 'aws' else '.routes[') + json.dumps(key) + ']'
     result = {kind + suffix for kind in kinds} if active or action == 'start' else set()
     if provider == 'gcp' and action == 'delete':
-        result |= {kind + suffix for kind in gcp_routes.KINDS[4:]}
+        result |= {kind + suffix for kind in gcp_routes.resource_kinds(route)[4:]}
     if provider == 'aws':
         pair = route['target_security_group_id'] + ':' + str(route['node_port'])
         if (active or action == 'start') and not any(k != key and r.get('enabled', True) and
@@ -131,9 +131,37 @@ def subset(expected, actual):
     return expected == actual
 
 
+def refresh_metadata(document):
+    """Allow only AWS's empty-tag normalization and the known ALB association."""
+    changes = {row['address']: row['change'] for row in document.get('resource_changes', [])}
+    alb = changes.get('aws_lb.app', {})
+    alb_id = (alb.get('before') or {}).get('id')
+    for row in document.get('resource_drift', []):
+        address, change = row.get('address', ''), row.get('change', {})
+        kind = row.get('type')
+        before, after = change.get('before'), change.get('after')
+        planned = changes.get(address, {})
+        require(kind in ('aws_lb_listener_rule', 'aws_lb_target_group') and
+                address.startswith(kind + '.app[') and row.get('mode') == 'managed' and
+                not row.get('deposed') and not change.get('importing') and not change.get('replace_paths') and
+                not change.get('after_unknown') and change['actions'] == ['update'] and
+                isinstance(before, dict) and isinstance(after, dict) and before.get('id') and
+                before['id'] == after.get('id') and planned.get('before') == after and
+                planned.get('actions') in (['no-op'], ['delete']), 'edge drift must be reconciled first')
+        normalized = dict(before)
+        if before.get('tags') is None and after.get('tags') == {}:
+            normalized['tags'] = {}
+        if (kind == 'aws_lb_target_group' and before.get('load_balancer_arns') == [] and alb_id and
+                alb.get('actions') == ['no-op'] and (alb.get('after') or {}).get('id') == alb_id and
+                after.get('load_balancer_arns') == [alb_id]):
+            normalized['load_balancer_arns'] = [alb_id]
+        require(normalized == after, 'edge drift must be reconciled first')
+
+
 def validate_plan(document, snapshot, candidate, provider, action):
-    """No drift/replacement/import, exact app addresses, bounded shared edits."""
-    require(not document.get('errored') and not document.get('resource_drift'), 'edge drift must be reconciled first')
+    """No configuration drift/replacement/import; exact app addresses and shared edits."""
+    require(not document.get('errored'), 'edge drift must be reconciled first')
+    refresh_metadata(document)
     require(all(subset(v, document.get('variables', {}).get(k, {}).get('value')) for k, v in candidate.items()),
             'saved plan variables changed')
     route, key = snapshot['route'], snapshot['key']
@@ -262,7 +290,8 @@ def saved_plan(work, values, label):
 
 
 def unchanged(document):
-    require(not document.get('errored') and not document.get('resource_drift') and all(
+    refresh_metadata(document)
+    require(not document.get('errored') and all(
         row['change']['actions'] == ['no-op'] or (row.get('mode') == 'data' and row['change']['actions'] == ['read'])
         for row in document.get('resource_changes', [])), 'fresh edge plan contains drift or unrelated changes')
 

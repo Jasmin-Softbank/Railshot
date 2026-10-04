@@ -26,6 +26,68 @@ class RouteError(ValueError):
         super().__init__(self.code)
 
 
+def checked_edge(config):
+    keys = {'version', 'provider', 'base_domain', 'runtime_private_address', 'controller', 'proxy'}
+    require(isinstance(config, dict) and set(config) in (keys, keys | {'worker_binding'})
+            and type(config['version']) is int and config['version'] == 1 and config['provider'] == 'openstack',
+            'OPENSTACK_ROUTE_CONFIGURATION_INVALID')
+    if 'worker_binding' in config:
+        worker.checked_worker_binding(config['worker_binding'])
+    return config
+
+
+def rpc_command(config):
+    controller, proxy = config['controller'], config['proxy']
+    proxy_command = [*ssh_prefix(proxy), '-W', '%h:%p', proxy['user'] + '@' + proxy['host']]
+    return [*ssh_prefix(controller), '-o', 'ProxyCommand=' + shlex.join(proxy_command),
+            controller['user'] + '@' + controller['host'], COMMAND]
+
+
+def registration_rpc(config, payload, status):
+    try:
+        result = subprocess.run(rpc_command(config), input=json.dumps(payload), capture_output=True,
+                                text=True, shell=False, timeout=600)
+        require(len(result.stdout) <= 65536, 'OPENSTACK_REGISTRATION_RESPONSE_INVALID')
+        receipt = json.loads(result.stdout)
+        require(result.returncode == 0 and isinstance(receipt, dict)
+                and set(receipt) == {'status', 'https_verified', 'binding'}
+                and receipt['status'] == status and receipt['https_verified'] is False
+                and receipt['binding'] == payload['binding'], 'OPENSTACK_REGISTRATION_RESPONSE_INVALID')
+        worker.checked_worker_binding(receipt['binding'])
+        return receipt
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        # A lost response is retried with the same immutable binding only.
+        raise RouteError(unknown=payload['operation'] != 'verify-runtime') from None
+
+
+def register_runtime(edge_template, *, environment_id, generation, base, runtime):
+    config = checked_edge(edge_template)
+    base = worker.operator_base(base)
+    require(base['base_domain'] == config['base_domain'] and runtime['private_address'] == config['runtime_private_address'],
+            'OPENSTACK_REGISTRATION_BINDING_INVALID')
+    binding = worker.registration_binding(base, environment_id, generation, runtime)
+    require('worker_binding' not in config or config['worker_binding'] == binding,
+            'OPENSTACK_REGISTRATION_BINDING_INVALID')
+    return registration_rpc(config, {'operation': 'register-runtime', 'binding': binding, 'runtime': runtime},
+                            'registered')['binding']
+
+
+def verify_runtime(edge_template, *, environment_id, generation, base, runtime):
+    config = checked_edge(edge_template)
+    base = worker.operator_base(base)
+    require(base['base_domain'] == config['base_domain'] and runtime['private_address'] == config['runtime_private_address'],
+            'OPENSTACK_REGISTRATION_BINDING_INVALID')
+    binding = worker.registration_binding(base, environment_id, generation, runtime)
+    return registration_rpc(config, {'operation': 'verify-runtime', 'binding': binding, 'runtime': runtime},
+                            'verified')['binding']
+
+
+def unregister_runtime(edge_config):
+    config = checked_edge(edge_config)
+    require('worker_binding' in config, 'OPENSTACK_WORKER_BINDING_REQUIRED')
+    return registration_rpc(config, {'operation': 'unregister-runtime', 'binding': config['worker_binding']}, 'unregistered')
+
+
 def ssh_prefix(connection):
     require(isinstance(connection, dict) and set(connection) == {
         'host', 'port', 'user', 'identity_file', 'known_hosts_file', 'host_key_alias'},
@@ -51,18 +113,13 @@ def ssh_prefix(connection):
 
 
 def ensure(config_path, request):
-    config = read_private(config_path)
-    require(isinstance(config, dict) and set(config) == {
-        'version', 'provider', 'base_domain', 'runtime_private_address', 'controller', 'proxy'}
-        and type(config['version']) is int and config['version'] == 1 and config['provider'] == 'openstack',
-        'OPENSTACK_ROUTE_CONFIGURATION_INVALID')
+    config = checked_edge(read_private(config_path))
     worker.checked_request(config, request)
-    controller, proxy = config['controller'], config['proxy']
-    proxy_command = [*ssh_prefix(proxy), '-W', '%h:%p', proxy['user'] + '@' + proxy['host']]
-    command = [*ssh_prefix(controller), '-o', 'ProxyCommand=' + shlex.join(proxy_command),
-               controller['user'] + '@' + controller['host'], COMMAND]
+    command = rpc_command(config)
+    payload = ({'operation': 'environment-route', 'binding': config['worker_binding'], 'request': request}
+               if 'worker_binding' in config else request)
     try:
-        result = subprocess.run(command, input=json.dumps(request), capture_output=True, text=True,
+        result = subprocess.run(command, input=json.dumps(payload), capture_output=True, text=True,
                                 shell=False, timeout=600)
     except (OSError, subprocess.TimeoutExpired):
         raise RouteError(unknown=True) from None
@@ -120,19 +177,15 @@ def lifecycle_config(binding):
 
 
 def lifecycle_rpc(binding, action, operation, expected=None):
-    config = read_private(binding['ingress']['edge_config_file'])
-    require(isinstance(config, dict) and set(config) == {
-        'version', 'provider', 'base_domain', 'runtime_private_address', 'controller', 'proxy'}
-        and config['version'] == 1 and config['provider'] == 'openstack', 'OPENSTACK_ROUTE_CONFIGURATION_INVALID')
+    config = checked_edge(read_private(binding['ingress']['edge_config_file']))
     request = lifecycle_request(binding)
     worker.checked_request(config, {**request, 'private_address': config['runtime_private_address'], 'health_path': '/'})
-    controller, proxy = config['controller'], config['proxy']
-    proxy_command = [*ssh_prefix(proxy), '-W', '%h:%p', proxy['user'] + '@' + proxy['host']]
-    command = [*ssh_prefix(controller), '-o', 'ProxyCommand=' + shlex.join(proxy_command),
-               controller['user'] + '@' + controller['host'], COMMAND]
+    command = rpc_command(config)
     payload = {'operation': operation, 'action': action, 'request': request}
     if expected is not None:
         payload['expected'] = expected
+    if 'worker_binding' in config:
+        payload = {'operation': 'environment-lifecycle', 'binding': config['worker_binding'], 'request': payload}
     try:
         result = subprocess.run(command, input=json.dumps(payload), capture_output=True, text=True,
                                 shell=False, timeout=600)

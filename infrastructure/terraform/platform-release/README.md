@@ -8,8 +8,10 @@ application. Keep its local state separate from the provider edge states.
 
 ## CI runtime promotion
 
-A trusted automatic platform release now runs `ci-runtime` after the platform
-image publication and live verification. This stage runs even when
+A trusted automatic platform release runs `ci-runtime` only when CI runner or
+app-workflow source changes, after platform publication and live verification.
+API/dashboard-only releases skip worker and provider reconciliation. Full provider
+maintenance requires an explicit manual `multicloud` request. CI promotion runs even when
 `RAILSHOT_MULTICLOUD_RELEASE` is disabled. It uses the same fixed SSM document,
 control instance and OIDC role with `Scope=ci-runtime`; no additional IAM action
 or resource is granted. Apply the reviewed document update and set its new

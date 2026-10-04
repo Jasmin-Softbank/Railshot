@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { DashboardError, createDashboardData } from './sessions.js';
+import { createRegistrations } from './openstack/registrations.js';
 import { validateFiles } from './archive.js';
 
 const run = promisify(execFile);
@@ -61,7 +62,7 @@ export async function createProductStore(directory) {
     const directoryHandle = await open(root, 'r');
     try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
   }
-  let state, db, dashboard;
+  let state, db, dashboard, registrations;
   try {
     const path = join(root, 'dashboard.sqlite3');
     try { const file = await open(path, 'wx', 0o600); await file.close(); }
@@ -75,8 +76,13 @@ export async function createProductStore(directory) {
     db = new DatabaseSync(path);
     db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
-    if (![0, 1].includes(version)) throw new Error('Unsupported database schema');
+    if (![0, 1, 2].includes(version)) throw new Error('Unsupported database schema');
     db.exec(await readFile(new URL('./dashboard-schema.sql', import.meta.url), 'utf8'));
+    // Remove registration fields that are no longer used for token issue or claim.
+    const registrationColumns = new Set(db.prepare('PRAGMA table_info(registrations)').all().map((column) => column.name));
+    for (const name of ['auth_type', 'project_id', 'user_id', 'key_salt', 'key_hash']) {
+      if (registrationColumns.has(name)) db.exec(`ALTER TABLE registrations DROP COLUMN ${name}`);
+    }
     if (version === 0) {
       try { state = await readPrivate(join(root, 'state.json')); }
       catch (error) { if (error.code !== 'ENOENT') throw error; state = { version: 1, operations: {}, keys: {}, bindings: {}, plans: {} }; }
@@ -102,10 +108,26 @@ export async function createProductStore(directory) {
       state.project_bindings[bindingId] = { id: bindingId, project_id: projectId, environment_id: app.environment_target_id, application_id: app.id, status: app.status, applied_revision_id: null };
       Object.assign(app, { project_id: projectId, binding_id: bindingId });
     }
+    state.personal = JSON.parse(db.prepare("SELECT record FROM personal_state WHERE id = 'personal'").get()?.record || '{"targets":{},"enrollments":{}}');
     for (const app of Object.values(state.applications)) if (['registering', 'stopping', 'starting', 'deleting'].includes(app.status)) app.status = 'unknown';
     for (const operation of Object.values(state.operations)) {
-      if (['queued', 'running'].includes(operation.status)) {
+      for (const item of Object.values(operation.classifications || {})) if (item.state === 'running') {
+        Object.assign(item, { state: 'failed', code: 'CLASSIFICATION_INTERRUPTED', outcome_unknown: true, completed_at: new Date().toISOString() });
+      }
+      if (operation.classification?.state === 'running') operation.classification = operation.classifications?.[operation.classification.input_sha256]
+        || { ...operation.classification, state: 'failed', code: 'CLASSIFICATION_INTERRUPTED', outcome_unknown: true };
+      if (operation.diagnostic_evidence && Date.now() - Date.parse(operation.diagnostic_evidence.checked_at) > 7 * 86400000) delete operation.diagnostic_evidence;
+      const unclaimed = operation.kind === 'deployments' && operation.status === 'queued'
+        && Number.isSafeInteger(operation.queue?.sequence) && operation.queue.sequence > 0
+        && operation.queue.enqueued_at && !operation.queue.started_at;
+      if (['queued', 'running'].includes(operation.status) && !unclaimed) {
+        if (operation.stage === 'ci' && operation.dispatch?.state === 'preparing' && !operation.ci?.run_id) {
+          operation.status = 'failed';
+          operation.error = { code: 'CI_DISPATCH_NOT_SENT', request_id: randomUUID(), message: '소스 준비 중 서버가 재시작되었습니다. GitHub 실행 요청은 보내지 않았습니다.', retryable: false, outcome_unknown: false };
+          continue;
+        }
         operation.status = 'unknown';
+        operation.unknown_since = new Date().toISOString();
         operation.error = { code: 'INTERRUPTED', request_id: randomUUID(), message: '실행이 중단되어 결과를 다시 확인해야 합니다.', retryable: false, outcome_unknown: true };
         if (operation.kind === 'application-lifecycle') {
           operation.residuals = state.plans[operation.plan_id]?.public?.resources || [];
@@ -113,8 +135,13 @@ export async function createProductStore(directory) {
         }
       }
     }
+    for (const target of Object.values(state.personal.targets)) {
+      if (target.status === 'deleting') target.status = 'attention';
+      if (target.status === 'ready') target.status = 'connecting';
+    }
     persist(state);
     dashboard = await createDashboardData(db, root);
+    registrations = createRegistrations(db);
   } catch (error) { db?.close(); await unlink(lockPath); throw error; }
   function persist(next) {
     // ponytail: rewrite the existing bounded 100-operation snapshot in one transaction;
@@ -137,16 +164,18 @@ export async function createProductStore(directory) {
         const insert = db.prepare(`INSERT INTO ${table} VALUES (?, ?)`);
         for (const [id, value] of Object.entries(next[table] || {})) insert.run(id, JSON.stringify(value));
       }
-      db.exec('PRAGMA user_version=1; COMMIT');
+      db.prepare("INSERT INTO personal_state VALUES ('personal', ?) ON CONFLICT(id) DO UPDATE SET record=excluded.record").run(JSON.stringify(next.personal || { targets: {}, enrollments: {} }));
+      db.exec('PRAGMA user_version=2; COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
   let tail = Promise.resolve();
   return {
     dashboard,
+    registrations,
     read: () => structuredClone(state),
     operationPage(kind, sessionId, { limit, marker }) {
       if (!['builds', 'deployments', 'environments'].includes(kind)) throw new Error('Invalid operation kind');
-      const where = `kind = ?${sessionId ? ' AND session_id = ?' : ''}${kind === 'builds' ? " AND json_extract(record, '$.ci.run_id') IS NOT NULL" : ''}`;
+      const where = `kind = ?${sessionId ? ' AND session_id = ?' : ' AND (session_id IS NULL OR session_id NOT IN (SELECT session_id FROM owners))'}${kind === 'builds' ? " AND json_extract(record, '$.ci.run_id') IS NOT NULL" : ''}`;
       const args = sessionId ? [kind, sessionId] : [kind];
       const publicId = kind === 'builds' ? "CAST(json_extract(record, '$.ci.run_id') AS TEXT)" : 'id';
       const anchor = marker === null ? null : db.prepare(`SELECT id, COALESCE(created_at, '') AS created FROM operations WHERE ${where} AND ${publicId} = ?`).get(...args, marker);

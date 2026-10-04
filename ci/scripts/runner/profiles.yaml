@@ -10,10 +10,11 @@ providers:
     max_budget_usd: 2.0
   codex:             # Codex Python SDK 0.159.3, exact read roots, approval deny_all
     model: gpt-6.1-sol  # explicit user selection
-    reasoning_effort: xhigh
+    reasoning_effort: medium
     permission_profile: railshot_read
 
 instructions_prefix: agents/SAFETY.md
+skills: [agents/skills/prepare-deployment/SKILL.md]
 # Enforced before SDK launch and on directory searches; Codex also gets native deny-read globs.
 read_deny: ["**/.env*", "**/*.pem", "**/*.key", "**/id_rsa*", "**/id_ed25519*", "**/id_ecdsa*"]
 # Loop checkpoints, not provider conversation replay, own restart/resume.

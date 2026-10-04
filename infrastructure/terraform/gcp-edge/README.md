@@ -9,8 +9,18 @@ against the VM module's state. Compute API, billing and ADC/IAM must already wor
 The module enables Certificate Manager without disabling it on destroy. It
 creates a managed certificate using a per-project DNS authorization. Give the
 `dns_authorization_record` output to the authoritative DNS owner; retain that
-CNAME for renewal. This module does not write DNS. The new global frontend IP
+CNAME for renewal. The bootstrap hostname's DNS remains operator-managed. The new global frontend IP
 cannot reuse the VM's regional external IP.
+
+For registered `routes`, the existing DNS-authorization resource publishes its
+owned CNAME through Railshot's DNS writer and confirms it through Google Public
+DNS before Terraform creates the dependent certificate. The application executor
+supplies the private DNS config path and Python module path only to that apply;
+credentials remain in the existing private token file. Standalone operators adding
+routes must supply `RAILSHOT_GCP_CERTIFICATE_DNS_CONFIG` and set `PYTHONPATH` to the
+checkout's `gitops` directory. This adds no Terraform resources or CI stages.
+Existing authorizations are not recreated by this change; interrupted or failed
+certificate issuance still requires observing the existing certificate and DNS.
 
 Before apply, verify the named VM/private IP, its NodePort health, and its
 dedicated service account (the firewall applies to every VM using that account).

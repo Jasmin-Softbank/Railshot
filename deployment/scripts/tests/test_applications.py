@@ -1,9 +1,10 @@
 """Model/cloud-free app registration checks; native helpers use the existing fake Kubernetes API."""
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import copy
 import fcntl
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -18,6 +19,18 @@ import test_environment as existing_fixtures
 
 
 class ApplicationsTest(unittest.TestCase):
+    def test_policy_capacity_is_not_reported_as_invalid_user_input(self):
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['applications.py', '--config', '/unused', '--request', '/unused']), \
+                patch.object(apps.os, 'umask'), patch.object(env, 'read_private', return_value={}), \
+                patch.object(apps, 'register', side_effect=env.credentials.PolicyCapacityError('policy full')), \
+                redirect_stdout(output):
+            self.assertEqual(apps.main(), 3)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['error']['code'], 'APPLICATION_CREDENTIAL_POLICY_CAPACITY_EXCEEDED')
+        self.assertFalse(result['error']['outcome_unknown'])
+
     def setUp(self):
         # Reuse the existing synthetic runtime/control/GitHub fixture, not a real executor.
         self.fixture = existing_fixtures.RegistrationTest(methodName='runTest')
@@ -125,6 +138,28 @@ class ApplicationsTest(unittest.TestCase):
         self.assertEqual(migrated['data'], before_data)
         self.assertEqual(migrated['metadata']['labels']['argocd.argoproj.io/secret-type'], 'railshot-application')
 
+    def test_existing_registration_gains_storage_permissions_once(self):
+        first = self.register(); app_id = first['application_id']
+        first.pop('runtime_permissions_version')
+        env.save(self.home() / 'registration.json', first)
+        role = self.fixture.runtime.objects[app_id, 'role', env.SA]
+        for rule in role['rules']:
+            rule['resources'] = [r for r in rule['resources'] if r != 'persistentvolumeclaims']
+        project = self.fixture.control.objects['argocd', 'appproject', app_id]
+        project['spec']['namespaceResourceWhitelist'] = env.argo.KINDS
+        before = (self.home() / 'binding.json').read_bytes()
+        result = self.register()
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(result['runtime_permissions_version'], 2)
+        self.assertEqual((self.home() / 'binding.json').read_bytes(), before)
+        role = self.fixture.runtime.objects[app_id, 'role', env.SA]
+        self.assertIn('persistentvolumeclaims', [r for rule in role['rules'] for r in rule['resources']])
+        project = self.fixture.control.objects['argocd', 'appproject', app_id]
+        self.assertIn(env.argo.PVC_KIND, project['spec']['namespaceResourceWhitelist'])
+        counters = (self.fixture.runtime.applications, self.fixture.control.applications)
+        self.assertEqual(self.register(), result)
+        self.assertEqual(counters, (self.fixture.runtime.applications, self.fixture.control.applications))
+
     def test_shared_scope_partial_write_requires_reconciliation_without_replay(self):
         original = self.fixture.control.__call__
         def fail_policy(namespace, *args, document=None):
@@ -176,10 +211,10 @@ class ApplicationsTest(unittest.TestCase):
                 finally:
                     case.doCleanups()
 
-    def test_full_renewal_policy_rejects_before_namespace_role_argo_or_ci_writes(self):
+    def test_oversized_renewal_policy_rejects_before_namespace_role_argo_or_ci_writes(self):
         self.fixture.fill_renewal_policy(20)
         before = copy.deepcopy(self.fixture.control.objects)
-        with self.assertRaisesRegex(ValueError, 'renewal target capacity exhausted'):
+        with patch.object(env.credentials, 'MAX_POLICY_BYTES', 1), self.assertRaises(env.credentials.PolicyCapacityError):
             self.register()
         self.assertEqual((self.fixture.runtime.applications, self.fixture.control.applications), (0, 0))
         self.assertEqual(self.fixture.control.objects, before)
@@ -210,16 +245,15 @@ class ApplicationsTest(unittest.TestCase):
             self.assertEqual((self.fixture.runtime.applications, self.fixture.control.applications), (0, 0))
         self.assertEqual(self.register()['status'], 'succeeded')
 
-    def test_twentieth_registration_succeeds_then_next_is_rejected_and_replay_is_read_only(self):
+    def test_registration_exceeds_twenty_and_replay_is_read_only(self):
         self.fixture.fill_renewal_policy(19)
         first = self.register(); self.assertEqual(first['status'], 'succeeded', first)
+        self.assertEqual(self.register('second-app')['status'], 'succeeded')
         counts = (self.fixture.runtime.applications, self.fixture.control.applications)
-        with self.assertRaisesRegex(ValueError, 'renewal target capacity exhausted'):
-            self.register('second-app')
         self.assertEqual(self.register(), first)
         self.assertEqual((self.fixture.runtime.applications, self.fixture.control.applications), counts)
         policy = json.loads(self.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']['data']['policy.json'])
-        self.assertEqual(len(policy['targets']), 20)
+        self.assertEqual(len(policy['targets']), 21)
 
     def test_duplicate_or_unclaimed_existing_renewal_identity_rejected_before_writes(self):
         cm = self.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']

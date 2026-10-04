@@ -276,6 +276,33 @@ class BridgeTest(unittest.TestCase):
                 kube.assert_not_called()
                 self.assertFalse(any('push' in args for args in self.calls))
 
+    def resume_after_completion(self, phase):
+        original = bridge.durable_write
+        def crash(path, data, *args, **kwargs):
+            original(path, data, *args, **kwargs)
+            if Path(path).name == 'state.json' and json.loads(data)['phase'] == phase:
+                raise KeyboardInterrupt('process lost after durable completion')
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.durable_write', side_effect=crash), self.assertRaises(KeyboardInterrupt):
+            bridge.execute(self.config, self.request)
+        self.calls.clear()
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value={'state': 'unverified', 'verified_at': None, 'url': None}), \
+                patch('argo.deploy', wraps=argo.deploy) as deploy:
+            bridge.execute(self.config, {**self.request, 'action': 'observe'})
+            self.assertTrue(all(call.kwargs['sync'] is False for call in deploy.call_args_list))
+            deploy.reset_mock()
+            result = bridge.execute(self.config, self.request)
+            self.assertTrue(result['cd']['deployed'])
+            self.assertEqual(sum(call.kwargs['sync'] for call in deploy.call_args_list), int(phase == 'pushed'))
+        self.assertFalse(any('push' in args or 'commit' in args for args in self.calls))
+
+    def test_resume_after_confirmed_push_starts_only_remaining_sync(self):
+        self.resume_after_completion('pushed')
+
+    def test_resume_after_sync_request_does_not_resubmit_sync(self):
+        self.resume_after_completion('sync_requested')
+
     def test_uncertain_push_is_never_repeated_and_forged_input_never_dispatches(self):
         def failed(args, **kwargs):
             if 'push' in args:

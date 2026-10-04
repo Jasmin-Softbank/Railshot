@@ -1,5 +1,22 @@
 """Shared release order and application container execution contract."""
-GATE_ORDER = ("L0", "L1", "Q", "L2", "L4", "L3")
+import json
+from pathlib import Path
+
+# One vocabulary for execution, evidence and repair tasks. No log-text routing.
+STAGE_CONTRACT = json.loads((Path(__file__).parent / 'contract/stages.json').read_text())
+
+
+def stage_contract(layer):
+    stage = STAGE_CONTRACT['layers'].get(layer, layer)
+    return {'id': stage, **STAGE_CONTRACT['stages'].get(stage, {
+        'owner': 'operator', 'completion': 'inspect missing execution evidence',
+        'replay': 'reconcile_remote', 'repair': 'operator'})}
+
+
+GATE_ORDER = ("L0", "L1", "L2", "L3")
+# Keep explicit quality diagnostics and previously published bundle receipts readable.
+FULL_GATE_ORDER = ("L0", "L1", "Q", "L2", "L4", "L3")
+RELEASE_ORDERS = (GATE_ORDER, ("L0", "L1", "L2", "L4", "L3"), FULL_GATE_ORDER)
 APP_UID = 65532
 
 

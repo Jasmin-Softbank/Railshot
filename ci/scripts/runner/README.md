@@ -54,7 +54,7 @@ kubectl --context "$OPS_CONTEXT" apply -f /private/build-runner.json
 
 Job은 정확한 build 노드에만 배치되며 다른 노드로 fallback하지 않습니다. 전용 ServiceAccount는 build namespace의 Pod 조회와 지정된 Node 한 개 조회만 허용합니다. Secret 조회·배포 변경 권한은 없습니다. runner는 인증된 API 응답으로 자기 Pod의 UID·권한·마운트와 Node의 역할·taint를 확인합니다. K3s 자격 디렉터리와 관리자 kubeconfig는 마운트하지 않습니다. 이 metadata token도 고객 코드 컨테이너에는 전달하지 않습니다.
 
-Job의 제한은 runner에 적용됩니다. 호스트 Docker가 실행하는 BuildKit/Q/L3는 기존 Docker 제한을 사용하므로 Kubernetes quota에 자동 합산되지 않습니다. 한 워커에서 runner 하나만 실행하도록 호스트 lock을 잡습니다. 이 설계는 운영 Pod와 빌드의 노드를 나누지만, privileged BuildKit과 운영 cluster의 control plane 공유에 따른 위험까지 제거하지는 않습니다. 다음 job에는 새로운 등록 token·Job 이름을 사용합니다. 연속 제품 요청에는 아래의 작은 CronJob controller가 이를 보충합니다.
+Job의 제한은 runner에 적용됩니다. 호스트 Docker가 실행하는 BuildKit/Q/L3는 기존 Docker 제한을 사용하므로 Kubernetes quota에 자동 합산되지 않습니다. runner별 checkout/temp 경로와 lock을 분리합니다. 동일 노드의 무거운 gate와 공유 Codex 호출은 root 소유 executor profile의 `concurrency.gate`/`concurrency.agent` 슬롯으로 제한합니다. 이 설계는 운영 Pod와 빌드의 노드를 나누지만, privileged BuildKit과 운영 cluster의 control plane 공유에 따른 위험까지 제거하지는 않습니다. 다음 job에는 새로운 등록 token·Job 이름을 사용합니다. 연속 제품 요청에는 아래의 작은 CronJob controller가 이를 보충합니다.
 
 ### 연속 요청을 위한 runner 보충
 
@@ -74,12 +74,14 @@ kubectl --context "$OPS_CONTEXT" apply -f /private/build-controller.json
 
 각 tick은 다음 순서로 동작합니다.
 
-1. 기존 runner Job을 모두 조회합니다. terminal condition이 없는 Job이 하나라도 있으면 등록 token 발급과 새 Job 생성을 하지 않습니다.
-2. 이전 생성 intent를 관측한 Job의 terminal condition으로 정리합니다. 연속 세 Job이 `Failed`가 되면 자동 보충을 차단합니다. GitHub workflow의 테스트 실패와 Kubernetes runner Job 실패는 다릅니다.
-3. 고정된 앱 저장소의 최근 queued/in_progress run을 최대 20개씩 조회하고, `railshot-ci`를 요구하는 queued job이 있을 때만 짧은 등록 token을 발급합니다. 지원 label은 self-hosted/Linux/X64/railshot-ci입니다.
-4. 등록 Secret의 `railshot.io/runner-controller` annotation에 pending Job 이름과 실패 수를 먼저 저장하고 token을 함께 갱신합니다. `resourceVersion` 경합이 있으면 Job을 생성하지 않습니다. 이후 검토한 Job을 정확히 한 번 생성합니다.
+1. 기존 runner Job을 조회하고 `runner_count` 범위의 빈 슬롯을 계산합니다. 이전 형식의 runner가 실행 중이면 먼저 완료를 기다립니다.
+2. 슬롯별 생성 intent를 실제 Job으로 확인합니다. 연속 세 Job이 실패한 슬롯은 보충을 중단합니다.
+3. 앱 저장소의 queued/in_progress run과 필요한 runner label을 확인합니다. 조회는 상태별 최대 4페이지, 전체 45초 안으로 제한합니다.
+4. 필요한 슬롯마다 등록 Secret annotation에 pending 이름을 먼저 저장합니다. `resourceVersion` 경합이 있으면 생성하지 않습니다. 검증한 Job에 고유 runner 이름과 슬롯 annotation을 넣어 한 번 생성합니다.
 
-Job 생성 응답이 유실되면 같은 tick에서 재시도하지 않습니다. 다음 tick에서 저장한 이름을 조회하여 실행 중이면 기다립니다. pending 이름을 찾을 수 없으면 `unknown`을 보존하고 추가 생성을 중단합니다. Job TTL 삭제 뒤에도 실패 수는 Secret annotation에 남습니다. 재개가 필요할 때는 운영자가 CronJob을 suspend하고 기존 Job·Pod·GitHub runner 등록을 확인한 뒤 원인을 고쳐야 합니다. 안전한 재개가 확인된 경우에만 해당 annotation을 제거하고 suspend를 해제합니다. 이 절차는 실행 중인 runner를 자동 삭제하지 않습니다.
+생성 응답이 유실되면 해당 슬롯의 `unknown` intent를 보존하고 같은 작업을 재생성하지 않습니다. 다른 빈 슬롯은 계속 처리합니다. 슬롯 축소 시 남아 있는 intent를 묵시적으로 버리지 않습니다. 운영자가 CronJob을 suspend하고 해당 Job·Pod·등록 상태를 확인한 뒤 조정해야 합니다.
+
+`--runner-count 12`로 동일한 build 노드의 슬롯 수를 지정할 수 있습니다. 기본값은 1입니다. 지속 배포에서는 private worker config의 `runner_count`에도 같은 값을 넣어야 합니다. [기존 호스트 병렬 CI 운영 규약](../../../docs/operations/parallel-ci-capacity.md)을 따릅니다.
 
 로컬 테스트는 실제 loopback HTTP 요청으로 연속 두 queued 요청, 실행 중 Job, 생성 응답 유실, Secret 충돌, 세 연속 실패, template/registry/권한 거부를 확인합니다. 운영 GitHub 등록·Kubernetes 설치·고객 빌드의 실제 성공은 별도 E2E 검증이 필요합니다.
 
@@ -119,7 +121,8 @@ GitHub 앱 저장소에는 기존 workflow의 변수도 설정합니다.
 | `RAILSHOT_RUN_ROOT` | `/var/lib/railshot-runner/runs`; `_work`·`RUNNER_TEMP`와 분리된 재시도 상태 |
 | `QUALITY_NETWORK` | `railshot-quality` |
 | `PLATFORM_REF` | 설치한 executor 계약과 같은 검토된 platform commit 40자리 SHA |
-| `RAILSHOT_MAX_REPAIR_ATTEMPTS` | 선택적 자동 코드 수정 횟수 0–3, 기본 3. 0이면 모델 인증·SDK 없이 결정적 baseline 검사·빌드·게시만 실행한다. 게이트 실패를 성공으로 바꾸거나 검사를 생략하지 않는다. |
+| `RAILSHOT_MAX_REPAIR_ATTEMPTS` | fixer 호출 상한 0·1·2, 기본 2. 0은 패키징 옵션과 관계없이 모든 SDK 호출을 끄며 모델 인증·SDK 설치 없이 결정적 baseline을 실행한다. fixer 재계획도 이 상한에 포함한다. 게이트 실패를 성공으로 바꾸거나 검사를 생략하지 않는다. |
+| `RAILSHOT_MAX_PACKAGING_ATTEMPTS` | 초기 adapter 호출 상한 0·1, 기본 1. 기본 전체 상한은 패키징 1회 + 수정 2회 = 3회이며 역할 간 횟수는 빌려 쓰지 않는다. 명세가 이미 있으면 fixer 최대 2회다. 0은 모델 패키징을 끄며 규칙 기반 패키징은 유지한다. |
 | `AGENT_PROVIDER`, `AGENT_AUTH_MODE` | 기존 workflow 계약의 provider와 `subscription` 또는 `api-key` |
 | `RAILSHOT_CODEX_HOME` | subscription일 때 `/var/lib/railshot-runner/codex`; 운영자가 해당 전용 디렉터리에 `auth.json` 준비 |
 

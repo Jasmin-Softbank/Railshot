@@ -79,6 +79,7 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
     const deadline = Date.now() + timeoutMs;
     let result = await invoke(request, signal, deadline - Date.now());
     await onProgress?.(result);
+    if (observeOnly) return result;
     while (!signal?.aborted && Date.now() < deadline &&
            (result.cd.state === 'progressing' || (result.cd.deployed && result.public_http.state === 'unverified'))) {
       try { await setTimeout(Math.min(2000, Math.max(1, deadline - Date.now())), undefined, { signal }); }

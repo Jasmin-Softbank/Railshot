@@ -33,7 +33,7 @@ class ArgoTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.prepare()
 
-    def prepare(self, database=False, image_digest='c' * 64, migration_command=None, configuration=None):
+    def prepare(self, database=False, image_digest='c' * 64, migration_command=None, configuration=None, storage=False):
         published = self.root / 'published'; published.mkdir(exist_ok=True)
         spec = {'apiVersion': 'railshot/v0', 'app': 'demo', 'services': [
             {'name': 'web', 'build': {'dockerfile': 'Dockerfile'}, 'port': 8080, 'route': '/health', 'health': '/health'}]}
@@ -43,6 +43,8 @@ class ArgoTest(unittest.TestCase):
         if configuration:
             spec['services'][0]['env'] = {name: 'source-must-not-win' for name in configuration['plain_names']}
             spec['services'][0]['secrets'] = configuration['secret_names']
+        if storage:
+            spec['services'][0]['storage'] = {'mountPath': '/var/opt/memos', 'sizeGi': 1}
         verdict = {'release_eligible': True, 'ok': True, 'status': 'PASS', 'source_sha256': 'a' * 64,
                    'layers': [{'layer': layer, 'ok': True} for layer in GATE_ORDER],
                    'images': {'web': 'local/web:test'}, 'image_ids': {'web': 'sha256:' + 'b' * 64}}
@@ -196,6 +198,19 @@ class ArgoTest(unittest.TestCase):
             else: bad['status']['sync']['status'] = 'OutOfSync'
             with self.subTest(field=field): self.assertFalse(argo.observe(self.review, bad)['deployed'])
 
+    def test_storage_project_roundtrip_and_stateless_app_in_storage_capable_project(self):
+        stateless = copy.deepcopy(self.review)
+        self.prepare(storage=True)
+        loaded = argo.load_review(self.directory)
+        project = argo.projects([loaded])['items'][0]
+        self.assertIn(argo.PVC_KIND, project['spec']['namespaceResourceWhitelist'])
+        argo.validate_project(project, loaded['application'], loaded['workload'])
+        argo.validate_project(project, stateless['application'], stateless['workload'])
+        self.assertTrue(argo.observe(loaded, self.healthy())['deployed'])
+        project['spec']['namespaceResourceWhitelist'].remove(argo.PVC_KIND)
+        with self.assertRaisesRegex(ValueError, 'restrict resources'):
+            argo.validate_project(project, loaded['application'], loaded['workload'])
+
     def test_actual_rendered_review_hash_and_project_contract(self):
         loaded = argo.load_review(self.directory)
         self.assertEqual(loaded['receipt']['http']['route'], '/health')
@@ -272,6 +287,15 @@ class ArgoTest(unittest.TestCase):
         with patch('argo.kubectl', side_effect=[pending, self.healthy()]) as client:
             self.assertTrue(argo.deploy(self.review, 'control', sync=True, timeout=0)['deployed'])
             self.assertTrue(all(call.args[2] == 'get' for call in client.call_args_list))
+
+    def test_completed_sync_is_read_only_but_new_revision_still_syncs(self):
+        with patch('argo.kubectl', return_value=self.healthy()) as client:
+            self.assertTrue(argo.deploy(self.review, 'control', sync=True, timeout=0)['deployed'])
+            self.assertTrue(all(call.args[2] == 'get' for call in client.call_args_list))
+        old = self.healthy(); old['spec']['source']['targetRevision'] = 'f' * 40
+        with patch('argo.kubectl', side_effect=[old, self.healthy(), self.healthy(), self.healthy()]) as client:
+            self.assertTrue(argo.deploy(self.review, 'control', sync=True, timeout=0)['deployed'])
+            self.assertEqual([call.args[2] for call in client.call_args_list], ['get', 'apply', 'patch', 'get'])
 
     def test_pinned_git_tree_must_match_reviewed_workload_without_extra_resources(self):
         repository = self.root / 'config'; repository.mkdir()

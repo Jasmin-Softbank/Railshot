@@ -1,0 +1,452 @@
+
+> jasmin-entrypoints-poc@0.1.0 test
+> node --test
+
+TAP version 13
+# Subtest: container access fails closed without explicit hosts and an operator token
+ok 1 - container access fails closed without explicit hosts and an operator token
+  ---
+  duration_ms: 1.022709
+  type: 'test'
+  ...
+# Subtest: HTTP enforces exact Host, Origin and Bearer before accessing deployment service
+ok 2 - HTTP enforces exact Host, Origin and Bearer before accessing deployment service
+  ---
+  duration_ms: 28.507292
+  type: 'test'
+  ...
+# Subtest: container API rejects browser origins unless explicitly enabled
+ok 3 - container API rejects browser origins unless explicitly enabled
+  ---
+  duration_ms: 4.301458
+  type: 'test'
+  ...
+# Subtest: CLI and stdio MCP client authenticate from the mounted token file for deploy and status
+ok 4 - CLI and stdio MCP client authenticate from the mounted token file for deploy and status
+  ---
+  duration_ms: 51.225167
+  type: 'test'
+  ...
+# Subtest: CD adapter validates output and terminates the whole process group on abort or timeout
+ok 5 - CD adapter validates output and terminates the whole process group on abort or timeout
+  ---
+  duration_ms: 1297.52775
+  type: 'test'
+  ...
+# Subtest: ZIP 검사 후 앱을 Git 트리에 등록하고 Actions 실행 ID를 반환한다
+ok 6 - ZIP 검사 후 앱을 Git 트리에 등록하고 Actions 실행 ID를 반환한다
+  ---
+  duration_ms: 29.445708
+  type: 'test'
+  ...
+# Subtest: internal target registration validates IDs and exposes a read-only target snapshot
+ok 7 - internal target registration validates IDs and exposes a read-only target snapshot
+  ---
+  duration_ms: 0.4875
+  type: 'test'
+  ...
+# Subtest: 재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에서 제외한다
+ok 8 - 재배포는 변경된 blob만 올리고 삭제된 파일은 앱 트리에서 제외한다
+  ---
+  duration_ms: 1.17075
+  type: 'test'
+  ...
+# Subtest: 소스가 같아도 커밋 없이 Actions를 다시 실행한다
+ok 9 - 소스가 같아도 커밋 없이 Actions를 다시 실행한다
+  ---
+  duration_ms: 0.602833
+  type: 'test'
+  ...
+# Subtest: ZIP 경로 이동과 비밀키 파일을 거부한다
+ok 10 - ZIP 경로 이동과 비밀키 파일을 거부한다
+  ---
+  duration_ms: 4.628667
+  type: 'test'
+  ...
+# Subtest: 공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 파일 목록으로 변환한다
+ok 11 - 공개 GitHub 저장소의 기본 브랜치를 SHA로 고정하고 공통 파일 목록으로 변환한다
+  ---
+  duration_ms: 5.947125
+  type: 'test'
+  ...
+# Subtest: GitHub 입력은 공개 저장소 기본 URL로만 제한한다
+ok 12 - GitHub 입력은 공개 저장소 기본 URL로만 제한한다
+  ---
+  duration_ms: 0.276625
+  type: 'test'
+  ...
+# Subtest: 소스 이름에서 앱 이름을 만들고 잘못된 이름은 거부한다
+ok 13 - 소스 이름에서 앱 이름을 만들고 잘못된 이름은 거부한다
+  ---
+  duration_ms: 2.231459
+  type: 'test'
+  ...
+# Subtest: HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사용한다
+ok 14 - HTTP 업로드, GitHub URL과 상태 조회는 동일한 서비스를 사용한다
+  ---
+  duration_ms: 76.74425
+  type: 'test'
+  ...
+# Subtest: 실제 producer artifact ID와 해시를 확인한 경우에만 이미지 게시로 표시한다
+ok 15 - 실제 producer artifact ID와 해시를 확인한 경우에만 이미지 게시로 표시한다
+  ---
+  duration_ms: 10.750917
+  type: 'test'
+  ...
+# Subtest: private registry 검증과 pull Secret 참조가 있는 v2 인계를 읽는다
+ok 16 - private registry 검증과 pull Secret 참조가 있는 v2 인계를 읽는다
+  ---
+  duration_ms: 4.041958
+  type: 'test'
+  ...
+# Subtest: 구버전·registry 계약 불일치·추가 credential 필드는 게시 확인을 차단한다
+ok 17 - 구버전·registry 계약 불일치·추가 credential 필드는 게시 확인을 차단한다
+  ---
+  duration_ms: 94.20125
+  type: 'test'
+  ...
+# Subtest: 실패 job 재시도는 현재 attempt 별칭 대신 실제 이전 release producer를 읽는다
+ok 18 - 실패 job 재시도는 현재 attempt 별칭 대신 실제 이전 release producer를 읽는다
+  ---
+  duration_ms: 2.801042
+  type: 'test'
+  ...
+# Subtest: 재시도에 복제된 loop job의 조회 attempt를 artifact 생산 attempt로 표시하지 않는다
+ok 19 - 재시도에 복제된 loop job의 조회 attempt를 artifact 생산 attempt로 표시하지 않는다
+  ---
+  duration_ms: 1.889542
+  type: 'test'
+  ...
+# Subtest: 최신 release가 실패하거나 건너뛰면 옛 성공 artifact를 사용하지 않는다
+ok 20 - 최신 release가 실패하거나 건너뛰면 옛 성공 artifact를 사용하지 않는다
+  ---
+  duration_ms: 2.326458
+  type: 'test'
+  ...
+# Subtest: artifact 만료·중복·누락과 source/target/attempt/파일 변조는 게시 확인을 차단한다
+ok 21 - artifact 만료·중복·누락과 source/target/attempt/파일 변조는 게시 확인을 차단한다
+  ---
+  duration_ms: 11.355833
+  type: 'test'
+  ...
+# Subtest: CI와 다른 앱 이름과 임의 target은 소스 등록 전에 거부한다
+ok 22 - CI와 다른 앱 이름과 임의 target은 소스 등록 전에 거부한다
+  ---
+  duration_ms: 1.215375
+  type: 'test'
+  ...
+# Subtest: MCP 소스 경로는 심볼릭 링크를 통해 허용 범위 밖으로 나갈 수 없다
+ok 23 - MCP 소스 경로는 심볼릭 링크를 통해 허용 범위 밖으로 나갈 수 없다
+  ---
+  duration_ms: 9.671083
+  type: 'test'
+  ...
+# Subtest: CLI의 폴더 입력은 API가 받는 ZIP으로 만들어진다
+ok 24 - CLI의 폴더 입력은 API가 받는 ZIP으로 만들어진다
+  ---
+  duration_ms: 17.508083
+  type: 'test'
+  ...
+# Subtest: HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까지 연결한다
+ok 25 - HTTP 업로드부터 Python 게시 인계를 거쳐 HTTP 상태 조회까지 연결한다
+  ---
+  duration_ms: 331.482167
+  type: 'test'
+  ...
+# Subtest: 허용된 복수 target도 publication은 접수 target과 정확히 일치해야 한다
+ok 26 - 허용된 복수 target도 publication은 접수 target과 정확히 일치해야 한다
+  ---
+  duration_ms: 3.296584
+  type: 'test'
+  ...
+# Subtest: registered profile → saved plan → descriptor snapshot → native validation → guest/runtime receipts
+ok 27 - registered profile → saved plan → descriptor snapshot → native validation → guest/runtime receipts
+  ---
+  duration_ms: 227.682792
+  type: 'test'
+  ...
+# Subtest: creation templates derive isolated runtime, DB and GitOps targets while retaining original policy snapshots
+ok 28 - creation templates derive isolated runtime, DB and GitOps targets while retaining original policy snapshots
+  ---
+  duration_ms: 497.075375
+  type: 'test'
+  ...
+# Subtest: creation templates reject invalid apps, incompatible GitOps paths and missing required DB before cloud planning
+ok 29 - creation templates reject invalid apps, incompatible GitOps paths and missing required DB before cloud planning
+  ---
+  duration_ms: 266.804167
+  type: 'test'
+  ...
+# Subtest: derived plans bind private and public targets and reject current template policy changes
+ok 30 - derived plans bind private and public targets and reject current template policy changes
+  ---
+  duration_ms: 105.394709
+  type: 'test'
+  ...
+# Subtest: per-request registration expiry is frozen once in the private plan and rechecked against original policy
+ok 31 - per-request registration expiry is frozen once in the private plan and rechecked against original policy
+  ---
+  duration_ms: 104.345792
+  type: 'test'
+  ...
+# Subtest: creation and registration lifetime policies require explicit booleans and bounded operator-approved ages
+ok 32 - creation and registration lifetime policies require explicit booleans and bounded operator-approved ages
+  ---
+  duration_ms: 70.033792
+  type: 'test'
+  ...
+# Subtest: one budget refresh precedes all derived target plans, preserves policy, and caps a ready plan at quote expiry
+ok 33 - one budget refresh precedes all derived target plans, preserves policy, and caps a ready plan at quote expiry
+  ---
+  duration_ms: 127.563708
+  type: 'test'
+  ...
+# Subtest: budget overage, collection failure, expired quote, and changed identity or policy stop before Terraform
+ok 34 - budget overage, collection failure, expired quote, and changed identity or policy stop before Terraform
+  ---
+  duration_ms: 1132.716292
+  type: 'test'
+  ...
+# Subtest: omitted storage horizon is forwarded unchanged and a quote expiring during native plans cannot execute
+ok 35 - omitted storage horizon is forwarded unchanged and a quote expiring during native plans cannot execute
+  ---
+  duration_ms: 89.694292
+  type: 'test'
+  ...
+# Subtest: budget refresh requires an AWS policy with the same settings across every selected profile
+ok 36 - budget refresh requires an AWS policy with the same settings across every selected profile
+  ---
+  duration_ms: 216.685334
+  type: 'test'
+  ...
+# Subtest: unsupported database/multinode requests are saved as blocked plans without cloud calls
+ok 37 - unsupported database/multinode requests are saved as blocked plans without cloud calls
+  ---
+  duration_ms: 39.250792
+  type: 'test'
+  ...
+# Subtest: client paths/credentials, unknown profiles and extra intent fields never reach the executor
+ok 38 - client paths/credentials, unknown profiles and extra intent fields never reach the executor
+  ---
+  duration_ms: 10.237959
+  type: 'test'
+  ...
+# Subtest: policy revocation, expired plans and changed snapshots reject before apply
+ok 39 - policy revocation, expired plans and changed snapshots reject before apply
+  ---
+  duration_ms: 33.959125
+  type: 'test'
+  ...
+# Subtest: a superseding native plan or previously attempted apply is rejected before admission
+ok 40 - a superseding native plan or previously attempted apply is rejected before admission
+  ---
+  duration_ms: 29.371417
+  type: 'test'
+  ...
+# Subtest: public creation cannot authorize destruction or modification of existing resources
+ok 41 - public creation cannot authorize destruction or modification of existing resources
+  ---
+  duration_ms: 19.534375
+  type: 'test'
+  ...
+# Subtest: uncertain apply is retained as unknown and runtime dispatch never starts
+ok 42 - uncertain apply is retained as unknown and runtime dispatch never starts
+  ---
+  duration_ms: 40.863542
+  type: 'test'
+  ...
+# Subtest: runtime readiness requires the exact environment request and target identity
+ok 43 - runtime readiness requires the exact environment request and target identity
+  ---
+  duration_ms: 146.93475
+  type: 'test'
+  ...
+# Subtest: Patroni request plans every new VM, installs only runtime on app VM, binds DB without exposing credentials
+ok 44 - Patroni request plans every new VM, installs only runtime on app VM, binds DB without exposing credentials
+  ---
+  duration_ms: 310.12025
+  type: 'test'
+  ...
+# Subtest: bound observations expire, fail closed, and never expose backend details
+ok 45 - bound observations expire, fail closed, and never expose backend details
+  ---
+  duration_ms: 68.746
+  type: 'test'
+  ...
+# Subtest: snapshot and intent are durable before one dispatch; replay returns the same completed deployment
+ok 46 - snapshot and intent are durable before one dispatch; replay returns the same completed deployment
+  ---
+  duration_ms: 168.231708
+  type: 'test'
+  ...
+# Subtest: concurrent identical keys dispatch once; another intent is refused while active
+ok 47 - concurrent identical keys dispatch once; another intent is refused while active
+  ---
+  duration_ms: 160.81825
+  type: 'test'
+  ...
+# Subtest: CD progress persists revision and HTTP stage before completion while observer failure stays separate
+ok 48 - CD progress persists revision and HTTP stage before completion while observer failure stays separate
+  ---
+  duration_ms: 186.306959
+  type: 'test'
+  ...
+# Subtest: GitHub URL replay keeps the first pinned source without fetching current HEAD
+ok 49 - GitHub URL replay keeps the first pinned source without fetching current HEAD
+  ---
+  duration_ms: 168.568666
+  type: 'test'
+  ...
+# Subtest: lost dispatch response stays unknown, survives restart, occupies admission and never replays
+ok 50 - lost dispatch response stays unknown, survives restart, occupies admission and never replays
+  ---
+  duration_ms: 160.923041
+  type: 'test'
+  ...
+# Subtest: unfinished durable intent is recovered as unknown; malformed or insecure storage fails closed
+ok 51 - unfinished durable intent is recovered as unknown; malformed or insecure storage fails closed
+  ---
+  duration_ms: 79.63125
+  type: 'test'
+  ...
+# Subtest: snapshot quota bounds admission before any dispatch
+ok 52 - snapshot quota bounds admission before any dispatch
+  ---
+  duration_ms: 30.29175
+  type: 'test'
+  ...
+# Subtest: CI publication alone and mismatched publication never report application success
+ok 53 - CI publication alone and mismatched publication never report application success
+  ---
+  duration_ms: 238.819958
+  type: 'test'
+  ...
+# Subtest: environment plans are private, consumed once and share deployment admission
+ok 54 - environment plans are private, consumed once and share deployment admission
+  ---
+  duration_ms: 102.212125
+  type: 'test'
+  ...
+# Subtest: deployment polling preserves normalized CI steps while running and after publication
+ok 55 - deployment polling preserves normalized CI steps while running and after publication
+  ---
+  duration_ms: 257.689334
+  type: 'test'
+  ...
+# Subtest: v1 HTTP contract has accepted/error headers, strict fields, preserved legacy and no foreign reads
+ok 56 - v1 HTTP contract has accepted/error headers, strict fields, preserved legacy and no foreign reads
+  ---
+  duration_ms: 191.94375
+  type: 'test'
+  ...
+# Subtest: unconfigured server lists empty capabilities without creating state
+ok 57 - unconfigured server lists empty capabilities without creating state
+  ---
+  duration_ms: 6.690667
+  type: 'test'
+  ...
+# Subtest: health stays live but not ready when private product state fails initialization
+ok 58 - health stays live but not ready when private product state fails initialization
+  ---
+  duration_ms: 5.578667
+  type: 'test'
+  ...
+# Subtest: intent write failure prevents external effects and fails subsequent writes closed
+ok 59 - intent write failure prevents external effects and fails subsequent writes closed
+  ---
+  duration_ms: 45.643791
+  type: 'test'
+  ...
+# Subtest: JSON singleton keys including nested escaped duplicates are rejected before adapter calls
+ok 60 - JSON singleton keys including nested escaped duplicates are rejected before adapter calls
+  ---
+  duration_ms: 28.887125
+  type: 'test'
+  ...
+# Subtest: running intent becomes unknown after restart without dispatch or CD replay
+ok 61 - running intent becomes unknown after restart without dispatch or CD replay
+  ---
+  duration_ms: 140.720583
+  type: 'test'
+  ...
+# Subtest: build POST preserves string run IDs and plan/environment HTTP use 201 then 202
+ok 62 - build POST preserves string run IDs and plan/environment HTTP use 201 then 202
+  ---
+  duration_ms: 184.6875
+  type: 'test'
+  ...
+# Subtest: one deployment consumes its app-bound plan before CI, and replay never repeats the DB stack
+ok 63 - one deployment consumes its app-bound plan before CI, and replay never repeats the DB stack
+  ---
+  duration_ms: 218.764833
+  type: 'test'
+  ...
+# Subtest: failed database environment never dispatches CI or CD
+ok 64 - failed database environment never dispatches CI or CD
+  ---
+  duration_ms: 108.6025
+  type: 'test'
+  ...
+# Subtest: successful environments registration reuses the app-bound environment through restart
+ok 65 - successful environments registration reuses the app-bound environment through restart
+  ---
+  duration_ms: 415.886291
+  type: 'test'
+  ...
+# Subtest: successful deployments registration reuses the app-bound environment through restart
+ok 66 - successful deployments registration reuses the app-bound environment through restart
+  ---
+  duration_ms: 542.839917
+  type: 'test'
+  ...
+# Subtest: dynamic target admission requires the exact private and public plan binding before provisioning
+ok 67 - dynamic target admission requires the exact private and public plan binding before provisioning
+  ---
+  duration_ms: 117.679917
+  type: 'test'
+  ...
+# Subtest: incomplete or mismatched environment registration never admits the dynamic CI target
+ok 68 - incomplete or mismatched environment registration never admits the dynamic CI target
+  ---
+  duration_ms: 357.287416
+  type: 'test'
+  ...
+# Subtest: original UI environment selection is resolved server-side and never falls back to a different provider
+ok 69 - original UI environment selection is resolved server-side and never falls back to a different provider
+  ---
+  duration_ms: 143.136375
+  type: 'test'
+  ...
+# Subtest: HTTP deployment accepts a dynamic app-bound plan alongside existing environment options and replays once
+ok 70 - HTTP deployment accepts a dynamic app-bound plan alongside existing environment options and replays once
+  ---
+  duration_ms: 132.48875
+  type: 'test'
+  ...
+# Subtest: public demo is explicit and uses exact origins without browser credentials
+ok 71 - public demo is explicit and uses exact origins without browser credentials
+  ---
+  duration_ms: 0.88875
+  type: 'test'
+  ...
+# Subtest: API runtime pins reuse CI dependencies and the K3s version policy
+ok 72 - API runtime pins reuse CI dependencies and the K3s version policy
+  ---
+  duration_ms: 225.850458
+  type: 'test'
+  ...
+# Subtest: runtime download verification detects altered artifact bytes
+ok 73 - runtime download verification detects altered artifact bytes
+  ---
+  duration_ms: 162.6445
+  type: 'test'
+  ...
+1..73
+# tests 73
+# suites 0
+# pass 73
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 4356.484167

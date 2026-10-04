@@ -105,6 +105,23 @@ class LifecycleTest(unittest.TestCase):
                 self.assertNotIn(shared['secret'], rule['resourceNames'])
         self.assertIn(shared['secret'], self.control.objects['argocd', 'role', 'railshot-credentials']['rules'][0]['resourceNames'])
 
+    def test_registered_app_without_cd_journal_or_argo_application_can_be_deleted(self):
+        app_id = self.app['application_id']
+        name = runtime.application_name(app_id, app_id, self.app['app'])
+        del self.control.objects['argocd', 'application', name]
+        self.assertFalse((self.home / 'deployments').exists())
+        plan = self.plan()
+        self.assertEqual(plan['status'], 'planned')
+        self.assertFalse(any(row['kind'] == 'Application' for row in plan['resources']))
+        self.assertTrue(all(verb == 'get' for verb, _ in self.calls))
+        _, result = self.apply(plan)
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(result['residuals'], [])
+        self.assertEqual(runtime.read_private(self.home / 'lifecycle.json')['status'], 'deleted')
+        self.execute.assert_called_once()
+        self.assertNotIn(('argocd', 'appproject', app_id), self.control.objects)
+        self.assertIn(('argocd', 'secret', 'railshot-' + self.app['environment_id']), self.control.objects)
+
     def test_shared_token_rotation_keeps_plan_valid_but_uid_drift_does_not(self):
         _, secret = self.shared_registration()
         plan = self.plan(); uid = secret['metadata']['uid']

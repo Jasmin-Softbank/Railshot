@@ -17,6 +17,54 @@ import credentials
 
 
 class CredentialsTest(unittest.TestCase):
+    def policy(self, count):
+        return {'version': 1, 'targets': [{**copy.deepcopy(self.target), 'target_id': f'reserved-{index}',
+            'secret': f'railshot-reserved-{index}'} for index in range(count)]}
+
+    def test_registration_count_is_not_a_deployed_app_quota(self):
+        policy = self.policy(40)
+        self.assertEqual(credentials.validate_policy(policy), policy)
+        size = len(json.dumps(policy).encode())
+        with patch.object(credentials, 'MAX_POLICY_BYTES', size), self.assertRaises(credentials.PolicyCapacityError):
+            credentials.validate_policy(policy)
+
+    def test_renewal_is_bounded_and_a_failed_target_does_not_block_others(self):
+        policy = self.policy(25)
+        lock = threading.Lock()
+        active = peak = 0
+        visited = []
+        first_batch = threading.Barrier(credentials.RENEWAL_WORKERS)
+
+        def renew(target):
+            nonlocal active, peak
+            index = int(target['target_id'].split('-')[-1])
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                visited.append(target['secret'])
+            try:
+                if index < credentials.RENEWAL_WORKERS:
+                    first_batch.wait(timeout=5)
+                if index == 0:
+                    raise RuntimeError('unreachable target')
+                return {'secret': target['secret'], 'status': 'renewed'}
+            finally:
+                with lock:
+                    active -= 1
+
+        with patch.object(credentials, 'renew', side_effect=renew):
+            results = credentials.renew_policy(policy)
+        self.assertEqual(peak, credentials.RENEWAL_WORKERS)
+        self.assertCountEqual(visited, [row['secret'] for row in policy['targets']])
+        self.assertEqual([row['secret'] for row in results], [row['secret'] for row in policy['targets']])
+        self.assertEqual(results[0]['code'], 'RENEWAL_FAILED')
+        self.assertTrue(all(row['status'] == 'renewed' for row in results[1:]))
+
+    def test_duplicate_secrets_are_rejected_before_concurrent_renewal(self):
+        with patch.object(credentials, 'renew') as renew, self.assertRaisesRegex(ValueError, 'duplicate registration'):
+            credentials.renew_policy({'version': 1, 'targets': [self.target, self.target]})
+        renew.assert_not_called()
+
     def setUp(self):
         self.now = 1_800_000_000
         self.ca = b'synthetic CA fixture'
@@ -91,7 +139,8 @@ class CredentialsTest(unittest.TestCase):
         self.assertEqual((cron['schedule'], cron['concurrencyPolicy']), ('0 */2 * * *', 'Forbid'))
         self.assertEqual(cron['jobTemplate']['spec']['backoffLimit'], 0)
         pod = cron['jobTemplate']['spec']['template']['spec']
-        self.assertEqual(pod['nodeSelector']['railshot.io/node-role'], 'platform')
+        self.assertEqual(pod['nodeSelector'], {
+            'kubernetes.io/arch': 'amd64', 'railshot.io/node-role': 'platform'})
         self.assertNotIn('hostNetwork', pod)
         self.assertNotIn('hostPath', json.dumps(pod))
         config = json.loads(next(x for x in items if x['kind'] == 'ConfigMap')['data']['kubeconfig'])
@@ -105,6 +154,51 @@ class CredentialsTest(unittest.TestCase):
         customer_role = list(yaml.safe_load_all(Path(__file__).with_name('credentials-customer.yaml').read_text()))[0]
         self.assertEqual(customer_role['rules'], [{'apiGroups': [''], 'resources': ['serviceaccounts/token'],
                                                  'resourceNames': ['railshot-argocd'], 'verbs': ['create']}])
+
+    def test_renderer_selects_an_explicit_supported_control_architecture_only(self):
+        image = 'ghcr.io/jasmin-softbank/railshot-api@sha256:' + 'a' * 64
+        items = credentials.render({'version': 1, 'targets': []}, image, platform_arch='arm64')['items']
+        pod = next(x for x in items if x['kind'] == 'CronJob')['spec']['jobTemplate']['spec']['template']['spec']
+        self.assertEqual(pod['nodeSelector'], {
+            'kubernetes.io/arch': 'arm64', 'railshot.io/node-role': 'platform'})
+        for invalid in ('aarch64', 'x86_64', '', None, True, 64):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                credentials.render({'version': 1, 'targets': []}, image, platform_arch=invalid)
+
+    def test_local_renderer_binds_real_import_receipt_and_never_pulls_or_forwards(self):
+        provenance = {'source_sha256': 'b' * 64, 'oci_archive_sha256': 'c' * 64,
+                      'manifest_digest': 'sha256:' + 'd' * 64, 'image_id': 'sha256:' + 'e' * 64}
+        image = 'localhost/railshot-api@' + provenance['manifest_digest']
+        items = credentials.render({'version': 1, 'targets': []}, image, platform_arch='arm64',
+                                   local_provenance=provenance)['items']
+        template = next(x for x in items if x['kind'] == 'CronJob')['spec']['jobTemplate']['spec']['template']
+        pod, container = template['spec'], template['spec']['containers'][0]
+        self.assertEqual(pod['nodeSelector'], {
+            'kubernetes.io/arch': 'arm64', 'railshot.io/node-role': 'platform'})
+        self.assertEqual((pod['hostNetwork'], pod['dnsPolicy']), (True, 'ClusterFirstWithHostNet'))
+        self.assertNotIn('imagePullSecrets', pod)
+        self.assertEqual((container['image'], container['imagePullPolicy']), (image, 'Never'))
+        self.assertEqual(template['metadata']['annotations'], {
+            'railshot.io/local-source-sha256': provenance['source_sha256'],
+            'railshot.io/local-oci-archive-sha256': provenance['oci_archive_sha256'],
+            'railshot.io/local-manifest-digest': provenance['manifest_digest'],
+            'railshot.io/local-image-id': provenance['image_id']})
+
+        invalid = [
+            None,
+            {**provenance, 'extra': 'x'},
+            {**provenance, 'source_sha256': 'B' * 64},
+            {**provenance, 'oci_archive_sha256': 'c' * 63},
+            {**provenance, 'manifest_digest': 'sha256:' + 'f' * 64},
+            {**provenance, 'image_id': 'e' * 64},
+        ]
+        for value in invalid[1:]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                credentials.render({'version': 1, 'targets': []}, image, platform_arch='arm64',
+                                   local_provenance=value)
+        # Omitting local provenance retains the production-only GHCR contract.
+        with self.assertRaises(ValueError):
+            credentials.render({'version': 1, 'targets': []}, image, platform_arch='arm64')
 
     def test_projectless_environment_registration_renews_without_broadening_namespaces(self):
         self.target['project'] = ''

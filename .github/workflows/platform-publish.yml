@@ -9,7 +9,7 @@ on:
       multicloud: {type: boolean, default: false}
       ci_run_id: {type: string, required: true}
       skip_build:
-        description: Reuse tested-image artifacts from this same trusted CI run
+        description: Reuse published digest artifacts from this same trusted CI run
         type: boolean
         default: false
   workflow_dispatch:
@@ -31,7 +31,7 @@ on:
         type: string
         default: ''
       deploy:
-        description: Update the platform deployment branch after publication (dashboard and api required)
+        description: Update the platform deployment branch after publication (unchanged component is preserved)
         type: boolean
         default: false
 
@@ -41,9 +41,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  admission:
+  publish:
+    if: ${{ !inputs.skip_build }}
+    uses: ./.github/workflows/platform-containers.yml
+    with:
+      components: ${{ inputs.components }}
+      publish: ${{ inputs.publish }}
+    permissions: {contents: read, packages: write}
+
+  deploy:
+    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && (needs.publish.result == 'success' || (inputs.skip_build && needs.publish.result == 'skipped')) }}
+    needs: publish
     runs-on: ubuntu-24.04
-    permissions: {contents: read, actions: read}
+    timeout-minutes: 25
+    permissions: {contents: write, actions: read, id-token: write}
+    outputs:
+      admitted: ${{ steps.source.outputs.admitted }}
+      revision: ${{ steps.declaration.outputs.revision }}
+      dashboard_digest: ${{ steps.declaration.outputs.dashboard_digest }}
+      api_digest: ${{ steps.declaration.outputs.api_digest }}
     steps:
       - name: Validate publication and deployment inputs
         env:
@@ -79,8 +95,8 @@ jobs:
               assert os.environ['GITHUB_EVENT_NAME'] == 'push' and os.environ['AUTO_RELEASE'] == 'true', 'artifact reuse requires the enabled automatic push release'
               assert os.environ['DEPLOY'] == 'true', 'artifact reuse requires platform deployment'
               assert os.environ['CI_RUN_ID'] == os.environ['GITHUB_RUN_ID'], 'artifact reuse requires the calling CI run gate'
-              assert set(components) == allowed, 'automatic deployment requires all tested components'
           if os.environ['MULTICLOUD'] == 'true':
+              assert os.environ['GITHUB_EVENT_NAME'] == 'workflow_dispatch', 'multicloud maintenance must be requested manually'
               assert os.environ.get('MULTICLOUD_ENABLED') == 'true', 'multicloud release requires RAILSHOT_MULTICLOUD_RELEASE=true'
               assert os.environ['DEPLOY'] == 'true', 'multicloud release requires platform deployment'
           if os.environ['DEPLOY'] == 'true':
@@ -89,7 +105,7 @@ jobs:
               assert os.environ['VERIFY_ROLE'] == 'arn:aws:iam::721622471953:role/railshot-platform-verifier', 'verification bootstrap role is required'
               assert re.fullmatch(r'[1-9][0-9]*', os.environ['VERIFY_VERSION']) and re.fullmatch(r'[a-f0-9]{64}', os.environ['VERIFY_HASH']), 'verification document version and hash are required'
               assert os.environ['PUBLISH'] == 'true', 'deploy requires publish=true'
-              assert {'dashboard', 'api'} <= set(components), 'deploy requires dashboard and api from this run'
+              assert {'dashboard', 'api', 'mcp'} & set(components), 'deploy requires a changed platform component'
               assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', os.environ['PLATFORM_TARGET']), 'RAILSHOT_PLATFORM_TARGET_ID is required'
               providers = json.loads(os.environ['PROVIDER_TARGETS'])
               assert isinstance(providers, dict) and set(providers) <= {'aws', 'gcp', 'openstack', 'proxmox'}, 'RAILSHOT_PROVIDER_TARGETS must be a supported provider-to-target JSON map'
@@ -98,6 +114,7 @@ jobs:
               selections = {'aws': os.environ['PLATFORM_TARGET'], **providers}
               assert len(set(selections.values())) == len(selections), 'provider target IDs must be distinct'
               if 'ci-runner' in components:
+                  assert {'dashboard', 'api'} <= set(components), 'worker rollout requires the platform images'
                   assert re.fullmatch(r'[1-9][0-9]*', os.environ['RELEASE_VERSION']) and re.fullmatch(r'[a-f0-9]{64}', os.environ['RELEASE_HASH']), 'release document version and hash are required'
               if os.environ.get('MULTICLOUD') == 'true':
                   assert {'dashboard', 'api', 'ci-runner'} <= set(components), 'multicloud release requires the central worker images'
@@ -106,84 +123,6 @@ jobs:
               port = os.environ['PLATFORM_PORT']
               assert re.fullmatch(r'[0-9]+', port) and 30000 <= int(port) <= 32767, 'RAILSHOT_PLATFORM_NODE_PORT must be 30000..32767'
           PYCODE
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        if: inputs.deploy
-        with: {persist-credentials: false}
-      - name: Require the exact trusted source CI gate before deployment
-        if: inputs.deploy
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.sha }}
-          SOURCE_REF: ${{ github.ref }}
-          CI_RUN_ID: ${{ inputs.ci_run_id }}
-        run: python3 deployment/scripts/release_admission.py --source-sha "$SOURCE_SHA" --ref "$SOURCE_REF" --ci-run-id "$CI_RUN_ID"
-  build:
-    needs: admission
-    if: ${{ !inputs.skip_build }}
-    uses: ./.github/workflows/platform-containers.yml
-    with:
-      components: ${{ inputs.components }}
-      export_image: ${{ inputs.publish }}
-
-  publish:
-    if: ${{ always() && !cancelled() && inputs.publish && needs.admission.result == 'success' && (needs.build.result == 'success' || (inputs.skip_build && needs.build.result == 'skipped')) }}
-    needs: [admission, build]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions: {contents: read, actions: read, packages: write}
-    strategy:
-      fail-fast: false
-      matrix:
-        component: ${{ fromJSON(inputs.components) }}
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: tested-image-${{ matrix.component }}
-      - name: Publish exactly the tested image
-        env:
-          COMPONENT: ${{ matrix.component }}
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          case "$COMPONENT" in dashboard|api|mcp|ci-runner) ;; *) exit 1 ;; esac
-          gzip -dc tested-image.tar.gz | docker load
-          test "$(docker inspect "railshot/$COMPONENT:ci" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
-          export DOCKER_CONFIG="$RUNNER_TEMP/platform-registry"
-          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
-          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          image="ghcr.io/jasmin-softbank/railshot-$COMPONENT:$GITHUB_SHA"
-          docker tag "railshot/$COMPONENT:ci" "$image"
-          docker push "$image"
-          mkdir -p published
-          docker image inspect "$image" --format '{{json .RepoDigests}}' > published/digests.json
-          python3 - <<'PYCODE'
-          import json, os, pathlib, re
-          component = os.environ['COMPONENT']
-          prefix = f'ghcr.io/jasmin-softbank/railshot-{component}@sha256:'
-          values = json.loads(pathlib.Path('published/digests.json').read_text())
-          image = next(value for value in values if value.startswith(prefix))
-          assert re.fullmatch(re.escape(prefix) + '[a-f0-9]{64}', image)
-          pathlib.Path(f'published/{component}.json').write_text(json.dumps({component: image}) + '\n')
-          pathlib.Path('published/digests.json').unlink()
-          PYCODE
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: platform-image-${{ matrix.component }}-${{ github.sha }}
-          path: published/${{ matrix.component }}.json
-          if-no-files-found: error
-          retention-days: 14
-
-  deploy:
-    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.admission.result == 'success' && needs.publish.result == 'success' }}
-    needs: [admission, publish]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {contents: write, actions: read}
-    outputs:
-      revision: ${{ steps.declaration.outputs.revision }}
-      dashboard_digest: ${{ steps.declaration.outputs.dashboard_digest }}
-      api_digest: ${{ steps.declaration.outputs.api_digest }}
-    steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
@@ -200,11 +139,13 @@ jobs:
           test -n "$pin"
           python3 -m pip install --disable-pip-version-check "$pin"
       - name: Recheck current source and CI gate immediately before platform publication
+        id: source
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"
+        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID" --skip-superseded
       - name: Commit the tested digest declaration to the platform branch
+        if: steps.source.outputs.admitted == 'true'
         id: declaration
         env:
           PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
@@ -218,39 +159,31 @@ jobs:
             --dashboard-node-port "$PLATFORM_PORT" \
             --provider-targets "$PROVIDER_TARGETS"
 
-  verify:
-    if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && needs.deploy.result == 'success' }}
-    needs: deploy
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions: {contents: read, id-token: write}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
       - name: Assume the fixed read-only verification role
+        if: steps.source.outputs.admitted == 'true'
         uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
         with:
           aws-region: ap-northeast-2
           role-to-assume: arn:aws:iam::721622471953:role/railshot-platform-verifier
-          role-duration-seconds: 900
+          role-duration-seconds: 1800
           role-session-name: railshot-platform-${{ github.run_id }}
           allowed-account-ids: '721622471953'
       - name: Verify the exact Argo revision, running digests and public edge
+        if: steps.source.outputs.admitted == 'true'
         env:
-          REVISION: ${{ needs.deploy.outputs.revision }}
-          DASHBOARD_DIGEST: ${{ needs.deploy.outputs.dashboard_digest }}
-          API_DIGEST: ${{ needs.deploy.outputs.api_digest }}
+          REVISION: ${{ steps.declaration.outputs.revision }}
+          DASHBOARD_DIGEST: ${{ steps.declaration.outputs.dashboard_digest }}
+          API_DIGEST: ${{ steps.declaration.outputs.api_digest }}
           DOCUMENT_VERSION: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_VERSION }}
           DOCUMENT_HASH: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_SHA256 }}
         run: |
+          git switch --detach "$GITHUB_SHA"
           python3 deployment/scripts/verify-platform.py remote \
             --revision "$REVISION" --dashboard-digest "$DASHBOARD_DIGEST" --api-digest "$API_DIGEST" \
             --document-version "$DOCUMENT_VERSION" --document-hash "$DOCUMENT_HASH" \
             --receipt "$RUNNER_TEMP/platform-verification.json"
       - name: Preserve the verification outcome
-        if: always()
+        if: always() && steps.source.outputs.admitted == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: platform-verification-${{ github.sha }}
@@ -259,8 +192,10 @@ jobs:
           retention-days: 14
 
   ci-runtime:
-    if: ${{ always() && !cancelled() && contains(fromJSON(inputs.components), 'ci-runner') && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' }}
-    needs: [deploy, verify]
+    outputs:
+      admitted: ${{ steps.source.outputs.admitted }}
+    if: ${{ always() && !cancelled() && contains(fromJSON(inputs.components), 'ci-runner') && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.deploy.outputs.admitted == 'true' }}
+    needs: deploy
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions: {contents: read, actions: read, id-token: write}
@@ -281,11 +216,13 @@ jobs:
           role-session-name: railshot-release-${{ github.run_id }}
           allowed-account-ids: '721622471953'
       - name: Recheck current source and CI gate immediately before remote release
+        id: source
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"
+        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID" --skip-superseded
       - name: Promote the tested CI controller runner and workflow source
+        if: steps.source.outputs.admitted == 'true'
         env:
           SOURCE_SHA: ${{ github.sha }}
           REVISION: ${{ needs.deploy.outputs.revision }}
@@ -299,7 +236,7 @@ jobs:
             --document-version "$DOCUMENT_VERSION" --document-hash "$DOCUMENT_HASH" \
             --receipt "$RUNNER_TEMP/ci-runtime-release.json"
       - name: Preserve the CI runtime rollout result
-        if: always()
+        if: ${{ always() && steps.source.outputs.admitted == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ci-runtime-release-${{ github.sha }}-${{ github.run_attempt }}
@@ -308,8 +245,8 @@ jobs:
           retention-days: 30
 
   multicloud:
-    if: ${{ always() && !cancelled() && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.verify.result == 'success' && needs.ci-runtime.result == 'success' }}
-    needs: [deploy, verify, ci-runtime]
+    if: ${{ always() && !cancelled() && github.event_name == 'workflow_dispatch' && inputs.multicloud && vars.RAILSHOT_MULTICLOUD_RELEASE == 'true' && inputs.deploy && inputs.publish && needs.deploy.result == 'success' && needs.deploy.outputs.admitted == 'true' && needs.ci-runtime.result == 'success' && needs.ci-runtime.outputs.admitted == 'true' }}
+    needs: [deploy, ci-runtime]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions: {contents: read, actions: read, id-token: write}
@@ -330,11 +267,13 @@ jobs:
           role-session-name: railshot-release-${{ github.run_id }}
           allowed-account-ids: '721622471953'
       - name: Recheck current source and CI gate immediately before remote release
+        id: source
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CI_RUN_ID: ${{ inputs.ci_run_id }}
-        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID"
+        run: python3 deployment/scripts/release_admission.py --source-sha "$GITHUB_SHA" --ref "$GITHUB_REF" --ci-run-id "$CI_RUN_ID" --skip-superseded
       - name: Apply the same approved release and require three verified providers
+        if: steps.source.outputs.admitted == 'true'
         env:
           SOURCE_SHA: ${{ github.sha }}
           REVISION: ${{ needs.deploy.outputs.revision }}
@@ -348,7 +287,7 @@ jobs:
             --document-version "$DOCUMENT_VERSION" --document-hash "$DOCUMENT_HASH" \
             --receipt "$RUNNER_TEMP/multicloud-release.json"
       - name: Preserve all provider outcomes
-        if: always()
+        if: ${{ always() && steps.source.outputs.admitted == 'true' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: multicloud-release-${{ github.sha }}-${{ github.run_attempt }}

@@ -6,7 +6,7 @@ on:
       components:
         type: string
         default: '["dashboard","api","mcp","ci-runner"]'
-      export_image:
+      publish:
         type: boolean
         default: false
   workflow_dispatch:
@@ -16,10 +16,10 @@ on:
         type: string
         default: '["dashboard","api","mcp","ci-runner"]'
 
-permissions: {contents: read}
+permissions: {contents: read, packages: write}
 
 jobs:
-  images:
+  publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     strategy:
@@ -27,6 +27,15 @@ jobs:
       matrix:
         component: ${{ fromJSON(inputs.components) }}
     steps:
+      - name: Restrict publication to the trusted repository and ref
+        if: inputs.publish
+        env:
+          VERIFY_REF: ${{ vars.RAILSHOT_PLATFORM_VERIFY_REF }}
+        run: |
+          test "$GITHUB_REPOSITORY" = Jasmin-Softbank/Railshot
+          test "$GITHUB_REPOSITORY_ID" = 1400202256
+          test "$GITHUB_EVENT_NAME" != pull_request
+          test -n "$VERIFY_REF" && test "$GITHUB_REF" = "$VERIFY_REF"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {persist-credentials: false}
       - name: Validate local application environment
@@ -41,6 +50,15 @@ jobs:
           RAILSHOT_RUNNER_NAME: config-check-only
           RAILSHOT_RUNNER_TOKEN_FILE: /tmp/railshot-registration-token-not-installed
         run: docker compose -f ci/runner-compose.yml config --quiet
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.component == 'mcp'
+        with:
+          node-version: '22'
+      - name: Verify MCP deployment submission and status lookup
+        if: matrix.component == 'mcp'
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --workspace=apps/agent --workspace=apps/api --include-workspace-root=false
+          npm test --workspace @railshot/agent
       - name: Build without credentials
         env:
           COMPONENT: ${{ matrix.component }}
@@ -60,15 +78,37 @@ jobs:
         env:
           COMPONENT: ${{ matrix.component }}
         run: python3 ci/scripts/container-smoke.py "$COMPONENT" "railshot/$COMPONENT:ci"
-      - name: Preserve exact tested image for publication
-        if: inputs.export_image
+      - name: Publish the built image
+        if: inputs.publish
         env:
           COMPONENT: ${{ matrix.component }}
-        run: docker save "railshot/$COMPONENT:ci" | gzip > tested-image.tar.gz
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: inputs.export_image
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          case "$COMPONENT" in dashboard|api|mcp|ci-runner) ;; *) exit 1 ;; esac
+          test "$(docker inspect "railshot/$COMPONENT:ci" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          export DOCKER_CONFIG="$RUNNER_TEMP/platform-registry"
+          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          image="ghcr.io/jasmin-softbank/railshot-$COMPONENT:$GITHUB_SHA"
+          docker tag "railshot/$COMPONENT:ci" "$image"
+          docker push "$image"
+          mkdir -p published
+          docker image inspect "$image" --format '{{json .RepoDigests}}' > published/digests.json
+          python3 - <<'PYCODE'
+          import json, os, pathlib, re
+          component = os.environ['COMPONENT']
+          prefix = f'ghcr.io/jasmin-softbank/railshot-{component}@sha256:'
+          values = json.loads(pathlib.Path('published/digests.json').read_text())
+          image = next(value for value in values if value.startswith(prefix))
+          assert re.fullmatch(re.escape(prefix) + '[a-f0-9]{64}', image)
+          pathlib.Path(f'published/{component}.json').write_text(json.dumps({component: image}) + '\n')
+          pathlib.Path('published/digests.json').unlink()
+          PYCODE
+      - if: inputs.publish
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: tested-image-${{ matrix.component }}
-          path: tested-image.tar.gz
+          name: platform-image-${{ matrix.component }}-${{ github.sha }}
+          path: published/${{ matrix.component }}.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14

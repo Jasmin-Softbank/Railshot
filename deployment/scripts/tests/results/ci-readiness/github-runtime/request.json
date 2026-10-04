@@ -1,0 +1,23 @@
+{
+  "environment_id": "railshot-ci-73a2e7255a543c39",
+  "exposure": {
+    "node_port": 30080,
+    "type": "nodeport"
+  },
+  "node": {
+    "host": "localhost"
+  },
+  "provider": "aws",
+  "runtime": {
+    "timeout_seconds": 600
+  },
+  "schema_version": "0.1",
+  "workload": {
+    "container_port": 80,
+    "health_path": "/",
+    "image": "nginx:1.28.0-alpine",
+    "namespace": "railshot-ci-73a2e7255a543c39",
+    "replicas": 1,
+    "sample_content": true
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "headSha": "003fc3ba0f84b4179ca697dfa31d4de5bc844b4d",
+  "status": "completed",
+  "conclusion": "success",
+  "url": "https://github.com/Jasmin-Softbank/Railshot/actions/runs/37015893193",
+  "jobs": [
+    {
+      "name": "Linux control Cilium install, repeat and network policy",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

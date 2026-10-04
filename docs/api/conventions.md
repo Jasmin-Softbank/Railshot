@@ -16,7 +16,7 @@
 
 위 구현의 HTTP 형식을 신규 제품 API에 적용한다. Node 서비스를 FastAPI로 바꾸거나 Python 계층 구조·Protocol을 그대로 복제할 필요는 없다. 기존 Ansible·OpenStack 내부 계약은 담당 구현을 유지하고 제품 API 경계에서 변환한다.
 
-제품은 **사용자 계정·로그인·팀원 allowlist 없는 공유 workspace**다. 모든 사용자가 소스를 업로드하고, 서버에 등록한 대상의 지원 범위에서 빌드·배포를 요청한다. user/auth 도메인은 추가하지 않으며, 해커톤 대시보드의 기록과 설정은 익명 쿠키 세션으로 분리한다. 운영자 지정 공용 대상은 공유한다. 운영자만 target·profile·실행 도구·자격을 설정하며, 공개 입력에는 이 등록 항목의 ID와 제품 입력만 받는다. 내부 서비스 인증과 Host/Origin 검사는 사용자 로그인과 별개다.
+제품은 **사용자 계정·로그인·팀원 allowlist 없는 공유 workspace**다. 개인 환경에는 별도 장기 소유자 쿠키와 복구키를 사용하며 [개인 환경 계약](personal-environments.md)을 따른다. 이 기능은 외부 로그인이나 공용 대상의 자동 인수를 추가하지 않는다. 모든 사용자가 소스를 업로드하고, 서버에 등록한 대상의 지원 범위에서 빌드·배포를 요청한다. user/auth 도메인은 추가하지 않으며, 해커톤 대시보드의 기록과 설정은 익명 쿠키 세션으로 분리한다. 운영자 지정 공용 대상은 공유한다. 운영자만 target·profile·실행 도구·자격을 설정하며, 공개 입력에는 이 등록 항목의 ID와 제품 입력만 받는다. 내부 서비스 인증과 Host/Origin 검사는 사용자 로그인과 별개다.
 
 ## 2. REST 원칙·HTTP 표준·로컬 이름 규칙
 
@@ -91,9 +91,9 @@ Content-Type: application/json
 | `Idempotency-Key` | 클라이언트가 동일한 생성 의도를 재접수할 때 재사용. 인증·자원 ID·HTTP 추적 ID를 대신하지 않음 |
 | 기존 Ansible `request_id` | 내부 API의 영속 job 식별자/중복 방지 값. 제품 HTTP `request_id`와 의미가 다르므로 제품 기록의 `ansible_job_id`로 매핑 |
 
-제품 `POST /api/v1/deployments`와 `POST /api/v1/environments`에는 `Idempotency-Key`를 요구한다. 1–128자의 영문·숫자·`.`·`_`·`-`만 허용하고 익명 세션과 자원 종류별로 관리한다. 같은 키·같은 정규화 입력이면 같은 자원을, 다른 입력이면 `409 IDEMPOTENCY_CONFLICT`를 반환한다. 기존 자원이 queued/running이면 같은 `resource_id`의 202 접수 형식, succeeded/failed/blocked/unknown이면 같은 자원 객체의 200 형식과 Location을 반환한다. unknown을 다시 접수하거나 실행하지 않으며 신규 작업 한도는 계속 점유한다. HTTP `request_id`는 매번 새 값이다.
+제품 `POST /api/v1/deployments`와 `POST /api/v1/environments`에는 `Idempotency-Key`를 요구한다. 1–128자의 영문·숫자·`.`·`_`·`-`만 허용하고 익명 세션과 자원 종류별로 관리한다. 같은 키·같은 정규화 입력이면 같은 자원을, 다른 입력이면 `409 IDEMPOTENCY_CONFLICT`를 반환한다. 기존 자원이 queued/running이면 같은 `resource_id`의 202 접수 형식, succeeded/failed/blocked/unknown이면 같은 자원 객체의 200 형식과 Location을 반환한다. unknown을 다시 접수하거나 실행하지 않는다. 실행 worker가 종료된 unknown은 60초 뒤 전역 실행 슬롯을 반납하지만, 기록·중복 방지 키·저장 한도는 유지하고 같은 앱 또는 미확정 환경의 변경은 계속 차단한다. HTTP `request_id`는 매번 새 값이다.
 
-재시작 후에도 키·소스 snapshot·입력 digest·외부 실행 식별자를 복구해야 한다. 원문 multipart boundary/ZIP 시각을 입력 의미로 비교하지 않는다. TTL이 있는 구현은 보존 기간과 만료 후 동작을 계약에 명시하고 미완료/unknown 기록을 자동 만료시키지 않는다.
+재시작 후에도 키·소스 snapshot·입력 digest·외부 실행 식별자를 복구해야 한다. 원문 multipart boundary/ZIP 시각을 입력 의미로 비교하지 않는다. 미완료/unknown 기록을 자동 삭제하지 않는다. 배포와 업데이트는 기존 operations의 queue.sequence 순서대로 단일 worker가 처리한다. queue.enqueued_at은 소스 보관 완료, queue.started_at은 실행 claim 완료, queue.released_at과 release_reason=unknown_timeout은 실행 슬롯 반납을 뜻한다. 성공·실패 확정이나 외부 실행 취소를 뜻하지 않는다. 신형 queue가 있고 아직 claim되지 않은 배포만 재시작 후 자동 실행하며, 이미 시작한 배포는 unknown으로 복구해 재제출하지 않는다. 오래 대기한 계획과 업데이트 기준 revision은 실행 직전에 다시 검사한다. legacy builds의 실제 run_id 응답 및 환경·수명주기·resume 계약은 유지하며, 이 경로는 슬롯이 사용 중이면 접수 전 409를 반환한다.
 
 기존 CI 제출과 OpenStack 생성에는 영속 중복 방지 계약이 없다. v1 CI 표현을 붙이는 것만으로 이를 지원한다고 쓰지 않는다. `X-Request-ID`를 넣었다고 자동 재전송이 안전해지지 않는다. 결과가 불확실하면 먼저 자원을 관측한다. `outcome_unknown=true`이면 `retryable=false`이며 변경 작업을 자동 재실행하지 않는다.
 
@@ -138,3 +138,5 @@ HTTP 조회가 성공했지만 작업이 실패한 경우 `GET`은 200이고 자
 라우트·요청/응답 모델·OpenAPI·HTTP 계약 테스트를 같은 변경에서 맞춘다. 본문뿐 아니라 `Location`, `X-Request-ID`, `Retry-After`, `Cache-Control` 응답 헤더도 OpenAPI에 표현한다. 기존 OpenStack snapshot에는 일부 런타임 헤더 선언이 없으므로 이를 이미 완비한 예제로 설명하지 않는다. REST 규약을 만들기 위해 아직 없는 모든 CRUD나 범용 작업 API를 추가하지 않는다. 제안·실행 코드·로컬 시험·실제 배포 결과를 구분한다.
 
 구현 검증은 화균 님의 기존 테스트 패턴을 재사용한다: 정상 상태/본문/Location, 잘못된 입력의 외부 호출 0회, Host·Origin 및 미등록 대상·run 차단, 모든 오류의 동일 envelope와 X-Request-ID, 목록 범위·중복 query 거부, 결과 불확실 시 재실행 금지. 제품 idempotency는 저장 실패·중복 접수·재시작 복구까지 확인한다. 실제 실행 근거는 해당 소스·계약 테스트와 배포별 결과이며, 이 규약 문서나 모의 시험만으로 클라우드 E2E 완료를 주장하지 않는다.
+
+큐 구현은 단일 API replica와 기존 SQLite transaction을 전제로 한다. Redis 등 별도 인프라는 추가하지 않는다. [SQLite transaction의 단일 writer](https://www.sqlite.org/lang_transaction.html), [BullMQ timeout의 취소 경계](https://docs.bullmq.io/patterns/timeout-jobs), [idempotent job 조건](https://docs.bullmq.io/patterns/idempotent-jobs)을 참고했다. 살아 있는 worker를 Promise timeout만으로 분리하여 다음 writer를 시작하지 않는다. 다중 API replica가 필요할 때 broker와 fencing을 함께 도입한다.

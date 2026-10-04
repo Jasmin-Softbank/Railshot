@@ -197,7 +197,11 @@ def runtime_kubectl(request):
                   '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15', host['ansible_user'] + '@' + host['ansible_host']]
         def kubectl(namespace, *args, document=None):
             remote = shlex.join(['sudo', '-n', 'k3s', 'kubectl', '--request-timeout=20s', '-n', namespace, *args])
-            raw = argo.native([*prefix, remote], document=document)
+            # Personal relay rechecks the complete app ownership/storage inventory
+            # before lifecycle mutations. Keep ordinary commands on their short deadline.
+            lifecycle = (node['ssh'].get('port') == 2223 and re.fullmatch(r'app-[a-f0-9]{24}', namespace)
+                         and args and args[0] in ('delete', 'patch'))
+            raw = argo.native([*prefix, remote], document=document, **({'timeout': 300} if lifecycle else {}))
             return json.loads(raw) if raw.strip() else None
         yield kubectl
 
@@ -223,7 +227,7 @@ def runtime_documents(target, owner, pull, binding):
                 'kind': kind, 'metadata': {'name': name, **({'namespace': namespace} if kind != 'Namespace' else {}), 'labels': labels}, **fields}
     verbs = ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete']
     rules = [{'apiGroups': [group], 'resources': resources, 'verbs': verbs} for group, resources in (
-        ('apps', ['deployments']), ('', ['services']), ('networking.k8s.io', ['networkpolicies']))]
+        ('apps', ['deployments']), ('', ['services', 'persistentvolumeclaims']), ('networking.k8s.io', ['networkpolicies']))]
     rules.extend([{'apiGroups': [''], 'resources': ['pods', 'events'], 'verbs': ['get', 'list', 'watch']},
                   {'apiGroups': [''], 'resources': ['pods/log'], 'verbs': ['get']},
                   {'apiGroups': ['apps'], 'resources': ['replicasets'], 'verbs': ['get', 'list', 'watch']},
@@ -250,19 +254,25 @@ def runtime_documents(target, owner, pull, binding):
     return result
 
 
+def application_project(registered, owner, binding=None):
+    target = registered['target']
+    project = {'apiVersion': 'argoproj.io/v1alpha1', 'kind': 'AppProject',
+               'metadata': {'name': target['project'], 'namespace': 'argocd'},
+               'spec': {'sourceRepos': [target['repo_url']], 'destinations': [{'server': target['cluster_server'], 'namespace': target['namespace']}],
+                        'clusterResourceWhitelist': [], 'namespaceResourceWhitelist': copy.deepcopy(argo.KINDS + [argo.PVC_KIND])}}
+    if binding:
+        project['spec']['namespaceResourceWhitelist'].append({'group': 'batch', 'kind': 'Job'})
+    project['metadata']['labels'] = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': owner}
+    return project
+
+
 def register_argo(kube, cd, registered, target_id, owner, binding, *, tls_server_name=None):
     target = registered['target']; namespace = target['namespace']
     control = lambda ns, *args, **kwargs: argo.kubectl(cd['context'], ns, *args, **kwargs)
     app = {'metadata': {'namespace': 'argocd', 'name': target_id}, 'spec': {'project': target['project'],
            'source': {'repoURL': target['repo_url']}, 'destination': {'server': target['cluster_server'], 'namespace': namespace}}}
     review = {'application': app, 'receipt': {'target_id': target_id}}
-    project = {'apiVersion': 'argoproj.io/v1alpha1', 'kind': 'AppProject',
-               'metadata': {'name': target['project'], 'namespace': 'argocd'},
-               'spec': {'sourceRepos': [target['repo_url']], 'destinations': [app['spec']['destination']],
-                        'clusterResourceWhitelist': [], 'namespaceResourceWhitelist': copy.deepcopy(argo.KINDS)}}
-    if binding:
-        project['spec']['namespaceResourceWhitelist'].append({'group': 'batch', 'kind': 'Job'})
-    project['metadata']['labels'] = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': owner}
+    project = application_project(registered, owner, binding)
     # Each new runtime gets a dedicated project. Refuse to adopt an existing shared project.
     owned_apply(control, project)
     live_project = control('argocd', 'get', 'appproject', target['project'], '-o', 'json')
@@ -409,7 +419,7 @@ def share_application_cluster(kube, cd, registered, environment_id):
 
 
 def preflight_renewal(cd, registered, target_id, *, allow_existing=False):
-    """Reject capacity/identity conflicts before creating any runtime or Argo object."""
+    """Validate the policy and existing identity before creating registration objects."""
     cm = argo.kubectl(cd['context'], 'argocd', 'get', 'configmap', 'railshot-credentials', '-o', 'json')
     policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
     target = registered['target']
@@ -420,9 +430,9 @@ def preflight_renewal(cd, registered, target_id, *, allow_existing=False):
         argo.require(allow_existing and all(previous[key] == value for key, value in expected.items())
                      and previous['service_account']['name'] == SA
                      and previous['service_account']['namespace'] == target['namespace'], 'renewal target binding conflict')
-    else:
-        # Existing credentials.validate_policy contract has a 20-target ceiling.
-        argo.require(len(policy['targets']) < 20, 'renewal target capacity exhausted')
+    # Failed deployments may still own resources and need token renewal. Their
+    # registration count is not an application quota. install_renewal validates
+    # the actual candidate document size again before writing policy or RBAC.
 
 
 def install_renewal(cd, renewal):

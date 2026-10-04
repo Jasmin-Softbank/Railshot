@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replenish one reviewed ephemeral build runner; one bounded CronJob tick, stdlib only."""
+"""Replenish a reviewed pool of isolated ephemeral build runners; one bounded CronJob tick, stdlib only."""
 import argparse
 import base64
 import copy
@@ -38,6 +38,8 @@ def validate_template(job, policy):
         if not re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-ci-runner@sha256:[a-f0-9]{64}', policy['image']):
             raise ValueError()
         if not re.fullmatch(r'[a-z][a-z0-9-]{0,62}', policy['node']):
+            raise ValueError()
+        if type(policy.get('runner_count', 1)) is not int or not 1 <= policy.get('runner_count', 1) <= 64:
             raise ValueError()
         pod = job['spec']['template']['spec']
         runner, = pod['containers']
@@ -113,6 +115,7 @@ class Controller:
     def __init__(self, kube, github, template, policy):
         validate_template(template, policy)
         self.kube, self.github, self.template, self.policy = kube, github, template, policy
+        self.slots = ['slot-' + str(i) for i in range(policy.get('runner_count', 1))]
         self.jobs_path = '/apis/batch/v1/namespaces/' + NAMESPACE + '/jobs'
         self.secret_path = '/api/v1/namespaces/' + NAMESPACE + '/secrets/' + SECRET
 
@@ -126,22 +129,35 @@ class Controller:
                 return [j for j in items if j.get('spec', {}).get('template', {}).get('metadata', {}).get('labels', {}).get('app') == 'railshot-build-runner']
         raise Blocked('JOB_LIST_LIMIT')
 
-    def queued(self):
+    def demand(self):
         root = '/repos/' + self.policy['repository'] + '/actions'
-        # This shared workspace admits one product operation. Bound scans to the newest 20 runs/status.
+        # Include running jobs: one active node must not prevent scaling for the
+        # next queued job. Stop scanning as soon as the reviewed pool is full.
+        demand, seen_runs = set(), set()
         for status in ('queued', 'in_progress'):
-            runs = self.github.request('GET', root + '/runs?' + urlencode({'status': status, 'per_page': 20}))['workflow_runs']
-            for run in runs:
-                if not isinstance(run.get('id'), int) or run['id'] <= 0:
-                    raise Blocked('INVALID_GITHUB_RUN')
-                jobs = self.github.request('GET', root + '/runs/' + str(run['id']) + '/jobs?filter=latest&per_page=100')['jobs']
-                for job in jobs:
-                    labels = {label.lower() for label in job.get('labels', [])}
-                    if job.get('status') == 'queued' and 'railshot-ci' in labels:
-                        if not labels <= {'self-hosted', 'linux', 'x64', 'railshot-ci'}:
-                            raise Blocked('UNSUPPORTED_RUNNER_LABELS')
-                        return True
-        return False
+            for page in range(1, 5):
+                runs = self.github.request('GET', root + '/runs?' + urlencode(
+                    {'status': status, 'per_page': 20, 'page': page}))['workflow_runs']
+                for run in runs:
+                    if not isinstance(run.get('id'), int) or run['id'] <= 0:
+                        raise Blocked('INVALID_GITHUB_RUN')
+                    if run['id'] in seen_runs:
+                        continue
+                    seen_runs.add(run['id'])
+                    jobs = self.github.request('GET', root + '/runs/' + str(run['id']) + '/jobs?filter=latest&per_page=100')['jobs']
+                    for job in jobs:
+                        labels = {label.lower() for label in job.get('labels', [])}
+                        if job.get('status') in ('queued', 'in_progress') and 'railshot-ci' in labels:
+                            if not labels <= {'self-hosted', 'linux', 'x64', 'railshot-ci'}:
+                                raise Blocked('UNSUPPORTED_RUNNER_LABELS')
+                            if type(job.get('id')) is not int or job['id'] <= 0:
+                                raise Blocked('INVALID_GITHUB_JOB')
+                            demand.add(job['id'])
+                            if len(demand) >= len(self.slots):
+                                return len(demand)
+                if len(runs) < 20:
+                    break
+        return len(demand)
 
     def save(self, secret, state, token=None):
         patch = {'metadata': {'resourceVersion': secret['metadata']['resourceVersion'],
@@ -156,45 +172,78 @@ class Controller:
             raise Blocked('INVALID_REGISTRATION_SECRET')
         raw = secret['metadata'].get('annotations', {}).get(ANNOTATION)
         try:
-            state = json.loads(raw) if raw else {'version': 1, 'failures': 0, 'pending': None}
-            if (set(state) != {'version', 'failures', 'pending'} or state['version'] != 1
-                    or type(state['failures']) is not int or not 0 <= state['failures'] <= 3
-                    or (state['pending'] is not None and not re.fullmatch(PREFIX + r'[a-f0-9]{16}', state['pending']))):
+            state = json.loads(raw) if raw else {'version': 2, 'slots': {}}
+            if state.get('version') == 1 and set(state) == {'version', 'failures', 'pending'}:
+                state = {'version': 2, 'slots': {'slot-0': {k: state[k] for k in ('failures', 'pending')}}}
+            if set(state) != {'version', 'slots'} or state['version'] != 2 or not isinstance(state['slots'], dict):
                 raise ValueError()
+            # Changing a pool cannot silently abandon durable create intents.
+            if set(state['slots']) - set(self.slots):
+                raise ValueError()
+            for node in self.slots:
+                slot = state['slots'].setdefault(node, {'failures': 0, 'pending': None})
+                if (set(slot) != {'failures', 'pending'} or type(slot['failures']) is not int
+                        or not 0 <= slot['failures'] <= 3 or slot['pending'] is not None
+                        and not re.fullmatch(PREFIX + r'[a-f0-9]{16}', slot['pending'])):
+                    raise ValueError()
         except (ValueError, TypeError):
             raise Blocked('INVALID_CONTROLLER_STATE') from None
         jobs = self.jobs()
-        if any(not terminal(job) for job in jobs):
+        live = [job for job in jobs if not terminal(job)]
+        # A legacy runner uses the old shared checkout; let it finish before
+        # admitting isolated parallel runners during an upgrade.
+        if any('railshot.io/runner-slot' not in job.get('metadata', {}).get('annotations', {}) for job in live):
             return {'state': 'active'}
-        if state['pending']:
-            previous = next((job for job in jobs if job['metadata']['name'] == state['pending']), None)
+        occupied = {job['metadata']['annotations']['railshot.io/runner-slot'] for job in live}
+        if not occupied <= set(self.slots) or len(occupied) != len(live):
+            raise Blocked('RUNNER_SLOT_BINDING_MISMATCH')
+        if len(live) >= len(self.slots):
+            return {'state': 'active'}
+        unknown, changed = [], False
+        for slot_id, slot in state['slots'].items():
+            if not slot['pending']:
+                continue
+            previous = next((job for job in jobs if job['metadata']['name'] == slot['pending']), None)
             if previous is None:
-                # A lost create response or missing history cannot authorize another runner.
-                return {'state': 'unknown', 'code': 'PENDING_JOB_NOT_OBSERVED'}
-            state['failures'] = min(3, state['failures'] + 1) if terminal(previous) == 'Failed' else 0
-            state['pending'] = None
+                unknown.append(slot_id); occupied.add(slot_id)
+                continue
+            actual = previous['spec']['template']['spec']['nodeSelector']['kubernetes.io/hostname']
+            if actual != self.policy['node'] or previous.get('metadata', {}).get('annotations', {}).get('railshot.io/runner-slot', 'slot-0') != slot_id:
+                raise Blocked('RUNNER_NODE_BINDING_MISMATCH')
+            if terminal(previous):
+                slot['failures'] = min(3, slot['failures'] + 1) if terminal(previous) == 'Failed' else 0
+                slot['pending'] = None
+                changed = True
+        if changed:
             secret = self.save(secret, state)
-        if state['failures'] >= 3:
-            return {'state': 'blocked', 'code': 'CONSECUTIVE_RUNNER_FAILURES'}
-        if not self.queued():
-            return {'state': 'idle'}
+        available = [slot_id for slot_id in self.slots if slot_id not in occupied and state['slots'][slot_id]['failures'] < 3]
+        if not available:
+            return {'state': 'unknown', 'code': 'PENDING_JOB_NOT_OBSERVED'} if unknown else {'state': 'blocked', 'code': 'CONSECUTIVE_RUNNER_FAILURES'}
+        count = min(len(available), max(0, self.demand() - len(occupied)))
+        if not count:
+            return {'state': 'unknown', 'code': 'PENDING_JOB_NOT_OBSERVED'} if unknown else {'state': 'active' if live else 'idle'}
         registration = self.github.request('POST', '/repos/' + self.policy['repository'] + '/actions/runners/registration-token', {})
         token = registration.get('token')
         if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9._~-]{1,4096}', token):
             raise Blocked('INVALID_REGISTRATION_TOKEN')
-        name = PREFIX + uuid.uuid4().hex[:16]
-        job = copy.deepcopy(self.template)
-        job['metadata']['name'] = name
-        for item in job['spec']['template']['spec']['containers'][0]['env']:
-            if item['name'] == 'RAILSHOT_RUNNER_NAME':
-                item['value'] = name
-        state['pending'] = name
-        self.save(secret, state, token)  # Durable intent/token before the single side effect.
-        try:
-            self.kube.request('POST', self.jobs_path, job)
-        except Blocked:
-            return {'state': 'unknown', 'code': 'JOB_CREATE_UNCERTAIN'}
-        return {'state': 'created', 'job': name}
+        created = []
+        for slot_id in available[:count]:
+            name = PREFIX + uuid.uuid4().hex[:16]
+            job = copy.deepcopy(self.template)
+            job['metadata']['name'] = name
+            pod = job['spec']['template']['spec']
+            job['metadata']['annotations'] = {'railshot.io/runner-slot': slot_id}
+            for item in pod['containers'][0]['env']:
+                if item['name'] == 'RAILSHOT_RUNNER_NAME':
+                    item['value'] = name
+            state['slots'][slot_id]['pending'] = name
+            secret = self.save(secret, state, token)  # CAS intent before each create.
+            try:
+                self.kube.request('POST', self.jobs_path, job)
+            except Blocked:
+                return {'state': 'unknown', 'code': 'JOB_CREATE_UNCERTAIN'}
+            created.append(name)
+        return {'state': 'created', 'job': created[0], **({'jobs': created, 'capacity': len(self.slots)} if len(self.slots) > 1 else {})}
 
 
 def read_json(path):

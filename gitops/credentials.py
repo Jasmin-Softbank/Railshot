@@ -3,6 +3,7 @@
 import argparse
 import base64
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
 from http.client import HTTPConnection, HTTPSConnection
@@ -19,8 +20,14 @@ from urllib.parse import urlsplit
 from argo import LABEL, native, require
 
 LIFETIME = 21600
+MAX_POLICY_BYTES = 131072
+RENEWAL_WORKERS = 4
 LABELS = {'argocd.argoproj.io/secret-type': 'cluster', 'app.kubernetes.io/managed-by': 'railshot'}
 APPLICATION_ID = r'app-[a-f0-9]{24}'
+
+
+class PolicyCapacityError(ValueError):
+    code = 'APPLICATION_CREDENTIAL_POLICY_CAPACITY_EXCEEDED'
 
 
 def credential_labels_match(labels, target_id, project, namespaces):
@@ -46,8 +53,12 @@ def tls_name(value):
 
 def validate_policy(policy):
     require(set(policy) == {'version', 'targets'} and policy['version'] == 1, 'invalid renewal policy')
+    # This is credential storage, not a quota on successfully deployed apps.
+    # Use the worker's existing document bound instead of counting registrations.
+    if len(json.dumps(policy).encode()) >= MAX_POLICY_BYTES:
+        raise PolicyCapacityError('renewal policy exceeds the 128 KiB document limit')
     targets = policy['targets']
-    require(isinstance(targets, list) and 0 <= len(targets) <= 20, 'registered targets required')
+    require(isinstance(targets, list), 'registered targets required')
     for target in targets:
         required = {'secret', 'target_id', 'server', 'project', 'namespaces', 'service_account', 'ca_sha256', 'audiences'}
         require(required <= set(target) <= required | {'tls_server_name', 'previous_scope'}, 'invalid registration binding')
@@ -235,9 +246,24 @@ def renew(target, now=None):
     return {'secret': target['secret'], 'status': 'unknown', 'code': 'RENEWAL_READBACK_UNKNOWN'}
 
 
-def render(policy, image):
+def render(policy, image, *, platform_arch='amd64', local_provenance=None):
     validate_policy(policy)
-    require(re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-api@sha256:[a-f0-9]{64}', image), 'published API digest required')
+    require(platform_arch in ('amd64', 'arm64'), 'supported platform architecture required')
+    local = local_provenance is not None
+    if local:
+        require(isinstance(local_provenance, dict) and set(local_provenance) == {
+            'source_sha256', 'oci_archive_sha256', 'manifest_digest', 'image_id'},
+            'exact local image provenance required')
+        require(all(isinstance(local_provenance[key], str) and re.fullmatch(r'[a-f0-9]{64}', local_provenance[key])
+                    for key in ('source_sha256', 'oci_archive_sha256')), 'local content hashes required')
+        require(all(isinstance(local_provenance[key], str) and re.fullmatch(r'sha256:[a-f0-9]{64}', local_provenance[key])
+                    for key in ('manifest_digest', 'image_id')), 'local OCI digests required')
+        match = re.fullmatch(r'localhost/railshot-api@(sha256:[a-f0-9]{64})', image or '')
+        require(match and match.group(1) == local_provenance['manifest_digest'],
+                'imported local API manifest digest required')
+    else:
+        require(re.fullmatch(r'ghcr\.io/jasmin-softbank/railshot-api@sha256:[a-f0-9]{64}', image or ''),
+                'published API digest required')
     name = 'railshot-credentials'
     meta = {'name': name, 'namespace': 'argocd'}
     sa_path = '/var/run/secrets/kubernetes.io/serviceaccount/'
@@ -257,8 +283,7 @@ def render(policy, image):
         {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': meta,
          'data': {'policy.json': json.dumps(policy), 'kubeconfig': json.dumps(kubeconfig)}}]
     pod = {'serviceAccountName': name, 'automountServiceAccountToken': True, 'restartPolicy': 'Never',
-           'nodeSelector': {'kubernetes.io/arch': 'amd64', 'railshot.io/node-role': 'platform'},
-           'imagePullSecrets': [{'name': 'ghcr-pull'}],
+           'nodeSelector': {'kubernetes.io/arch': platform_arch, 'railshot.io/node-role': 'platform'},
            'securityContext': {'runAsNonRoot': True, 'runAsUser': 1000, 'runAsGroup': 1000,
                                'seccompProfile': {'type': 'RuntimeDefault'}},
            'containers': [{'name': 'renew', 'image': image,
@@ -271,12 +296,39 @@ def render(policy, image):
                            'volumeMounts': [{'name': 'policy', 'mountPath': '/etc/railshot/credentials', 'readOnly': True},
                                             {'name': 'tmp', 'mountPath': '/tmp'}]}],
            'volumes': [{'name': 'policy', 'configMap': {'name': name}}, {'name': 'tmp', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '16Mi'}}]}
+    template = {'spec': pod}
+    if local:
+        pod.update(hostNetwork=True, dnsPolicy='ClusterFirstWithHostNet')
+        pod['containers'][0]['imagePullPolicy'] = 'Never'
+        template['metadata'] = {'annotations': {
+            'railshot.io/local-source-sha256': local_provenance['source_sha256'],
+            'railshot.io/local-oci-archive-sha256': local_provenance['oci_archive_sha256'],
+            'railshot.io/local-manifest-digest': local_provenance['manifest_digest'],
+            'railshot.io/local-image-id': local_provenance['image_id']}}
+    else:
+        pod['imagePullSecrets'] = [{'name': 'ghcr-pull'}]
     items.append({'apiVersion': 'batch/v1', 'kind': 'CronJob', 'metadata': meta,
                   'spec': {'schedule': '0 */2 * * *', 'timeZone': 'Etc/UTC', 'concurrencyPolicy': 'Forbid',
                            'startingDeadlineSeconds': 600, 'successfulJobsHistoryLimit': 1, 'failedJobsHistoryLimit': 3,
                            'jobTemplate': {'spec': {'backoffLimit': 0, 'activeDeadlineSeconds': 300,
-                                                    'template': {'spec': pod}}}}})
+                                                    'template': template}}}})
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
+
+
+def renew_policy(policy):
+    """Renew independent Secrets with bounded concurrency; keep failures isolated."""
+    validate_policy(policy)
+
+    def attempt(target):
+        try:
+            return renew(target)
+        except Exception:
+            return {'secret': target['secret'], 'status': 'unchanged', 'code': 'RENEWAL_FAILED'}
+
+    # Policy validation rejects duplicate Secrets. Each worker retains the
+    # existing resourceVersion check and readback; it never retries a write.
+    with ThreadPoolExecutor(max_workers=RENEWAL_WORKERS) as executor:
+        return list(executor.map(attempt, policy['targets']))
 
 
 def main():
@@ -286,17 +338,11 @@ def main():
     parser.add_argument('--image', help='published existing API image digest, for render only')
     args = parser.parse_args()
     try:
-        require(args.policy.stat().st_size < 131072, 'small operator policy required')
+        require(args.policy.stat().st_size < MAX_POLICY_BYTES, 'small operator policy required')
         policy = validate_policy(json.loads(args.policy.read_bytes()))
         if args.command == 'render':
             print(json.dumps(render(policy, args.image or ''), indent=2)); return 0
-        results = []
-        for target in policy['targets']:
-            try:
-                result = renew(target)
-            except Exception:
-                result = {'secret': target['secret'], 'status': 'unchanged', 'code': 'RENEWAL_FAILED'}
-            results.append(result)
+        results = renew_policy(policy)
         print(json.dumps({'results': results}))
         return 0 if all(r['status'] == 'renewed' for r in results) else 1
     except Exception:

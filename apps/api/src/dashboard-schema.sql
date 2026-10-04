@@ -59,3 +59,30 @@ CREATE TABLE IF NOT EXISTS revisions (id TEXT PRIMARY KEY, record TEXT NOT NULL 
 CREATE TABLE IF NOT EXISTS project_bindings (id TEXT PRIMARY KEY, record TEXT NOT NULL CHECK(json_valid(record))) STRICT;
 
 CREATE TABLE IF NOT EXISTS project_keys (id TEXT PRIMARY KEY, record TEXT NOT NULL CHECK(json_valid(record))) STRICT;
+CREATE TABLE IF NOT EXISTS owners (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  recovery_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS personal_state (
+  id TEXT PRIMARY KEY,
+  record TEXT NOT NULL CHECK(json_valid(record))
+) STRICT;
+CREATE TABLE IF NOT EXISTS registrations (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  provider TEXT NOT NULL CHECK(provider = 'openstack'),
+  status TEXT NOT NULL CHECK(status IN ('pending', 'claimed')),
+  created_at TEXT NOT NULL,
+  claimed_at TEXT
+) STRICT;
+CREATE INDEX IF NOT EXISTS registrations_session_created ON registrations(session_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS registration_tokens (
+  registration_id TEXT PRIMARY KEY REFERENCES registrations(id),
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER,
+  created_at INTEGER NOT NULL
+) STRICT;

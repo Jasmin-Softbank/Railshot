@@ -30,9 +30,10 @@ services:
     cpus: 0.5
     environment:
       RAILSHOT_API_UPSTREAM: api:4173
+      RAILSHOT_MCP_UPSTREAM: mcp-remote:4185
       RAILSHOT_API_TOKEN_FILE: /run/secrets/api_token
     secrets: [api_token]
-    depends_on: [api]
+    depends_on: [api, mcp-remote]
   api:
     depends_on:
       state: {condition: service_completed_successfully}
@@ -75,7 +76,9 @@ services:
     environment:
       RAILSHOT_API_URL: http://api:4173
       RAILSHOT_API_TOKEN_FILE: /run/secrets/api_token
+      RAILSHOT_AGENT_SESSION_DIR: /var/lib/railshot-agent
     secrets: [api_token]
+    volumes: ["../.local/mcp-sessions:/var/lib/railshot-agent"]
     stdin_open: true
     tty: false
     init: true
@@ -84,6 +87,25 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 512m
+  mcp-remote:
+    image: railshot/mcp:local
+    user: "${RAILSHOT_LOCAL_UID:-1000}:${RAILSHOT_LOCAL_GID:-1000}"
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+      target: mcp
+    command: [node, src/remote-mcp.js]
+    environment:
+      RAILSHOT_API_URL: http://api:4173
+      RAILSHOT_PUBLIC_ORIGIN: http://127.0.0.1:4181
+      RAILSHOT_API_TOKEN_FILE: /run/secrets/api_token
+    secrets: [api_token]
+    depends_on: [api]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
 secrets:
   api_token:
     file: ${RAILSHOT_API_TOKEN_PATH:?Set an absolute path to a private API token file}

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -20,6 +21,12 @@ REPOSITORY = "https://github.com/Jasmin-Softbank/Railshot.git"
 
 class NotReady(Exception):
     """Only fixed reason codes cross the SSM/Actions output boundary."""
+
+
+REASONS = {"ARGO_REVISION_NOT_HEALTHY", "DEPLOYMENT_NOT_READY", "POD_COUNT_NOT_READY",
+           "POD_DIGEST_NOT_READY", "KUBERNETES_READ_FAILED", "CLUSTER_READ_FAILED",
+           "API_PREPARATION_PENDING", "API_PREPARATION_RETRY", "ARGO_PREVIOUS_REVISION_RUNNING",
+           "ARGO_SYNC_FAILED"}
 
 
 def expected(revision, dashboard_digest, api_digest):
@@ -46,6 +53,19 @@ def snapshot(revision, images, read=kubectl):
     app = read("applications.argoproj.io", "railshot-platform", "argocd")
     source = app.get("spec", {}).get("source", {})
     status = app.get("status", {})
+    operation = status.get("operationState", {})
+    operation_revision = operation.get("syncResult", {}).get("revision")
+    if operation_revision == revision and operation.get("phase") in {"Failed", "Error"}:
+        raise NotReady("ARGO_SYNC_FAILED")
+    if operation.get("phase") in {"Running", "Terminating"}:
+        if operation_revision and operation_revision != revision:
+            raise NotReady("ARGO_PREVIOUS_REVISION_RUNNING")
+        preparation = [row for row in operation.get("syncResult", {}).get("resources", [])
+                       if row.get("kind") == "Job" and row.get("name") == "railshot-api-prepare"]
+        if any(row.get("hookPhase") in {"Failed", "Error"} for row in preparation):
+            raise NotReady("API_PREPARATION_RETRY")
+        if any(row.get("hookPhase") in {"Running", "Pending"} for row in preparation):
+            raise NotReady("API_PREPARATION_PENDING")
     if (source.get("repoURL") != REPOSITORY or source.get("targetRevision") != "deployment/platform"
             or source.get("path") != "gitops/applications/railshot-platform"
             or app.get("spec", {}).get("project") != "railshot-platform"
@@ -90,14 +110,16 @@ def snapshot(revision, images, read=kubectl):
 
 
 def local(revision, images):
-    deadline, reason = time.monotonic() + 600, "CLUSTER_NOT_READY"
-    while time.monotonic() < deadline:
-        try:
-            return snapshot(revision, images)
-        except (NotReady, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
-            reason = str(error) if isinstance(error, NotReady) else "CLUSTER_READ_FAILED"
-        time.sleep(5)
-    raise NotReady(reason)
+    # One short read per pinned SSM command. The caller owns the deadline and can
+    # show the actual Argo phase instead of hiding ten minutes inside InProgress.
+    try:
+        return snapshot(revision, images)
+    except NotReady as error:
+        if str(error) == "ARGO_SYNC_FAILED":
+            raise
+        return {"status": "waiting", "code": str(error), "revision": revision}
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return {"status": "waiting", "code": "CLUSTER_READ_FAILED", "revision": revision}
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -142,29 +164,53 @@ def remote(revision, images, version, document_hash, call=aws, health=public_hea
         raise NotReady("INVALID_DOCUMENT_PIN")
     parameters = {"Revision": [revision], **{name.title() + "Digest": [image.rsplit(":", 1)[1]]
                                            for name, image in images.items()}}
-    # Send once. An uncertain response fails; there is no session or arbitrary command fallback.
-    command = call("send-command", "--document-name", DOCUMENT, "--document-version", version,
-                   "--document-hash", document_hash, "--document-hash-type", "Sha256",
-                   "--instance-ids", INSTANCE, "--timeout-seconds", "60", "--parameters", json.dumps(parameters))
-    command_id = command["Command"]["CommandId"]
-    if not re.fullmatch(r"[a-f0-9-]{36}", command_id):
-        raise NotReady("INVALID_COMMAND_ID")
-    deadline = time.monotonic() + 720
+    # Send each read-only probe once. An uncertain submission fails; there is no
+    # session or arbitrary-command fallback.
+    started = time.monotonic()
+    # Preparation allows 15 min including image pull; allow 2 min for rollout.
+    deadline, next_log = started + 1020, started
+    command_id = None
+    reason = "CLUSTER_NOT_READY"
+    print(f"Verifying Argo revision {revision} and ready API/dashboard image digests; then public HTTPS.", file=sys.stderr, flush=True)
     while time.monotonic() < deadline:
+        if command_id is None:
+            command = call("send-command", "--document-name", DOCUMENT, "--document-version", version,
+                           "--document-hash", document_hash, "--document-hash-type", "Sha256",
+                           "--instance-ids", INSTANCE, "--timeout-seconds", "60", "--parameters", json.dumps(parameters))
+            command_id = command["Command"]["CommandId"]
+            if not re.fullmatch(r"[a-f0-9-]{36}", command_id):
+                raise NotReady("INVALID_COMMAND_ID")
         result = call("get-command-invocation", "--command-id", command_id, "--instance-id", INSTANCE)
         if result.get("Status") == "Success":
             if result.get("ResponseCode") != 0:
                 raise NotReady("REMOTE_VERIFIER_FAILED")
             proof = json.loads(result.get("StandardOutputContent", ""))
+            if proof.get("status") == "waiting":
+                if proof.get("revision") != revision or proof.get("code") not in REASONS:
+                    raise NotReady("REMOTE_PROOF_MISMATCH")
+                reason = proof["code"]
+                print(f"Waiting for platform: {reason}, elapsed={int(time.monotonic() - started)}s/1020s, revision={revision}.", file=sys.stderr, flush=True)
+                command_id = None
+                time.sleep(min(10, max(0, deadline - time.monotonic())))
+                continue
             if (proof.get("status") != "cluster_verified" or proof.get("revision") != revision
                     or {key: item.get("image") for key, item in proof.get("components", {}).items()} != images):
                 raise NotReady("REMOTE_PROOF_MISMATCH")
             return {**proof, "status": "verified", "command_id": command_id, "public_http": health(),
                     "verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
         if result.get("Status") not in {"Pending", "InProgress", "Delayed"}:
-            raise NotReady("REMOTE_VERIFIER_FAILED")
+            try:
+                failure = json.loads(result.get("StandardOutputContent", ""))
+                reason = failure.get("code") if failure.get("status") == "failed" else None
+            except (ValueError, AttributeError):
+                reason = None
+            raise NotReady(reason if reason in REASONS else "REMOTE_VERIFIER_FAILED")
+        now = time.monotonic()
+        if now >= next_log:
+            print(f"Waiting for cluster verification: SSM={result['Status']}, elapsed={int(now - started)}s/1020s, revision={revision}.", file=sys.stderr, flush=True)
+            next_log = now + 30
         time.sleep(5)
-    raise NotReady("SSM_VERIFICATION_TIMEOUT")
+    raise NotReady(reason if reason in REASONS else "SSM_VERIFICATION_TIMEOUT")
 
 
 if __name__ == "__main__":

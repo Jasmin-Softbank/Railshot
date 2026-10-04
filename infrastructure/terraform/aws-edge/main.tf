@@ -82,6 +82,16 @@ resource "aws_security_group" "alb" {
       cidr_blocks = ["${egress.value.target_private_ip}/32"]
     }
   }
+  dynamic "egress" {
+    for_each = var.shared_service_egress
+    content {
+      description = egress.value.description
+      protocol    = "tcp"
+      from_port   = egress.value.port
+      to_port     = egress.value.port
+      cidr_blocks = ["${egress.value.target_private_ip}/32"]
+    }
+  }
 }
 resource "aws_security_group_rule" "target_from_alb" {
   for_each                 = local.aws_target_rules

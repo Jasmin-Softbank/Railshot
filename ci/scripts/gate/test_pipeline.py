@@ -1,5 +1,6 @@
 """Offline contract tests: no Docker daemon, agent, dependency install or cloud calls."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -70,6 +71,26 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(invalid["status"], "BLOCKED")
             self.assertEqual(invalid["layers"][0]["blocked"], "INVALID_APP_ID")
 
+    def test_l0_deletions_share_runner_scope_and_protect_existing_tests(self):
+        paths = gate.yaml.safe_load((gate.PLATFORM / 'contract/paths.yaml').read_text())
+        for path, scope, allowed in [('old.Dockerfile', 'packaging', True),
+                                     ('src/old.java', 'source', True),
+                                     ('src/old.java', 'packaging', False),
+                                     ('tests/test_app.py', 'source', False),
+                                     ('package.json', 'source', False),
+                                     ('schema/model.py', 'source', False)]:
+            with self.subTest(path=path, scope=scope), tempfile.TemporaryDirectory() as tmp:
+                ws = imported_workspace(tmp, {path: '{}'})
+                (ws / path).unlink()
+                errors, changed = gate.l0(ws, paths, repair_scope=scope)
+                self.assertEqual(not errors, allowed, errors)
+                self.assertIn(path, changed)
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = imported_workspace(tmp, {'old.Dockerfile': 'x' * 20001})
+            (ws / 'old.Dockerfile').unlink()
+            errors, _ = gate.l0(ws, paths)
+            self.assertTrue(any('patch too large' in error for error in errors), errors)
+
     def test_imported_ignored_source_is_tracked_and_policy_checked(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = imported_workspace(tmp, {".gitignore": "app.py\n", "app.py": "print('before')\n"})
@@ -112,10 +133,11 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(lines.count("print('rename')"), 1)
             paths = gate.yaml.safe_load((gate.PLATFORM / "contract/paths.yaml").read_text())
             errors, _ = gate.l0(ws, paths, repair_scope="source")
-            self.assertTrue(any("deleted file: app.py" in error for error in errors), errors)
+            self.assertTrue(any("forbidden pattern" in error for error in errors), errors)
+            self.assertFalse(any("app.py" in error for error in errors), errors)
             self.assertTrue(any("forbidden pattern" in error for error in errors), errors)
 
-    def test_full_gate_scans_and_runs_the_built_image_id(self):
+    def test_default_gate_runs_the_built_image_id_without_optional_scan(self):
         spec = {"services": [{"name": "web"}]}
         image_id = "sha256:" + "a" * 64
         with tempfile.TemporaryDirectory() as tmp, patch.object(gate, "l0", return_value=([], [])), \
@@ -127,9 +149,45 @@ class PipelineTest(unittest.TestCase):
             verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.ORDER))
         self.assertTrue(verdict["release_eligible"])
         self.assertEqual(verdict["image_ids"], {"web": image_id})
-        scan.assert_called_once_with({"web": image_id}, network=None)
+        scan.assert_not_called()
         self.assertEqual(runtime.call_args.args[1], {"web": image_id})
         self.assertEqual([r["layer"] for r in verdict["layers"]], list(gate.ORDER))
+
+    def test_build_reuse_requires_same_operation_source_spec_network_and_image(self):
+        spec = {"services": [{"name": "web"}]}
+        image_id = "sha256:" + "a" * 64
+        for changed in (None, 'source', 'spec', 'network', 'operation', 'image', 'missing_image'):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as tmp, \
+                    patch.dict(os.environ, {'RAILSHOT_RUN_ID': 'same-operation'}), \
+                    patch.object(gate, 'l0', return_value=([], [])), \
+                    patch.object(gate, 'l1', return_value=([], spec)), patch.object(gate, 'require_ci_network'), \
+                    patch.object(gate, 'docker_ok', return_value=True), \
+                    patch.object(gate, 'l2', return_value=([], {'web': 'test:one'})) as build, \
+                    patch.object(gate, 'sh', return_value=SimpleNamespace(stdout=image_id, returncode=0)) as shell, \
+                    patch.object(gate, 'l3', return_value=[]) as runtime:
+                ws = workspace(tmp)
+                first = Path(tmp) / 'first'
+                self.assertTrue(gate.run_gate(ws, first, list(gate.ORDER))['ok'])
+                receipt = first / 'build.json'
+                if changed == 'source': (ws / 'app.py').write_text('changed')
+                if changed == 'spec':
+                    record = json.loads(receipt.read_text()); record['binding']['spec'] = {}
+                    receipt.write_text(json.dumps(record))
+                if changed == 'operation': os.environ['RAILSHOT_RUN_ID'] = 'another-operation'
+                if changed in ('image', 'missing_image'):
+                    mismatch = [SimpleNamespace(stdout='sha256:' + 'b' * 64,
+                                                returncode=int(changed == 'missing_image'))]
+                    shell.side_effect = lambda *args, **kwargs: (
+                        mismatch.pop() if mismatch and args[0][:3] == ['docker', 'image', 'inspect']
+                        else SimpleNamespace(stdout=image_id, returncode=0))
+                target = Path(tmp) / 'second'
+                result = gate.run_gate(ws, target, list(gate.ORDER), build_receipt=receipt,
+                                       quality_network='changed' if changed == 'network' else None)
+                self.assertTrue(result['ok'], result)
+                self.assertEqual(build.call_count, 1 if changed is None else 2)
+                self.assertEqual(runtime.call_count, 2)  # Runtime is never a cached PASS.
+                self.assertEqual(json.loads((target / 'L2.json').read_text())['reused'], changed is None)
+                self.assertEqual(json.loads((target / 'L3.json').read_text())['stage'], 'image.runtime')
 
     def test_source_mutation_blocks_release(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -200,7 +258,7 @@ class PipelineTest(unittest.TestCase):
                     patch.object(gate, "run_quality", return_value=result), \
                     patch.object(gate, "l2", return_value=(build_errors, {})) as build, \
                     patch.object(gate, "l4", return_value=[]), patch.object(gate, "l3", return_value=runtime_errors) as runtime:
-                verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.ORDER))
+                verdict = gate.run_gate(workspace(tmp), Path(tmp) / "run", list(gate.FULL_GATE_ORDER))
             self.assertEqual(verdict["status"], expected)
             self.assertEqual(verdict["release_eligible"], expected == "PASS")
             q = verdict["layers"][2]
@@ -573,12 +631,16 @@ class GateNetworkTest(unittest.TestCase):
             if cmd[:3] == ["docker", "inspect", "--format"]:
                 return SimpleNamespace(returncode=0, stdout=json.dumps({net: {"IPAddress": "172.18.0.2"}}))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        spec = {"services": [{"name": "web", "port": 8080, "health": "/health"}]}
+        spec = {"services": [{"name": "web", "port": 8080, "health": "/health",
+                              "storage": {"mountPath": "/var/opt/memos", "sizeGi": 1}}]}
         with patch.object(gate, "require_ci_network"), patch.object(gate, "sh", side_effect=command) as shell, \
              patch.object(gate, "http_status", return_value=200) as http:
             self.assertEqual([], gate.l3(spec, {"web": "sha256:" + "b" * 64}, "a" * 16, network=gate.CI_NETWORK))
         http.assert_called_once_with("http://172.18.0.2:8080/health")
         self.assertFalse(any("-p" in call.args[0] for call in shell.call_args_list))
+        launch = next(call.args[0] for call in shell.call_args_list if call.args[0][:2] == ['docker', 'run'])
+        self.assertIn('/var/opt/memos:rw,uid=65532,gid=65532,mode=0700,size=1g', launch)
+        self.assertIn('--read-only', launch)
 
     def test_worker_installer_and_native_verifier_shell_parse(self):
         infra = gate.PLATFORM.parents[1] / "infrastructure/ansible"
