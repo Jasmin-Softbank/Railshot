@@ -187,8 +187,17 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
         throw fail('APPLICATION_PUBLICATION_MISMATCH');
       const configPath = join(home, 'deployments', args.deploymentId, 'cd.json');
       // Recovery reads an existing CD journal; it never runs route finalization or apply.
-      try { await privateJson(configPath); }
-      catch (error) { if (error.code === 'ENOENT') throw fail('CD_RECORD_MISSING', 409, true); throw error; }
+      // privateJson intentionally normalizes read errors, so distinguish an absent
+      // journal before validating it. The product layer decides whether an
+      // interrupted publication can resume; malformed/unsafe files still fail closed.
+      try { await lstat(configPath); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        return { cd: { state: 'blocked', deployed: false, revision: null },
+          public_http: { state: 'not_run', url: null, verified_at: null },
+          error: { code: 'DEPLOYMENT_NOT_FOUND' } };
+      }
+      await privateJson(configPath);
       return createCdAdapter({ configPath, loadPublished, python })({ ...args, observeOnly: true });
     },
     async observeLogs(application, record) {
