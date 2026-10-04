@@ -11,9 +11,47 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location("verify_platform", Path(__file__).resolve().parents[1] / "verify-platform.py")
 verify = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(verify)
+verify_snapshot = verify.snapshot
 
 
 class PlatformVerificationTests(unittest.TestCase):
+    def test_one_probe_reports_preparation_and_old_revision_without_sleeping(self):
+        revision = 'a' * 40
+        for phase, hook, other, expected in [
+            ('Running', 'Running', False, 'API_PREPARATION_PENDING'),
+            ('Running', 'Failed', False, 'API_PREPARATION_RETRY'),
+            ('Running', 'Running', True, 'ARGO_PREVIOUS_REVISION_RUNNING'),
+            ('Failed', 'Failed', False, 'ARGO_SYNC_FAILED'),
+        ]:
+            app = {'status': {'operationState': {'phase': phase, 'syncResult': {
+                'revision': 'b' * 40 if other else revision,
+                'resources': [{'kind': 'Job', 'name': 'railshot-api-prepare', 'hookPhase': hook}]}}}}
+            with self.subTest(expected=expected), patch.object(verify, 'kubectl', return_value=app):
+                # snapshot's bound default is replaced explicitly to keep this offline.
+                with patch.object(verify, 'snapshot', side_effect=lambda r, i: verify_snapshot(r, i, lambda *a: app)):
+                    if phase == 'Failed':
+                        with self.assertRaisesRegex(verify.NotReady, expected):
+                            verify.local(revision, {})
+                    else:
+                        self.assertEqual(verify.local(revision, {}), {'status': 'waiting', 'code': expected, 'revision': revision})
+
+    def test_remote_repeats_only_completed_probes_and_keeps_final_image_proof(self):
+        revision = 'a' * 40
+        images = verify.expected(revision, 'b' * 64, 'c' * 64)
+        command = {'Command': {'CommandId': '12345678-1234-1234-1234-123456789012'}}
+        waiting = {'Status': 'Success', 'ResponseCode': 0, 'StandardOutputContent': json.dumps({
+            'status': 'waiting', 'revision': revision, 'code': 'API_PREPARATION_PENDING'})}
+        done = {'Status': 'Success', 'ResponseCode': 0, 'StandardOutputContent': json.dumps({
+            'status': 'cluster_verified', 'revision': revision, 'components': {k: {'image': v} for k, v in images.items()}})}
+        replies = iter([command, waiting, command, done]); calls = []
+        def ssm(*args):
+            calls.append(args[0]); return next(replies)
+        with patch.object(verify.time, 'sleep'), patch('builtins.print') as output:
+            proof = verify.remote(revision, images, '2', 'e' * 64, call=ssm, health=lambda: {'health': 'succeeded'})
+        self.assertEqual(proof['status'], 'verified')
+        self.assertEqual(calls, ['send-command', 'get-command-invocation'] * 2)
+        self.assertIn('API_PREPARATION_PENDING', str(output.call_args_list))
+
     def test_revision_running_digest_readiness_and_external_http_are_all_required(self):
         revision = "a" * 40
         images = verify.expected(revision, "b" * 64, "c" * 64)

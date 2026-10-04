@@ -39,7 +39,7 @@ locals {
       action = "aws:runShellScript"
       name   = "verifyPlatform"
       inputs = {
-        timeoutSeconds = "660"
+        timeoutSeconds = "90"
         runCommand = concat([
           "set -eu",
           "python3 - local --revision \"$SSM_Revision\" --dashboard-digest \"$SSM_DashboardDigest\" --api-digest \"$SSM_ApiDigest\" <<'RAILSHOT_VERIFY_PY'"

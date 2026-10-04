@@ -156,6 +156,30 @@ test('CD progress persists revision and HTTP stage before completion while obser
   assert.equal((await settle(() => f.product.getDeployment(first.id))).status, 'succeeded');
 });
 
+test('release drain finishes the active deployment but prevents the next queued writer until resumed', async (t) => {
+  let release, entered; let calls = 0;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const f = await fixture(t, { service: {
+    deploy: async () => { const run_id = String(123 + calls++); entered(); await waiting; return { run_id, source_commit: publication.source_commit }; },
+    status: async id => ({ run_id: id, state: 'published', publication: { ...publication, run_id: id } }),
+  } });
+  const first = await f.product.createDeployment(input, 'drain-first');
+  await started;
+  const second = await f.product.createDeployment(input, 'drain-second');
+  try {
+    assert.equal(f.product.pauseForRelease(), false);
+    release();
+    assert.equal((await settle(() => f.product.getDeployment(first.id))).status, 'succeeded');
+    await pause(25);
+    assert.equal(calls, 1);
+    assert.equal((await f.product.getDeployment(second.id)).status, 'queued');
+    assert.equal(f.product.pauseForRelease(), true);
+  } finally { release(); f.product.resumeAfterRelease(); }
+  assert.equal((await settle(() => f.product.getDeployment(second.id))).status, 'succeeded');
+  assert.equal(calls, 2);
+});
+
 test('GitHub URL replay keeps the first pinned source without fetching current HEAD', async (t) => {
   const f = await fixture(t);
   let loads = 0;

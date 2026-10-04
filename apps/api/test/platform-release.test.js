@@ -14,6 +14,7 @@ async function fixture(t, product, releaseLeaseMs = 1000) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
   return { server, get: (path) => fetch(origin + path, { headers }),
+    post: (path) => fetch(origin + path, { method: 'POST', headers, body: '{}' }),
     prepare: (id = randomUUID(), auth = true) => fetch(origin + '/internal/releases/prepare', {
       method: 'POST', headers: auth ? headers : { 'content-type': 'application/json' }, body: JSON.stringify({ release_id: id }),
     }) };
@@ -32,9 +33,10 @@ test('release waits for in-flight requests, fences admissions atomically and rec
   assert.equal((await f.prepare(undefined, false)).status, 401);
   assert.equal(pauses, 0);
   const pending = f.get('/api/v1/deployments/one/logs'); await entered;
-  assert.equal((await f.prepare()).status, 202); assert.equal(pauses, 0);
-  finish(); assert.equal((await pending).status, 200);
   const id = randomUUID();
+  assert.equal((await f.prepare(id)).status, 202); assert.equal(pauses, 1);
+  assert.equal((await f.post('/api/v1/deployments')).status, 503);
+  finish(); assert.equal((await pending).status, 200);
   assert.equal((await f.prepare(id)).status, 200); assert.equal(paused, true);
   assert.equal((await f.prepare()).status, 409);
   const rejected = await f.get('/api/v1/options');
@@ -53,11 +55,39 @@ test('release does not stop active native work; shutdown waits for durable store
     pauseForRelease: () => !busy, resumeAfterRelease() {},
     async close() { await pause(15); closeDone = true; },
   });
-  assert.equal((await f.prepare()).status, 202);
+  const id = randomUUID();
+  const waiting = await f.prepare(id);
+  assert.equal(waiting.status, 202);
+  assert.equal((await waiting.json()).waiting_for, 'active_worker');
   assert.equal((await f.get('/api/v1/options')).status, 200);
   busy = false;
-  assert.equal((await f.prepare()).status, 200);
+  assert.equal((await f.prepare(id)).status, 200);
   await f.server.shutdown(); assert.equal(closeDone, true);
+});
+
+test('abandoned draining releases the fence even when work never became idle', async (t) => {
+  let resumed = 0;
+  const f = await fixture(t, { pauseForRelease: () => false, resumeAfterRelease() { resumed++; }, close() {} }, 40);
+  assert.equal((await f.prepare()).status, 202);
+  assert.equal((await f.post('/api/v1/deployments')).status, 503);
+  await pause(70);
+  assert.equal(resumed, 1);
+  assert.notEqual((await f.post('/api/v1/deployments')).status, 503);
+});
+
+test('pre-sync waits out an earlier release lease and reports only safe states', async () => {
+  const { prepareRelease } = await import('../src/prepare-release.js');
+  let calls = 0; const progress = [];
+  await prepareRelease({ token: 'private-test-token', templateId: 'a'.repeat(64), pollMs: 1, timeoutMs: 100,
+    onProgress: (row) => progress.push(row), request: async (_url, request) => {
+      const { release_id } = JSON.parse(request.body);
+      calls++;
+      if (calls === 1) return Response.json({ error: { message: 'do not log private content' } }, { status: 409 });
+      if (calls === 2) return Response.json({ status: 'busy', waiting_for: 'active_worker' }, { status: 202 });
+      return Response.json({ status: 'prepared', release_id, lease_ms: 120000 });
+    } });
+  assert.deepEqual(progress.map(row => row.reason), ['previous_release_lease', 'active_worker']);
+  assert.ok(!JSON.stringify(progress).includes('private'));
 });
 
 test('the API entrypoint handles SIGTERM and exits after graceful closure', { timeout: 8000 }, async (t) => {
