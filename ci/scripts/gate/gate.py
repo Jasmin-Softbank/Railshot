@@ -493,7 +493,14 @@ def l3(spec, images, run_id, *, network=None):
                                         timeout=15, check=True).stdout)
             if set(attachments) != {net}:
                 raise ValueError("runtime container network identity changed")
-            address = ipaddress.IPv4Address(attachments[net]["IPAddress"])
+            raw_address = attachments[net].get("IPAddress", "")
+            if not raw_address:
+                logs = sh(["docker", "logs", "--tail", "200", name])
+                state = sh(["docker", "inspect", "-f", "{{json .State}}", name])
+                errs.append(f"{s['name']}: container has no runtime address; startup failed\n"
+                            f"{state.stdout[-2000:]}\n{(logs.stdout + logs.stderr)[-6000:]}")
+                continue
+            address = ipaddress.IPv4Address(raw_address)
             if not address.is_private or address.is_loopback or address.is_link_local:
                 raise ValueError("runtime container requires a private bridge address")
             # Internal Docker 29 bridges do not provide published host ports.
@@ -613,7 +620,7 @@ def l4(images, *, network=None):
             name = "railshot-scan-" + uuid.uuid4().hex[:16]
             try:
                 p = sh(["docker", "run", "--name", name, "--network", network,
-                        *docker_security(), "--cpus=1", "--memory=2g", "--memory-swap=2g", "--pids-limit=128",
+                        *docker_security(), "--read-only", "--cpus=1", "--memory=2g", "--memory-swap=2g", "--pids-limit=128",
                         "--mount", f"type=bind,src={archive},dst=/scan/image.tar,readonly",
                         "--mount", f"type=bind,src={cache},dst=/cache",
                         "-e", "TMPDIR=/cache", "-e", "GOMAXPROCS=1",

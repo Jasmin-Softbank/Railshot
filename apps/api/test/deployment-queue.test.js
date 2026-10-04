@@ -24,7 +24,7 @@ async function until(read, predicate = (record) => !['queued', 'running'].includ
   assert.fail(`Queue did not settle: ${JSON.stringify(value)}`);
 }
 
-async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments = 16 } = {}) {
+async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-queue-'));
   const submissions = [], deliveries = [], publications = new Map(), releases = [];
   const service = { targetId: 'runtime-aws', targetIds: ['runtime-aws', 'runtime-gcp'],
@@ -334,7 +334,7 @@ test('restart completes the original GCP deployment only when native registratio
 test('operator source replay is idempotent, preserves ownership and requires a known unsent request or successful cross-provider source', async t => {
   const { SubmissionError } = await import('../src/github.js');
   const f = await fixture(t), deploy = f.service.deploy;
-  f.service.deploy = async () => { throw new SubmissionError('source_ref', new TypeError('interrupted')); };
+  f.service.deploy = async () => { throw new SubmissionError('source_ref', { upstreamStatus: 422 }); };
   const original = await f.create('terminal');
   await until(() => f.read(original.id));
   f.service.deploy = deploy;

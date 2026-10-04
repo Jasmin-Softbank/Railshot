@@ -214,14 +214,14 @@ s.step('agent:1', lambda: os._exit(9))
             agent.assert_not_called(); gate.assert_not_called()
 
     def test_separate_role_allowances_never_exceed_three_or_override_zero(self):
-        for limit in (0, 1, 2):
+        for limit in (0, 1, 2, 8):
             with self.subTest(limit=limit):
                 self.run = self.root / f'combined-{limit}'
                 def gate(ws, run, attempt, *args, **kwargs):
                     target = run / f'gate-{attempt}'; target.mkdir()
                     verdict = {'ok': False, 'status': 'FAIL', 'failure': {
                         'layer': 'L1' if not attempt else 'L3', 'class': 'F5' if not attempt else 'F4',
-                        'signature': f'new-failure-{attempt}'}}
+                        'signature': 'repeated-failure'}}
                     (target / 'verdict.json').write_text(json.dumps(verdict))
                     return verdict
                 record = {'output': {'status': 'proposed'}, 'written': ['Dockerfile'],
@@ -394,7 +394,7 @@ s.step('agent:1', lambda: os._exit(9))
         record = {'output': {'status': 'proposed'}, 'written': [], 'meta': {'sdk_status': 'completed'}}
         with self.gate_result(fail), self.agent_result(record) as agent:
             self.assertEqual(self.cli(False, '--max-attempts', '1'), 1)
-            self.assertEqual(agent.call_count, 1)
+            self.assertEqual(agent.call_count, 2)
         with patch.object(loop, 'agent') as agent, patch.object(loop, 'gate') as gate, redirect_stdout(io.StringIO()) as output:
             self.assertEqual(self.cli(True, '--max-attempts', '2'), 1)
         self.assertEqual(json.loads(output.getvalue())['error']['code'], 'STATE_BINDING_MISMATCH')

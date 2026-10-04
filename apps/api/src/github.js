@@ -68,7 +68,7 @@ const transientRead = (error) => error.retryable === true || error instanceof Ty
 export class SubmissionError extends ServiceError {
   constructor(phase, cause) {
     if (phase === 'source_checkpoint') {
-      super('소스 브랜치는 반영됐지만 서버의 접수 기록 저장이 중단되었습니다. CI 실행은 아직 요청하지 않았습니다.', 503, 'SOURCE_CHECKPOINT_FAILED');
+      super('소스 준비 단계의 내부 기록 저장이 중단되었습니다. CI 실행은 아직 요청하지 않았습니다.', 503, 'SOURCE_CHECKPOINT_FAILED');
       Object.assign(this, { phase, upstream_status: null, reason: 'local_checkpoint_failure', outcomeUnknown: false });
       return;
     }
@@ -78,7 +78,7 @@ export class SubmissionError extends ServiceError {
     const reason = cause?.name === 'TimeoutError' ? 'timeout' : 'upstream_failure';
     const detail = upstreamStatus ? `GitHub HTTP ${upstreamStatus}` : reason === 'timeout' ? 'GitHub 응답 시간 초과' : 'GitHub 통신 오류';
     const unknown = ['source_ref', 'ci_dispatch'].includes(phase) && (upstreamStatus === null || upstreamStatus >= 500 || upstreamStatus === 408);
-    super(`${labels[phase]} 중 ${detail}가 발생했습니다. ${unknown ? '실행 접수 응답을 확인하지 못했습니다.' : phase === 'ci_dispatch' ? 'GitHub가 CI 실행 접수를 거절했습니다.' : 'CI 실행은 아직 요청하지 않았습니다.'}`,
+    super(`${labels[phase]} 중 ${detail}가 발생했습니다. ${phase === 'ci_dispatch' ? unknown ? '실행 접수 응답을 확인하지 못했습니다.' : 'GitHub가 CI 실행 접수를 거절했습니다.' : 'CI 실행은 아직 요청하지 않았습니다.'}`,
       502, phase === 'ci_dispatch' ? unknown ? 'CI_DISPATCH_UNCONFIRMED' : 'CI_DISPATCH_REJECTED' : 'SOURCE_REGISTRATION_FAILED');
     Object.assign(this, { phase, upstream_status: upstreamStatus, reason, outcomeUnknown: unknown,
       cause_type: ['TypeError', 'TimeoutError', 'AbortError', 'SyntaxError', 'Error'].includes(cause?.name) ? cause.name : 'ServiceError',
@@ -86,16 +86,10 @@ export class SubmissionError extends ServiceError {
   }
 }
 
-// Local durable-state failures must never masquerade as a GitHub transport failure.
-export class SubmissionCheckpointError extends ServiceError {
-  constructor() {
-    super('소스 준비 단계의 내부 처리가 중단되었습니다. 저장된 기록을 확인해 재개합니다.', 503, 'CI_SUBMISSION_INTERRUPTED');
-    Object.assign(this, { phase: 'source_checkpoint', reason: 'local_interruption', outcomeUnknown: true });
-  }
-}
+// Preserve the local checkpoint phase separately from upstream requests.
 async function checkpoint(callback, value) {
   try { await callback?.(value); }
-  catch { throw new SubmissionCheckpointError(); }
+  catch (error) { throw new SubmissionError('source_checkpoint', error); }
 }
 
 export function createDeploymentService(config, fetchImpl = fetch) {
@@ -306,7 +300,8 @@ export function createDeploymentService(config, fetchImpl = fetch) {
           method: 'PATCH', body: JSON.stringify({ sha: commit.sha, force: false }),
         });
       }
-      await checkpoint(onPrepared, { source_commit: sourceCommit });
+      phase = 'source_checkpoint';
+      await onPrepared?.({ source_commit: sourceCommit });
       phase = 'ci_dispatch';
       const dispatched = await request(`${repoPath}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, {
         method: 'POST', body: JSON.stringify({ ref, inputs: { tenant, app, source_commit: sourceCommit, target_id } }),
@@ -318,7 +313,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
         run_id: dispatched.workflow_run_id, tenant, app, source_commit: sourceCommit, target_id, state: 'queued', changes, ...(source ? { source } : {}),
         actions_url: dispatched.html_url || `https://github.com/${owner}/${repo}/actions/runs/${dispatched.workflow_run_id}`,
       };
-    } catch (error) { if (error instanceof SubmissionCheckpointError) throw error; throw new SubmissionError(phase, error); }
+    } catch (error) { if (error instanceof SubmissionError) throw error; throw new SubmissionError(phase, error); }
   }
 
   async function findDeployment({ operation_id, source_commit, app, target_id }) {
@@ -372,7 +367,7 @@ export function createDeploymentService(config, fetchImpl = fetch) {
       if (!result.workflow_run_id) throw new ServiceError('CI 실행 접수 결과를 확인하지 못했습니다.', 502);
       return { ...binding, run_id: result.workflow_run_id, actions_url: result.html_url, state: 'queued' };
     } catch (error) {
-      if (error instanceof SubmissionCheckpointError || error.code === 'SOURCE_REF_CONFLICT') throw error;
+      if (error instanceof SubmissionError || error.code === 'SOURCE_REF_CONFLICT') throw error;
       throw new SubmissionError(phase, error);
     }
   }

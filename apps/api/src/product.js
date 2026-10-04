@@ -7,7 +7,7 @@ import { validateFiles, documentationOnly, documentationOnlyMessage } from './ar
 import { createMetricsObserver } from './metrics.js';
 import { emptyAgentEvents, summarizeAgentEvents } from './agent-events.js';
 import { EnvironmentError } from './environments.js';
-import { SubmissionError, SubmissionCheckpointError } from './github.js';
+import { SubmissionError } from './github.js';
 import { createDeploymentDiagnostics } from './deployment-diagnostics.js';
 import { appendEvent, observeOperation, ingestCiEvents, publicTelemetry } from './telemetry.js';
 import { exact, lifecycleActions, lifecycleId, lifecycleHash, lifecycleResources, lifecycleSteps } from './application-lifecycle.js';
@@ -74,7 +74,7 @@ function checkFree(state, sessionId = null, except = null) {
     { retryable: blocker.status !== 'unknown', admission });
 }
 
-export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 5000, unknownGraceMs = 60_000, maxConcurrentDeployments = 16, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 5000, unknownGraceMs = 60_000, maxConcurrentDeployments = 3, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
   const targetId = target?.id || service?.targetId;
   if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
   const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
@@ -282,7 +282,7 @@ export async function createProductService({ service, directory, target, provide
   function interruptedCI(state, row) {
     const due = row.status === 'running' && row.ci?.observation?.next_retry_at && Date.parse(row.ci.observation.next_retry_at) <= Date.now();
     if (!['deployments', 'builds'].includes(row.kind) || !(due || row.status === 'unknown'
-        && ['INTERRUPTED', 'CD_OUTCOME_UNKNOWN', 'CI_DISPATCH_UNCONFIRMED', 'CI_SUBMISSION_INTERRUPTED', 'SOURCE_REGISTRATION_FAILED'].includes(row.error?.code)) || row.stage !== 'ci' || row.deletion_requested
+        && ['INTERRUPTED', 'CD_OUTCOME_UNKNOWN', 'CI_DISPATCH_UNCONFIRMED', 'SOURCE_REGISTRATION_FAILED'].includes(row.error?.code)) || row.stage !== 'ci' || row.deletion_requested
         || row.kind === 'deployments' && (row.cd?.state !== 'not_started' || row.cd?.deployed || row.cd?.revision)) return false;
     const runId = String(row.ci?.run_id), binding = state.bindings[runId];
     if (!/^[a-f0-9]{40}$/.test(row.source_commit || '')) return false;
@@ -317,7 +317,7 @@ export async function createProductService({ service, directory, target, provide
   function pump() {
     if (pumping || releasePaused || abort.signal.aborted) return pumping;
     // Read-only CI retries retain an admission slot, even between polls. Otherwise
-    // a queue of 100 requests would dispatch 100 builds despite a limit of 16.
+    // a queue of 100 requests would dispatch 100 builds despite the configured limit.
     const admitted = (row) => row.status === 'running'
       || row.status === 'unknown' && !row.queue?.released_at;
     const snapshot = store.read(), rows = Object.values(snapshot.operations);
@@ -555,7 +555,7 @@ export async function createProductService({ service, directory, target, provide
         onSourcePrepared: async ({ source_commit, source_parent }) => {
           if (!/^[a-f0-9]{40}$/.test(source_commit || '') || !/^[a-f0-9]{40}$/.test(source_parent || '')) throw new Error('Invalid prepared source');
           await update(record.id, { source_commit, dispatch: { version: 2, state: 'source_prepared', source_parent, source_prepared_at: new Date().toISOString() } });
-          if (abort.signal.aborted || deletionRequested(record.id)) throw new Error('Submission interrupted before dispatch');
+          if (deletionRequested(record.id)) throw new Error('Submission cancelled before dispatch');
         },
         onPrepared: async ({ source_commit }) => {
           if (!/^[a-f0-9]{40}$/.test(source_commit || '')) throw new Error('Invalid prepared source');
@@ -567,7 +567,7 @@ export async function createProductService({ service, directory, target, provide
       await bindRun(record, result);
       return result;
     } catch (error) {
-      const known = error instanceof SubmissionError || error instanceof SubmissionCheckpointError;
+      const known = error instanceof SubmissionError;
       const unknown = !known || error.outcomeUnknown;
       const failure = { ...operationError(known ? error.code : 'UPSTREAM_FAILURE', unknown),
         ...(known ? { message: error.message, phase: error.phase, upstream_status: error.upstream_status, reason: error.reason } : {}) };
@@ -601,13 +601,12 @@ export async function createProductService({ service, directory, target, provide
             result = await writeSource(() => service.resumePrepared({ ...binding, source_parent: saved.dispatch.source_parent,
               onPrepared: async ({ source_commit }) => {
                 if (source_commit !== saved.source_commit) throw new Error('Source binding changed');
-                if (abort.signal.aborted || deletionRequested(record.id)) throw new Error('Submission interrupted before dispatch');
+                if (deletionRequested(record.id)) throw new Error('Submission cancelled before dispatch');
                 await update(record.id, { dispatch: { ...saved.dispatch, state: 'requesting', prepared_at: new Date().toISOString() } });
               } }));
           } else result = await service.findDeployment(binding);
         }
         catch (error) {
-          if (error instanceof SubmissionCheckpointError) return;
           if (error instanceof SubmissionError && error.outcomeUnknown) {
             await observationRetry(record, { code: 'CI_DISPATCH_LOOKUP_UNAVAILABLE', message: '소스 반영 또는 CI 접수 결과를 다시 확인합니다.' });
             return;
@@ -616,8 +615,13 @@ export async function createProductService({ service, directory, target, provide
           await observationRetry(record, { code: 'CI_DISPATCH_LOOKUP_UNAVAILABLE', message: 'GitHub 실행 목록 조회를 재시도하고 있습니다.' });
           return;
         }
-        if (abort.signal.aborted || deletionRequested(record.id)) return;
-        if (result) { await bindRun(record, result); return await observe(record, String(result.run_id)); }
+        if (deletionRequested(record.id)) return;
+        if (result) {
+          await bindRun(record, result);
+          if (!abort.signal.aborted) return await observe(record, String(result.run_id));
+          return;
+        }
+        if (abort.signal.aborted) return;
         if (Date.now() - Date.parse(record.dispatch.prepared_at) > 300_000)
           throw new ProductError(409, 'CI_DISPATCH_NOT_IDENTIFIED', '5분 동안 접수한 CI 실행을 찾지 못했습니다. 요청 ID와 소스 커밋으로 GitHub 실행을 확인해야 합니다. 실행을 다시 보내지는 않았습니다.');
         await observationRetry(record, { code: 'CI_DISPATCH_PENDING', message: '실행 접수 응답이 유실되어 같은 소스 커밋의 CI 실행을 찾고 있습니다.' });

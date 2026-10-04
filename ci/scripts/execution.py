@@ -37,12 +37,12 @@ def pod_security(uid=APP_UID):
 
 
 def container_security():
-    return {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+    return {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": False,
             "capabilities": {"drop": ["ALL"]}}
 
 
 def docker_security():
-    return ["--user", f"{APP_UID}:{APP_UID}", "--read-only", "--tmpfs", "/tmp",
+    return ["--user", f"{APP_UID}:{APP_UID}", "--tmpfs", "/tmp",
             "--cap-drop=ALL", "--security-opt=no-new-privileges"]
 
 

@@ -314,7 +314,7 @@ class PipelineTest(unittest.TestCase):
         verdict = {"ok": False, "failure": {"class": "QUALITY", "signature": "q"}}
         self.assertIn("reviewed application", loop.decide(verdict, None, set()))
         verdict["failure"]["class"] = "F2"
-        self.assertEqual(loop.decide(verdict, None, {"q"}), "stop: same failure twice")
+        self.assertIsNone(loop.decide(verdict, None, {"q"}))
 
     def test_quality_never_triggers_source_repair(self):
         failure = {"layer": "Q", "class": "QUALITY", "signature": "lint-1", "source_repair_eligible": True}
@@ -640,7 +640,64 @@ class GateNetworkTest(unittest.TestCase):
         self.assertFalse(any("-p" in call.args[0] for call in shell.call_args_list))
         launch = next(call.args[0] for call in shell.call_args_list if call.args[0][:2] == ['docker', 'run'])
         self.assertIn('/var/opt/memos:rw,uid=65532,gid=65532,mode=0700,size=1g', launch)
-        self.assertIn('--read-only', launch)
+        self.assertNotIn('--read-only', launch)
+
+    def test_runtime_early_exit_keeps_logs_and_cleans_up(self):
+        net = "railshot-gate-" + "a" * 16
+        def command(cmd, **kwargs):
+            if cmd[:3] == ["docker", "network", "inspect"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps([{
+                    "Driver": "bridge", "Internal": True, "EnableIPv6": False,
+                    "Options": {"com.docker.network.bridge.name": "rsrun-aaaaaaaa"}}]))
+            if cmd[:3] == ["docker", "inspect", "--format"]:
+                return SimpleNamespace(returncode=0, stdout=json.dumps({net: {"IPAddress": ""}}))
+            if cmd[:2] == ["docker", "logs"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="startup permission denied")
+            if cmd[:3] == ["docker", "inspect", "-f"]:
+                return SimpleNamespace(returncode=0, stdout='{"Running":false,"ExitCode":1}')
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        spec = {"services": [{"name": "web", "port": 8080}]}
+        with patch.object(gate, "require_ci_network"), patch.object(gate, "sh", side_effect=command) as shell, \
+             patch.object(gate, "http_status") as http:
+            errors = gate.l3(spec, {"web": "image"}, "a" * 16, network=gate.CI_NETWORK)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("startup permission denied", errors[0])
+        self.assertIn('"ExitCode":1', errors[0])
+        http.assert_not_called()
+        commands = [call.args[0] for call in shell.call_args_list]
+        self.assertIn(["docker", "rm", "-f", net + "-web"], commands)
+        self.assertEqual(commands[-1], ["docker", "network", "rm", net])
+
+    def test_runtime_empty_address_reports_exited_app_or_unknown_network(self):
+        net = "railshot-gate-" + "a" * 16
+        spec = {"services": [{"name": "web", "port": 8080}]}
+        for status in ("exited", "running"):
+            def command(cmd, **kwargs):
+                if cmd[:3] == ["docker", "network", "inspect"]:
+                    return SimpleNamespace(returncode=0, stdout=json.dumps([{
+                        "Driver": "bridge", "Internal": True, "EnableIPv6": False,
+                        "Options": {"com.docker.network.bridge.name": "rsrun-aaaaaaaa"}}]))
+                if cmd[:3] == ["docker", "inspect", "--format"]:
+                    data = {"Status": status, "ExitCode": 1} if cmd[3] == "{{json .State}}" else {net: {"IPAddress": ""}}
+                    return SimpleNamespace(returncode=0, stdout=json.dumps(data))
+                if cmd[:2] == ["docker", "logs"]:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="unable to load evlib plugin evlib_uv")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            with self.subTest(status=status), patch.object(gate, "require_ci_network"), \
+                 patch.object(gate, "sh", side_effect=command) as shell, patch.object(gate, "http_status") as http:
+                if status == "exited":
+                    errors = gate.l3(spec, {"web": "sha256:" + "b" * 64}, "a" * 16, network=gate.CI_NETWORK)
+                    self.assertIn("container exited before health check (exit code 1)", errors[0])
+                    self.assertIn("unable to load evlib plugin evlib_uv", errors[0])
+                else:
+                    with self.assertRaises(gate.OperationError) as raised:
+                        gate.l3(spec, {"web": "sha256:" + "b" * 64}, "a" * 16, network=gate.CI_NETWORK)
+                    self.assertEqual(raised.exception.phase, "runtime-network")
+                    self.assertEqual(raised.exception.outcome, "UNKNOWN")
+                http.assert_not_called()
+                commands = [call.args[0] for call in shell.call_args_list]
+                self.assertIn(["docker", "rm", "-f", net + "-web"], commands)
+                self.assertEqual(commands[-1], ["docker", "network", "rm", net])
 
     def test_worker_installer_and_native_verifier_shell_parse(self):
         infra = gate.PLATFORM.parents[1] / "infrastructure/ansible"

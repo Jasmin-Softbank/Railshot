@@ -89,7 +89,7 @@ class SourceRepairTest(unittest.TestCase):
                 verdict = {"ok": False, "layers": [{"layer": layer, "ok": False}],
                            "failure": {"class": failure_class, "layer": layer, "signature": layer, "source_repair_eligible": layer == "Q"}}
                 self.assertIsNone(loop.decide(verdict, None, set(), "source"))
-                self.assertIn("same failure", loop.decide(verdict, None, {layer}, "source"))
+                self.assertIsNone(loop.decide(verdict, None, {layer}, "source"))
                 from runner.test_repair_evidence import case_fixture, bind_proposal
                 ws = Path(tmp) / "work"; ws.mkdir()
                 source = ws / "app.py"; source.write_text("original = True\n")

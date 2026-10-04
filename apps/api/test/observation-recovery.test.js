@@ -194,18 +194,15 @@ test('GitHub successful response near exhaustion preserves account reserve', asy
   assert.equal(calls, 1);
 });
 
-test('shutdown after a source checkpoint resumes the same commit and dispatches once', async t => {
+test('restart after a lost source acknowledgement resumes the same checkpoint and dispatches once', async t => {
   const checkpointed = deferred(), release = deferred();
   let uploads = 0, dispatches = 0;
-  const { SubmissionCheckpointError } = await import('../src/github.js');
   const f = await fixture(t, {
     deploy: async ({ onSourcePrepared, onPrepared }) => {
       uploads++;
       await onSourcePrepared({ source_commit: publication.source_commit, source_parent: 'b'.repeat(40) });
       checkpointed.resolve(); await release.promise;
-      try { await onPrepared({ source_commit: publication.source_commit }); }
-      catch { throw new SubmissionCheckpointError(); }
-      assert.fail('Shutdown must stop before dispatch');
+      throw new SubmissionError('source_ref', new TypeError('lost acknowledgement during shutdown'));
     },
     findDeployment: async () => null,
     resumePrepared: async ({ source_commit, source_parent, onPrepared }) => {
@@ -273,7 +270,7 @@ for (const mode of ['conflict', 'ahead', 'wrong-parent']) test(`prepared source 
 });
 test('local source checkpoint failure is not labeled as a GitHub communication error', async () => {
   const f = preparedService('published', async () => { throw new Error('Submission interrupted before dispatch'); });
-  await assert.rejects(f.service.resumePrepared(f.binding), error => error.code === 'CI_SUBMISSION_INTERRUPTED' && error.reason === 'local_interruption' && !error.message.includes('GitHub 통신'));
+  await assert.rejects(f.service.resumePrepared(f.binding), error => error.code === 'SOURCE_CHECKPOINT_FAILED' && error.reason === 'local_checkpoint_failure' && !error.message.includes('GitHub 통신'));
   assert.equal(f.counts.dispatches, 0);
 });
 
@@ -296,4 +293,51 @@ test('restart only requeues protocol-2 source work that could not have dispatche
     assert.equal(rows.legacy.status, 'failed'); assert.equal(rows.deleting.status, 'failed');
     assert.equal(rows.requesting.status, 'unknown'); assert.equal(rows.requesting.dispatch.state, 'requesting');
   } finally { await store.close(); }
+});
+
+test('graceful shutdown finishes an admitted source submission and restart observes its run without redispatch', async t => {
+  const entered = deferred(), uploaded = deferred();
+  let sends = 0;
+  const f = await fixture(t, {
+    deploy: async ({ onPrepared }) => {
+      sends++; entered.resolve(); await uploaded.promise;
+      await onPrepared({ source_commit: publication.source_commit });
+      return { run_id: 123, source_commit: publication.source_commit };
+    },
+  });
+  const accepted = await f.product.createDeployment(input, 'shutdown-source');
+  await entered.promise;
+  const closing = f.product.close();
+  uploaded.resolve(); await closing;
+  f.product = await createProductService(f.options);
+  const done = await until(() => f.product.getDeployment(accepted.id), row => row.status === 'succeeded');
+  assert.equal(done.source_commit, publication.source_commit);
+  assert.equal(done.ci.run_id, '123'); assert.equal(sends, 1);
+});
+
+test('local source checkpoint errors are never reported as GitHub communication errors', () => {
+  const error = new SubmissionError('source_checkpoint', new Error('private storage path'));
+  assert.equal(error.code, 'SOURCE_CHECKPOINT_FAILED');
+  assert.equal(error.reason, 'local_checkpoint_failure');
+  assert.equal(error.outcomeUnknown, false);
+  assert.equal(error.upstream_status, null);
+  assert.doesNotMatch(error.message, /GitHub|private/);
+});
+
+test('lost acknowledgement during recovered dispatch only looks up the run afterwards', async t => {
+  let resumes = 0, lookups = 0;
+  const f = await fixture(t, {
+    deploy: async ({ onSourcePrepared }) => {
+      await onSourcePrepared({ source_commit: publication.source_commit, source_parent: 'b'.repeat(40) });
+      throw new SubmissionError('source_ref', new TypeError('lost'));
+    },
+    resumePrepared: async ({ source_commit, onPrepared }) => {
+      resumes++; await onPrepared({ source_commit });
+      throw new SubmissionError('ci_dispatch', new TypeError('lost dispatch response'));
+    },
+    findDeployment: async () => { lookups++; return { run_id: 123, source_commit: publication.source_commit }; },
+  });
+  const accepted = await f.product.createDeployment(input, 'recovered-dispatch-ack');
+  await until(() => f.product.getDeployment(accepted.id), row => row.status === 'succeeded');
+  assert.equal(resumes, 1); assert.equal(lookups, 1); assert.equal(f.counts().cdCalls, 1);
 });
