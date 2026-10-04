@@ -151,7 +151,7 @@ def unknown_paths(value, path=()):
             yield from unknown_paths(child, (*path, key))
 
 
-def comparable_resource(address, value):
+def comparable_resource(address, value, *, sort_rules=False):
     """Compare GCP resource references and unset routing fields by their meaning."""
     result = copy.deepcopy(value)
     if not isinstance(result, dict):
@@ -177,6 +177,10 @@ def comparable_resource(address, value):
                         for key in ('path_redirect', 'prefix_redirect'):
                             if redirect.get(key) == '':
                                 redirect[key] = None
+            # Google returns host rules and named matchers in canonical order
+            # after apply. Their list position does not determine routing.
+            if sort_rules and isinstance(result.get(field), list):
+                result[field].sort(key=encoded)
     return result
 
 
@@ -189,8 +193,8 @@ def validate_plan(plan, request, values):
         # but only when refresh changed representation, not existing behavior.
         representation_only = (address in UPDATES and actions.get(address) == ['update'] and
                                isinstance(change.get('before'), dict) and isinstance(change.get('after'), dict) and
-                               comparable_resource(address, change['before']) ==
-                               comparable_resource(address, change['after']))
+                               comparable_resource(address, change['before'], sort_rules=True) ==
+                               comparable_resource(address, change['after'], sort_rules=True))
         require(actions.get(address) == ['no-op'] or representation_only,
                 'reconcile writable refresh drift before route writes')
     key = request['application_id']

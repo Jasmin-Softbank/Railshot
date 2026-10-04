@@ -359,6 +359,20 @@ class GcpRoutesTest(unittest.TestCase):
         plan['resource_changes'].pop(0)
         with self.assertRaisesRegex(ValueError, 'exact application resources'): routes.validate_plan(plan, app(), self.values)
 
+    def test_refreshed_host_rule_order_does_not_block_new_application(self):
+        values = {**self.values, 'routes': {app()['application_id']: routes.checked_request(app())}}
+        plan = plan_for(app(2), values)
+        before = copy.deepcopy(plan['resource_changes'][7]['change']['before'])
+        after = copy.deepcopy(before)
+        after['host_rule'].reverse()
+        after['path_matcher'].reverse()
+        plan['resource_drift'] = [{'address': 'google_compute_url_map.app',
+            'change': {'before': before, 'after': after}}]
+        self.assertEqual(len(routes.validate_plan(plan, app(2), values)), 7)
+        after['host_rule'][0]['hosts'] = ['foreign.railshot.io']
+        with self.assertRaisesRegex(ValueError, 'drift'):
+            routes.validate_plan(plan, app(2), values)
+
     def test_existing_backend_self_link_and_empty_redirect_are_equivalent(self):
         values = {**self.values, 'routes': {app()['application_id']: routes.checked_request(app())}}
         plan = plan_for(app(2), values)
