@@ -1,9 +1,11 @@
 # Source repair in customer CI
 
-The workflow and CLI default to at most two combined adapter/fixer SDK invocations.
-The existing operator variable `RAILSHOT_MAX_REPAIR_ATTEMPTS` is the total limit:
-`2` enables the default allowance, `0` disables SDK work, and `1` remains supported.
-Values above two are rejected before SDK setup. The workflow retains source scope
+The workflow and CLI default to one initial adapter invocation plus at most two
+fixer invocations, with a hard cap of three SDK invocations. The existing operator
+variable `RAILSHOT_MAX_REPAIR_ATTEMPTS` bounds fixers (`0|1|2`, default `2`), while
+`RAILSHOT_MAX_PACKAGING_ATTEMPTS` bounds adapters (`0|1`, default `1`). Repair `0`
+remains the explicit switch that disables all SDK work, including the adapter.
+Out-of-range role limits are rejected before SDK setup. The workflow retains source scope
 and the CLI retains packaging scope; the budget does not broaden either.
 Repository variables override workflow fallbacks. Jev diagnostics run separately in the API
 and do not enable the fixer or change the selected attempt budget.
@@ -33,13 +35,14 @@ it, and includes its hash, gate list and subsequent written files/verdict in
 raw model planning text remain in the private run directory. Every changed
 attempt reruns the deterministic gates from L0. The loop supplies the configured
 total attempt count.
-The CLI uses `--max-attempts 0|1|2` for the same combined limit.
-`RAILSHOT_MAX_PACKAGING_ATTEMPTS=1` (CLI `--max-packaging-attempts 1`) is a legacy
-preparation sublimit within that total; it never adds an invocation. Total `2` and
-packaging `1` can run one adapter and one fixer, never three calls. Total `0` runs
-only deterministic checks even when packaging is `1`, without model credentials
-or SDK installation. With packaging `0`, adapter and fixer share the total directly.
-Rejected proposals consume the same slots, and an unchanged failure signature stops
+The CLI uses `--max-attempts 0|1|2` for fixers and `--max-packaging-attempts 0|1`
+for the initial adapter. Neither role may borrow the other role's unused slots:
+an existing spec permits at most two fixer invocations even when the adapter is
+unused. Packaging `0` disables model-based adaptation but keeps deterministic
+packaging. Repair `0` runs only deterministic checks even when packaging is `1`,
+without model credentials or SDK installation. A rejected adapter exhausts its
+single slot and cannot switch roles to retry. Safe fixer replans consume fixer slots.
+Rejected proposals consume the same role slots, and an unchanged failure signature stops
 the run sooner. Completed checkpoints consume their original slots on resume;
 changing either configured limit rejects the resume binding.
 
@@ -103,11 +106,12 @@ gate success. The trusted parent also publishes at most 60 recent safe events to
 a `Railshot agent events` GitHub Check, bound to the source commit, workflow run,
 run attempt, tenant, app and target. Its completion is neutral, not gate success.
 `loop.started` and `loop.completed` include `agent_budget` with `enabled` and
-`max_invocations` (`0`, `1` or `2`). Final `sdk_invocations` counts only SDK invocations
+`max_invocations` (`0`, `1`, `2` or `3`). The default declaration of three is not an
+observed count. Final `sdk_invocations` counts only SDK invocations
 established by receipts; an uncertain count remains null. Model requests within an
 SDK invocation are separate. `evidence.json` retains the declared budget, while
 `budget_used` records consumed supervisor slots by role. Deploy a reader accepting
-the optional budget field before promoting this workflow and runner. Older events
+the optional budget field with a maximum of three before promoting this workflow and runner. Older events
 omit the field and must not be assigned an invented budget.
 The job's short-lived `checks:write` token is removed from the environment before
 child processes run; transport failure never changes the gate result or repeats

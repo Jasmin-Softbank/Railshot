@@ -303,12 +303,12 @@ def binding(a):
 
 
 def agent_budget(a):
-    """The operator limit covers adapter and fixer together, including replans."""
-    limit = a.max_attempts
-    if (type(limit) is not int or not 0 <= limit <= 2
-            or type(getattr(a, 'max_packaging_attempts', 0)) is not int
-            or getattr(a, 'max_packaging_attempts', 0) not in (0, 1)):
+    """Separate role allowances; repair=0 remains the explicit all-agent off switch."""
+    repair, packaging = a.max_attempts, getattr(a, 'max_packaging_attempts', 1)
+    if (type(repair) is not int or not 0 <= repair <= 2
+            or type(packaging) is not int or packaging not in (0, 1)):
         raise StateError('STATE_USAGE_INVALID', component='loop', phase='config', retry_policy='after_configuration')
+    limit = repair + packaging if repair else 0
     return {'enabled': limit > 0, 'max_invocations': limit}
 
 
@@ -320,7 +320,7 @@ def execute(a, run, state, progress_sink=None):
         return finish(run, json.loads((run / state.data['final']).read_text()), state.data['started'], finalized=True)
     app_id = getattr(a, 'app_id', None)
     ev = {'run_id': state.data['run_id'], 'provider': a.provider, 'repair_scope': a.repair_scope, 'app_id': app_id,
-          'max_attempts': a.max_attempts, 'max_packaging_attempts': getattr(a, 'max_packaging_attempts', 0),
+          'max_attempts': a.max_attempts, 'max_packaging_attempts': getattr(a, 'max_packaging_attempts', 1),
           'agent_budget': allowance, 'attempts': [], 'started': int(state.data['started'])}
 
     def intake_step():
@@ -349,7 +349,7 @@ def execute(a, run, state, progress_sink=None):
     options = {'quality_network': a.quality_network, 'repair_scope': a.repair_scope,
                'selected_root': a.selected_root, 'app_id': app_id, **({'progress_sink': progress_sink} if progress_sink is not None else {})}
     seen, role, current_failure = set(), 'deterministic', {}
-    packaging_limit = getattr(a, 'max_packaging_attempts', 0)
+    packaging_limit = getattr(a, 'max_packaging_attempts', 1) if total_limit else 0
     budget = {'packaging': packaging_limit, 'repair': a.max_attempts}
     used = {'packaging': 0, 'repair': 0}
     ev['budget_used'] = used
@@ -358,9 +358,9 @@ def execute(a, run, state, progress_sink=None):
         os.environ['RAILSHOT_ATTEMPT_ID'] = f"{state.data['run_id']}:{attempt}"
         rec, report, attempt_scope = {}, None, 'packaging'
         if attempt:
-            # A legacy preparation allowance is a sublimit, never extra calls.
+            # Neither role can borrow the other role's unused allowance.
             # Completed checkpoints consume the same slots again on replay.
-            budget_kind = 'packaging' if role == 'adapter' and packaging_limit else 'repair'
+            budget_kind = 'packaging' if role == 'adapter' else 'repair'
             if used[budget_kind] >= budget[budget_kind]:
                 break
             used[budget_kind] += 1
@@ -424,8 +424,7 @@ def execute(a, run, state, progress_sink=None):
                         return detail
                     state.step(f'replan:{attempt}', replan_step, artifacts=(f'rejection-{attempt}.json',))
                     seen.add(rejection_signature)
-                    # Rejected preparation has not become a source repair task.
-                    role = role if packaging_limit else 'fixer'
+                    # Replanning retains its role and consumes that role's allowance.
                     continue
                 ev['result'] = 'stop: agent proposal rejected'
                 ev['error'] = rec.get('error')
@@ -511,9 +510,9 @@ def main():
     ap.add_argument("run", nargs="?")
     ap.add_argument("--provider", choices=["codex", "claude"], default="codex")
     ap.add_argument("--max-attempts", type=int, choices=range(0, 3), default=2,
-                    help="combined adapter/fixer invocation limit; 0 disables SDK calls, default 2")
-    ap.add_argument("--max-packaging-attempts", type=int, choices=range(0, 2), default=0,
-                    help="legacy packaging sublimit within --max-attempts; never adds invocations")
+                    help="fixer invocation limit, default 2; 0 disables all SDK calls including adapter")
+    ap.add_argument("--max-packaging-attempts", type=int, choices=range(0, 2), default=1,
+                    help="separate initial adapter allowance, default 1; combined hard cap 3")
     ap.add_argument("--layers", default=','.join(GATE_ORDER))
     ap.add_argument("--quality-network")
     ap.add_argument("--selected-root", help="Trusted relative build root for repository discovery")

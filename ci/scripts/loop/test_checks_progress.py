@@ -56,7 +56,7 @@ class FakeChecks(progress.ChecksProgress):
 class ChecksProgressTest(unittest.TestCase):
     def test_loop_budget_is_optional_bounded_and_survives_check_restore(self):
         self.assertNotIn('agent_budget', progress.row(event('loop.started')))
-        for limit in (0, 1, 2):
+        for limit in (0, 1, 2, 3):
             budget = {'enabled': limit > 0, 'max_invocations': limit}
             for name in ('loop.started', 'loop.completed'):
                 with self.subTest(limit=limit, event=name):
@@ -65,7 +65,7 @@ class ChecksProgressTest(unittest.TestCase):
                     self.assertIsNone(row['sdk_invocations'])
                     row['sequence'] = 1
                     self.assertEqual(progress.restored_row(row), row)
-        for budget in (None, {}, {'enabled': True, 'max_invocations': 3},
+        for budget in (None, {}, {'enabled': True, 'max_invocations': 4},
                        {'enabled': True, 'max_invocations': 0}, {'enabled': False, 'max_invocations': 2},
                        {'enabled': 1, 'max_invocations': 1}, {'enabled': True, 'max_invocations': True},
                        {'enabled': True, 'max_invocations': 2, 'token': 'sentinel'}):
@@ -73,7 +73,7 @@ class ChecksProgressTest(unittest.TestCase):
                 progress.row(event('loop.started', agent_budget=budget))
 
     def test_real_loop_emits_declared_budget_and_confirmed_zero_without_sdk(self):
-        for limit in (0, 1, 2):
+        for repair, packaging, limit in ((0, 1, 0), (1, 0, 1), (1, 1, 2), (2, 1, 3)):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); upload = root / 'upload'; run = root / 'run'
                 upload.mkdir(); (upload / 'app.py').write_text('print(1)')
@@ -83,7 +83,8 @@ class ChecksProgressTest(unittest.TestCase):
                     verdict = {'ok': True, 'release_eligible': True, 'status': 'PASS'}
                     (path / 'verdict.json').write_text(json.dumps(verdict))
                     return verdict
-                with patch.object(sys, 'argv', ['loop', str(upload), str(run), '--max-attempts', str(limit)]), \
+                with patch.object(sys, 'argv', ['loop', str(upload), str(run), '--max-attempts', str(repair),
+                                              '--max-packaging-attempts', str(packaging)]), \
                         patch.object(loop, 'progress_from_environment', return_value=sink), \
                         patch.object(loop, 'gate', side_effect=gate), patch.object(loop, 'agent') as agent:
                     self.assertEqual(loop.main(), 0)

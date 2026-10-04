@@ -76,13 +76,14 @@ class WorkflowPolicyTest(unittest.TestCase):
                         self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
                         self.assertEqual(Path(tmp, 'output').read_text(), f'passed={str(loop_exit == 0).lower()}\n')
 
-    def test_default_allows_two_combined_calls_with_configured_provider(self):
+    def test_default_allows_one_adapter_and_two_fixers_with_configured_provider(self):
         for attempts in (None, ''):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, attempts, credentials=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 invocation = json.loads(Path(tmp, 'invocation.json').read_text())
                 self.assertEqual(invocation['args'][invocation['args'].index('--max-attempts') + 1], '2')
+                self.assertEqual(invocation['args'][invocation['args'].index('--max-packaging-attempts') + 1], '1')
                 self.assertIn('CODEX_API_KEY', invocation['model_env'])
 
     def test_nonzero_repair_requires_explicit_budget_and_provider_auth(self):
@@ -326,7 +327,7 @@ class WorkflowPolicyTest(unittest.TestCase):
             env['DOCKER_CONFIG'] = str(root / 'railshot-registry-123-2')
             self.assertEqual(Path(env['DOCKER_CONFIG']).stat().st_mode & 0o777, 0o700)
 
-    def test_zero_disables_sdk_even_with_legacy_packaging_enabled(self):
+    def test_zero_disables_sdk_even_with_packaging_enabled(self):
         for packaging in ('0', '1', '2', '-1'):
             with self.subTest(packaging=packaging), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, '0', packaging=packaging, credentials=True)
