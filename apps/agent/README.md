@@ -1,6 +1,6 @@
 # RailShot 서비스 내부 에이전트
 
-Node 22 이상에서 실행합니다. 이 패키지의 stdio MCP 서버는 RailShot 제품 API의 조회와 공개 GitHub 저장소 배포 요청을 도구로 제공합니다. 별도 HTTP 대화 에이전트는 모델의 배포 제안을 승인 토큰으로 확인한 뒤 실행합니다. 외부 AI가 MCP 서버를 직접 등록해 `deploy_repository`를 호출하면 이 HTTP 승인 절차를 거치지 않고 즉시 제품 API에 배포 요청을 보냅니다. 이 경우 사용자 확인은 MCP 호스트에서 설정해야 합니다. API의 공통 입력 검증·멱등성·상태 기록을 사용하며, MCP가 인프라에 직접 접근하지 않습니다.
+Node 22 이상에서 실행합니다. 이 패키지의 stdio MCP 서버는 RailShot 제품 API의 조회와 공개 GitHub 저장소 배포 요청을 도구로 제공합니다. 원격 MCP 서버는 로컬 ZIP·개별 파일·폴더 배포를 위한 브라우저 업로드 링크도 발급합니다. 별도 HTTP 대화 에이전트는 모델의 배포 제안을 승인 토큰으로 확인한 뒤 실행합니다. 외부 AI가 MCP 서버를 직접 등록해 `deploy_repository`를 호출하면 이 HTTP 승인 절차를 거치지 않고 즉시 제품 API에 배포 요청을 보냅니다. 이 경우 사용자 확인은 MCP 호스트에서 설정해야 합니다. API의 공통 입력 검증·멱등성·상태 기록을 사용하며, MCP가 인프라에 직접 접근하지 않습니다.
 
 ## 설정과 실행
 
@@ -25,7 +25,7 @@ Node 22 이상에서 실행합니다. 이 패키지의 stdio MCP 서버는 RailS
 운영 플랫폼에서 dashboard, api, mcp 이미지를 함께 배포하면 Nginx가 `https://railshot.io/mcp`를 MCP 서버로 연결합니다. 공개 OAuth 메타데이터는 `/.well-known/oauth-protected-resource/mcp`와 `/.well-known/oauth-authorization-server`에 있습니다. MCP 서버는 내부 API 토큰을 서버 측에서만 사용합니다.
 
 - ChatGPT에서는 개발자 모드를 켜고 Plugins의 새 MCP 연결에 `https://railshot.io/mcp`를 입력합니다. 인증 방식은 OAuth이며 동적 클라이언트 등록(DCR)을 사용합니다.
-- Codex CLI에서는 `codex mcp add railshot --url https://railshot.io/mcp` 후 `codex mcp login railshot --oauth-client-registration dcr`을 실행합니다. Codex 앱 또는 IDE에서는 Streamable HTTP 서버 URL을 추가하고 인증을 시작합니다.
+- Codex CLI에서는 `codex mcp add railshot --url https://railshot.io/mcp`로 등록합니다. 등록 중 OAuth가 시작될 수 있으며, 연결을 다시 승인할 때 `codex mcp login railshot --oauth-client-registration dcr`을 실행합니다. Codex 앱 또는 IDE에서는 Streamable HTTP 서버 URL을 추가하고 인증을 시작합니다.
 - 승인 화면은 **웹 앱을 쓰던 동일한 브라우저**에서 열어 `연결 승인`을 누릅니다. 이때 기존 `railshot_session` 쿠키를 AI 연결에 묶습니다. 웹 방문 기록이 없는 브라우저에서는 새 익명 세션을 발급하며, 이후 그 브라우저에서 Railshot을 열면 AI가 만든 앱을 같은 세션에서 볼 수 있습니다.
 
 원격 AI 연결마다 별도 OAuth Bearer 토큰을 발급하고 서버에서 해당 토큰을 정확히 하나의 API 세션 쿠키에 연결합니다. 웹의 `sessions.js`는 수정하지 않았습니다. 인증 코드와 Bearer 토큰은 MCP 프로세스 메모리에만 보관하므로 MCP Pod가 재시작되면 AI에서 OAuth 연결을 다시 승인해야 합니다. 등록된 클라이언트 ID는 내부 API 토큰으로 서명되어 재시작 후에도 재사용할 수 있습니다. Bearer 토큰은 최대 24시간, 웹 세션은 최대 7일 유효합니다. 서로 다른 브라우저 세션의 앱은 자동 병합되지 않습니다.
@@ -38,7 +38,7 @@ Node 22 이상에서 실행합니다. 이 패키지의 stdio MCP 서버는 RailS
 - `POST /v1/approvals`, 본문 `{"approval_token":"..."}`: 제안된 인자를 변경하지 않고 MCP 도구로 배포를 한 번 요청합니다. 토큰은 10분 유효하며 같은 토큰 재호출은 제품 API의 같은 `Idempotency-Key`로 처리됩니다.
 - `GET /healthz`: 프로세스 생존만 나타냅니다.
 
-MCP 도구는 `list_options`, `list_targets`, `get_deployment`, `get_build`, `deploy_repository`입니다. 마지막 도구의 성공은 **요청 접수**이며 배포 성공이 아닙니다. 배포 완료는 `get_deployment`에서 대상 적용 및 공개 HTTP 검증 후 `status=succeeded`와 URL을 확인해야 합니다. 현재 에이전트 입력은 공개 GitHub 저장소 URL만 지원합니다. 파일·ZIP 업로드, 환경 생성 및 소스 자동 수정은 포함하지 않습니다.
+공통 MCP 도구는 `list_options`, `list_targets`, `get_deployment`, `get_build`, `deploy_repository`입니다. 원격 MCP에는 `prepare_file_deployment`와 `get_file_upload`가 추가됩니다. 각 도구의 입력·결과·사용 순서는 [MCP 도구 사용 가이드](MCP_TOOLS.md)에 정리했습니다. 배포 요청 접수는 배포 성공이 아닙니다. 배포 완료는 `get_deployment`에서 대상 적용 및 공개 HTTP 검증 후 `status=succeeded`와 URL을 확인해야 합니다. 별도 HTTP 대화 에이전트의 입력은 공개 GitHub 저장소 URL만 지원하며, 환경 생성 및 소스 자동 수정은 포함하지 않습니다.
 
 로컬 stdio MCP는 API 원점별 세션 쿠키를 `RAILSHOT_AGENT_SESSION_DIR`에 저장해 후속 조회와 MCP 프로세스 재시작 시 재전송합니다. 같은 API 원점과 쿠키 디렉터리를 공유하는 로컬 MCP 프로세스는 제품 API에서 같은 세션으로 취급됩니다. 이 쿠키는 해당 세션의 작업 조회 권한을 가지므로 디렉터리와 파일을 다른 OS 사용자가 읽을 수 없게 유지합니다. 원격 HTTP MCP는 이 공유 파일을 사용하지 않습니다. 원격 API에서 서로 다른 쿠키를 사용하는 세션의 배포 ID 조회는 차단되지만, 비공개 localhost의 쿠키 없는 유지보수 요청은 세션 소유권 제한을 적용하지 않습니다. 사용자 컴퓨터에 내부 API Bearer 토큰을 배포하는 것은 별도의 사용자 인증·권한 모델을 대신하지 않습니다.
 

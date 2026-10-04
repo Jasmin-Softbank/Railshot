@@ -43,6 +43,7 @@ location /mcp/ {
     proxy_http_version 1.1;
     proxy_set_header Host \$http_host;
     proxy_set_header Connection "";
+    proxy_request_buffering off;
     proxy_buffering off;
     proxy_read_timeout 610s;
 }
