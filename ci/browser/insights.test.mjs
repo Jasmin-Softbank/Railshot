@@ -19,7 +19,10 @@ const fixture = () => {
       cd_state: "deployed",
       source_commit: "a".repeat(40),
       revision: "b".repeat(40),
-      public_http: { verified_at: new Date(now - 60000).toISOString() },
+      public_http: {
+        state: "succeeded",
+        verified_at: new Date(now - 60000).toISOString(),
+      },
     },
     observation: {
       metrics: {
@@ -108,7 +111,23 @@ test("operational view separates historical success from current failure, escape
   assert.match(await page.locator("#host").innerText(), /응답 실패/);
   assert.match(await page.locator("#host").innerText(), /전체: 완료/);
   assert.equal(await page.locator("#host img").count(), 0);
-  assert.equal(await page.locator("svg path").count(), 1);
+  assert.equal(await page.locator(".rs-chart-line").count(), 1);
+  // Keyboard navigation exposes the actual sample, not an interpolated value.
+  const slider = page.getByRole("slider", { name: "요청 추이 시점" });
+  await slider.focus();
+  await slider.press("Home");
+  assert.match(await slider.getAttribute("aria-valuetext"), /0.1 req\/s/);
+  await page.locator(".rs-file summary").click();
+  assert.match(
+    await page.locator(".rs-file").innerText(),
+    /<img src=x onerror=alert\(1\)>/,
+  );
+  await page.evaluate(
+    (data) => window.render(document.querySelector("#host"), data),
+    fixture(),
+  );
+  assert.equal(await page.locator(".rs-file").getAttribute("open"), "");
+  await page.locator(".rs-file summary").click();
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "보고서 저장" }).click();
   assert.equal((await download).suggestedFilename(), "railshot-insights.md");
@@ -125,6 +144,27 @@ test("operational view separates historical success from current failure, escape
     ),
     true,
   );
+  await page.screenshot({
+    path: new URL("../../outputs/insights-mobile-ready.png", import.meta.url)
+      .pathname,
+    fullPage: true,
+  });
+  const gaps = fixture();
+  gaps.traffic.series[10].requests_per_second = null;
+  gaps.traffic.series.splice(20, 2);
+  await page.evaluate(
+    (data) => window.render(document.querySelector("#host"), data),
+    gaps,
+  );
+  assert.equal(await page.locator(".rs-chart-line").count(), 3);
+  await slider.focus();
+  await slider.press("Home");
+  for (let i = 0; i < 10; i++) await slider.press("ArrowRight");
+  assert.match(await slider.getAttribute("aria-valuetext"), /관측 없음/);
+  assert.equal(
+    await page.locator(".rs-chart circle").last().getAttribute("visibility"),
+    "hidden",
+  );
   const stale = fixture();
   stale.traffic.observed_at = "2000-01-01T00:00:00Z";
   stale.observation.metrics.http.observed_at = "2000-01-01T00:00:00Z";
@@ -132,7 +172,7 @@ test("operational view separates historical success from current failure, escape
     (data) => window.render(document.querySelector("#host"), data),
     stale,
   );
-  assert.equal(await page.locator("svg").count(), 0);
+  assert.equal(await page.locator(".rs-chart svg").count(), 0);
   assert.match(await page.locator("#host").innerText(), /오래된 관측/);
   await page.screenshot({
     path: new URL("../../outputs/insights-mobile.png", import.meta.url)
@@ -193,7 +233,9 @@ test("bundled MCP App initializes through the official host bridge and refreshes
     await import("/host.js");
   }, fixture());
   const frame = page.frameLocator("iframe");
-  await frame.getByText("insights-demo · 운영 확인", { exact: true }).waitFor();
+  await frame
+    .getByRole("heading", { name: "insights-demo", exact: true })
+    .waitFor();
   await frame.getByRole("button", { name: "새로고침", exact: true }).click();
   await page.waitForFunction(() => window.calls === 1);
   assert.equal(

@@ -11,7 +11,7 @@ const output = await build({
   legalComments: "inline",
 });
 const script = output.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
-const html = `<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Railshot 운영 인사이트</title><main id="insights">배포 정보를 기다리고 있습니다.</main><script type="module">${script}</script></html>`;
+const html = `<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Railshot 운영 인사이트</title><body style="margin:0;background:#f5f7f4"><main id="insights">배포 정보를 기다리고 있습니다.</main><script type="module">${script}</script></body></html>`;
 const destination = new URL("../src/insights-app.html", import.meta.url);
 // A committed, reproducible resource keeps the existing image/release pipeline unchanged.
 if (process.argv.includes("--check")) {
