@@ -4681,6 +4681,48 @@
               "provider"
             ],
             "additionalProperties": false
+          },
+          "agent_activity_summary": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "enum": [
+                      "analyzing",
+                      "verifying",
+                      "succeeded",
+                      "failed",
+                      "unknown"
+                    ]
+                  },
+                  "attempt": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "updated_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "date-time"
+                  }
+                },
+                "required": [
+                  "id",
+                  "state",
+                  "attempt",
+                  "updated_at"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -6935,6 +6977,43 @@
               "duration_s"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "sequence": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "occurred_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "native_run_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "event_name": {
+                "const": "agent.repair"
+              },
+              "attempt_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+              },
+              "repair": {
+                "$ref": "#/components/schemas/AgentRepairReceipt"
+              }
+            },
+            "required": [
+              "sequence",
+              "occurred_at",
+              "native_run_id",
+              "event_name",
+              "attempt_id",
+              "repair"
+            ],
+            "additionalProperties": false
           }
         ]
       },
@@ -7043,6 +7122,16 @@
           },
           "progress": {
             "$ref": "#/components/schemas/CiProgress"
+          },
+          "agent_activity": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AgentActivity"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -8013,6 +8102,377 @@
         ],
         "additionalProperties": false,
         "description": "Last observed CI progress, not execution authority. A heartbeat alone never proves an SDK invocation; actual model calls and cost cannot be inferred. Budget may be recovered only from the same run and attempt in the retained timeline."
+      },
+      "AgentRepairChange": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "status": {
+            "const": "applied"
+          }
+        },
+        "required": [
+          "path",
+          "summary",
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "AgentRepairReceipt": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "enum": [
+              "verifying",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "role": {
+            "enum": [
+              "adapter",
+              "fixer"
+            ]
+          },
+          "changes": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/AgentRepairChange"
+            }
+          },
+          "omitted_changes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failure_layer": {
+            "enum": [
+              null,
+              "L0",
+              "L1",
+              "Q",
+              "L2",
+              "L3",
+              "L4"
+            ]
+          }
+        },
+        "required": [
+          "state",
+          "role",
+          "changes",
+          "omitted_changes",
+          "failure_layer"
+        ],
+        "additionalProperties": false
+      },
+      "AgentRepairAttempt": {
+        "type": "object",
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "enum": [
+              "analyzing",
+              "verifying",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "role": {
+            "enum": [
+              "adapter",
+              "fixer"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "changes": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/AgentRepairChange"
+            }
+          },
+          "verification": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "not_run",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "unknown"
+                  ]
+                }
+              },
+              "required": [
+                "key",
+                "label",
+                "state"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "failure_layer": {
+            "enum": [
+              null,
+              "L0",
+              "L1",
+              "Q",
+              "L2",
+              "L3",
+              "L4"
+            ]
+          },
+          "omitted_changes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "attempt",
+          "state",
+          "started_at",
+          "updated_at",
+          "finished_at",
+          "changes",
+          "verification",
+          "failure_layer",
+          "omitted_changes"
+        ],
+        "additionalProperties": false
+      },
+      "AgentActivity": {
+        "type": "object",
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "state": {
+            "enum": [
+              "analyzing",
+              "verifying",
+              "succeeded",
+              "failed",
+              "unknown"
+            ]
+          },
+          "role": {
+            "enum": [
+              "adapter",
+              "fixer"
+            ]
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "changes": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/AgentRepairChange"
+            }
+          },
+          "verification": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "not_run",
+                    "running",
+                    "succeeded",
+                    "failed",
+                    "unknown"
+                  ]
+                }
+              },
+              "required": [
+                "key",
+                "label",
+                "state"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "failure_layer": {
+            "enum": [
+              null,
+              "L0",
+              "L1",
+              "Q",
+              "L2",
+              "L3",
+              "L4"
+            ]
+          },
+          "omitted_changes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "schema_version": {
+            "const": 1
+          },
+          "id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "stage": {
+            "const": "build"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "current_action": {
+            "type": "string"
+          },
+          "observation": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": [
+                  "current",
+                  "stale",
+                  "unavailable"
+                ]
+              },
+              "checked_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "state",
+              "checked_at"
+            ],
+            "additionalProperties": false
+          },
+          "previous_attempts": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/AgentRepairAttempt"
+            }
+          },
+          "question": {
+            "type": "null"
+          },
+          "omitted": {
+            "type": "object",
+            "properties": {
+              "changes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "previous_attempts": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "changes",
+              "previous_attempts"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "attempt",
+          "state",
+          "started_at",
+          "updated_at",
+          "finished_at",
+          "changes",
+          "verification",
+          "failure_layer",
+          "omitted_changes",
+          "schema_version",
+          "id",
+          "revision",
+          "stage",
+          "summary",
+          "current_action",
+          "observation",
+          "previous_attempts",
+          "question",
+          "omitted"
+        ],
+        "additionalProperties": false,
+        "description": "Read-only projection of bound host events. Agent completion does not imply repair success; repair success does not imply deployment success. No model invocation on GET."
       }
     },
     "responses": {

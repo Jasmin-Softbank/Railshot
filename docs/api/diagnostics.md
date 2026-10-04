@@ -152,3 +152,17 @@ A rejection before any writes can consume another configured attempt. Changed ho
 source/case/policy evidence cannot be repaired by a new model proposal and is not
 marked safe to replan. Reference integrity does not establish that the proposed fix
 will work; unchanged scope checks and gates still decide acceptance.
+
+## Dashboard repair activity
+
+The events response additionally exposes `agent_activity`, a read-only projection
+of the bound host timeline. Deployment records include `agent_activity_summary`
+so a repaired successful deployment remains accessible from history. The new
+`agent.repair` producer event carries only actual applied paths, bounded/redacted
+change explanations and the host's verification outcome. Model completion alone
+never marks repair successful, and repair success does not mark deployment successful.
+Older metadata-only producers remain supported without inventing changes or success.
+
+See [dashboard agent recovery](dashboard-agent-recovery.md) for the UI, payload,
+retention and rollout order. This adds no classifier call, question submission
+endpoint or permission to resume a deployment from a GET request.

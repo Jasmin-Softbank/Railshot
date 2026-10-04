@@ -573,3 +573,10 @@ button:disabled { cursor: default; opacity: .5; }
   #history-view .dh-history-pane, #history-view .dh-issue-pane { transform: none !important; transition: opacity 140ms ease, visibility 0s linear 140ms; }
   #history-view .dh-detail-viewport.dh-instant > section { transition: none; }
 }
+
+/* Agent observations update independently of recovery inputs and raw logs. */
+.dh-agent-card { border: 1px solid var(--border, #d6dbe3); border-radius: 12px; padding: 16px; margin: 16px 0; overflow-wrap: anywhere; }
+.dh-agent-card h4 { margin: 0; }
+.dh-agent-card details { margin-top: 12px; }
+.dh-agent-card li { margin: 6px 0; }
+.dh-agent-checks { padding-left: 20px; }

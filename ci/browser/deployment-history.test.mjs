@@ -108,19 +108,20 @@ test('history preview: stage navigation, conditional inputs, one submission, key
   await page.getByRole('heading', { name: 'shop-api', exact: true }).waitFor();
   assert.equal(await page.locator('.dh-table-wrap tbody tr').count(), 3);
   assert.equal(await page.locator('.dh-log-layout').count(), 0, 'successful deployment hides the pipeline');
-  assert.equal(await page.locator('.dh-issue-trigger').count(), 1, 'only the older failed deployment has an arrow');
+  assert.equal(await page.locator('.dh-issue-trigger').count(), 3, 'successful and running agent histories remain accessible');
   assert.doesNotMatch(await page.locator('#preview-detail').innerText(), /해결 방법을 조회하지 못했습니다/);
   assert.equal(await page.locator('.dh-current').count(), 1);
   await page.setViewportSize({ width: 1440, height: 1050 });
   if (screenshots) await page.screenshot({ path: `${screenshots}/history-overview.png`, fullPage: true });
-  await page.locator('.dh-issue-trigger').focus(); await page.keyboard.press('Enter');
+  const failedTrigger = page.locator('.dh-issue-trigger[data-deployment-id="demo-shop-failed"]');
+  await failedTrigger.focus(); await page.keyboard.press('Enter');
   await page.locator('.dh-stage-detail').waitFor();
   assert.match(await page.locator('.dh-issue-heading').innerText(), /demo-shop-failed/);
   assert.equal(await page.locator('.dh-detail-viewport').evaluate((element) => element.classList.contains('dh-instant')), true);
   await page.getByRole('button', { name: '‹ 배포내역으로 돌아가기' }).click();
-  assert.equal(await page.locator('.dh-issue-trigger').evaluate((element) => document.activeElement === element), true);
+  assert.equal(await failedTrigger.evaluate((element) => document.activeElement === element), true);
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.locator('.dh-issue-trigger').click();
+  await failedTrigger.click();
   assert.equal(await page.locator('.dh-issue-pane').evaluate((element) => getComputedStyle(element).transform), 'none');
   await page.getByRole('button', { name: '‹ 배포내역으로 돌아가기' }).click();
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -135,7 +136,7 @@ test('history preview: stage navigation, conditional inputs, one submission, key
       recovery: { load: async () => q, submit: async (answer) => { window.submissionCalls++; return { status: 'accepted', question_id: answer.question_id, revision: answer.revision }; } } });
     await window.probe.open(record);
   }, { ...question(), stage: 'deploy' });
-  await page.locator('.dh-issue-trigger').click();
+  await page.locator('#submission-probe .dh-issue-trigger').click();
   await page.getByRole('radio', { name: '중단', exact: true }).check();
   await page.getByRole('button', { name: '선택한 방법 제출' }).click();
   await page.getByText('응답이 접수되었습니다.', { exact: false }).waitFor();
@@ -147,4 +148,76 @@ test('history preview: stage navigation, conditional inputs, one submission, key
   assert.equal(await page.getByRole('radio', { name: '중단', exact: true }).isDisabled(), true);
   assert.equal(await page.evaluate(() => window.submissionCalls), 1);
   assert.deepEqual(writes, []); assert.deepEqual(errors, []);
+});
+
+test('agent card opens on successful history, polls independently and preserves questions', { timeout: 60000 }, async (t) => {
+  const root = new URL('../../apps/dashboard/', import.meta.url);
+  const server = createServer(async (req, res) => {
+    const path = new URL(req.url, 'http://localhost').pathname;
+    try {
+      if (path === '/') { res.setHeader('Content-Type', 'text/html'); res.end('<html lang="ko"><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><main class="content"><section id="history-view"><div id="detail"></div></section></main></body></html>'); return; }
+      if (!['/src/recovery.js', '/src/deployment-history.js', '/styles.css'].includes(path)) { res.writeHead(404).end(); return; }
+      res.setHeader('Content-Type', path.endsWith('.js') ? 'text/javascript' : 'text/css');
+      res.end(await readFile(new URL(path.slice(1), root)));
+    } catch { res.writeHead(500).end(); }
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const browser = await chromium.launch({ executablePath: process.env.CHROME_EXECUTABLE || undefined });
+  t.after(async () => { await browser.close(); await new Promise(resolve => server.close(resolve)); });
+  const page = await browser.newPage({ viewport: { width: 1000, height: 900 } });
+  const errors = []; page.on('pageerror', e => errors.push(e.message));
+  await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  await page.evaluate(async () => {
+    const { createHistoryDetail } = await import('/src/deployment-history.js');
+    const record = { id: 'deployment-1', app: 'clock', kind: 'deployments', status: 'succeeded', stage: 'complete', ci: { state: 'published' },
+      cd: { state: 'deployed' }, created_at: new Date().toISOString(), agent_activity_summary: { id: 'repair-1', state: 'verifying', attempt: 1 } };
+    window.activity = { id: 'repair-1', revision: 1, stage: 'build', state: 'verifying', attempt: 1, summary: '시작 검사 실패를 처리합니다.',
+      current_action: '수정 후 실행 검사 중', started_at: '2026-10-04T03:00:00Z', updated_at: '2026-10-04T03:00:42Z',
+      observation: { state: 'current' }, changes: [{ path: 'Dockerfile', summary: '<img src=x onerror=alert(1)>', status: 'applied' }],
+      verification: [{ key: 'image.build', label: '이미지 빌드', state: 'succeeded' }], previous_attempts: [] };
+    window.eventReads = 0; window.unavailable = false;
+    const question = { id: 'q-1', deployment_id: record.id, revision: 'r1', stage: 'build', summary: '확인 필요', prompt: '추가 설명',
+      expires_at: new Date(Date.now() + 60000).toISOString(), evidence: [{ label: '확인', text: '확인' }],
+      options: [{ id: 'provide', label: '설명 제공', fields: [{ id: 'notes', label: '설명', type: 'text', required: true }] }] };
+    window.historyDetail = createHistoryDetail({ host: document.querySelector('#detail'), getRecords: () => [record], getApplications: () => [],
+      serviceUrl: () => null, onLogs: () => {}, onMonitor: () => {}, recovery: { load: async () => question },
+      request: async path => {
+        if (path.endsWith('/events')) {
+          window.eventReads++;
+          if (window.unavailable) throw new Error('offline');
+          return { data: { deployment_id: record.id, agent_activity: structuredClone(window.activity),
+            status: window.activity.state === 'succeeded' ? 'completed' : 'running', progress: { poll_after_ms: 5000 } } };
+        }
+        return { data: record };
+      } });
+    await window.historyDetail.open(record);
+  });
+  await page.getByRole('button', { name: /처리 내역 보기/ }).click();
+  await page.getByRole('heading', { name: 'AI 자동 복구', exact: true }).waitFor();
+  assert.match(await page.locator('.dh-agent-card').innerText(), /재검증 중/);
+  assert.equal(await page.locator('.dh-agent-card img').count(), 0, 'model description is text, never HTML');
+  await page.getByText('변경 내용 보기', { exact: true }).click();
+  await page.getByRole('radio', { name: '설명 제공', exact: true }).check();
+  await page.getByRole('textbox', { name: '설명', exact: true }).fill('작성 중인 사용자 입력');
+  await page.evaluate(() => { window.unavailable = true; });
+  await page.getByText('최신 상태를 조회하지 못했습니다.', { exact: false }).waitFor({ timeout: 12000 });
+  assert.equal(await page.getByRole('textbox', { name: '설명', exact: true }).inputValue(), '작성 중인 사용자 입력');
+  await page.evaluate(() => { window.unavailable = false; window.activity.state = 'succeeded'; window.activity.revision = 2;
+    window.activity.current_action = '필수 검사를 통과했습니다.'; window.activity.finished_at = '2026-10-04T03:00:58Z'; });
+  await page.locator('.dh-agent-card .dh-status').getByText('복구 완료', { exact: true }).waitFor({ timeout: 12000 });
+  assert.equal(await page.locator('.dh-agent-card details').first().getAttribute('open'), '');
+  assert.equal(await page.getByRole('textbox', { name: '설명', exact: true }).inputValue(), '작성 중인 사용자 입력');
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  if (process.env.RAILSHOT_HISTORY_SCREENSHOTS) {
+    await mkdir(process.env.RAILSHOT_HISTORY_SCREENSHOTS, { recursive: true });
+    await page.screenshot({ path: `${process.env.RAILSHOT_HISTORY_SCREENSHOTS}/agent-recovery-mobile.png`, fullPage: true });
+  }
+  const count = await page.evaluate(() => window.eventReads);
+  await page.getByRole('button', { name: '‹ 배포내역으로 돌아가기' }).click();
+  // A restored successful record still exposes the activity, rather than hiding its history.
+  await page.getByRole('button', { name: /처리 내역 보기/ }).click();
+  await page.getByRole('heading', { name: 'AI 자동 복구', exact: true }).waitFor();
+  assert.ok(await page.evaluate(() => window.eventReads) >= count);
+  assert.deepEqual(errors, []);
 });

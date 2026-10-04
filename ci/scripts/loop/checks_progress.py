@@ -1,6 +1,7 @@
 """Bounded, best-effort GitHub Checks transport for safe supervisor observations.
 
-This channel never decides gate outcomes and never forwards provider text or errors.
+This channel never decides gate outcomes. Only bounded, redacted change descriptions
+from host-confirmed writes are forwarded; raw provider output and errors stay private.
 The job token lives only in this process; callers remove it from the environment
 before any child process starts.
 """
@@ -18,7 +19,7 @@ APP_ID = 15368  # github-actions on github.com; this transport has no configurab
 MAX_BYTES, MAX_ITEMS, MAX_RESPONSE = 60000, 60, 2 * 1024 * 1024
 OUTCOMES = {'RUNNING', 'PASS', 'FAIL', 'BLOCKED', 'UNKNOWN', 'NOT_RUN', 'INCOMPLETE'}
 EVENTS = {'loop.started', 'loop.completed', 'agent.heartbeat', 'agent.observation',
-          'gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat'}
+          'gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat', 'agent.repair'}
 
 
 def integer(value):
@@ -55,7 +56,30 @@ def row(event):
                     or budget['enabled'] != (budget['max_invocations'] > 0)):
                 raise ValueError('invalid agent budget')
             result['agent_budget'] = dict(budget)
+    elif name == 'agent.repair':
+        repair = attributes.get('repair')
+        if (not identifier(event.get('attempt_id')) or not isinstance(repair, dict)
+                or set(repair) != {'state', 'role', 'changes', 'omitted_changes', 'failure_layer'}
+                or repair['state'] not in {'verifying', 'succeeded', 'failed', 'unknown'}
+                or repair['role'] not in {'adapter', 'fixer'}
+                or repair['failure_layer'] not in {None, 'L0', 'L1', 'Q', 'L2', 'L3', 'L4'}
+                or not integer(repair['omitted_changes']) or not isinstance(repair['changes'], list)
+                or len(repair['changes']) > 24):
+            raise ValueError('invalid repair observation')
+        for change in repair['changes']:
+            if (not isinstance(change, dict) or set(change) != {'path', 'summary', 'status'}
+                    or not isinstance(change['path'], str) or len(change['path']) > 240
+                    or not re.fullmatch(r'[A-Za-z0-9_./@-]+', change['path'])
+                    or change['path'].startswith('/') or any(p in ('', '.', '..') for p in change['path'].split('/'))
+                    or not isinstance(change['summary'], str) or not 1 <= len(change['summary']) <= 300
+                    or change['status'] != 'applied'):
+                raise ValueError('invalid repair change')
+        # Only these bounded, host-confirmed fields may cross the Checks boundary.
+        from diagnostics import redact
+        repair = {**repair, 'changes': [{**c, 'summary': redact(c['summary'])} for c in repair['changes']]}
+        result.update(attempt_id=event['attempt_id'], repair=repair)
     elif name.startswith('gate.layer.'):
+
         if (not identifier(event.get('attempt_id')) or event.get('phase') not in {'L0', 'L1', 'Q', 'L2', 'L4', 'L3'}
                 or event.get('outcome') not in OUTCOMES
                 or any(not integer(attributes.get(key)) for key in ('completed_steps', 'total_steps'))
@@ -219,7 +243,9 @@ class ChecksProgress:
             self.items.append({**item, 'sequence': self.sequence})
         self.pending.clear()
         if len(self.items) > MAX_ITEMS:
-            self.items = self.items[-MAX_ITEMS:]
+            receipts = {r['attempt_id']: r for r in self.items if r['event_name'] == 'agent.repair'}
+            keep = list(receipts.values())[-3:]
+            self.items = sorted(keep + [r for r in self.items if r not in keep][-(MAX_ITEMS - len(keep)):], key=lambda r: r['sequence'])
             self.truncated = True
         while True:
             value = {**self.binding, 'updated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
@@ -229,7 +255,8 @@ class ChecksProgress:
                 return {'title': NAME, 'summary': 'Structured supervisor observations only; gate results remain authoritative.', 'text': text}
             if not self.items:
                 raise ValueError('oversized progress binding')
-            self.items.pop(0)
+            removable = next((i for i, r in enumerate(self.items) if r['event_name'] not in {'agent.repair', 'loop.completed'}), 0)
+            self.items.pop(removable)
             self.truncated = True
 
     def emit(self, event, *, final=False):

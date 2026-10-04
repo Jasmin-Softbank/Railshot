@@ -167,6 +167,10 @@ test('real events HTTP route binds ownership before GitHub reads, rejects contro
   assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal(body.deployment_id, id); assert.equal(body.state, 'live'); assert.equal(body.run_id, '123');
   assert.equal(body.items[0].progress.sdk_event_count, 4);
+  assert.equal(body.agent_activity.stage, 'build');
+  assert.equal(body.agent_activity.state, 'analyzing');
+  const detail = await (await fetch(origin + `/api/v1/deployments/${id}`, { headers: { Cookie: owner } })).json();
+  assert.equal(detail.agent_activity_summary.id, body.agent_activity.id);
   assert.equal(body.progress.poll_after_ms, 15000);
   assert.equal(body.progress.latest.attempt_id, 'native:123:1');
   assert.equal(body.progress.sdk_invocations, null, 'heartbeat is not an SDK call receipt');
@@ -235,4 +239,19 @@ test('deterministic gate progress is admitted with no agent call and rejects for
   const result = await f.read(); assert.equal(result.items[0].event_name, 'gate.layer.completed');
   const bad = fixture(); bad.envelope.items = [{ ...f.envelope.items[0], completed_steps: 7 }]; bad.save();
   assert.equal((await bad.read()).state, 'unavailable');
+});
+
+test('host repair receipts expose bounded redacted descriptions, never arbitrary model fields', async () => {
+  const f = fixture();
+  f.envelope.items = [{ sequence: 1, occurred_at: f.envelope.updated_at, event_name: 'agent.repair', native_run_id: 'native:123', attempt_id: 'native:123:1',
+    repair: { state: 'verifying', role: 'fixer', failure_layer: 'L2', omitted_changes: 0,
+      changes: [{ path: 'Dockerfile', summary: 'token=private-example', status: 'applied' }] } }];
+  f.save();
+  const data = await f.read(); assert.equal(data.state, 'live');
+  assert.equal(data.items[0].repair.changes[0].summary, '[REDACTED]');
+  for (const mutate of [r => r.changes[0].path = '../secret', r => r.raw_prompt = 'secret', r => r.changes[0].status = 'proposed',
+    r => r.changes[0].summary = 'x'.repeat(301), r => r.state = 'deployed']) {
+    const bad = fixture(); bad.envelope.items = structuredClone(f.envelope.items); mutate(bad.envelope.items[0].repair); bad.save();
+    assert.equal((await bad.read()).state, 'unavailable');
+  }
 });

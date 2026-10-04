@@ -33,7 +33,11 @@ export function appendEvent(record, name, phase, outcome, { attributes = {}, err
       github_run_attempt: attributes.github_run_attempt || record.ci?.producer_attempt || null },
     attributes, error, evidence_refs });
   const cutoff = Date.now() - telemetryContract.retention_days * 86400000;
-  const kept = log.items.filter((e) => Date.parse(e.ingested_at) >= cutoff).slice(-telemetryContract.max_events);
+  const recent = log.items.filter(e => Date.parse(e.ingested_at) >= cutoff);
+  // Preserve bounded host repair receipts when noisy heartbeats roll out of the journal.
+  const repairs = recent.filter(e => e.event_name === 'agent.repair').slice(-12);
+  const kept = [...repairs, ...recent.filter(e => !repairs.includes(e)).slice(-(telemetryContract.max_events - repairs.length))]
+    .sort((a, b) => a.sequence - b.sequence);
   if (kept.length < log.items.length) log.truncated = true;
   log.items = kept; log.updated_at = now;
 }
@@ -70,9 +74,9 @@ export function ingestCiEvents(record, envelope) {
   log.reason = envelope.reason; log.truncated ||= envelope.truncated === true;
   for (const e of envelope.items || []) {
     if (!Number.isSafeInteger(e.sequence) || !safeId(e.native_run_id)) continue;
-    const attributes = { github_run_attempt: envelope.run_attempt, native_run_id: e.native_run_id };
+    const attributes = { github_run_attempt: envelope.run_attempt, native_run_id: e.native_run_id, producer_sequence: e.sequence };
     for (const key of ['attempt_id', 'completed_steps', 'total_steps', 'duration_s', 'elapsed_ms', 'role', 'provider', 'sdk_invocations',
-      'agent_budget', 'process_running', 'snapshot_state', 'sdk_activity_since_previous', 'last_sdk_event_age_ms', 'progress'])
+      'agent_budget', 'process_running', 'snapshot_state', 'sdk_activity_since_previous', 'last_sdk_event_age_ms', 'progress', 'repair'])
       if (e[key] !== undefined) attributes[key] = structuredClone(e[key]);
     appendEvent(record, e.event_name, e.phase || 'agent', e.outcome || (e.process_running ? 'RUNNING' : 'UNKNOWN'), { attributes,
       identity: `ci:${envelope.run_id}:${envelope.run_attempt}:${e.sequence}`, occurred_at: e.occurred_at });

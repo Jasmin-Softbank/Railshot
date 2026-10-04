@@ -1,3 +1,4 @@
+import { agentActivity } from './agent-activity.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { createProductStore } from './product-store.js';
 import { APP_NAME, TARGET_ID, sourceAppName } from './contract.js';
@@ -52,7 +53,10 @@ export function idempotencyKey(value) {
 }
 function publicRecord(record) {
   const { fingerprint, key, source, source_bytes, legacy, session_id, publication, refreshed_plan, diagnostic_evidence, classifications, telemetry, ...visible } = record;
-  return { ...structuredClone(visible), ...(telemetry ? { telemetry: publicTelemetry(record) } : {}) };
+  const timeline = publicTelemetry(record);
+  const activity = agentActivity(record, timeline);
+  return { ...structuredClone(visible), ...(telemetry ? { telemetry: timeline } : {}),
+    agent_activity_summary: activity ? { id: activity.id, state: activity.state, attempt: activity.attempt, updated_at: activity.updated_at } : null };
 }
 function checkFree(state, sessionId = null, except = null) {
   const blocker = Object.values(state.operations).find((record) => record.id !== except && occupiesSlot(record));
@@ -1180,7 +1184,7 @@ export async function createProductService({ service, directory, target, provide
         source_commit: record.source_commit, app: record.app, target_id: record.target_id };
       const response = (envelope, row) => {
         const timeline = publicTelemetry(row);
-        return { ...envelope, deployment_id: id, timeline, progress: summarizeAgentEvents(envelope, timeline) };
+        return { ...envelope, deployment_id: id, timeline, agent_activity: agentActivity(row, timeline, envelope), progress: summarizeAgentEvents(envelope, timeline) };
       };
       const empty = (state, reason) => response(emptyAgentEvents(identity, state, reason), record);
       if (!identity.runId) return empty('not_started', 'not_dispatched');
