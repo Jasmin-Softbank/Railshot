@@ -1214,7 +1214,7 @@ export async function createProductService({ service, directory, target, provide
           && lifecycle.kind === 'application-lifecycle' && lifecycle.application_id === application.id
           && lifecycle.session_id === sessionId && lifecycle.target_id === operation.target_id
           && lifecycle.app === application.app && lifecycle.status === 'succeeded' && ['stop', 'start'].includes(lifecycle.action);
-        if (!['unknown', 'blocked'].includes(operation.status) || !['cd', 'http'].includes(operation.stage)
+        if (!['unknown', 'blocked', 'failed'].includes(operation.status) || !['cd', 'http'].includes(operation.stage)
             || application.status !== 'ready' || application.deletion_requested || operation.deletion_requested || !completedLifecycle
             || ci?.state !== 'published'
             || typeof applicationAdapter?.deployPublished !== 'function'

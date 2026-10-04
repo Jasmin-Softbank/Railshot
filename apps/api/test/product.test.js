@@ -1290,6 +1290,30 @@ test('explicit CD resume survives restart, preserves the deployment and publishe
   } finally { finish(); await product.close(); }
 });
 
+test('published CD failure can resume after cluster permissions are repaired without another CI run', async (t) => {
+  const f = await applicationFixture(t);
+  const owner = f.product.dashboard.session().id;
+  const deliver = f.adapter.deployPublished;
+  f.adapter.deployPublished = async (...args) => {
+    await deliver(...args);
+    return { cd: { state: 'failed', deployed: false, revision: 'd'.repeat(40),
+      evidence: { sync: 'Unknown', health: 'Healthy' } },
+    public_http: { state: 'not_run', url: null, verified_at: null } };
+  };
+  const accepted = await f.product.createDeployment(applicationSource('calculator'), 'permission-repair', undefined, owner);
+  const failed = await settle(() => f.product.getDeployment(accepted.id, owner));
+  assert.equal(failed.status, 'failed'); assert.equal(failed.stage, 'cd');
+  assert.equal(failed.ci.state, 'published'); assert.equal(failed.url, null);
+  await assert.rejects(f.product.resumeDeployment(accepted.id, f.product.dashboard.session().id), { status: 404 });
+  f.adapter.deployPublished = deliver;
+  await f.product.resumeDeployment(accepted.id, owner);
+  const done = await settle(() => f.product.getDeployment(accepted.id, owner));
+  assert.equal(done.status, 'succeeded'); assert.equal(done.id, accepted.id);
+  assert.equal(done.ci.run_id, failed.ci.run_id); assert.deepEqual(done.ci.images, failed.ci.images);
+  assert.equal(done.resume_count, 1);
+  assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 2);
+});
+
 test('resume checks exact session ownership before any CI or CD observation', async (t) => {
   const f = await interruptedApplication(t);
   f.service.status = async () => assert.fail('Unauthorized resume must not read CI');
