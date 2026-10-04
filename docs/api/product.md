@@ -8,7 +8,7 @@
 
 `GET /api/v1/deployments/{id}/events`는 소유 세션·소스·앱·대상·GitHub 실행과 현재 attempt를 검증한 뒤 실행 중인 GitHub Checks 기록을 반환한다. 대시보드의 작업 로그는 15초마다 조회한다. 실행기는 약 20초 간격으로 관측을 전달하고 API cache도 15초이므로 초 단위 즉시 전달을 보장하지 않는다. 진행 중 기록이 60초 이상 갱신되지 않으면 `stale=true`로 표시하며, 관측 지연을 실행 실패로 바꾸지 않는다.
 
-`progress.latest`는 마지막으로 관측한 검사 단계 또는 SDK 진행 이벤트다. `progress.agent_budget`은 실행기가 선언한 활성화 여부와 최초 패키징·실패 수정 합산 호출 한도(최대 2회)이며, 이전 실행기에 이 필드가 없으면 `null`이다. 최근 60개 중 최초 이벤트가 빠져도 같은 run/attempt의 중앙 기록에 있으면 예산을 보존한다. 다른 attempt의 값을 재사용하지 않는다. `progress.sdk_invocations`는 확인된 SDK 실행 횟수이며 heartbeat만 있을 때는 `null`이다. SDK 실행 횟수를 모델 내부 호출 수나 과금 횟수로 해석하면 안 된다.
+`progress.latest`는 마지막으로 관측한 검사 단계 또는 SDK 진행 이벤트다. `progress.agent_budget`은 실행기가 선언한 활성화 여부와 합산 호출 한도다. 현재 정책은 초기 패키징 최대 1회와 오류 수정 최대 2회를 각각 제한하여 총 3회이며, 패키징이 필요 없는 앱의 수정 횟수는 최대 2회다. API는 이전 실행기가 선언하는 0·1·2회도 허용하고, 이 필드가 없으면 `null`이다. 선언 한도는 실제 사용 횟수가 아니다. 최근 60개 중 최초 이벤트가 빠져도 같은 run/attempt의 중앙 기록에 있으면 예산을 보존한다. 다른 attempt의 값을 재사용하지 않는다. `progress.sdk_invocations`는 확인된 SDK 실행 횟수이며 heartbeat만 있을 때는 `null`이다. SDK 실행 횟수를 모델 내부 호출 수나 과금 횟수로 해석하면 안 된다.
 
 중앙 `timeline`에는 안전한 SDK 활동 종류·횟수·토큰 계수·갱신 시각을 보존한다. 프롬프트, 소스 본문, 명령, reasoning 원문은 허용하지 않는다. 조회 실패는 `unavailable`, 아직 CI 미접수는 `not_started`이며, 과거 기록은 현재 상태와 구분한다. 이 GET은 모델·CI·배포를 시작하지 않는다. `complete`는 관측 종료이며 CI 통과나 앱 배포 성공을 뜻하지 않는다.
 
