@@ -30,7 +30,7 @@ Node 22 이상에서 실행합니다. 이 패키지의 stdio MCP 서버는 RailS
 - Claude Code에서 이 저장소를 열면 루트 `.mcp.json`의 원격 서버 설정을 검토·승인한 뒤 `claude mcp login railshot` 또는 대화의 `/mcp`에서 브라우저 인증을 완료합니다. 다른 프로젝트에서는 `claude mcp add --transport http railshot https://railshot.io/mcp`를 실행해 로컬 범위로 추가할 수 있습니다. `claude mcp list`로 연결 상태를 확인합니다. 별도의 Claude 전용 MCP 서버나 사용자 컴퓨터의 `RAILSHOT_API_TOKEN`은 필요하지 않습니다.
 - 승인 화면은 **웹 앱을 쓰던 동일한 브라우저**에서 열어 `연결 승인`을 누릅니다. 이때 기존 `railshot_session` 쿠키를 AI 연결에 묶습니다. 웹 방문 기록이 없는 브라우저에서는 새 익명 세션을 발급하며, 이후 그 브라우저에서 Railshot을 열면 AI가 만든 앱을 같은 세션에서 볼 수 있습니다.
 
-원격 AI 연결마다 별도 OAuth Bearer 토큰을 발급하고 서버에서 해당 토큰을 정확히 하나의 API 세션 쿠키에 연결합니다. 웹의 `sessions.js`는 수정하지 않았습니다. 인증 코드와 Bearer 토큰은 MCP 프로세스 메모리에만 보관하므로 MCP Pod가 재시작되면 AI에서 OAuth 연결을 다시 승인해야 합니다. 등록된 클라이언트 ID는 내부 API 토큰으로 서명되어 재시작 후에도 재사용할 수 있습니다. Bearer 토큰은 최대 24시간, 웹 세션은 최대 7일 유효합니다. 서로 다른 브라우저 세션의 앱은 자동 병합되지 않습니다.
+원격 AI 연결마다 별도 OAuth Bearer 토큰을 발급하고 서버에서 해당 토큰을 정확히 하나의 API 세션 쿠키에 연결합니다. 인증 코드와 Bearer 토큰은 MCP 프로세스 메모리에만 보관하므로 MCP Pod가 재시작되면 AI에서 OAuth 연결을 다시 승인해야 합니다. 등록된 클라이언트 ID는 내부 API 토큰으로 서명되어 재시작 후에도 재사용할 수 있습니다. 승인된 OAuth Bearer 토큰과 연결된 웹 세션에는 만료 시간을 두지 않습니다. OAuth 승인 코드는 탈취 방지를 위해 10분·일회용으로 유지합니다. 서로 다른 브라우저 세션의 앱은 자동 병합되지 않습니다.
 
 ## HTTP 계약
 
