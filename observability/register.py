@@ -77,7 +77,7 @@ def metrics_host(descriptor, node_ip):
 def registration_row(config, request, descriptor):
     fields = {'version', 'target_id', 'environment_id', 'node_ip', 'registry_file'}
     app_fields = {'app', 'namespace', 'probe_url'} if request.get('app') is not None else set()
-    require(set(request) - {'context', 'traffic_port'} == fields | app_fields and request['version'] == 1)
+    require(set(request) - {'context', 'traffic_port', 'application_id'} == fields | app_fields and request['version'] == 1)
     require(request['target_id'] == descriptor['target_id'] and request['node_ip'] == descriptor['addresses']['private'])
     for key in ('target_id', *(['app', 'namespace'] if app_fields else [])):
         require(isinstance(request[key], str) and re.fullmatch(r'[a-z][a-z0-9-]{1,61}[a-z0-9]', request[key]))
@@ -86,9 +86,14 @@ def registration_row(config, request, descriptor):
         'observer_source_cidr': config.get('observer_source_cidr', config['observer_ip'] + '/32'), 'node_metrics_port': config['node_metrics_port'],
         'cluster_metrics_port': config['cluster_metrics_port'], 'probe_urls': [request['probe_url']] if app_fields else [], 'argocd_metrics': None})
     metrics_address = metrics_host(descriptor, request['node_ip'])
+    # Keep runtime ownership intact; product applications carry their own identity.
+    application_id = request.get('application_id')
+    require(application_id is None or app_fields and isinstance(application_id, str)
+            and re.fullmatch(r'[a-z][a-z0-9-]{1,61}[a-z0-9]', application_id))
     traffic_port = request.get('traffic_port')
     require(traffic_port is None or app_fields and type(traffic_port) is int and 30000 <= traffic_port <= 32767)
     return {'target_id': request['target_id'], **{key: request[key] for key in app_fields},
+            **({'application_id': application_id} if application_id else {}),
             **({'node_ip': request['node_ip']} if metrics_address != request['node_ip'] else {}),
             'prometheus_url': config['prometheus_url'], 'node_instance': f"{metrics_address}:{config['node_metrics_port']}",
             **({'traffic_instance': f'{metrics_address}:{traffic_port}'} if traffic_port else {}),
@@ -106,10 +111,12 @@ def merge_rows(rows, row):
         require(len(existing) == 1)
         previous = existing[0]
         # Add optional observations without changing the original binding identity.
-        require({k: v for k, v in previous.items() if k not in ('healthz_url', 'traffic_instance')} ==
-                {k: v for k, v in row.items() if k not in ('healthz_url', 'traffic_instance')})
+        require({k: v for k, v in previous.items() if k not in ('healthz_url', 'traffic_instance', 'application_id')} ==
+                {k: v for k, v in row.items() if k not in ('healthz_url', 'traffic_instance', 'application_id')})
         require(not (previous.get('healthz_url') and row.get('healthz_url')) or
                 previous['healthz_url'] == row['healthz_url'])
+        require(not (previous.get('application_id') and row.get('application_id')) or
+                previous['application_id'] == row['application_id'])
         require(not (previous.get('traffic_instance') and row.get('traffic_instance')) or
                 previous['traffic_instance'] == row['traffic_instance'])
         return [{**previous, **row} if item is previous else item for item in rows]
@@ -140,7 +147,7 @@ def scrape_config(rows):
         if row.get('traffic_instance'):
             require(row.get('app') and re.fullmatch(r'[a-zA-Z0-9.-]+:[0-9]{1,5}', row['traffic_instance']))
             traffic.append({'targets': [row['traffic_instance']],
-                            'labels': {'app': row['app'], 'target_id': row['target_id']}})
+                            'labels': {'app': row['app'], 'target_id': row.get('application_id', row['target_id'])}})
     if traffic:
         jobs.append({'job_name': 'app_traffic', 'metrics_path': '/metrics', 'static_configs': traffic,
                      'metric_relabel_configs': [{'source_labels': ['__name__'],
@@ -338,7 +345,7 @@ def commit_row(config, row, before_commit):
         # Keep runtime health independent of any application registered on this node.
         node_row = next((dict(item) for item in rows if item['target_id'] == row['target_id'] and not item.get('app')), None)
         if node_row is None:
-            node_row = {key: value for key, value in row.items() if key not in ('app', 'namespace', 'probe_url', 'traffic_instance')}
+            node_row = {key: value for key, value in row.items() if key not in ('app', 'namespace', 'probe_url', 'traffic_instance', 'application_id')}
         rows = merge_rows(rows, node_row)
         durable_write(desired, json.dumps({'version': 1, 'targets': rows}).encode())
         binding = before_commit()

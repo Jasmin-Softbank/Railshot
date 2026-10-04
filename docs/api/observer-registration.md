@@ -45,7 +45,9 @@ python3 observability/register.py --config /private/observer-config.json \
   --request /private/environment/observability-request.json --out /private/environment/observability.json
 ```
 
-request에는 `version,target_id,environment_id,app,namespace,node_ip,probe_url,registry_file,context`만 둔다.
+request에는 `version,target_id,environment_id,app,namespace,node_ip,probe_url,registry_file,context`를 둔다.
+앱 등록에는 선택적으로 `application_id`(제품 앱 대상 ID)와 `traffic_port`(메트릭 NodePort)를 추가한다.
+`target_id`는 물리 runtime descriptor의 ID를 유지하며 `application_id`로 다른 앱의 데이터와 구분한다.
 registrar가 검증한 descriptor와 edge allocation에서 생성하며, 관측 helper가 target/private IP를 다시 대조한다.
 노드만 등록할 때는 `app,namespace,probe_url`을 생략한다. 같은 target의 앱 행은 함께 보관하되 물리 자원 변경은 거부한다. 기존 NodePort나 관측 소유권이 다른
 동명 Kubernetes 자원을 덮어쓰지 않는다.

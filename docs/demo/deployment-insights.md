@@ -51,7 +51,9 @@ MCP 도구 `get_app_overview(deployment_id, minutes)`와
    치환한다. 미사용 NodePort를 선택하고, 클라우드/호스트 방화벽을 관측 VM 송신 IP `/32`로 제한한다.
    기존 Cilium/네트워크 정책과 함께 접근이 되는지 실제 확인한다. 이 샘플 자체를 바로 적용하지 않는다.
 4. 기존 `observability/register.py` 운영자 등록 요청의 app/namespace/probe_url에
-   `"traffic_port": 30940`을 추가한다. 노드 전용 등록에서는 사용할 수 없다.
+   `"traffic_port": 30940`과 제품 배포의 `application_id`를 추가한다.
+   request의 `target_id`는 descriptor의 환경 ID(예: `k3s-aws`)를 유지한다.
+   `application_id`는 배포 응답의 앱 대상 ID이며 namespace와 함께 운영자가 확인한다. 노드 전용 등록에서는 사용할 수 없다.
    `--config`, `--request`, `--out`은 기존 등록 절차의 실제 운영자 파일을 사용한다.
    등록기는 descriptor의 주소와 포트로 `traffic_instance`를 만들고 다음 job을 렌더링한다.
 
@@ -75,6 +77,40 @@ static_configs:
 등록은 `traffic_instance`를 기존 앱에 추가할 수 있고, 동일 요청은 같은 설정을 유지한다.
 이미 지정된 주소를 다른 주소로 바꾸는 동작은 차단한다. 삭제/주소 이전은 운영자 등록 정리 절차로 처리한다.
 자동 수집 대상 탐색이나 인프라 권한 확대는 포함하지 않는다.
+
+### 기존 서비스 보존과 적용 순서
+
+API의 새 조회 코드를 먼저 릴리스한 뒤 새 앱의 관측 등록을 추가한다. `application_id`가 없는
+기존 등록은 기존 방식으로 조회한다. 환경 ID·앱 이름·application ID가 모두 일치해야 새 앱의
+Pod/HTTP/트래픽을 읽으며, 미등록 앱에는 기존처럼 환경의 노드 관측만 제공한다.
+기존 행을 다른 application ID나 수집 주소로 덮어쓰는 요청은 거부한다.
+
+운영자 요청의 추가 필드는 다음과 같다. 나머지 필드는 기존 운영자 등록 파일을 사용한다.
+임의로 환경 descriptor의 target ID를 앱 ID로 교체하지 않는다.
+
+```json
+{
+  "target_id": "k3s-aws",
+  "app": "insights-demo",
+  "application_id": "app-fea3bad6f677e1eeb0282ad3",
+  "namespace": "app-fea3bad6f677e1eeb0282ad3",
+  "traffic_port": 30940
+}
+```
+
+- 앱 Pod가 Ready이고 기존 공개 주소가 응답하는지 먼저 확인한다. 배포 자체가 대기 중이면
+  관측 설정으로 해결하거나 성공으로 표시하지 않는다.
+- 메트릭 Service/NetworkPolicy는 기존 앱 리소스와 이름을 달리하여 추가한다. 샘플 정책은
+  기존 앱의 8080 ingress 허용 정책과 함께 사용한다. 기존 정책이 없는 Pod에 그대로 적용하면
+  일반 요청까지 차단할 수 있으므로 적용 전에 selector와 정책을 확인한다.
+- 미사용 NodePort와 옵저버 송신 주소를 확인하고 SG/호스트 방화벽은 해당 포트의 송신자를
+  옵저버로 한정한다. 기존 앱 포트/정책을 교체하지 않는다.
+- 기존 Prometheus 설정·등록 파일을 보존하고 기존 등록 경로로 병합한다. Promtool 검증 후
+  재시작 대신 설정 reload를 사용한다. 전후 기존 수집 대상의 `up`을 비교한다.
+- 최소 두 번 수집한 뒤 정상·시험 오류·지연 요청을 보내 MCP의 실제 값으로 검증한다.
+  롤백은 이번 앱의 수집 항목·관측 Service/정책·SG 규칙만 제거한다. 공유 옵저버는 삭제하지 않는다.
+
+이 변경 자체는 운영 수집 항목이나 네트워크를 자동 수정하지 않으며 CI/CD 흐름에도 손대지 않는다.
 
 ## 해석 기준
 
@@ -136,5 +172,30 @@ UI/SDK 변경 후 `npm run build:insights --workspace @railshot/agent`로 재생
 - 이번 UI 추가로 필요한 정적 파일 제공 목록은 테스트 서버에도 반영했고 배포 내역 화면
   테스트 4개를 다시 통과했다.
 
-운영 서버 배포, 실제 앱 관측 등록, 최종 데모 AI 제품에서의 연결은 아직 수행하지 않았다.
-위 운영 연결 순서로 진행해야 운영 데이터가 보인다.
+위 항목은 최초 구현 시점의 검증 기록이다. 이후 운영 확인은 아래에 별도로 기록한다.
+
+## 2026-10-04 운영 데모 연결 기록
+
+- MCP로 접수한 배포 `a9d5dc75-0c43-416e-91d4-08a3ced86724`는 성공했다.
+  공개 주소는 `https://insights-demo-f7edb701418c.railshot.io/`이다.
+- `k3s-aws`의 namespace `app-fea3bad6f677e1eeb0282ad3`에 샘플의
+  `insights-demo-metrics` Service(30940 → 9400)와 `insights-demo-observer` 정책을 추가했다.
+  기존 8080 Service/NetworkPolicy/Deployment는 변경하지 않았다.
+- 현재 수집기는 control 노드 `172.31.0.172`의 기존 Prometheus다. 별도 관측 VM/Grafana는 만들지 않았다.
+  AWS ingress 규칙 `sgr-0d0ad769600813416`은 control SG만 허용하며,
+  egress 규칙 `sgr-0819eab713dd7d73a`는 `172.31.13.147/32:30940`만 허용한다.
+- Prometheus의 기존 9개 수집 대상을 보존하고 `app_traffic`과 앱 HTTP probe를 추가했다.
+  Promtool 검증 후 SIGHUP으로 reload했으며 컨테이너 시작 시각이 유지됐다.
+  기존 9개와 추가 2개 수집 대상 모두 `up`이었다. HTTP probe 성공값도 1이었다.
+- 정상 요청 8회·시험 오류 2회·지연 요청 1회를 보냈다. 수집된 누적 카운터는 기존 정상 1회를
+  포함해 2xx=10, 5xx=2였다. 이는 방문자 수나 15분 increase 값이 아닌 원시 누적 카운터다.
+- API의 기존 `product.json`/`desired.json` 3개 환경 행을 유지하고, `application_id`를 가진
+  새 앱 행 1개를 추가했다. API는 파일을 매번 읽는다. 운영 API에는 본 브랜치의 조회 수정이
+  아직 릴리스되지 않았으므로 수집 성공을 MCP/대시보드 표시 완료로 설명하면 안 된다.
+- 핵심 회귀 검사: API 관측/인사이트 6개, 등록기 15개 통과. 전체 테스트는 반복하지 않았다.
+
+운영 원본 백업은 control의
+`/home/railshot-operator/observer-shared/prometheus.before-insights-demo-20261004.json`,
+API PVC의 `/var/lib/railshot/state/observer/product.before-insights-demo-20261004.json` 및
+`desired.before-insights-demo-20261004.json`에 있다. 이후 다른 등록이 생겼다면 백업 전체를
+덮어쓰지 말고 이번 앱 항목만 제거한다. SG 회수는 위 rule ID로 한정한다.

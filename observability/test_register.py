@@ -58,6 +58,29 @@ class RegistrationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 registration_row(self.config, {**self.request, 'traffic_port': port}, self.descriptor)
 
+    def test_application_binding_preserves_runtime_and_other_apps(self):
+        base, _ = registration_row(self.config, self.request, self.descriptor)
+        row, _ = registration_row(self.config, {**self.request, 'application_id': 'app-one',
+            'traffic_port': 30940}, self.descriptor)
+        node = {key: value for key, value in base.items() if key not in ('app', 'namespace', 'probe_url')}
+        other = {**base, 'app': 'other-app', 'namespace': 'other-namespace'}
+        rows = merge_rows([node, base, other], row)
+        self.assertEqual(rows[0], node)
+        self.assertEqual(rows[2], other)
+        self.assertEqual(merge_rows(rows, base), rows)
+        self.assertEqual(merge_rows(rows, row), rows)
+        self.assertEqual(row['target_id'], 'new-aws')
+        job = next(j for j in scrape_config(rows)['scrape_configs'] if j['job_name'] == 'app_traffic')
+        self.assertEqual(job['static_configs'][0]['labels'], {'app': 'demo-app', 'target_id': 'app-one'})
+        with self.assertRaises(ValueError):
+            merge_rows(rows, {**row, 'application_id': 'another-app'})
+        for invalid in (True, '', 'invalid/id'):
+            with self.assertRaises(ValueError):
+                registration_row(self.config, {**self.request, 'application_id': invalid}, self.descriptor)
+        node_request = {key: value for key, value in self.request.items() if key not in ('app', 'namespace', 'probe_url')}
+        with self.assertRaises(ValueError):
+            registration_row(self.config, {**node_request, 'application_id': 'app-one'}, self.descriptor)
+
     def test_identity_conflicts_and_duplicate_registration_preserve_shared_rows(self):
         settings(self.config)
         row, _ = registration_row(self.config, self.request, self.descriptor)
