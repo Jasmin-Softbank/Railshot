@@ -109,6 +109,10 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertIn("github.event_name == 'workflow_dispatch'", jobs['multicloud']['if'])
         ci = yaml.safe_load((ROOT / '.github/workflows/railshot-ci.yml').read_text())
         self.assertIs(ci['jobs']['release']['with']['multicloud'], False)
+        self.assertEqual(ci['concurrency'], {
+            'group': 'railshot-ci-${{ github.event.pull_request.number || github.sha }}',
+            'cancel-in-progress': False,
+        })
         build = yaml.safe_load((ROOT / '.github/workflows/platform-containers.yml').read_text())
         steps = build['jobs']['publish']['steps']
         guard = next(step for step in steps if step.get('name') == 'Restrict publication to the trusted repository and ref')
