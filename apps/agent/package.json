@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node src/server.js",
     "mcp": "node src/mcp.js",
+    "mcp:local": "node src/mcp-local.js",
     "mcp:remote": "node src/remote-mcp.js",
     "test": "node --test",
     "build:insights": "node ui/build.mjs",
