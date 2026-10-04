@@ -493,6 +493,16 @@ def l3(spec, images, run_id, *, network=None):
                                         timeout=15, check=True).stdout)
             if set(attachments) != {net}:
                 raise ValueError("runtime container network identity changed")
+            if not attachments[net].get("IPAddress"):
+                state = json.loads(sh(["docker", "inspect", "--format", "{{json .State}}", name],
+                                      timeout=15, check=True).stdout)
+                if state.get("Status") == "exited":
+                    logs = sh(["docker", "logs", "--tail", "200", name])
+                    errs.append(f"{s['name']}: container exited before health check (exit code {state.get('ExitCode')})\n"
+                                f"{(logs.stdout + logs.stderr)[-6000:]}")
+                    continue
+                raise OperationError("GATE_ENVIRONMENT_UNAVAILABLE", component="gate", phase="runtime-network",
+                                     outcome="UNKNOWN", retry_policy="after_reconcile", side_effect="possible")
             address = ipaddress.IPv4Address(attachments[net]["IPAddress"])
             if not address.is_private or address.is_loopback or address.is_link_local:
                 raise ValueError("runtime container requires a private bridge address")
