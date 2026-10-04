@@ -38,7 +38,7 @@
 
 ### 결과가 불확실한 클라이언트 삭제의 재확인·재개
 
-앱 삭제와 환경 권한 회수가 모두 서버 기록에서 확인되어 클라이언트 단계까지 도달한 작업만 재개할 수 있습니다. 앱 또는 실행환경 권한 회수의 결과가 불확실하면 `REMOVAL_RECONCILIATION_REQUIRED`로 거절합니다. 데이터베이스 수정, 새 등록, 실패 상태 강제 초기화로 우회하지 않습니다.
+클라이언트 제거는 앱 삭제와 환경 권한 회수가 확인된 이후에만 재개합니다. 그 이전 단계에서 실패했다면 아래의 준비 및 초기 삭제 실패 재확인 절차로 앱·권한 잔여 자원을 먼저 검사합니다. 데이터베이스 수정, 새 등록, 실패 상태 강제 초기화로 우회하지 않습니다.
 
 1. 동일 소유자가 `POST /targets/{id}/reconciliations {operation_id}`를 요청합니다. 응답은 202 기존 작업 객체이며 `Location: /api/v1/operations/{id}`입니다. 작업의 `reconciliation`에는 `id,status,expires_at,resumable,blockers`가 들어갑니다. 확인 자격은 5분 동안 유효합니다.
 2. 서버는 `environment.inspect` 읽기 명령을 상태 보고 응답으로 전달합니다. 명령에는 기존 `operation_id`, 새 `reconciliation_id`, `generation`, 이전 시도가 있으면 `previous_attempt_id`가 있습니다. 클라이언트는 설치 파일·소유권·계정·서비스·터널이 온전하고 이전 제거 프로세스가 실행 중이지 않은지 확인합니다. 기존 불확실한 작업 기록만 지우고 성공으로 보고할 수 없습니다.
@@ -118,3 +118,9 @@ API 컨테이너는 root로 실행하지 않습니다. [게이트웨이 배치 �
 ## 검증 구분
 
 `apps/api/test/personal-environments.test.js`는 실제 로컬 HTTP 서버와 SQLite를 사용하며 외부 게이트웨이·배포·삭제 실행기를 모의 구현합니다. 소유권 복구, 등록토큰 회전/재사용 차단, readiness 판정, 동적 대상 배포, 삭제 경쟁 차단, 최종 제거 확인, 재시작 안전성을 확인합니다. 이 자동 시험은 실제 OpenStack·WireGuard·Argo·DNS 변경을 수행하지 않습니다. `deployment/scripts/tests/test_personal_runtime.py`는 기존 등록·갱신 정책 함수를 모의 Kubernetes API와 연결하여 신규 개인 정책 추가, 권한 확인, 다른 환경 보존, 결과 불명 재실행 차단과 권한 회수 순서를 검사합니다. 실제 환경 인수 결과는 별도 기록으로 구분합니다.
+
+### 준비 및 초기 삭제 실패 재확인
+
+소유자는 `POST /targets/{id}/reconciliations {scope:"runtime"}`으로 접수된 실행환경 증거를 다시 확인합니다. 응답은 `202`와 `PersonalRuntime`이며 대상 조회로 `runtime_preparation.status`를 관찰합니다. 등록 요청을 다시 실행하지 않고 실제 자원과 저장된 소유권을 읽어 검증합니다. 고객 클라이언트는 `/runtimes`에 `{generation,action:"reconcile"}`을 보낼 수 있습니다. 외부 변경을 시작하지 않았음이 확인되면 `resumable:true`가 반환되며, 클라이언트가 보관한 동일 증거와 `action:"resume"`으로 준비를 명시적으로 재개합니다. 부분 등록의 소유권이나 실행 결과가 불명확하면 계속 차단되며 운영자 확인이 필요합니다.
+
+앱 또는 실행환경 자격 회수 중 실패한 삭제도 기존 `operation_id` 재확인 경로를 사용합니다. 서버는 남은 자원의 원래 식별자, 앱 데이터 삭제 동의, 경로 제공자 실행 기록을 확인하고 `reconciliation.phase=services`를 반환합니다. 확인 중에는 외부 자원을 변경하지 않습니다. 재개 요청은 유효한 재확인 식별자가 있어야 하며, 완료된 앱을 반복 삭제하지 않고 원래 계획에 포함된 잔여 자원만 처리합니다. 교체된 자원, 진행 중인 제거 프로세스, 결과가 불명확한 외부 경로 변경은 자동 재개를 차단합니다. 고객 VM·K3s·일반 사용자 데이터는 이 복구 경로에서도 보존합니다.

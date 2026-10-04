@@ -21,6 +21,7 @@ const retained = [{ kind: 'CustomerServices', name: 'RailShot 외부 서비스' 
   { kind: 'AuditRecord', name: '작업 및 삭제 기록' }];
 
 export function createPersonalEnvironments({ store, adapter, applicationAdapter, launch, publicApplication, maxTargets = 20 }) {
+  const runtimeWorkers = new Set();
   function owned(state, id, owner) {
     const target = state.personal.targets[id];
     if (!owner || !target || target.session_id !== owner) absent();
@@ -69,20 +70,22 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
     const allowed = ['succeeded', 'blocked', 'unknown'];
     if (!allowed.includes(result?.status)) throw new Error('Runtime result invalid');
     return { status: result.status, stage: result.status === 'succeeded' ? 'complete' : /^[a-z_]{1,48}$/.test(result.stage || '') ? result.stage : 'verification',
-      cluster_verified: result.cluster_verified === true,
+      cluster_verified: result.cluster_verified === true, resumable: result.resumable === true,
       blockers: (result.blockers || []).filter((code) => /^[A-Z][A-Z0-9_]{0,95}$/.test(code)),
       verified_at: result.status === 'succeeded' ? result.verified_at : null };
   }
-  async function runRuntime(id, generation, fingerprint) {
+  async function runRuntime(id, generation, fingerprint, reconcileOnly = false) {
+    if (runtimeWorkers.has(id)) return;
+    runtimeWorkers.add(id);
     try {
       const target = await store.transaction((state) => {
         const row = state.personal.targets[id];
         if (held(row) || row.generation !== generation || row.runtime_fingerprint !== fingerprint) return null;
-        row.runtime_preparation = { status: 'running', stage: 'registration', blockers: [], verified_at: null };
+        row.runtime_preparation = { status: 'running', stage: reconcileOnly ? 'reconciliation' : 'registration', blockers: [], verified_at: null };
         return structuredClone(row);
       });
       if (!target) return;
-      let result = await adapter.prepareRuntime(target, target.runtime_evidence);
+      let result = await (reconcileOnly ? adapter.reconcileRuntime(target, target.runtime_evidence) : adapter.prepareRuntime(target, target.runtime_evidence));
       if (result.status === 'succeeded') result = await adapter.verifyRuntime(target, target.runtime_evidence);
       if (result.status === 'succeeded' && adapter.deploymentReady?.(target) !== true) result = { status: 'blocked', blockers: ['RUNTIME_APPLICATION_BINDING_INCOMPLETE'] };
       const visible = runtimeResult(result);
@@ -91,7 +94,8 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
         if (row.generation !== generation || row.runtime_fingerprint !== fingerprint || held(row)) return;
         row.runtime_preparation = visible;
         row.runtime_prepared = result.status === 'succeeded' && adapter.deploymentReady?.(row) === true;
-        row.runtime_binding = result.binding_sha256 || null;
+        // Keep known ownership when a readback fails; removal still needs it.
+        row.runtime_binding = result.binding_sha256 || row.runtime_binding || null;
         row.status = 'connecting';
       });
     } catch {
@@ -101,7 +105,20 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
         row.runtime_prepared = false;
         row.runtime_preparation = { status: 'unknown', stage: 'reconciliation', blockers: ['RUNTIME_PREPARATION_UNVERIFIED'], verified_at: null };
       });
-    }
+    } finally { runtimeWorkers.delete(id); }
+  }
+  async function reconcileRuntime(id, owner, authorization, generation) {
+    const accepted = await store.transaction((state) => {
+      const target = owner ? owned(state, id, owner) : authenticated(state, id, authorization, generation);
+      if (held(target) || !target.runtime_evidence || !target.runtime_fingerprint || !adapter?.reconcileRuntime)
+        fail('접수된 실행환경 증거가 있어야 준비 상태를 다시 확인할 수 있습니다.', 409, 'RUNTIME_EVIDENCE_REQUIRED');
+      if (runtimeWorkers.has(id) || ['queued', 'running'].includes(target.runtime_preparation?.status)) return { replay: true, target: structuredClone(target) };
+      target.runtime_prepared = false;
+      target.runtime_preparation = { status: 'queued', stage: 'reconciliation', blockers: [], verified_at: null };
+      return { target: structuredClone(target) };
+    });
+    if (!accepted.replay) launch(() => runRuntime(id, accepted.target.generation, accepted.target.runtime_fingerprint, true));
+    return runtimeView(accepted.target);
   }
   function clientPhaseComplete(state, target, operation) {
     const plan = state.plans[operation.plan_id];
@@ -113,6 +130,57 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
       && apps(state, target).length === 0
       && (!target.runtime_binding || operation.steps.some((step) => step.name === 'runtime:revoke' && step.status === 'succeeded'))
       && (operation.client_command_issued === true || target.command?.kind === 'environment.delete' && target.command.operation_id === operation.id);
+  }
+  function initialDeletion(state, target, operation) {
+    const plan = state.plans[operation.plan_id];
+    return !operation.client_command_issued && target.command?.kind !== 'environment.delete'
+      && !operation.steps.some((step) => step.name === 'client') && operation.kind === 'target-lifecycle' && operation.action === 'delete'
+      && operation.delete_data === true && operation.session_id === target.session_id && target.deletion_operation_id === operation.id
+      && plan?.kind === 'target-lifecycle' && plan.session_id === target.session_id && plan.public.target_id === target.id
+      && Array.isArray(plan.children) && apps(state, target).every((app) => plan.children.some((child) => child.application_id === app.id));
+  }
+  async function reconcileDeletionServices(id, operationId, checkId) {
+    const state = store.read(), target = state.personal.targets[id], operation = state.operations[operationId], plan = state.plans[operation.plan_id];
+    const children = [], completed = [], blockers = [];
+    let runtimeRevoked = false, runtimeResume = false;
+    try {
+      if (plan.children.some((entry) => state.applications[entry.application_id]?.status !== 'deleted')) await adapter.restoreApplications?.(target);
+      for (const entry of plan.children) {
+        const app = state.applications[entry.application_id];
+        if (app?.status === 'deleted' && operation.steps.some((step) => step.name === `application:${app.id}` && step.status === 'succeeded')) continue;
+        if (!app || app.session_id !== target.session_id || !applicationAdapter?.reconcileLifecycle) throw new Error('Application reconciliation unavailable');
+        const result = await applicationAdapter.reconcileLifecycle(app, entry.plan, { id: entry.operation_id });
+        if (result.status === 'succeeded' && !(result.residuals || []).length) { completed.push(app.id); continue; }
+        if (!result.resumable) throw new Error('Application outcome remains unknown');
+        if (result.resume_mode === 'fresh') {
+          children.push({ application_id: app.id, operation_id: randomUUID(), plan: await applicationAdapter.planLifecycle(app, { id: randomUUID(), action: 'delete' }) });
+        } else if (result.resume_mode === 'existing') children.push({ ...entry, resume: true });
+        else throw new Error('Application reconciliation mode invalid');
+      }
+      if (!children.length && target.runtime_binding && !operation.steps.some((step) => step.name === 'runtime:revoke' && step.status === 'succeeded')) {
+        if (!adapter.inspectRuntimeRemoval) throw new Error('Runtime reconciliation unavailable');
+        const result = await adapter.inspectRuntimeRemoval(target);
+        runtimeRevoked = result.status === 'succeeded' && result.revocation_verified === true && !result.residuals?.length;
+        runtimeResume = !runtimeRevoked && result.resumable === true;
+        if (!runtimeRevoked && !runtimeResume) throw new Error('Runtime outcome remains unknown');
+      }
+    } catch { blockers.push('REMOVAL_RESIDUALS_UNVERIFIED'); }
+    await store.transaction((current) => {
+      const row = current.personal.targets[id], op = current.operations[operationId], check = op.reconciliation;
+      if (row.status !== 'attention' || check?.id !== checkId || check.status !== 'pending') return;
+      for (const appId of completed) {
+        current.applications[appId].status = 'deleted';
+        op.steps.push({ name: `application:${appId}`, status: 'succeeded' });
+      }
+      if (runtimeRevoked) {
+        row.runtime_prepared = false; row.runtime_preparation = { status: 'revoked', stage: 'complete', blockers: [], verified_at: null };
+        op.steps.push({ name: 'runtime:revoke', status: 'succeeded' });
+      }
+      Object.assign(check, { status: blockers.length ? 'blocked' : 'ready', resumable: blockers.length === 0,
+        blockers, expires_at: new Date(Date.now() + 300000).toISOString() });
+      current.plans[op.plan_id].recovery = { reconciliation_id: checkId, children, runtime_resume: runtimeResume };
+      row.blockers = blockers; op.updated_at = now();
+    });
   }
   function updateAttempt(operation, status, stage, errorCode) {
     const attempt = operation.attempts?.find((entry) => entry.id === operation.active_attempt_id);
@@ -162,7 +230,8 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
         return { record: structuredClone(op), replay: true };
       }
       const check = op.reconciliation;
-      if (target.status !== 'attention' || !['unknown', 'blocked'].includes(op.status) || !clientPhaseComplete(state, target, op)
+      const initial = check?.phase === 'services' && initialDeletion(state, target, op);
+      if (target.status !== 'attention' || !['unknown', 'blocked'].includes(op.status) || !(clientPhaseComplete(state, target, op) || initial)
           || check?.id !== input.reconciliation_id || !check.resumable || check.status !== 'ready'
           || Date.parse(check.expires_at) <= Date.now() || input.confirmation !== target.label)
         fail('최신 삭제 재확인 결과를 먼저 확인하세요.', 409, 'REMOVAL_RECONCILIATION_REQUIRED');
@@ -171,7 +240,16 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
       target.resume_requests ||= {}; target.resume_requests[requestKey] = { fingerprint, operation_id: op.id };
       if (!op.attempts?.length) op.attempts = [{ id: 'legacy', status: op.status, stage: op.stage, error_code: op.error?.code || 'REMOVAL_UNVERIFIED', updated_at: op.updated_at }];
       check.resumable = false; check.status = 'used';
-      if (op.client_removed_verified) {
+      if (initial) {
+        // The refreshed child plans retain exact application identities and the
+        // original data-deletion consent. Completed children are never repeated.
+        const plan = state.plans[op.plan_id];
+        if (plan.recovery?.reconciliation_id !== check.id) fail('삭제 재개 근거가 일치하지 않습니다.', 409, 'REMOVAL_RECONCILIATION_REQUIRED');
+        plan.children = plan.children.map((entry) => plan.recovery.children.find((child) => child.application_id === entry.application_id) || entry);
+        op.runtime_resume = plan.recovery.runtime_resume === true;
+        Object.assign(op, { status: 'running', stage: 'services', error: null, updated_at: now() }); target.status = 'deleting';
+        return { record: structuredClone(op), initial: true, plan: structuredClone(plan) };
+      } else if (op.client_removed_verified) {
         op.active_attempt_id = randomUUID();
         op.attempts.push({ id: op.active_attempt_id, status: 'running', stage: 'gateway', created_at: now(), updated_at: now() });
         Object.assign(op, { status: 'running', stage: 'gateway', error: null, updated_at: now() }); target.status = 'deleting';
@@ -179,6 +257,7 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
       return { record: structuredClone(op), gateway: op.client_removed_verified === true };
     });
     if (!accepted.replay && accepted.gateway) launch(() => finishGateway(id, accepted.record.id, accepted.record.active_attempt_id));
+    if (!accepted.replay && accepted.initial) launch(() => runDeletion(accepted.record, accepted.plan));
     return visibleOperation(accepted.record);
   }
   async function runDeletion(record, plan) {
@@ -186,8 +265,10 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
       await store.transaction((state) => { Object.assign(state.operations[record.id], { status: 'running', stage: 'services', updated_at: now() }); });
       for (const entry of plan.children) {
         const app = store.read().applications[entry.application_id];
-        await applicationAdapter.verifyLifecyclePlan(app, entry.plan);
-        const result = await applicationAdapter.applyLifecycle(app, entry.plan, { id: entry.operation_id, deleteData: true });
+        if (app.status === 'deleted' && store.read().operations[record.id].steps.some((step) => step.name === `application:${app.id}` && step.status === 'succeeded')) continue;
+        if (!entry.resume) await applicationAdapter.verifyLifecyclePlan(app, entry.plan);
+        const result = await (entry.resume ? applicationAdapter.resumeLifecycle(app, entry.plan, { id: entry.operation_id, deleteData: true })
+          : applicationAdapter.applyLifecycle(app, entry.plan, { id: entry.operation_id, deleteData: true }));
         if (result.status !== 'succeeded' || (result.residuals || []).length) throw new Error('Application removal unverified');
         await store.transaction((state) => {
           state.applications[app.id].status = 'deleted';
@@ -196,9 +277,9 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
         });
       }
       const target = store.read().personal.targets[record.target_id];
-      if (target.runtime_binding) {
+      if (target.runtime_binding && !store.read().operations[record.id].steps.some((step) => step.name === 'runtime:revoke' && step.status === 'succeeded')) {
         await store.transaction((state) => { state.operations[record.id].stage = 'runtime'; });
-        const revoked = await adapter.removeRuntime(target);
+        const revoked = await (record.runtime_resume ? adapter.resumeRuntimeRemoval(target) : adapter.removeRuntime(target));
         if (revoked.status !== 'succeeded' || revoked.revocation_verified !== true || revoked.residuals.length) throw new Error('Runtime revocation unverified');
         await store.transaction((state) => {
           state.personal.targets[target.id].runtime_prepared = false;
@@ -381,6 +462,8 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
     },
     runtimeStatus(id, authorization) { return runtimeView(authenticated(store.read(), id, authorization)); },
     async prepareRuntime(id, input, authorization) {
+      if (exact(input, ['generation', 'action']) && Number.isSafeInteger(input.generation) && input.action === 'reconcile')
+        return reconcileRuntime(id, null, authorization, input.generation);
       if (exact(input, ['generation', 'progress']) && Number.isSafeInteger(input.generation)) {
         const progress = input.progress;
         if (!exact(progress, ['stage', 'status'], ['blockers']) || !['client_selection', 'client_installation', 'client_verification'].includes(progress.stage)
@@ -395,18 +478,20 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
         });
       }
       const fields = ['resource_id', 'private_ipv4', 'management_network', 'placement', 'architecture', 'initialization', 'ssh_user', 'ssh_port', 'ssh_host_key'];
-      if (!exact(input, ['generation', 'evidence']) || !Number.isSafeInteger(input.generation) || !exact(input.evidence, fields)
+      if (!exact(input, ['generation', 'evidence'], ['action']) || input.action !== undefined && input.action !== 'resume'
+          || !Number.isSafeInteger(input.generation) || !exact(input.evidence, fields)
           || !['resource_id', 'management_network', 'placement'].every((key) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.evidence[key] || ''))
           || isIP(input.evidence.private_ipv4) !== 4 || input.evidence.architecture !== 'amd64'
           || !['cloud-init', 'preconfigured'].includes(input.evidence.initialization) || input.evidence.ssh_user !== 'railshot-runtime' || input.evidence.ssh_port !== 2223
           || !/^ssh-ed25519 [A-Za-z0-9+/]{68}={0,2}$/.test(input.evidence.ssh_host_key || '')) fail('실행환경 준비 증거를 확인하세요.');
-      const fingerprint = hash(input);
+      const fingerprint = hash({ generation: input.generation, evidence: input.evidence });
       const accepted = await store.transaction((state) => {
         const target = authenticated(state, id, authorization, input.generation);
         if (held(target)) fail('삭제 또는 확인 중인 환경입니다.', 409, 'TARGET_UNAVAILABLE');
         if (!publicTarget(target).capabilities.openstack_control) fail('OpenStack 제어 연결을 먼저 확인하세요.', 409, 'TARGET_UNAVAILABLE');
         if (target.runtime_fingerprint) {
           if (target.runtime_fingerprint !== fingerprint) fail('이미 준비 요청에 연결된 실행환경입니다.', 409, 'RUNTIME_BINDING_CONFLICT');
+          if (input.action === 'resume' && target.runtime_preparation?.resumable !== true) fail('읽기 전용 재확인으로 재개 가능 여부를 먼저 확인하세요.', 409, 'RUNTIME_RECONCILIATION_REQUIRED');
           if (target.runtime_preparation?.status !== 'blocked') return { replay: true, target: structuredClone(target) };
         }
         target.runtime_fingerprint = fingerprint; target.runtime_evidence = input.evidence; target.runtime_prepared = false;
@@ -443,22 +528,30 @@ export function createPersonalEnvironments({ store, adapter, applicationAdapter,
       });
     },
     async reconcile(id, input, owner) {
+      if (exact(input, ['scope']) && input.scope === 'runtime') return reconcileRuntime(id, owner);
       if (!exact(input, ['operation_id']) || !uuid(input.operation_id)) fail('기존 삭제 작업을 지정하세요.');
-      return store.transaction((state) => {
+      const accepted = await store.transaction((state) => {
         const target = owned(state, id, owner), operation = state.operations[input.operation_id];
         if (!operation || operation.session_id !== owner || operation.target_id !== id || operation.kind !== 'target-lifecycle') absent();
-        if (target.status !== 'attention' || !['unknown', 'blocked'].includes(operation.status) || !clientPhaseComplete(state, target, operation))
+        const initial = initialDeletion(state, target, operation);
+        if (target.status !== 'attention' || !['unknown', 'blocked'].includes(operation.status) || !(clientPhaseComplete(state, target, operation) || initial))
           fail('서비스 및 실행환경 권한 제거부터 확인해야 합니다. 자동 재실행할 수 없습니다.', 409, 'REMOVAL_RECONCILIATION_REQUIRED');
-        if (operation.reconciliation?.status === 'pending' && Date.parse(operation.reconciliation.expires_at) > Date.now()) return visibleOperation(operation);
+        if (operation.reconciliation?.status === 'pending' && Date.parse(operation.reconciliation.expires_at) > Date.now()) return { operation: visibleOperation(operation) };
         const check = { id: randomUUID(), status: operation.client_removed_verified ? 'ready' : 'pending', resumable: operation.client_removed_verified === true,
           expires_at: new Date(Date.now() + 300000).toISOString(), blockers: [] };
         updateAttempt(operation, operation.status, operation.stage, operation.error?.code);
+        if (initial) {
+          check.phase = 'services'; operation.reconciliation = check; operation.updated_at = now();
+          return { operation: visibleOperation(operation), initial: true, checkId: check.id };
+        }
         operation.client_command_issued = true;
         operation.reconciliation = check; operation.updated_at = now();
         if (!operation.client_removed_verified) target.command = { id: check.id, reconciliation_id: check.id, operation_id: operation.id,
           kind: 'environment.inspect', generation: target.generation, ...(operation.active_attempt_id ? { previous_attempt_id: operation.active_attempt_id } : {}) };
-        return visibleOperation(operation);
+        return { operation: visibleOperation(operation) };
       });
+      if (accepted.initial) launch(() => reconcileDeletionServices(id, input.operation_id, accepted.checkId));
+      return accepted.operation;
     },
     async remove(id, input, key, owner) {
       if (input?.action === 'resume') return resumeDeletion(id, input, key, owner);

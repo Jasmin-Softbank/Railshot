@@ -528,6 +528,26 @@ def validate(binding, action, expected_plan):
         validate_locked(binding, action, expected_plan, config, dns_config, root)
 
 
+def inspect_execution(binding, action, expected_plan):
+    """Read a reviewed route intent; an uncertain provider write is never replayed."""
+    checked(binding, action)
+    config = config_at(binding)
+    with ExitStack() as stack:
+        root = stack.enter_context(edge.locked(config))
+        dns_config = dns.config_at(binding['ingress']['dns_config_file'])
+        stack.enter_context(dns.locked(dns_config))
+        _, intent = reviewed_plan(binding, action, expected_plan, root)
+        if intent['phase'] == 'succeeded':
+            receipt = intent['receipt']
+            require(receipt.get('status') == 'succeeded' and receipt.get('application_id') == binding['application_id']
+                    and receipt.get('plan_sha256') == expected_plan['plan_sha256']
+                    and receipt.get('phase') == {'stop': 'stopped', 'start': 'started', 'delete': 'deleted'}[action],
+                    'completed lifecycle receipt differs')
+            return 'succeeded'
+        validate_locked(binding, action, expected_plan, config, dns_config, root)
+        return 'not_started'
+
+
 def execute(binding, action, expected_plan):
     checked(binding, action)
     config = config_at(binding)

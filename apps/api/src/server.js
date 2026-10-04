@@ -241,7 +241,11 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
             if (child === 'instances') { json(response, 200, { items: await products.personal.instances(id, ownerId), next_marker: null }); return; }
             if (child === 'applications') { json(response, 200, { items: products.personal.applications(id, ownerId), next_marker: null }); return; }
             if (child === 'enrollments') { const result = await products.personal.enrollment(id, await jsonInput(request), ownerId); json(response, 201, result, { Location: `/api/v1/targets/${id}` }); return; }
-            if (child === 'reconciliations') { const result = await products.personal.reconcile(id, await jsonInput(request), ownerId); json(response, 202, result, { Location: `/api/v1/operations/${result.id}`, 'Retry-After': '2' }); return; }
+            if (child === 'reconciliations') {
+              const result = await products.personal.reconcile(id, await jsonInput(request), ownerId);
+              const location = result.id ? `/api/v1/operations/${result.id}` : `/api/v1/targets/${result.target_id}`;
+              json(response, 202, result, { Location: location, 'Retry-After': '2' }); return;
+            }
             if (child === 'plans') { const result = await products.personal.plan(id, await jsonInput(request), ownerId); json(response, 201, result, { Location: `/api/v1/plans/${result.id}` }); return; }
             accepted(response, 'operations', await products.personal.remove(id, await jsonInput(request), requestKey(request), ownerId), requestId, 'delete'); return;
           }

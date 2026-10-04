@@ -3,7 +3,7 @@ name: Publish platform containers
 on:
   workflow_call:
     inputs:
-      components: {type: string, default: '["dashboard","api","mcp","ci-runner"]'}
+      components: {type: string, default: '["dashboard","api","mcp","personal-gateway","ci-runner"]'}
       publish: {type: boolean, default: true}
       deploy: {type: boolean, default: true}
       multicloud: {type: boolean, default: false}
@@ -17,7 +17,7 @@ on:
       components:
         description: JSON array of components to build
         type: string
-        default: '["dashboard","api","mcp","ci-runner"]'
+        default: '["dashboard","api","mcp","personal-gateway","ci-runner"]'
       publish:
         description: Publish tested images to GHCR (trusted branch only)
         type: boolean
@@ -74,6 +74,7 @@ jobs:
           PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
           PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
           PROVIDER_TARGETS: ${{ vars.RAILSHOT_PROVIDER_TARGETS || '{}' }}
+          PERSONAL_ENABLED: ${{ vars.RAILSHOT_PERSONAL_ENABLED || 'false' }}
           VERIFY_REF: ${{ vars.RAILSHOT_PLATFORM_VERIFY_REF }}
           VERIFY_ROLE: ${{ vars.RAILSHOT_PLATFORM_VERIFY_ROLE_ARN }}
           VERIFY_VERSION: ${{ vars.RAILSHOT_PLATFORM_VERIFY_DOCUMENT_VERSION }}
@@ -88,7 +89,7 @@ jobs:
           python3 - <<'PYCODE'
           import json, os, re
           components = json.loads(os.environ['COMPONENTS'])
-          allowed = {'dashboard', 'api', 'mcp', 'ci-runner'}
+          allowed = {'dashboard', 'api', 'mcp', 'personal-gateway', 'ci-runner'}
           assert isinstance(components, list) and components and all(isinstance(value, str) for value in components), 'components must be a nonempty string array'
           assert len(components) == len(set(components)) and set(components) <= allowed, 'components must be unique supported names'
           if os.environ['SKIP_BUILD'] == 'true':
@@ -100,6 +101,7 @@ jobs:
               assert os.environ.get('MULTICLOUD_ENABLED') == 'true', 'multicloud release requires RAILSHOT_MULTICLOUD_RELEASE=true'
               assert os.environ['DEPLOY'] == 'true', 'multicloud release requires platform deployment'
           if os.environ['DEPLOY'] == 'true':
+              assert os.environ['PERSONAL_ENABLED'] in {'true', 'false'}, 'RAILSHOT_PERSONAL_ENABLED must be true or false'
               assert os.environ['GITHUB_REPOSITORY'] == 'Jasmin-Softbank/Railshot' and os.environ['GITHUB_REPOSITORY_ID'] == '1400202256', 'deploy requires the registered platform repository'
               assert os.environ['VERIFY_REF'] and os.environ['GITHUB_REF'] == os.environ['VERIFY_REF'], 'deploy requires the exact OIDC trusted ref'
               assert os.environ['VERIFY_ROLE'] == 'arn:aws:iam::721622471953:role/railshot-platform-verifier', 'verification bootstrap role is required'
@@ -151,13 +153,17 @@ jobs:
           PLATFORM_TARGET: ${{ vars.RAILSHOT_PLATFORM_TARGET_ID }}
           PLATFORM_PORT: ${{ vars.RAILSHOT_PLATFORM_NODE_PORT }}
           PROVIDER_TARGETS: ${{ vars.RAILSHOT_PROVIDER_TARGETS || '{}' }}
+          PERSONAL_ENABLED: ${{ vars.RAILSHOT_PERSONAL_ENABLED || 'false' }}
         run: |
+          personal=()
+          if [ "$PERSONAL_ENABLED" = true ]; then personal=(--personal); fi
           python3 deployment/scripts/publish-platform.py \
             --artifacts "$RUNNER_TEMP/platform-published" \
             --source-sha "$GITHUB_SHA" \
             --target-id "$PLATFORM_TARGET" \
             --dashboard-node-port "$PLATFORM_PORT" \
-            --provider-targets "$PROVIDER_TARGETS"
+            --provider-targets "$PROVIDER_TARGETS" \
+            "${personal[@]}"
 
       - name: Assume the fixed read-only verification role
         if: steps.source.outputs.admitted == 'true'

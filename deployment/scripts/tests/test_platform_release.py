@@ -62,7 +62,7 @@ class PlatformReleaseTests(unittest.TestCase):
                "VERIFY_VERSION": "1", "VERIFY_HASH": "e" * 64,
                "RELEASE_VERSION": "", "RELEASE_HASH": "",
                "COMPONENTS": '["dashboard","api"]', "PLATFORM_TARGET": "k3s-aws", "PLATFORM_PORT": "31080",
-               "PROVIDER_TARGETS": "{}",
+               "PROVIDER_TARGETS": "{}", "PERSONAL_ENABLED": "false",
                **(overrides or {})}
         return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], cwd=self.repo,
                               env=env, text=True, capture_output=True)
@@ -238,6 +238,52 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         after = json.loads(self.git("show", f"{self.remote_revision()}:{WORKLOAD}").stdout)
         self.assertEqual(next(x for x in after['items'] if x['kind'] == 'Deployment' and x['metadata']['name'] == 'railshot-dashboard'), dashboard)
+
+    def test_personal_mode_toggle_rerenders_api_even_when_only_dashboard_changes(self):
+        self.assertEqual(self.deploy().returncode, 0)
+        self.git('switch', '--detach', self.source_sha)
+        (self.artifacts / 'personal-gateway.json').write_text(json.dumps({'personal-gateway':
+            'ghcr.io/jasmin-softbank/railshot-personal-gateway@sha256:' + 'b' * 64}))
+        enabled = self.deploy({'PERSONAL_ENABLED': 'true'})
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        declaration = json.loads(self.git('show', f'{self.remote_revision()}:{WORKLOAD}').stdout)
+        api = next(item for item in declaration['items'] if item['kind'] == 'Deployment'
+                   and item['metadata']['name'] == 'railshot-api')
+        self.assertTrue(any(item['name'] == 'personal-gateway'
+                            for item in api['spec']['template']['spec']['initContainers']))
+        self.git('switch', '--detach', self.source_sha)
+        (self.artifacts / 'api.json').unlink()
+        (self.artifacts / 'personal-gateway.json').unlink()
+        (self.artifacts / 'dashboard.json').write_text(json.dumps({'dashboard':
+            'ghcr.io/jasmin-softbank/railshot-dashboard@sha256:' + 'c' * 64}))
+        still_enabled = self.deploy({'PERSONAL_ENABLED': 'true'})
+        self.assertEqual(still_enabled.returncode, 0, still_enabled.stderr)
+        declaration = json.loads(self.git('show', f'{self.remote_revision()}:{WORKLOAD}').stdout)
+        api = next(item for item in declaration['items'] if item['kind'] == 'Deployment'
+                   and item['metadata']['name'] == 'railshot-api')
+        self.assertTrue(any(item['name'] == 'personal-gateway'
+                            for item in api['spec']['template']['spec']['initContainers']))
+        self.git('switch', '--detach', self.source_sha)
+        (self.artifacts / 'dashboard.json').write_text(json.dumps({'dashboard':
+            'ghcr.io/jasmin-softbank/railshot-dashboard@sha256:' + 'd' * 64}))
+        disabled = self.deploy({'PERSONAL_ENABLED': 'false'})
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        declaration = json.loads(self.git('show', f'{self.remote_revision()}:{WORKLOAD}').stdout)
+        api = next(item for item in declaration['items'] if item['kind'] == 'Deployment'
+                   and item['metadata']['name'] == 'railshot-api')
+        self.assertFalse(any(item['name'] == 'personal-gateway'
+                             for item in api['spec']['template']['spec']['initContainers']))
+        self.assertFalse(any(item['metadata']['name'].startswith('railshot-personal-')
+                             for item in declaration['items']))
+
+    def test_initial_personal_enablement_requires_both_runtime_images(self):
+        self.assertEqual(self.deploy().returncode, 0)
+        self.git('switch', '--detach', self.source_sha)
+        (self.artifacts / 'api.json').unlink()
+        (self.artifacts / 'personal-gateway.json').write_text(json.dumps({'personal-gateway':
+            'ghcr.io/jasmin-softbank/railshot-personal-gateway@sha256:' + 'b' * 64}))
+        result = self.deploy({'PERSONAL_ENABLED': 'true'})
+        self.assertNotEqual(result.returncode, 0)
 
     def test_dashboard_only_release_preserves_preparation_hook_without_changing_api(self):
         self.assertEqual(self.deploy().returncode, 0)

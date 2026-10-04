@@ -222,6 +222,30 @@ def prepare_runtime(config, args):
     if current.get('deployable') is True and current.get('runtime_preparation', {}).get('status') == 'succeeded':
         return
     existing = current.get('runtime_preparation', {})
+    evidence_path = CONFIG / 'runtime-evidence.json'
+    if existing.get('status') in ('unknown', 'blocked') and (evidence_path.exists() or existing.get('client_reported_ready')):
+        if not evidence_path.exists():
+            # Older clients did not persist their submitted evidence. Recover it
+            # from the immutable local binding and installed relay host key.
+            runtime = json.loads(read_private(CONFIG / 'runtime.json'))
+            evidence = {k: runtime[k] for k in ('resource_id', 'private_ipv4', 'management_network', 'placement', 'architecture', 'initialization')}
+            evidence.update(ssh_user='railshot-runtime', ssh_port=2223,
+                            ssh_host_key=' '.join((CONFIG / 'runtime_access_host_key.pub').read_text().split()[:2]))
+            atomic_private_write(evidence_path, json.dumps(evidence).encode())
+        api(config['api_url'], path, config['client_token'], {'generation': config['generation'], 'action': 'reconcile'}, **options)
+        deadline = time.monotonic() + 240
+        while True:
+            current = api(config['api_url'], path, config['client_token'], method='GET', **options)
+            existing = current.get('runtime_preparation', {})
+            if existing.get('status') not in ('queued', 'running'):
+                break
+            require(time.monotonic() < deadline, 'RUNTIME_RECONCILIATION_PENDING')
+            time.sleep(5)
+        if existing.get('status') != 'succeeded':
+            require(existing.get('resumable') is True, 'RUNTIME_PRIOR_OUTCOME_UNKNOWN')
+            api(config['api_url'], path, config['client_token'], {'generation': config['generation'],
+                'action': 'resume', 'evidence': json.loads(read_private(evidence_path))}, **options)
+            existing = {'status': 'queued', 'stage': 'registration'}
     require(existing.get('status') != 'unknown', 'RUNTIME_PRIOR_OUTCOME_UNKNOWN')
     submitted = existing.get('stage') in ('registration', 'verification', 'complete')
     if not submitted:
@@ -246,6 +270,7 @@ def prepare_runtime(config, args):
             except Exception:
                 pass
             raise
+        atomic_private_write(evidence_path, json.dumps(evidence).encode())
         api(config['api_url'], path, config['client_token'], {'generation': config['generation'], 'evidence': evidence}, **options)
     deadline = time.monotonic() + 900
     while time.monotonic() < deadline:

@@ -16,7 +16,8 @@ def image_ref(images, name):
     return value
 
 
-def render(images, target_id, dashboard_node_port=None, provider_targets=None, prepare_api_rollout=False):
+def render(images, target_id, dashboard_node_port=None, provider_targets=None, prepare_api_rollout=False,
+           personal=False):
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", target_id):
         raise ValueError("operator-approved target_id is required")
     if dashboard_node_port is not None and not 30000 <= dashboard_node_port <= 32767:
@@ -34,10 +35,31 @@ def render(images, target_id, dashboard_node_port=None, provider_targets=None, p
         selections[provider] = selected
     for name in ("dashboard", "api"):
         image_ref(images, name)
+    if personal:
+        image_ref(images, "personal-gateway")
     if "mcp" in images:
         image_ref(images, "mcp")
     source = Path(__file__).resolve().parents[1] / "manifests/platform.yaml"
     documents = list(yaml.safe_load_all(source.read_text()))
+    if not personal:
+        documents = [document for document in documents if document.get('metadata', {}).get('name') not in {
+            'railshot-personal-gateway', 'railshot-personal-wireguard'}]
+        api = next(document for document in documents
+                   if document['kind'] == 'Deployment' and document['metadata']['name'] == 'railshot-api')
+        pod = api['spec']['template']['spec']
+        pod['initContainers'] = [item for item in pod.get('initContainers', [])
+                                 if item['name'] != 'personal-gateway']
+        for container in pod['containers'] + pod.get('initContainers', []):
+            container['env'] = [item for item in container.get('env', [])
+                                if item['name'] != 'RAILSHOT_PERSONAL_CONFIG']
+            container['volumeMounts'] = [item for item in container.get('volumeMounts', [])
+                                         if not item['name'].startswith('personal-')]
+        pod['volumes'] = [item for item in pod.get('volumes', [])
+                          if not item['name'].startswith('personal-')]
+        policy = next(document for document in documents
+                      if document['kind'] == 'NetworkPolicy' and document['metadata']['name'] == 'railshot-api-private')
+        policy['spec']['ingress'] = [item for item in policy['spec']['ingress']
+                                     if not any(port.get('port') == 51820 for port in item.get('ports', []))]
     if "mcp" not in images:
         documents = [document for document in documents if not
                      (document['metadata']['name'] == 'railshot-mcp' and document['kind'] == 'Deployment')
@@ -52,10 +74,12 @@ def render(images, target_id, dashboard_node_port=None, provider_targets=None, p
             document["spec"]["ports"][0]["nodePort"] = dashboard_node_port
         if document["kind"] != "Deployment":
             continue
-        container = document["spec"]["template"]["spec"]["containers"][0]
-        container["image"] = images[container["name"]]
+        containers = document["spec"]["template"]["spec"]["containers"]
+        for container in containers:
+            container["image"] = images[container["name"]]
         for init in document["spec"]["template"]["spec"].get("initContainers", []):
-            init["image"] = images["api"]
+            init["image"] = images[init["name"]] if init["name"] in images else images["api"]
+        container = containers[0]
         for item in container.get("env", []):
             if item["name"] == "RAILSHOT_TARGET_ID":
                 item["value"] = target_id
@@ -132,6 +156,7 @@ if __name__ == "__main__":
     parser.add_argument("--dashboard-node-port", type=int, help="optional allocated ALB backend port; API stays private")
     parser.add_argument("--provider-targets", default="{}", help="optional JSON provider-to-target map; enable only after CI and CD registration")
     parser.add_argument('--prepare-api-rollout', action='store_true', help='prewarm the API image and prepare the existing single writer')
+    parser.add_argument('--personal', action='store_true', help='enable the operator-preflighted personal gateway and configuration')
     args = parser.parse_args()
     try:
         if args.runner_count != 1 and not args.build_controller:
@@ -141,14 +166,15 @@ if __name__ == "__main__":
         if not isinstance(provider_targets, dict):
             raise ValueError("provider targets must be a JSON object")
         if args.build_runner_name or args.build_controller:
-            if args.dashboard_node_port or provider_targets:
+            if args.dashboard_node_port or provider_targets or args.personal:
                 raise ValueError("build runner cannot configure dashboard ports or provider targets")
             output = (render_build_controller(images, args.runner_url, args.build_node, args.runner_count) if args.build_controller
                       else render_build_runner(images, args.build_runner_name, args.runner_url, args.build_node))
         else:
             if args.runner_url or args.build_node:
                 raise ValueError("runner options require --build-runner-name or --build-controller")
-            output = render(images, args.target_id, args.dashboard_node_port, provider_targets, args.prepare_api_rollout)
+            output = render(images, args.target_id, args.dashboard_node_port, provider_targets,
+                            args.prepare_api_rollout, args.personal)
         print(json.dumps(output, indent=2))
     except (ValueError, TypeError, KeyError) as error:
         parser.exit(2, f"BLOCKED: {error}\n")

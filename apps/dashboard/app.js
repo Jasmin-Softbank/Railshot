@@ -28,7 +28,7 @@ function showView(name) {
   if (sessionReady && ['monitor', 'deploy'].includes(name)) loadEnvironments();
   else stopEnvironmentPolling();
   if (sessionReady && name === 'personal') { loadOwnerInfo(); loadOwnedTargets(); }
-  else stopOwnedTargetPolling();
+  else { stopOwnedTargetPolling(); stopRuntimeReconciliationPolling(); }
   if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
   if (sessionReady && name === 'monitor' && consoleTab === 'work') refreshEvents();
 }
@@ -81,6 +81,7 @@ let targets = [], observations = new Map(), environmentController, environmentTi
 let ownedTargets = [], ownedTargetError = null, ownedTargetController, ownedTargetTimer, selectedOwnedTarget = null;
 let selectedOwnedDetail = null, ownedObservation = null, ownedApplications = [], enrollmentTargetId = null, environmentDeleteDraft = null;
 let environmentDeleteOperation = null, environmentDeletePlanController = null, environmentDeleteReconciliationTimer;
+let runtimeReconciliationTimer, runtimeReconciliationBusy = false;
 let enrollmentRequestGeneration = 0, ownedTargetSelectionGeneration = 0;
 let environmentRegistrationTargetId = null;
 let ownerRecoveryConfigured = false, ownerInfoGeneration = 0;
@@ -185,7 +186,8 @@ function selectedOption() {
   return deploymentOptions.find((item) => item.environment === selected.environment && item.provider === selected.provider);
 }
 function selectedProfiles() {
-  return profiles.filter((item) => item.provider === deploymentSelection().provider && item.deployment_supported);
+  const selected = deploymentSelection();
+  return selected.environment === 'cloud' ? profiles.filter((item) => item.provider === selected.provider && item.deployment_supported) : [];
 }
 function selectedProfile() { const matches = selectedProfiles(); return matches.length === 1 ? matches[0] : null; }
 function planCost(plan) {
@@ -526,7 +528,6 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else if (selected.environment === 'onprem' && !selected.targetId) error.textContent = '배포할 등록 OpenStack 환경을 선택하세요.';
   else if (selected.environment === 'onprem' && (ownedTargetError || option?.status !== 'ready' || option?.deployable !== true)) error.textContent = document.querySelector('#connection-status').textContent;
   else if (selected.environment === 'cloud' && (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available))) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
-  else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
     invalidateReview();
     const generation = reviewGeneration, source = selectedSource;
@@ -538,7 +539,9 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
       app = applicationName.value.trim() || sourceApplication(source);
       if (!APP_NAME.test(app)) throw new Error(APP_NAME_MESSAGE);
       if (!profile) {
-        const { data } = await request(`/api/v1/applications/resolve?${new URLSearchParams({ ...selected, app })}`);
+        const query = new URLSearchParams({ environment: selected.environment, provider: selected.provider, app });
+        if (selected.targetId) query.set('target_id', selected.targetId);
+        const { data } = await request(`/api/v1/applications/resolve?${query}`);
         if (generation !== reviewGeneration) return;
         if (data.app !== app || !resourceId(data.environment_target_id) || !Object.hasOwn(data, 'application'))
           throw new Error('기존 앱 조회 결과가 선택 내용과 일치하지 않습니다.');
@@ -1553,7 +1556,7 @@ async function loadEnvironmentDeleteOperation(target = selectedOwnedDetail) {
     if (selectedOwnedDetail?.id !== target.id) return null;
     environmentDeleteOperation = data; renderEnvironmentDeleteOperation(); scheduleEnvironmentDeleteReconciliation(target, data);
     if (data.status === 'succeeded') {
-      clearEnvironmentRegistrationFeedback(target.id);
+      removeOwnedTargetLocally(target.id, '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.');
       await loadOwnedTargets({ preserveDetail: false, removedMessage: '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.' });
     }
     return data;
@@ -1615,6 +1618,12 @@ function renderOwnedTargetDetail() {
     : runtime.status === 'blocked' || runtime.status === 'failed' ? '아래 사유를 해결한 뒤 서버 배포 준비를 다시 확인해야 합니다.' : '서버 배포 준비 상태를 확인하고 있습니다.';
   document.querySelector('#environment-runtime-preparation-blockers').replaceChildren(...(runtimeBlockers.length
     ? runtimeBlockers.map((blocker) => element('li', runtimePreparationBlockerLabel(blocker))) : [element('li', runtimeNote, 'field-note')]));
+  const runtimeReconcile = document.querySelector('#environment-runtime-reconcile');
+  const reconciliationActive = ['queued', 'running'].includes(runtime.status) && runtime.stage === 'reconciliation';
+  const reconciliationAvailable = ['blocked', 'unknown'].includes(runtime.status) && runtime.client_reported_ready === true;
+  runtimeReconcile.hidden = !(reconciliationActive || reconciliationAvailable);
+  runtimeReconcile.disabled = runtimeReconciliationBusy || reconciliationActive;
+  runtimeReconcile.textContent = reconciliationActive ? '준비 상태 확인 중' : '준비 다시 확인';
   const appMessage = document.querySelector('#environment-applications-message');
   appMessage.textContent = Array.isArray(ownedApplications) ? (ownedApplications.length ? `RailShot으로 배포한 서비스 ${ownedApplications.length}개` : 'RailShot으로 배포한 서비스가 없습니다.') : '서비스 목록을 불러오지 못했습니다.';
   const appList = document.querySelector('#environment-applications-list');
@@ -1630,6 +1639,32 @@ function renderOwnedTargetDetail() {
   const deleteButton = document.querySelector('#environment-delete');
   deleteButton.textContent = target.deletion_operation_id ? '삭제 상태 확인' : '환경 삭제';
   deleteButton.disabled = target.status === 'deleted';
+}
+function stopRuntimeReconciliationPolling() { clearTimeout(runtimeReconciliationTimer); runtimeReconciliationTimer = undefined; }
+function mergeOwnedTarget(target) {
+  const index = ownedTargets.findIndex((item) => item.id === target.id);
+  if (index >= 0) ownedTargets.splice(index, 1, target);
+  if (selectedOwnedTarget === target.id) selectedOwnedDetail = target;
+  renderOwnedTargetOptions(); renderOwnedTargetList(); renderOwnedTargetDetail(); updateSelection();
+}
+async function pollRuntimeReconciliation(id) {
+  stopRuntimeReconciliationPolling();
+  try {
+    const { data } = await request(`/api/v1/targets/${encodeURIComponent(id)}`);
+    if (data?.id !== id || !data.runtime_preparation || typeof data.runtime_preparation.status !== 'string')
+      throw new Error('서버 배포 준비 상태 응답을 확인하지 못했습니다.');
+    if (selectedOwnedTarget !== id) return;
+    mergeOwnedTarget(data);
+    if (['queued', 'running'].includes(data.runtime_preparation.status)) {
+      runtimeReconciliationTimer = setTimeout(() => pollRuntimeReconciliation(id), 2000);
+    } else {
+      await loadOwnedTargets({ preserveDetail: false });
+    }
+  } catch (cause) {
+    if (selectedOwnedTarget === id) {
+      document.querySelector('#environment-detail-message').textContent = `서버 배포 준비 상태 조회 실패: ${cause.message} 목록 새로고침으로 다시 확인하세요.`;
+    }
+  }
 }
 function clearEnrollment() {
   enrollmentRequestGeneration += 1;
@@ -1652,6 +1687,17 @@ function clearEnvironmentRegistrationFeedback(targetId) {
     document.querySelector('#environment-register-message').textContent = '';
   }
 }
+function removeOwnedTargetLocally(targetId, message) {
+  clearEnvironmentRegistrationFeedback(targetId);
+  ownedTargets = ownedTargets.filter((target) => target.id !== targetId);
+  if (selectedOwnedTarget === targetId) {
+    stopEnvironmentDeleteReconciliationPolling(); stopRuntimeReconciliationPolling(); ownedTargetSelectionGeneration += 1;
+    selectedOwnedTarget = null; selectedOwnedDetail = null; ownedObservation = null; ownedApplications = []; environmentDeleteOperation = null;
+  }
+  if (provider.value === targetId || provider.dataset.restoreTarget === targetId) { provider.value = ''; delete provider.dataset.restoreTarget; }
+  renderOwnedTargetOptions(); renderOwnedTargetList(); renderOwnedTargetDetail(); renderEnvironmentDeleteOperation(); updateSelection();
+  document.querySelector('#environment-detail-message').textContent = message;
+}
 function showEnrollmentState(id, commandState, message, { retry = true } = {}) {
   enrollmentTargetId = id;
   document.querySelector('#environment-enrollment').hidden = false;
@@ -1669,6 +1715,7 @@ function canIssueEnrollment(target) {
 }
 function resetOwnedEnvironmentSelection() {
   stopEnvironmentDeleteReconciliationPolling();
+  stopRuntimeReconciliationPolling();
   clearEnrollment();
   ownedTargetSelectionGeneration += 1;
   selectedOwnedTarget = null; selectedOwnedDetail = null; ownedObservation = null; ownedApplications = [];
@@ -1713,7 +1760,7 @@ async function loadOwnedTargets({ preserveDetail = true, removedMessage = '' } =
 }
 async function selectOwnedTarget(id, refreshList = true) {
   const target = ownedTargets.find((item) => item.id === id); if (!target) return;
-  if (selectedOwnedTarget !== id) clearEnrollment();
+  if (selectedOwnedTarget !== id) { clearEnrollment(); stopRuntimeReconciliationPolling(); }
   const selectionGeneration = ++ownedTargetSelectionGeneration;
   selectedOwnedTarget = id; selectedOwnedDetail = target; ownedObservation = null; ownedApplications = [];
   stopEnvironmentDeleteReconciliationPolling(); environmentDeleteOperation = null; renderEnvironmentDeleteOperation();
@@ -1820,6 +1867,32 @@ document.querySelector('#environment-register-form').addEventListener('submit', 
 });
 document.querySelector('#environment-owned-refresh').addEventListener('click', () => loadOwnedTargets({ preserveDetail: false }));
 document.querySelector('#environment-regenerate-command').addEventListener('click', () => { if (enrollmentTargetId) issueEnrollment(enrollmentTargetId); });
+document.querySelector('#environment-runtime-reconcile').addEventListener('click', async () => {
+  const target = selectedOwnedDetail, runtime = target?.runtime_preparation;
+  if (!target || runtimeReconciliationBusy || !['blocked', 'unknown'].includes(runtime?.status) || runtime.client_reported_ready !== true) return;
+  runtimeReconciliationBusy = true; renderOwnedTargetDetail();
+  document.querySelector('#environment-detail-message').textContent = '서버 배포 준비 상태를 다시 확인하고 있습니다.';
+  try {
+    const { data, status } = await request(`/api/v1/targets/${encodeURIComponent(target.id)}/reconciliations`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'runtime' }),
+    });
+    if (status !== 202 || data?.target_id !== target.id || !Number.isSafeInteger(data.generation)
+        || !data.runtime_preparation || !['queued', 'running', 'succeeded', 'blocked', 'unknown'].includes(data.runtime_preparation.status))
+      throw new Error('서버 배포 준비 재확인 응답을 확인하지 못했습니다.');
+    if (selectedOwnedTarget !== target.id) return;
+    mergeOwnedTarget({ ...target, ...data, id: target.id });
+    if (['queued', 'running'].includes(data.runtime_preparation.status)) {
+      runtimeReconciliationTimer = setTimeout(() => pollRuntimeReconciliation(target.id), 2000);
+    } else {
+      await loadOwnedTargets({ preserveDetail: false });
+    }
+  } catch (cause) {
+    if (selectedOwnedTarget === target.id) document.querySelector('#environment-detail-message').textContent = `서버 배포 준비 재확인 실패: ${cause.message}`;
+  } finally {
+    runtimeReconciliationBusy = false;
+    if (selectedOwnedTarget === target.id) renderOwnedTargetDetail();
+  }
+});
 document.querySelector('#environment-continue-deploy').addEventListener('click', () => {
   if (!selectedOwnedDetail || !(selectedOwnedDetail.status === 'ready' && selectedOwnedDetail.deployable === true)) return;
   document.querySelector('[name="environment"][value="onprem"]').checked = true; renderOwnedTargetOptions(); provider.value = selectedOwnedDetail.id; updateSelection(); showView('deploy');
@@ -1918,7 +1991,7 @@ async function refreshEnvironmentDeleteOperation(id, targetId) {
     document.querySelector('#environment-detail-message').textContent = `환경 삭제 상태 조회 실패: ${cause.message}`;
   }), 5000);
   else {
-    if (data.status === 'succeeded') clearEnvironmentRegistrationFeedback(targetId);
+    if (data.status === 'succeeded') removeOwnedTargetLocally(targetId, '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.');
     loadOwnedTargets({ preserveDetail: false, removedMessage: data.status === 'succeeded' ? '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.' : '' });
   }
 }

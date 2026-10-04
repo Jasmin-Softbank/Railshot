@@ -54,7 +54,7 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
     if (!lifecycleId.test(payload.operation_id || '') || !lifecycleActions.includes(payload.action)) throw fail('APPLICATION_INPUT_INVALID', 422);
     const run = join(home, 'lifecycle', payload.operation_id);
     await privateDirectory(run);
-    const request = join(run, payload.phase + '-request.json');
+    const request = join(run, payload.phase + (['reconcile', 'resume'].includes(payload.phase) ? '-' + randomUUID() : '') + '-request.json');
     // An uncertain executor invocation is never repeated, even with identical bytes.
     try { await lstat(request); throw fail('APPLICATION_OPERATION_RECONCILE_REQUIRED', 409, mutation); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -103,6 +103,27 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       private: { configuration_sha256: fingerprint, native_plan_id: nativeId } };
     },
     verifyLifecyclePlan,
+    async reconcileLifecycle(application, plan, { id }) {
+      await current(application);
+      if (plan.private?.configuration_sha256 !== fingerprint || plan.public?.application_id !== application.id
+          || plan.public.action !== 'delete' || plan.private.deferred) throw fail('APPLICATION_PLAN_STALE');
+      const result = await lifecycleRequest(application, { phase: 'reconcile', action: 'delete', operation_id: id,
+        plan_id: plan.private.native_plan_id || plan.public.id, plan_hash: plan.public.plan_hash, delete_data: true }, false);
+      if (result.application_id !== application.id || result.action !== 'delete'
+          || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
+      return { status: result.status, resumable: result.resumable === true, resume_mode: result.resume_mode,
+        steps: lifecycleSteps(result.steps), residuals: lifecycleResources(result.residuals) };
+    },
+    async resumeLifecycle(application, plan, { id, deleteData }) {
+      await current(application);
+      if (deleteData !== true || plan.private?.configuration_sha256 !== fingerprint || plan.public?.application_id !== application.id
+          || plan.public.action !== 'delete' || plan.private.deferred) throw fail('APPLICATION_PLAN_STALE');
+      const result = await lifecycleRequest(application, { phase: 'resume', action: 'delete', operation_id: id,
+        plan_id: plan.private.native_plan_id || plan.public.id, plan_hash: plan.public.plan_hash, delete_data: true }, true);
+      if (result.application_id !== application.id || result.action !== 'delete'
+          || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502, true);
+      return { status: result.status, steps: lifecycleSteps(result.steps), residuals: lifecycleResources(result.residuals) };
+    },
     async applyLifecycle(application, plan, { id, deleteData }) {
       await verifyLifecyclePlan(application, plan);
       if (plan.private.deferred) throw fail('APPLICATION_PLAN_STALE');
