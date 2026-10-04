@@ -91,9 +91,9 @@ jobs:
           progress_token="$RAILSHOT_PROGRESS_TOKEN"
           unset RAILSHOT_PROGRESS_TOKEN
           MAX_REPAIR_ATTEMPTS=${RAILSHOT_MAX_REPAIR_ATTEMPTS:-2}
-          [[ "$MAX_REPAIR_ATTEMPTS" =~ ^[0-2]$ ]] || { echo "RAILSHOT_MAX_REPAIR_ATTEMPTS must be 0, 1 or 2 (combined adapter/fixer limit)"; exit 1; }
-          # Legacy packaging is a sublimit of the combined budget, not an extra call.
-          MAX_PACKAGING_ATTEMPTS=${RAILSHOT_MAX_PACKAGING_ATTEMPTS:-0}
+          [[ "$MAX_REPAIR_ATTEMPTS" =~ ^[0-2]$ ]] || { echo "RAILSHOT_MAX_REPAIR_ATTEMPTS must be 0, 1 or 2 (fixer limit; 0 disables all SDK calls)"; exit 1; }
+          # Separate adapter/fixer budgets: default 1 + 2, with no borrowing.
+          MAX_PACKAGING_ATTEMPTS=${RAILSHOT_MAX_PACKAGING_ATTEMPTS:-1}
           [[ "$MAX_PACKAGING_ATTEMPTS" =~ ^[01]$ ]] || { echo "RAILSHOT_MAX_PACKAGING_ATTEMPTS must be 0 or 1"; exit 1; }
           [[ "$PROVIDER" = codex || "$PROVIDER" = claude ]] || { echo "AGENT_PROVIDER must be claude or codex"; exit 1; }
           test -f .railshot/ci/scripts/loop/checks_progress.py || { echo 'PLATFORM_REF must support isolated progress publishing'; exit 1; }

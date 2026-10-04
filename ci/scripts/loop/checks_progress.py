@@ -51,7 +51,7 @@ def row(event):
             budget = attributes['agent_budget']
             if (not isinstance(budget, dict) or set(budget) != {'enabled', 'max_invocations'}
                     or type(budget['enabled']) is not bool or type(budget['max_invocations']) is not int
-                    or not 0 <= budget['max_invocations'] <= 2
+                    or not 0 <= budget['max_invocations'] <= 3
                     or budget['enabled'] != (budget['max_invocations'] > 0)):
                 raise ValueError('invalid agent budget')
             result['agent_budget'] = dict(budget)

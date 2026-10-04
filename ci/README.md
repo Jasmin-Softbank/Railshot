@@ -56,13 +56,13 @@ PR 검사에는 cloud·모델·private registry 자격을 제공하지 않는다
 
 AI의 책임은 제한된 근거로 수정안을 제안하는 것이다. 호스트가 수정 범위와 근거를 검사하고 적용한 뒤 공식 gate를 실행한다. 새 JEV 분류 호출·그래프 DB·언어별 오류 사전은 이 경로에 추가하지 않는다. 기존 오류 분류는 중단 정책을 위해 유지하지만 새로운 조사 순서는 그 분류의 정규식 매칭에 의존하지 않는다.
 
-### 최초 구성과 실패 수정의 합산 예산
+### 최초 구성 1회와 실패 수정 2회
 
-Actions Variable `RAILSHOT_MAX_REPAIR_ATTEMPTS`는 기존 이름을 유지하며 최초 구성(adapter)과 실패 수정(fixer)을 합산한 SDK 호출 상한을 지정한다. 기본값은 `2`, 끄기는 `0`이며 기존 `1`도 지원한다. `3` 이상은 실행 전에 거부한다. CLI는 `--max-attempts 0|1|2`로 같은 제한을 적용한다.
+Actions Variable `RAILSHOT_MAX_PACKAGING_ATTEMPTS`는 최초 구성(adapter)을 최대 `1`회, `RAILSHOT_MAX_REPAIR_ATTEMPTS`는 실패 수정(fixer)을 최대 `2`회 허용한다. 기본값은 각각 `1`, `2`이며 전체 SDK 호출은 최대 `3`회다. 두 역할은 사용하지 않은 상대 역할의 횟수를 빌릴 수 없다. 명세가 이미 있으면 fixer만 최대 2회 호출한다. CLI는 `--max-packaging-attempts 0|1`, `--max-attempts 0|1|2`를 사용한다.
 
-기존 `RAILSHOT_MAX_PACKAGING_ATTEMPTS`는 기본 `0`을 유지한다. `1`로 설정해도 합산 예산 안에서만 사용하므로 총 `2`·패키징 `1`은 adapter 1회와 fixer 1회까지 가능하며 3회로 늘어나지 않는다. 총예산이 `0`이면 패키징 값과 관계없이 모델 자격과 SDK 없이 baseline만 실행한다. 검사를 통과한 입력은 예산이 남아 있어도 모델을 호출하지 않는다.
+기존 끄기 옵션 `RAILSHOT_MAX_REPAIR_ATTEMPTS=0`은 패키징 값과 관계없이 모든 SDK 호출을 끈다. 이때 모델 인증과 SDK 설치 없이 결정적 검사만 실행한다. 패키징 `0`은 adapter 호출을 끄며 규칙 기반 자동 패키징은 계속 실행한다. 초기 adapter 제안이 거부되면 1회 몫을 소진하므로 fixer로 역할을 바꿔 재호출하지 않는다. fixer의 안전한 재계획은 수정 2회 안에서만 가능하다. 검사를 통과한 입력은 예산이 남아 있어도 모델을 호출하지 않는다.
 
-`evidence.json`의 `agent_budget`은 선언한 상한, `budget_used`는 역할별 supervisor 시도, `sdk_invocations`는 기록으로 확인한 SDK 호출 수다. SDK 내부 모델 요청 수와 구분하며 확인할 수 없는 횟수는 null로 남긴다. 기존 GitHub Checks의 `loop.started/completed`에도 예산을 전달한다. 이 선택 필드를 받는 API를 먼저 배포한 뒤 CI 워크플로와 실행기 참조를 승격한다. 플랫폼 코드나 예산이 바뀌면 기존 run을 덮어쓰거나 강제 resume하지 않고 새 run으로 비교한다.
+`evidence.json`의 `agent_budget`은 선언한 전체 상한, `budget_used`는 역할별 supervisor 시도, `sdk_invocations`는 기록으로 확인한 SDK 호출 수다. 기본 선언 3은 실제 호출 3을 뜻하지 않는다. SDK 내부 모델 요청 수와 구분하며 확인할 수 없는 횟수는 null로 남긴다. 기존 GitHub Checks의 `loop.started/completed`에도 예산을 전달한다. `max_invocations`의 0~3을 받는 API를 먼저 배포한 뒤 CI 워크플로와 실행기 참조를 승격한다. 플랫폼 코드나 예산이 바뀌면 기존 run을 덮어쓰거나 강제 resume하지 않고 새 run으로 비교한다.
 
 ### 검증 범위와 측정
 
@@ -120,6 +120,6 @@ source_commit/target_id를 workflow 입력으로 받아 checkout 및 운영자 t
 
 기본 경로는 L0(변경·비밀 경계) → L1(실행 설정) → L2(이미지 빌드) → L3(실제 기동·HTTP)다. 이미지가 게시되면 CD가 같은 digest를 클러스터에 적용하고 외부 HTTPS를 확인한다. 성공 URL은 대시보드의 앱 목록과 상세에 표시한다. 별도 lint/type/unit Q와 취약점 스캔 L4는 기본 배포에서 실행하지 않는다. `--layers L0,L1,L2,L4,L3` 또는 `--layers L0,L1,Q,L2,L4,L3`를 명시하면 추가 검사를 실행하며, 이전 bundle도 계속 검증한다.
 
-GitHub와 ZIP 모두 접수한 소스에 동일한 자동 패키징을 적용한다. 루트 `index.html`이 있는 완성된 HTML/CSS/JavaScript 사이트는 파일 구조를 보존하여 비특권 Nginx 컨테이너로 감싼다. 표준 단일 Vite 앱은 lockfile과 기존 build 명령을 보존한다. 기존 Dockerfile은 마지막 stage에 명시된 단일 `EXPOSE` 포트로 명세만 생성하며, 기존 컨테이너 기동 제약과 HTTP 검사는 계속 적용한다. 포트가 불명확하거나 서버 코드·미빌드 프레임워크가 섞인 앱을 정적 사이트로 오인하지 않는다. 사용자 명세와 앱 소스는 덮어쓰지 않는다. 기본 SDK 호출은 최초 구성과 실패 수정을 합쳐 최대 2회이며 `RAILSHOT_MAX_REPAIR_ATTEMPTS=0`으로 끌 수 있다. 기존 `1`은 지원하지만 `3` 이상은 허용하지 않는다. 최초 게이트가 통과하면 Agent를 호출하지 않는다. 첫 패키징은 packaging 범위로 수행하며, 실제 L2 빌드·L3 기동/HTTP 실패 뒤에만 source 범위로 소스를 수정한다. workflow 기본 `REPAIR_SCOPE=source`이며 명시적인 `packaging` 설정은 유지한다. [배포 준비 스킬](scripts/agents/skills/prepare-deployment/SKILL.md)은 두 역할의 실제 SDK instructions에 합성되고 예시는 필요할 때 읽는다. 제안된 생성·수정·삭제는 기존 경로·파일 수·바이트 제한과 보호 규칙을 적용한 뒤 전체 게이트를 재실행한다. 동일 실패 반복, 인증·인프라 문제, 실행 결과 불명확 상태에는 추가 호출하지 않는다. 옵션은 실행 시작 시 고정되므로 이전 0회 실행의 재시도가 아니라 새 실행에서 적용해야 한다.
+GitHub와 ZIP 모두 접수한 소스에 동일한 자동 패키징을 적용한다. 루트 `index.html`이 있는 완성된 HTML/CSS/JavaScript 사이트는 파일 구조를 보존하여 비특권 Nginx 컨테이너로 감싼다. 표준 단일 Vite 앱은 lockfile과 기존 build 명령을 보존한다. 기존 Dockerfile은 마지막 stage에 명시된 단일 `EXPOSE` 포트로 명세만 생성하며, 기존 컨테이너 기동 제약과 HTTP 검사는 계속 적용한다. 포트가 불명확하거나 서버 코드·미빌드 프레임워크가 섞인 앱을 정적 사이트로 오인하지 않는다. 사용자 명세와 앱 소스는 덮어쓰지 않는다. 기본 SDK 호출은 최초 구성 1회와 실패 수정 최대 2회로 총 3회이며 `RAILSHOT_MAX_REPAIR_ATTEMPTS=0`으로 모두 끌 수 있다. 초기 구성 몫을 사용하지 않아도 수정은 최대 2회다. 최초 게이트가 통과하면 Agent를 호출하지 않는다. 첫 패키징은 packaging 범위로 수행하며, 실제 L2 빌드·L3 기동/HTTP 실패 뒤에만 source 범위로 소스를 수정한다. workflow 기본 `REPAIR_SCOPE=source`이며 명시적인 `packaging` 설정은 유지한다. [배포 준비 스킬](scripts/agents/skills/prepare-deployment/SKILL.md)은 두 역할의 실제 SDK instructions에 합성되고 예시는 필요할 때 읽는다. 제안된 생성·수정·삭제는 기존 경로·파일 수·바이트 제한과 보호 규칙을 적용한 뒤 전체 게이트를 재실행한다. 동일 실패 반복, 인증·인프라 문제, 실행 결과 불명확 상태에는 추가 호출하지 않는다. 옵션은 실행 시작 시 고정되므로 이전 0회 실행의 재시도가 아니라 새 실행에서 적용해야 한다.
 
 Memos의 Go 서버와 영구 `/var/opt/memos` 저장소는 정적 Vite 앱 조건에 해당하지 않는다. CI 축소는 영구 볼륨 지원을 추가하지 않으며, 임시 디스크로 대체하여 배포 성공으로 처리해서는 안 된다.
