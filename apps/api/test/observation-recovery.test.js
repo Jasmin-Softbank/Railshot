@@ -140,6 +140,11 @@ test('unchanged source receives a request commit before dispatch and lookup reje
     assert.fail(`Unexpected GitHub path ${path}`);
   });
   await assert.rejects(service.deploy({ ...input, operation_id, onPrepared: async value => { assert.equal(value.source_commit, source_commit); prepared = true; } }), { code: 'CI_DISPATCH_UNCONFIRMED' });
+  await assert.rejects(service.deploy({ ...input, operation_id,
+    onPrepared: async () => { throw new Error('private checkpoint failure'); } }),
+  error => error.code === 'SOURCE_CHECKPOINT_FAILED' && error.phase === 'source_checkpoint'
+    && !error.message.includes('GitHub') && error.outcomeUnknown === false);
+  assert.equal(dispatches, 1, 'a failed local checkpoint must not dispatch CI');
   assert.match(commit.message, new RegExp(`Railshot-Request: ${operation_id}`));
   const binding = { operation_id, source_commit, app: input.app, target_id: input.target_id };
   assert.equal((await service.findDeployment(binding)).run_id, 123);
@@ -187,4 +192,33 @@ test('GitHub successful response near exhaustion preserves account reserve', asy
   await assert.rejects(service.status('123'), error => error.retryAt === reset * 1000 && error.retryable);
   await assert.rejects(service.status('456'), error => error.retryAt === reset * 1000);
   assert.equal(calls, 1);
+});
+
+test('graceful shutdown finishes an admitted source submission and restart observes its run without redispatch', async t => {
+  const entered = deferred(), uploaded = deferred();
+  let sends = 0;
+  const f = await fixture(t, {
+    deploy: async ({ onPrepared }) => {
+      sends++; entered.resolve(); await uploaded.promise;
+      await onPrepared({ source_commit: publication.source_commit });
+      return { run_id: 123, source_commit: publication.source_commit };
+    },
+  });
+  const accepted = await f.product.createDeployment(input, 'shutdown-source');
+  await entered.promise;
+  const closing = f.product.close();
+  uploaded.resolve(); await closing;
+  f.product = await createProductService(f.options);
+  const done = await until(() => f.product.getDeployment(accepted.id), row => row.status === 'succeeded');
+  assert.equal(done.source_commit, publication.source_commit);
+  assert.equal(done.ci.run_id, '123'); assert.equal(sends, 1);
+});
+
+test('local source checkpoint errors are never reported as GitHub communication errors', () => {
+  const error = new SubmissionError('source_checkpoint', new Error('private storage path'));
+  assert.equal(error.code, 'SOURCE_CHECKPOINT_FAILED');
+  assert.equal(error.reason, 'local_checkpoint_failure');
+  assert.equal(error.outcomeUnknown, false);
+  assert.equal(error.upstream_status, null);
+  assert.doesNotMatch(error.message, /GitHub|private/);
 });

@@ -145,3 +145,30 @@ test('pre-sync waits for active work and refuses malformed or rejected preparati
   await assert.rejects(prepareRelease({ ...options, timeoutMs: 5,
     request: async () => Response.json({ status: 'busy' }, { status: 202 }) }), /API_HANDOVER_BUSY/);
 });
+
+test('saved-source operator replay requires the private API token and exact input', async t => {
+  const calls = [], f = await fixture(t, {
+    replaySubmittedSource: async (...args) => { calls.push(args); return { id: 'replay' }; }, close() {},
+  });
+  const origin = `http://127.0.0.1:${f.server.address().port}`;
+  const body = JSON.stringify({ operation_id: randomUUID(), environment_target_id: 'k3s-gcp' });
+  const path = '/internal/deployments/replay-source';
+  assert.equal((await fetch(origin + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body })).status, 401);
+  assert.equal((await f.post(path)).status, 422);
+  const response = await fetch(origin + path, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${'release-test-token-'.repeat(3)}` }, body });
+  assert.equal(response.status, 202); assert.equal(calls.length, 1);
+});
+
+test('liveness responds during initialization while readiness is unavailable', async t => {
+  let initialized;
+  const pending = new Promise(resolve => { initialized = resolve; });
+  const f = await fixture(t, pending);
+  try {
+    const health = await Promise.race([f.get('/healthz'), pause(1000).then(() => { throw new Error('Liveness blocked on initialization'); })]);
+    assert.equal(health.status, 200);
+    assert.equal((await health.json()).configured, false);
+    assert.equal((await f.get('/readyz')).status, 503);
+  } finally { initialized({ close() {} }); }
+  await f.server.productReady;
+  assert.equal((await f.get('/readyz')).status, 200);
+});
