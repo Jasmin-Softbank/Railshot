@@ -1025,7 +1025,8 @@ def self_test():
     assert classify("L2", "ERROR: No matching distribution found for flask==9") == "F1"
     assert classify("L2", "net/http: TLS handshake timeout") == "F8"
     assert signature("L3", "F4", "Error: listen EADDRINUSE 0.0.0.0:8080\n").startswith("v2:L3:F4:")
-    assert "***" in excerpt("token ghp_" + "a" * 36)
+    secret = "ghp_" + "a" * 36
+    assert secret not in excerpt("token " + secret)
     print("self-test ok")
     return 0
 
