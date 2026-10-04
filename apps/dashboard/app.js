@@ -62,6 +62,7 @@ let deploymentOptions = [];
 let profiles = [];
 let reviewing = false;
 let reviewGeneration = 0;
+let selectionEdited = false;
 let connectionError = null;
 let submitting = false;
 let resuming = null;
@@ -220,9 +221,10 @@ function updateSelection() {
   invalidateReview();
   savePreferences(selected);
 }
-document.querySelectorAll('[name="environment"]').forEach((input) => input.addEventListener('change', updateSelection));
-provider.addEventListener('change', updateSelection);
-cloudProvider.addEventListener('change', updateSelection);
+function editSelection() { selectionEdited = true; updateSelection(); }
+document.querySelectorAll('[name="environment"]').forEach((input) => input.addEventListener('change', editSelection));
+provider.addEventListener('change', editSelection);
+cloudProvider.addEventListener('change', editSelection);
 deploymentDatabase.addEventListener('change', updateSelection);
 
 initializeOpenStackInstaller();
@@ -513,7 +515,7 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else {
     invalidateReview();
     const generation = reviewGeneration, source = selectedSource;
-    let plan, app;
+    let plan, app, environmentTargetId;
     reviewing = true;
     const reviewButton = document.querySelector('#deploy-form button[type="submit"]');
     reviewButton.disabled = true;
@@ -525,6 +527,7 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
         if (generation !== reviewGeneration) return;
         if (data.app !== app || !resourceId(data.environment_target_id) || !Object.hasOwn(data, 'application'))
           throw new Error('기존 앱 조회 결과가 선택 내용과 일치하지 않습니다.');
+        environmentTargetId = data.environment_target_id;
         const existing = data.application;
         if (existing) {
           if (!resourceId(existing.id) || !resourceId(existing.target_id) || existing.app !== app
@@ -553,7 +556,7 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
       if (generation === reviewGeneration) { error.textContent = cause.message; error.hidden = false; }
       return;
     } finally { reviewing = false; reviewButton.disabled = false; }
-    reviewed = { ...selected, source, app, kind: 'deployments', key: crypto.randomUUID(), plan,
+    reviewed = { ...selected, source, app, kind: 'deployments', key: crypto.randomUUID(), plan, environmentTargetId,
       targetId: plan?.runtime_target_id || profile?.target_id };
     document.querySelector('#review-source').textContent = source.label;
     document.querySelector('#review-app').textContent = app;
@@ -725,6 +728,13 @@ function renderRun() {
 
 deployButton.addEventListener('click', async () => {
   if (submitting || !reviewed || deployButton.disabled) return;
+  const selected = deploymentSelection();
+  if (!reviewed.update && (reviewed.environment !== selected.environment || reviewed.provider !== selected.provider)) {
+    invalidateReview();
+    error.textContent = '검토한 배포 환경과 현재 선택이 다릅니다. 선택 내용을 다시 확인하세요.';
+    error.hidden = false;
+    return;
+  }
   submitting = true;
   deployButton.disabled = true;
   requestError.hidden = true;
@@ -739,7 +749,10 @@ deployButton.addEventListener('click', async () => {
     const payload = new FormData();
     if (draft.plan) {
       payload.set('app', draft.plan.name); payload.set('target_id', draft.targetId); payload.set('plan_id', draft.plan.id);
-    } else { payload.set('environment', draft.environment); payload.set('provider', draft.provider); }
+    } else {
+      payload.set('environment', draft.environment); payload.set('provider', draft.provider);
+      payload.set('expected_target_id', draft.environmentTargetId);
+    }
     if (!draft.plan) payload.set('source_name', draft.app);
     appendSource(payload, draft.source);
     draft.attempted = true;
@@ -758,6 +771,10 @@ deployButton.addEventListener('click', async () => {
     refreshRun();
   } catch (cause) {
     const uncertain = draft.attempted && (cause.outcomeUnknown === true || !cause.status);
+    if (cause.code === 'DEPLOYMENT_TARGET_CHANGED') {
+      invalidateReview(); error.textContent = cause.message; error.hidden = false;
+      return;
+    }
     if (draft.update) {
       draft.uncertain = uncertain;
       if (!uncertain) { draft.attempted = false; delete draft.startRebuild; }
@@ -1430,13 +1447,17 @@ async function initializeDashboard() {
     const { data: session } = await request('/api/v1/sessions', { method: 'POST' });
     const { data: saved } = await request('/api/v1/preferences');
     preferences = saved;
-    document.querySelector(`[name="environment"][value="${saved.environment}"]`).checked = true;
-    cloudProvider.value = ['aws', 'gcp'].includes(saved.provider) ? saved.provider : 'aws';
-    provider.value = ['openstack', 'proxmox'].includes(saved.provider) ? saved.provider : '';
+    // A delayed preference read must never replace a choice made on this page.
+    if (!selectionEdited) {
+      document.querySelector(`[name="environment"][value="${saved.environment}"]`).checked = true;
+      cloudProvider.value = ['aws', 'gcp'].includes(saved.provider) ? saved.provider : 'aws';
+      provider.value = ['openstack', 'proxmox'].includes(saved.provider) ? saved.provider : '';
+    }
     showView(saved.view);
     await checkConnection();
     document.querySelector('#session-note').textContent = `이 브라우저 세션 · ${new Date(session.expires_at).toLocaleDateString()}까지 유지`;
     sessionReady = true;
+    if (selectionEdited) savePreferences(deploymentSelection());
     if (!Object.hasOwn(views, saved.view)) savePreferences({ view: 'deploy' });
     await Promise.allSettled([loadApplications(), loadHistory().catch(showHistoryError)]);
     renderLifecycleOperation();

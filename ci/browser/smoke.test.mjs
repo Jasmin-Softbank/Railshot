@@ -895,6 +895,73 @@ test('each provider selection keeps the assigned CI and CD target through reload
   });
 });
 
+test('provider selection made before saved preferences arrive stays bound through submission', { timeout: 90000 }, async (t) => {
+  for (const [provider, sourceType] of [['gcp', 'github'], ['gcp', 'zip'], ['gcp', 'folder'], ['openstack', 'github']]) await t.test(`${provider}/${sourceType}`, async (t) => {
+    const targetId = `assigned-${provider}`, app = 'provider-race', commit = 'a'.repeat(40);
+    const submissions = [], deliveries = [];
+    const publication = { run_id: 1, target_id: targetId, app, tenant: 'demo', source_commit: commit, artifact_id: 2, producer_attempt: 1 };
+    const service = { targetId: 'assigned-aws', targetIds: ['assigned-aws', 'assigned-gcp', 'assigned-openstack'],
+      deploy: async (input) => { submissions.push(input); return { run_id: 1, source_commit: commit }; },
+      status: async () => ({ state: 'published', status: 'completed', conclusion: 'success', source_commit: commit, publication }),
+    };
+    const deployPublished = Object.assign(async (input) => {
+      deliveries.push(input);
+      return { cd: { state: 'deployed', deployed: true, revision: 'b'.repeat(40) },
+        public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: `https://${provider}.example.test/health` } };
+    }, { targets: Object.fromEntries(service.targetIds.map((id) => [id, { applicationName: app, tenant: 'demo' }])) });
+    const { page, origin, errors, stateDirectory } = await start(t, { service, target: { provider: 'aws' },
+      providerTargets: { gcp: 'assigned-gcp', openstack: 'assigned-openstack' }, deployPublished,
+      sourceLoader: async () => ({ files: [{ path: 'index.js', content: Buffer.from('provider fixture') }] }),
+    });
+    let releasePreferences, preferencesRequested;
+    const waiting = new Promise((resolve) => { preferencesRequested = resolve; });
+    const release = new Promise((resolve) => { releasePreferences = resolve; });
+    await page.route('**/api/v1/preferences', async (route) => {
+      if (route.request().method() !== 'GET') { await route.continue(); return; }
+      preferencesRequested(); await release;
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        body: JSON.stringify({ view: 'deploy', environment: 'cloud', provider: 'aws' }) });
+    });
+    await page.goto(origin); await waiting;
+    if (provider === 'openstack') {
+      await page.getByRole('radio', { name: /온프레미스/ }).check();
+      await page.locator('#provider').selectOption(provider);
+    } else await page.locator('#cloud-provider').selectOption(provider);
+    releasePreferences();
+    await page.waitForFunction(() => document.querySelector('#session-note').textContent.includes('까지'));
+    assert.equal(await page.locator(provider === 'openstack' ? '#provider' : '#cloud-provider').inputValue(), provider);
+    assert.equal(await page.locator('[name="environment"]:checked').inputValue(), provider === 'openstack' ? 'onprem' : 'cloud');
+    if (sourceType === 'github') await page.locator('#repository-url').fill(`https://github.com/example/${app}`);
+    else {
+      const source = join(stateDirectory, app);
+      await mkdir(source); await writeFile(join(source, 'index.js'), 'provider fixture');
+      if (sourceType === 'folder') await page.locator('#folder').setInputFiles(source);
+      else {
+        const zip = await archiveFromPath(source);
+        await page.locator('#archive').setInputFiles({ name: `${app}.zip`, mimeType: 'application/zip', buffer: zip.bytes });
+      }
+    }
+    await page.locator('#deploy-form button[type="submit"]').click();
+    await page.locator('#review-panel').waitFor({ state: 'visible' });
+    assert.match(await page.locator('#review-target').innerText(), provider === 'gcp' ? /Google Cloud/ : /OpenStack/);
+    if (provider === 'gcp' && sourceType === 'github') {
+      // Restore/autofill can change a native value without emitting a change event.
+      await page.locator('#cloud-provider').evaluate((select) => { select.value = 'aws'; });
+      await page.locator('#deploy-button').click();
+      assert.match(await page.locator('#form-error').innerText(), /검토한 배포 환경과 현재 선택이 다릅니다/);
+      assert.equal(submissions.length, 0); assert.equal(deliveries.length, 0);
+      await page.locator('#cloud-provider').selectOption('gcp');
+      await page.locator('#deploy-form button[type="submit"]').click();
+      await page.locator('#review-panel').waitFor({ state: 'visible' });
+    }
+    await page.locator('#deploy-button').click();
+    await page.waitForFunction(() => document.querySelector('#run-state').textContent === '앱 배포 완료');
+    assert.equal(submissions.length, 1); assert.equal(deliveries.length, 1);
+    assert.equal(submissions[0].target_id, targetId); assert.equal(deliveries[0].targetId, targetId);
+    assert.deepEqual(errors, []);
+  });
+});
+
 test('deployment monitor binds metrics, restores progress, and distinguishes stale, collection and HTTP failure', { timeout: 45000 }, async (t) => {
   let state = 'ready', age = 0, http = 1, broken = false;
   const record = { id: 'monitor-demo', application_id: 'monitor-app', app: 'demo-app', target_id: 'demo-aws', status: 'running', stage: 'cd',

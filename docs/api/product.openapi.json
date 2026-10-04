@@ -301,7 +301,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/builds/{id}": {
@@ -541,7 +541,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/deployments/{id}": {
@@ -1011,7 +1011,7 @@
             "$ref": "#/components/responses/Error503"
           }
         },
-        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1\u2013100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
+        "description": "Read persisted summaries owned by the requesting session, ordered by created_at DESC then internal operation id DESC. Missing legacy dates sort last. limit defaults to 20 (1–100). Continue with next_marker (public resource id); its kind and owner must match. Newly inserted records above the marker do not shift subsequent pages; equal-time ties use the internal id. total is the current count, not a frozen snapshot. No provider polling or dispatch."
       }
     },
     "/api/v1/environments/{id}": {
@@ -4656,6 +4656,31 @@
             ],
             "additionalProperties": false,
             "description": "Durable preparation time before dispatch; it does not prove GitHub accepted the request."
+          },
+          "deployment_selection": {
+            "type": "object",
+            "description": "Original environment/provider choice retained for deployments submitted using provider selection. Absent on historical and explicit-target requests.",
+            "properties": {
+              "environment": {
+                "enum": [
+                  "cloud",
+                  "onprem"
+                ]
+              },
+              "provider": {
+                "enum": [
+                  "aws",
+                  "gcp",
+                  "openstack",
+                  "proxmox"
+                ]
+              }
+            },
+            "required": [
+              "environment",
+              "provider"
+            ],
+            "additionalProperties": false
           }
         },
         "required": [
@@ -5690,6 +5715,11 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "expected_target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$",
+                "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
               }
             },
             "required": [
@@ -5758,6 +5788,11 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "expected_target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$",
+                "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
               }
             },
             "required": [
@@ -5833,6 +5868,11 @@
                 "maxLength": 255,
                 "pattern": "^[^\\u0000-\\u001f]+$",
                 "description": "Source name used to derive the app identity; never replaced by the registered target app. Required for folder uploads."
+              },
+              "expected_target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$",
+                "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
               }
             },
             "required": [

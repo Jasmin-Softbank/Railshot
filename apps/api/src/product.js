@@ -187,6 +187,8 @@ export async function createProductService({ service, directory, target, provide
     if (!option) throw invalid('배포 환경과 인프라 종류를 확인하세요.');
     if (!option.available) throw new ProductError(409, 'CAPABILITY_UNAVAILABLE', option.message);
     const { id } = providerSelection(provider);
+    if (input.expected_target_id !== undefined && input.expected_target_id !== id)
+      throw new ProductError(409, 'DEPLOYMENT_TARGET_CHANGED', '검토한 배포 대상이 현재 환경과 다릅니다. 선택 내용을 다시 확인하세요.');
     const name = input.source_name ?? input.repository_url?.split('/').filter(Boolean).at(-1)?.replace(/\.git$/i, '');
     let app;
     try { app = sourceAppName(name); } catch (error) { throw invalid(`소스 이름을 확인하세요. ${error.message}`); }
@@ -435,6 +437,7 @@ export async function createProductService({ service, directory, target, provide
       await store.snapshot(id, files);
       if (application && !previousApplication) state.applications[application.id] = { ...application, session_id: sessionId, status: 'queued', created_at: now };
       const record = { id, kind, session_id: sessionId, app: input.app, target_id: input.target_id,
+        ...(input.deployment_selection ? { deployment_selection: { ...input.deployment_selection } } : {}),
         ...(application ? { application_id: application.id, environment_target_id: application.environment_target_id } : {}),
         ...(plan ? { plan_id: input.plan_id, environment_id: `${id}.environment`, environment: { status: 'queued' } } : registered ? { environment_id: registered.environment_id } : {}), status: 'queued', stage: application ? 'registration' : plan ? 'environment' : 'ci',
         ci: { run_id: null, state: 'queued', steps: [], publication_artifact_id: null, producer_attempt: null },
