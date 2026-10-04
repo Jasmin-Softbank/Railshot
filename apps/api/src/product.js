@@ -300,9 +300,11 @@ export async function createProductService({ service, directory, target, provide
       && other.application_id === row.application_id && other.app === row.app && other.target_id === row.target_id
       && other.created_at > row.created_at && !(other.status === 'queued' && !other.queue?.started_at));
   }
-  const cdRecoveries = new Set(Object.values(store.read().operations).filter(row => row.status === 'unknown' && ['cd', 'http'].includes(row.stage)).map(row => row.id));
+  const cdRecoveries = new Set(Object.values(store.read().operations).filter(row =>
+    (row.status === 'unknown' || row.status === 'blocked' && row.error?.code === 'INTERRUPTED')
+      && ['cd', 'http'].includes(row.stage)).map(row => row.id));
   function recoveringCD(state, row) {
-    if (!cdRecoveries.has(row.id) || !['unknown', 'running'].includes(row.status) || !['cd', 'http'].includes(row.stage)
+    if (!cdRecoveries.has(row.id) || !['unknown', 'running', 'blocked'].includes(row.status) || !['cd', 'http'].includes(row.stage)
         || typeof applicationAdapter?.observePublished !== 'function' || !row.publication
         || row.ci?.state !== 'published' || Date.parse(row.cd?.observation?.next_retry_at) > Date.now()) return false;
     return interruptedCI(state, { ...row, status: 'unknown', stage: 'ci', error: { code: 'INTERRUPTED' }, cd: { state: 'not_started' } });
@@ -609,6 +611,14 @@ export async function createProductService({ service, directory, target, provide
       const cd = unknown ? store.read().operations[record.id].cd : result.cd;
       const missing = result.error?.code === 'DEPLOYMENT_NOT_FOUND';
       const originalError = missing && store.read().operations[record.id].error;
+      if (missing && originalError?.code === 'INTERRUPTED' && !record.cd?.deployed && !record.cd?.revision) {
+        // A platform restart can interrupt route preparation before CD records a
+        // revision. Resume the same publication through the idempotent adapter.
+        // Known route failures still require reconciliation instead of replay.
+        await update(record.id, { error: null, resumed_at: now, resume_count: (record.resume_count || 0) + 1 });
+        await observe(record, String(record.ci.run_id), { resume: true });
+        return;
+      }
       const error = unknown ? { code: result.error?.code || 'CD_OBSERVATION_UNAVAILABLE', message: '클러스터 결과 조회를 재시도하고 있습니다.', retryable: true }
         : missing ? { code: 'DEPLOYMENT_NOT_FOUND', message: '클러스터 적용 기록이 아직 없습니다. 앞선 경로 구성 오류를 확인하세요.', retryable: false } : null;
       const observation = { checked_at: now, last_success_at: unknown ? cd.observation?.last_success_at || null : now,

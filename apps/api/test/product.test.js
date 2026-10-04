@@ -1582,6 +1582,33 @@ test('restart reobserves published customer CD through the read-only adapter, wi
   } finally { await restarted.close(); }
 });
 
+test('platform restart resumes an unapplied published image without another upload or CI dispatch', async t => {
+  for (const status of ['unknown', 'blocked']) await t.test(status, async t => {
+    const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+    const deliver = f.adapter.deployPublished;
+    f.adapter.deployPublished = async () => { throw new EnvironmentError('INTERRUPTED', 502, true); };
+    const accepted = await f.product.createDeployment(applicationSource('restart-cd'), 'restart-cd', undefined, owner);
+    const first = await settle(() => f.product.getDeployment(accepted.id, owner));
+    assert.equal(first.error.code, 'INTERRUPTED');
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    await store.transaction(s => { s.operations[accepted.id].status = status; });
+    await store.close();
+    f.adapter.observePublished = async () => ({ cd: { state: 'blocked', deployed: false, revision: null },
+      public_http: { state: 'not_run' }, error: { code: 'DEPLOYMENT_NOT_FOUND' } });
+    f.adapter.deployPublished = deliver;
+    const product = await createProductService(f.options);
+    try {
+      const done = await settle(() => product.getDeployment(accepted.id, owner), row => row.status === 'succeeded');
+      assert.equal(done.id, first.id); assert.equal(done.ci.run_id, first.ci.run_id);
+      assert.deepEqual(done.ci.images, first.ci.images);
+      assert.equal(done.resume_count, 1); assert.equal(done.error, null);
+      assert.equal(done.url, 'https://restart-cd.example.test/');
+      assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1); assert.equal(f.deliveries.length, 1);
+    } finally { await product.close(); }
+  });
+});
+
 test('missing CD observation preserves the route failure and the owner can resume its published image', async t => {
   const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
   const deliver = f.adapter.deployPublished;
