@@ -34,6 +34,7 @@ API_NATIVE_FILES = {
     'deployment/scripts/applications.py', 'deployment/scripts/application_release.py', 'deployment/scripts/application_routes.py',
     'deployment/scripts/openstack_route_worker.py', 'deployment/scripts/application_lifecycle.py',
     'deployment/scripts/lifecycle_runtime.py',
+    'deployment/scripts/personal_wireguard.py', 'deployment/scripts/personal_runtime.py',
     'deployment/cloudflared/register.py', 'deployment/cloudflared/render.py',
     'deployment/bootstrap/install-k3s.sh', 'deployment/bootstrap/health.sh', 'deployment/bootstrap/runtime-healthz.py',
     'deployment/cilium/install.sh', 'deployment/cilium/preflight.py',
