@@ -259,6 +259,16 @@ def instructions(profile, role_cfg):
              "For a justified deletion set action=delete and content to an empty string. "
              "Omit action or use action=write for creation/update. Files you do not list stay unchanged. "
              "Return at most eight files and 20,000 UTF-8 content bytes in total.\n")
+    # Share the validator's policy instead of maintaining a second pattern list.
+    policy = load_yaml(PLATFORM / "contract/paths.yaml")
+    text += ("\n## Content checks before application\n"
+             "The host checks the entire proposed content of every written file, not just changed lines. "
+             "Any match below rejects the proposal before build or runtime checks. "
+             "These are Python regular expressions evaluated with re.MULTILINE. "
+             "Review your proposed files against them before returning your answer; "
+             "do not disguise a forbidden operation to avoid a match. "
+             "If compliant packaging is not possible, return give_up with the unmet requirement.\n"
+             + json.dumps(policy["forbidden_patterns"], ensure_ascii=False) + "\n")
     return text
 
 
