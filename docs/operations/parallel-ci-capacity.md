@@ -6,7 +6,7 @@ Status: local implementation and verification; live 12-runner capacity is not ye
 
 | Layer | Limit | Owner |
 | --- | ---: | --- |
-| API admitted deployments | 16, configurable 1..64 | `RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS` |
+| API admitted deployments | 3 by default, configurable 1..64 | `RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS` |
 | Ephemeral runner workflows on the existing build node | 12 target, default remains 1 until configured | operator worker config `runner_count` |
 | Heavy gate executions across those runners | 2 | root-owned `/etc/railshot/ci-executor.yaml`, `concurrency.gate` |
 | Shared Codex subscription calls | 1 | same profile, `concurrency.agent` |
@@ -21,7 +21,7 @@ Each ephemeral runner uses its own `work/<runner-name>` checkout, temporary dire
 
 ## Queue and recovery
 
-The existing SQLite queue remains the source of operation state. CI keeps its admission slot between asynchronous observations. Additional accepted requests queue durably. Same-app operations remain ordered across environments. Source branch updates and infrastructure writes have separate short serial writers. Shared native CD mutations are still serialized.
+The existing SQLite queue remains the source of operation state. CI keeps its admission slot between asynchronous observations. Additional accepted requests queue durably. Without an explicit override, the first three deployments retain slots through CI/CD and the fourth waits in FIFO order. The production manifest must preserve the same three-slot limit. Same-app operations remain ordered across environments. Source branch updates and infrastructure writes have separate short serial writers. Shared native CD mutations are still serialized.
 
 The existing CronJob controller creates unique ephemeral Jobs on the same approved node. `runner_count` adds slots, not nodes. A durable per-slot intent is written before creation. An uncertain create reserves that slot while unrelated slots can proceed. Three failed runner Jobs stop that slot; they do not trigger duplicate deployment. Legacy active runners drain before the new private workspace layout is used. Shrinking a pool with retained slot state requires operator reconciliation.
 
@@ -39,7 +39,7 @@ API status polling scales its interval with admitted CI operations, so additiona
 2. Publish reviewed API/runner images and update the trusted workflow pin through the existing platform release procedure.
 3. Update the existing host executor profile through its Ansible owner and reverify its network/sandbox receipt. Set `runner_count: 12` in the private worker promotion config, so future promotions retain the setting. Merely editing a rendered ConfigMap is insufficient.
 4. Verify actual available disk/memory, runner startup, >=12 distinct overlapping workflow jobs on the same node, and heavy gate peak <=2. Check account rate/usage before and after.
-5. Verify the 17th deployment queues, same-app order, restart observation, uncertain create isolation and exact artifact/CD binding. Report live customer URL verification separately from runner capacity.
+5. Verify the fourth deployment queues at the default limit, same-app order, restart observation, uncertain create isolation and exact artifact/CD binding. Report live customer URL verification separately from runner capacity.
 
 Read-only host measurement on 2026-10-04: 4 CPUs, 15,783 MiB RAM, 14,568 MiB available; 58 GiB root filesystem, 17 GiB available. This snapshot is not a load-test result. Avoid retaining disposable checkouts indefinitely; preserve durable evidence independently.
 

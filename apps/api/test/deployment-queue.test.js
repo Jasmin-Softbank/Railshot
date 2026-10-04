@@ -24,7 +24,7 @@ async function until(read, predicate = (record) => !['queued', 'running'].includ
   assert.fail(`Queue did not settle: ${JSON.stringify(value)}`);
 }
 
-async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments = 16 } = {}) {
+async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-queue-'));
   const submissions = [], deliveries = [], publications = new Map(), releases = [];
   const service = { targetId: 'runtime-aws', targetIds: ['runtime-aws', 'runtime-gcp'],

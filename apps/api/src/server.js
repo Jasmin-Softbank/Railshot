@@ -66,7 +66,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
   service = configuredDeploymentService(),
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
   deployPublished, environmentAdapter, applicationAdapter, personalAdapter, observeMetrics, observeLogs, observeTraffic, classifyFailure, product, pollInterval,
-  maxConcurrentDeployments = Number(process.env.RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS ?? 16),
+  maxConcurrentDeployments = Number(process.env.RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS ?? 3),
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets, releaseLeaseMs = 120_000,
 } = {}) {
   // Keep the dedicated API credential in the adapter closure. Child CI/CD tools
