@@ -129,8 +129,8 @@ def unavailable():
         pass
 
 
-# Twelve active jobs produce at most 720 periodic updates/hour, leaving room
-# in the repository GITHUB_TOKEN budget for registration/final publications.
+# Heartbeats are coalesced; bounded stage/repair transitions publish immediately.
+# Server-directed rate-limit backoff still applies to every publication.
 PUBLISH_INTERVAL_SECONDS = 60
 
 
@@ -278,7 +278,10 @@ class ChecksProgress:
             now = time.monotonic()
             if now < self.backoff_until:
                 return
-            if now < self.next_at and not final:
+            transition = projected['event_name'] in {
+                'loop.started', 'loop.completed', 'gate.layer.started', 'gate.layer.completed',
+                'agent.repair', 'agent.observation'}
+            if now < self.next_at and not final and not transition:
                 return
             self.next_at = now + PUBLISH_INTERVAL_SECONDS
             if self.check_id is None:

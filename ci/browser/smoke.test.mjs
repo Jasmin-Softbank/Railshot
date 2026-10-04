@@ -112,7 +112,7 @@ test('execution links require the latest owned active service and disappear on s
   await page.route('**/api/v1/applications?*', (route) => failInventory
     ? json(route, { error: { message: 'Unavailable' } }, 503) : json(route, { items: [app] }));
   await page.route('**/api/v1/deployments?*', (route) => json(route, { items: [deployment] }));
-  await page.route('**/api/v1/deployments/deployed-v1', (route) => json(route, deployment));
+  await page.route('**/api/v1/deployments/deployed-v1*', (route) => json(route, deployment));
   await page.goto(origin);
   const links = ['#application-link', '#monitor-application-link'];
   await page.waitForFunction(() => ['#application-link', '#monitor-application-link']
