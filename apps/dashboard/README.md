@@ -74,6 +74,10 @@ The app and last verified service are fixed context. Source, review and executio
 
 ## 배포 이력 화면과 선택형 응답 (프런트엔드 우선 구현)
 
+AI의 처리 중 상태·변경 파일·검증 결과를 연결하는 후속 설계는
+[대시보드 AI 자동 복구 표시 설계](../../docs/api/dashboard-agent-recovery.md)를 참고합니다.
+해당 문서는 연동 제안이며 아직 구현된 응답 규격이 아닙니다.
+
 첨부 디자인 `8_mockup_deploy_history.html`을 기준으로 카드형 목록, 날짜·상태·앱 이름 필터,
 접속정보, 배포 이력 표, 단계별 로그 화면을 구성했습니다. 목록의 필터는 현재 서버 페이지에만
 적용됩니다. 상세의 이력 표도 현재 불러온 동일 앱·동일 환경 기록만 표시합니다.
