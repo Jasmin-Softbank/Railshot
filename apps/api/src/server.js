@@ -65,7 +65,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   productReady.catch(() => {});
-  let activeRequests = 0, release = null, releaseTimer, productClosing, shuttingDown = false;
+  let activeRequests = 0, release = null, draining = null, releaseTimer, productClosing, shuttingDown = false;
   const closeProduct = () => productClosing ||= productReady.then((value) => value?.close?.());
   const server = createServer(async (request, response) => {
     const requestId = randomUUID();
@@ -98,24 +98,27 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           json(response, 200, { status: 'current', release_id: input.release_id }); return;
         }
         if (!products?.pauseForRelease || shuttingDown) throw new ServiceError('Release preparation unavailable', 503);
-        if (release && release !== input.release_id) throw new ServiceError('Another release is prepared', 409);
+        if ((release || draining) && (release || draining) !== input.release_id) throw new ServiceError('Another release is prepared', 409);
         if (!release) {
-          // No await between the idle check and admission fence: requests cannot
-          // slip into the process after it has granted permission to replace it.
-          if (activeRequests || !products.pauseForRelease()) {
-            json(response, 202, { status: 'busy' }, { 'Retry-After': '2' }); return;
-          }
-          release = input.release_id;
+          // Fence the next queued writer before waiting for the current one.
+          // Refresh a bounded lease so an abandoned preparation resumes service.
+          draining = input.release_id;
+          clearTimeout(releaseTimer);
           releaseTimer = setTimeout(() => {
-            release = null;
+            release = null; draining = null;
             products.resumeAfterRelease();
           }, releaseLeaseMs);
           releaseTimer.unref();
+          const idle = products.pauseForRelease();
+          if (activeRequests || !idle) {
+            json(response, 202, { status: 'busy', waiting_for: !idle ? 'active_worker' : 'active_request' }, { 'Retry-After': '2' }); return;
+          }
+          release = input.release_id;
         }
         json(response, 200, { status: 'prepared', release_id: release, lease_ms: releaseLeaseMs }); return;
       }
       if (url.pathname.startsWith('/api/')) {
-        if (release || shuttingDown) {
+        if (release || shuttingDown || draining && !['GET', 'HEAD'].includes(request.method)) {
           // The request has not been read or executed. This exact envelope allows
           // a browser to retry the same request safely during the short handover.
           json(response, 503, { error: { code: 'PLATFORM_UPDATING', message: '서버 업데이트를 마치고 요청을 이어서 처리합니다.',

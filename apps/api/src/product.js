@@ -293,10 +293,10 @@ export async function createProductService({ service, directory, target, provide
     // ponytail: existing SQLite operations are a bounded FIFO for one API replica;
     // use a broker with fenced workers only when the runtime gains multiple writers.
     pumping = (async () => {
-      while (!abort.signal.aborted) {
+      while (!abort.signal.aborted && !releasePaused) {
         if (workers.size) break; // Never detach a live writer merely because its clock expired.
         const record = await store.transaction((state) => {
-          if (abort.signal.aborted) return null;
+          if (abort.signal.aborted || releasePaused) return null;
           const now = Date.now(), iso = new Date(now).toISOString();
           for (const row of Object.values(state.operations)) {
             if (row.status !== 'unknown' || row.queue?.released_at) continue;
@@ -890,9 +890,8 @@ export async function createProductService({ service, directory, target, provide
   void pump();
   return {
     pauseForRelease() {
-      if (workers.size || pumping) return false;
       releasePaused = true;
-      return true;
+      return !workers.size && !pumping;
     },
     resumeAfterRelease() { releasePaused = false; void pump(); },
     dashboard: store.dashboard,

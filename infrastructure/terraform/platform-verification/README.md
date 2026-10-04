@@ -58,4 +58,6 @@ gh api repos/Jasmin-Softbank/Railshot/actions/oidc/customization/sub
 
 검증 코드가 바뀌면 같은 모듈·state에서 새 saved plan을 적용하고 네 개 workflow 변수의 document version/hash를 갱신한다. 기존 검증 문서는 기본 버전 변경에 관계없이 pin한 버전으로 실행된다. 일반 앱/API 이미지 게시만으로는 이 bootstrap을 반복할 필요가 없다. trusted ref를 main으로 옮길 때는 검토한 `-var='trusted_ref=refs/heads/main'` plan과 `RAILSHOT_PLATFORM_VERIFY_REF`를 함께 갱신한다. 초기 trust에 main이나 `integration/*` wildcard를 추가하지 않는다.
 
-workflow는 SSM 요청을 한 번만 보내며 응답이 불확실하면 실패한다. 문서 실행은 최대 660초, hosted polling은 최대 720초이고 workflow job은 15분 제한이다. 실패해도 Kubernetes를 변경하지 않으며 SSH, 고객 runner, release GitHub token으로 관리자 경로에 진입하는 fallback은 없다. `platform-verification-<source SHA>` artifact가 실제 검증 결과이고, Terraform validate나 로컬 mock 검사는 배포 성공 증거가 아니다.
+workflow는 버전·해시를 고정한 SSM 문서로 짧은 읽기 검사를 수행한다. 완료된 검사가 대기 상태를 반환하면 10초 후 다시 조회하며, 응답이 불확실한 요청은 재전송하지 않는다. 이전 revision 처리, API 준비, 준비 재시도, 일반 동기화 대기를 구분해 Actions에 표시한다. 확정된 Argo 실패는 즉시 실패하고, 성공 조건은 기존과 같은 revision·Pod digest·Ready·공개 HTTPS다. 각 SSM 문서는 최대 90초, 전체 검증은 준비 Job의 15분과 Pod 교체 여유 2분을 합한 최대 17분이다. 이 값은 최대 대기 한도이며 정상 준비 완료 후 첫 검사에서 바로 끝난다. 검증 역할 세션은 30분, workflow job은 25분이다.
+
+API 교체 요청은 진행 중 작업을 중단하지 않고 다음 큐 작업의 시작과 새 변경 요청을 먼저 보류한다. 진행 중 작업이 끝나면 교체하며, 준비 프로세스가 사라지면 마지막 조회로부터 2분 뒤 보류를 해제한다. 준비 로그는 대기 사유와 제한된 오류 코드만 출력하며 토큰·응답 본문은 출력하지 않는다. 실패해도 검증기는 Kubernetes를 변경하지 않으며 SSH, 고객 runner, release GitHub token으로 관리자 경로에 진입하는 fallback은 없다. `platform-verification-<source SHA>` artifact가 실제 검증 결과이고, Terraform validate나 로컬 mock 검사는 배포 성공 증거가 아니다.

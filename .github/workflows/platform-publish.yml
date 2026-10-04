@@ -53,7 +53,7 @@ jobs:
     if: ${{ always() && !cancelled() && inputs.deploy && inputs.publish && (needs.publish.result == 'success' || (inputs.skip_build && needs.publish.result == 'skipped')) }}
     needs: publish
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     permissions: {contents: write, actions: read, id-token: write}
     outputs:
       admitted: ${{ steps.source.outputs.admitted }}
@@ -165,7 +165,7 @@ jobs:
         with:
           aws-region: ap-northeast-2
           role-to-assume: arn:aws:iam::721622471953:role/railshot-platform-verifier
-          role-duration-seconds: 900
+          role-duration-seconds: 1800
           role-session-name: railshot-platform-${{ github.run_id }}
           allowed-account-ids: '721622471953'
       - name: Verify the exact Argo revision, running digests and public edge
