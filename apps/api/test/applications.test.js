@@ -166,3 +166,13 @@ test('publication above the operator-config limit replays unchanged and still re
   assert.equal(f.calls.length, 2);
   assert.equal((await stat(requestPath, { bigint: true })).mtimeNs, before.mtimeNs);
 });
+
+test('registration recovery distinguishes no native request from an attempted registration', async t => {
+  const f = await fixture(t), app = f.adapter.describe('runtime-gcp', 'memos');
+  assert.equal(await f.adapter.registrationStarted(app), false);
+  assert.equal(f.calls.length, 0);
+  await f.adapter.register(app);
+  assert.equal(await f.adapter.registrationStarted(app), true);
+  assert.equal(f.calls.length, 1, 'observation must not invoke registration again');
+  await assert.rejects(f.adapter.registrationStarted({ ...app, id: 'foreign' }), { code: 'APPLICATION_BINDING_MISMATCH' });
+});

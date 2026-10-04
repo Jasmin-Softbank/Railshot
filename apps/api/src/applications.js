@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lstat } from 'node:fs/promises';
+import { lstat, readdir } from 'node:fs/promises';
 import { APP_NAME, TARGET_ID, TENANT_NAME } from './contract.js';
 import { EnvironmentError, privateJson, privateDirectory, savePrivate, runEnvironmentCommand } from './environments.js';
 import { createCdAdapter } from './cd.js';
@@ -115,6 +115,15 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
           || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502, true);
       return { status: result.status, application_id: application.id, action,
         steps: lifecycleSteps(result.steps), residuals: lifecycleResources(result.residuals) };
+    },
+    async registrationStarted(application) {
+      const home = await current(application);
+      try { await lstat(home); }
+      catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+      await privateDirectory(home);
+      // register persists request.json before invoking any native command. Any
+      // file, including an interrupted temporary write, keeps recovery fenced.
+      return (await readdir(home)).length !== 0;
     },
     async register(application) {
       const home = await current(application);

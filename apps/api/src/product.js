@@ -409,6 +409,25 @@ export async function createProductService({ service, directory, target, provide
     const id = operation.kind === 'environments' ? operation.runtime_target_id : operation.environment?.runtime_target_id;
     if (registeredEnvironment(restored, id)) service?.allowTarget?.(id);
   }
+  // A process restart can interrupt a task still waiting for the shared writer.
+  // Only absence of the native request/intent permits replay of the same source.
+  for (const operation of Object.values(restored.operations)) {
+    const application = restored.applications[operation.application_id];
+    if (operation.kind !== 'deployments' || operation.status !== 'unknown' || operation.stage !== 'registration'
+        || !application || !['unknown', 'queued'].includes(application.status)
+        || operation.deletion_requested || application.deletion_requested || application.lifecycle_operation_id
+        || operation.ci?.run_id || operation.source_commit || operation.dispatch
+        || !operation.queue?.enqueued_at || typeof applicationAdapter?.registrationStarted !== 'function') continue;
+    try {
+      if (await applicationAdapter.registrationStarted(application)) continue;
+      await store.transaction(state => {
+        const row = state.operations[operation.id];
+        state.applications[application.id].status = 'queued';
+        Object.assign(row, { status: 'queued', error: null, updated_at: new Date().toISOString() });
+        delete row.queue.started_at; delete row.queue.released_at; delete row.queue.release_reason;
+      });
+    } catch { /* A failed observation never grants permission to repeat a write. */ }
+  }
   function inputFingerprint(input) {
     return digest({ app: input.app, target_id: input.target_id, type: input.source_type, ...(input.environment_target_id ? { environment_target_id: input.environment_target_id } : {}), ...(input.plan_id ? { plan_id: input.plan_id } : {}),
       ...(input.deployment_selection ? { selection: input.deployment_selection } : {}),

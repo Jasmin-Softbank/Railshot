@@ -298,3 +298,35 @@ test('a released unknown app does not prevent confirmed deletion of another app 
   assert.equal(f.product.getApplication(beta.application_id, f.owner).status, 'deleted');
   assert.equal((await f.read(alpha.id)).status, 'unknown');
 });
+
+test('restart completes the original GCP deployment only when native registration never started', async t => {
+  for (const started of [false, true]) await t.test(`native request exists: ${started}`, async t => {
+    const f = await fixture(t);
+    let attempts = 0;
+    f.adapter.register = async () => { attempts++; throw new Error('Worker stopped before acquiring writer'); };
+    const first = await f.product.createDeployment(source('memos', 'gcp'), 'original-upload', undefined, f.owner);
+    const stopped = await until(() => f.read(first.id));
+    assert.equal(stopped.status, 'unknown');
+    assert.equal(stopped.stage, 'registration');
+    assert.equal(f.submissions.length, 0);
+    await f.product.close();
+    f.adapter.registrationStarted = async application => {
+      assert.equal(application.environment_target_id, 'runtime-gcp');
+      assert.equal(application.app, 'memos');
+      return started;
+    };
+    f.adapter.register = async () => { attempts++; return { status: 'ready' }; };
+    f.product = await createProductService(f.options);
+    if (started) {
+      const blocked = await f.read(first.id);
+      assert.equal(blocked.status, 'unknown');
+      assert.equal(attempts, 1); assert.equal(f.submissions.length, 0);
+    } else {
+      const completed = await until(() => f.read(first.id));
+      assert.equal(completed.status, 'succeeded');
+      assert.equal(completed.id, first.id); assert.equal(completed.application_id, first.application_id);
+      assert.equal(attempts, 2); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 1);
+      assert.equal(f.submissions[0].files[0].content.toString(), 'source for memos');
+    }
+  });
+});
