@@ -57,7 +57,7 @@ jobs:
       - name: Verify MCP deployment submission and status lookup
         if: matrix.component == 'mcp'
         run: |
-          npm ci --ignore-scripts --no-audit --no-fund --workspace=apps/agent --include-workspace-root=false
+          npm ci --ignore-scripts --no-audit --no-fund --workspace=apps/agent --workspace=apps/api --include-workspace-root=false
           npm test --workspace @railshot/agent
       - name: Build without credentials
         env:
