@@ -1731,3 +1731,16 @@ test('concurrency configuration is bounded and rejects invalid limits before ope
     await assert.rejects(fixture(t, { maxConcurrentDeployments }), { code: 'INVALID_INPUT' });
   }
 });
+
+test('operator resumes only the exact published operation without new CI', async t => {
+  const f = await interruptedApplication(t);
+  const identity = { operation_id: f.created.id, source_commit: f.original.source_commit, run_id: f.original.ci.run_id };
+  await assert.rejects(f.product.resumePublishedOperation({ ...identity, source_commit: 'f'.repeat(40) }), { code: 'RESUME_BINDING_MISMATCH' });
+  await assert.rejects(f.product.resumePublishedOperation({ ...identity, run_id: '999999' }), { code: 'RESUME_BINDING_MISMATCH' });
+  f.adapter.deployPublished = f.deliver;
+  await f.product.resumePublishedOperation(identity);
+  const result = await settle(() => f.product.getDeployment(f.created.id, f.owner));
+  assert.equal(result.status, 'succeeded');
+  assert.equal(f.submissions.length, 1);
+  assert.equal(diskState(f.directory).operations[f.created.id].resume_initiated_by, 'operator');
+});

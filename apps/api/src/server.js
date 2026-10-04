@@ -120,6 +120,19 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           && Boolean(product || service?.targetId || environmentAdapter || process.env.RAILSHOT_PROFILES_FILE);
         json(response, url.pathname === '/readyz' && !configured ? 503 : 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
+      if (url.pathname === '/internal/deployments/resume' && request.method === 'POST') {
+        versioned = true;
+        if (!access.token || !allowsToken(request.headers.authorization, access.token))
+          throw new ServiceError('API authentication required', 401);
+        if (shuttingDown || release || draining) throw new ServiceError('Platform update in progress', 503);
+        const input = await jsonInput(request);
+        if (!input || Object.keys(input).sort().join(',') !== 'operation_id,run_id,source_commit'
+            || !/^[a-f0-9-]{36}$/.test(input.operation_id || '')
+            || !/^[a-f0-9]{40}$/.test(input.source_commit || '') || !/^[1-9][0-9]*$/.test(input.run_id || ''))
+          throw new ServiceError('Exact published deployment identity required', 422);
+        activeRequests++; counted = true;
+        json(response, 202, await (await productReady).resumePublishedOperation(input)); return;
+      }
       if (url.pathname === '/internal/deployments/replay-source' && request.method === 'POST') {
         versioned = true;
         if (!access.token || !allowsToken(request.headers.authorization, access.token))

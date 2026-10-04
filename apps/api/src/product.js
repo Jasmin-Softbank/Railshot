@@ -1250,7 +1250,13 @@ export async function createProductService({ service, directory, target, provide
       return this.createDeployment({ app: record.app, target_id: environmentTargetId, source_type: 'folder', files },
         `source-replay.${record.id}.${digest([environmentTargetId, sourceDigest(files)]).slice(0, 32)}`, undefined, record.session_id);
     },
-    async resumeDeployment(id, sessionId = null) {
+    async resumePublishedOperation({ operation_id: id, source_commit: source, run_id: run }) {
+      const record = store.read().operations[id];
+      if (!record?.session_id || record.source_commit !== source || record.ci?.run_id !== run)
+        throw new ProductError(409, 'RESUME_BINDING_MISMATCH', '재개 요청의 소스와 CI 실행이 원래 배포와 일치하지 않습니다.');
+      return this.resumeDeployment(id, record.session_id, 'operator');
+    },
+    async resumeDeployment(id, sessionId = null, initiatedBy = 'owner') {
       const record = await store.transaction((state) => {
         const operation = Object.hasOwn(state.operations, id) ? state.operations[id] : null;
         const application = operation?.application_id && state.applications[operation.application_id];
@@ -1295,7 +1301,7 @@ export async function createProductService({ service, directory, target, provide
         checkUncertainResource(state, operation, id);
         if (operation.queue) { delete operation.queue.released_at; delete operation.queue.release_reason; }
         Object.assign(operation, { status: 'running', error: null, resumed_at: new Date().toISOString(),
-          resume_count: (operation.resume_count || 0) + 1, updated_at: new Date().toISOString() });
+          resume_count: (operation.resume_count || 0) + 1, resume_initiated_by: initiatedBy, updated_at: new Date().toISOString() });
         return operation;
       });
       launch(() => observe(record, String(record.ci.run_id), { resume: true }), record.id);
