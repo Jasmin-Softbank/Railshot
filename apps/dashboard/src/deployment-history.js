@@ -1,3 +1,4 @@
+import { openInsights } from './insights.js';
 import { node, button, renderRecovery, validateQuestion, createAgentActivityCard } from './recovery.js';
 
 export const time = (value) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('ko-KR') : '시각 미제공';
@@ -89,7 +90,9 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       if (value) { const chip = node('span', '', 'dh-chip'); chip.append(node('span', label), node('b', value)); metadata.append(chip); }
     }
     const heading = node('div'); heading.append(title, metadata);
-    const actions = node('div', '', 'dh-actions'); actions.append(button('모니터링', () => onMonitor(record)), button('작업 로그', () => onLogs(record)), button('새로고침', () => open(record)));
+    let disposeInsights = () => {};
+    const actions = node('div', '', 'dh-actions');
+    if (record.kind !== 'builds') actions.append(button('운영 인사이트', () => { disposeInsights(); disposeInsights = openInsights(record, request); })); actions.append(button('모니터링', () => onMonitor(record)), button('작업 로그', () => onLogs(record)), button('새로고침', () => open(record)));
     const url = serviceUrl(application);
     if (url) { const link = node('a', '서비스 접속 ↗', 'primary-button'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; actions.append(link); }
     header.append(heading, actions); host.append(back, header);
@@ -136,7 +139,7 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
         content.replaceChildren(node('p', `오류 상세 조회 실패: ${error.message}`, 'dh-error'), button('다시 시도', () => showIssue(item)));
       }
     }
-    cleanup = () => { issueSequence++; issueController?.abort(); disposePipeline(); };
+    cleanup = () => { disposeInsights(); issueSequence++; issueController?.abort(); disposePipeline(); };
     const connections = node('section', '', 'dh-panel'); connections.append(node('h3', '접속정보'));
     const grid = node('div', '', 'dh-connections');
     for (const [label, value] of [['서비스 주소', url || '현재 검증된 서비스 주소가 없습니다.'], ['모니터링', '환경 모니터링에서 확인'], ['배포환경', record.environment_target_id || record.target_id || '미제공']]) {

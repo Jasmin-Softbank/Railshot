@@ -141,6 +141,8 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'],
       '/contracts/application.mjs': ['../../contracts/application.mjs', 'text/javascript'],
       '/src/api.js': ['src/api.js', 'text/javascript'], '/src/lifecycle.js': ['src/lifecycle.js', 'text/javascript'],
+      '/src/insights.js': ['src/insights.js', 'text/javascript'],
+      '/src/insights-view.js': ['src/insights-view.js', 'text/javascript'],
       '/src/deployment-history.js': ['src/deployment-history.js', 'text/javascript'], '/src/recovery.js': ['src/recovery.js', 'text/javascript'] };
     if (!files[path]) return respond(response, 404, { error: { message: 'fixture path unavailable' } });
     response.writeHead(200, { 'content-type': files[path][1] }); response.end(await readFile(new URL('../../apps/dashboard/' + files[path][0], import.meta.url)));

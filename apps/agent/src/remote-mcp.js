@@ -85,7 +85,7 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
   const mcp = createMcpHandler(({ authInfo }) => {
     const bound = tokens.get(authInfo?.token);
     if (!bound || bound.expires <= now()) throw new Error('AI 연결이 만료되었습니다.');
-    return createToolServer(createApiClient({ baseUrl: apiUrl, env, fetchImpl, session: bound.session }));
+    return createToolServer(createApiClient({ baseUrl: apiUrl, env, fetchImpl, session: bound.session }), { publicOrigin: origin.origin });
   }, { legacy: 'stateless' });
 
   async function ensureSession(request) {

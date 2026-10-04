@@ -101,6 +101,8 @@ export function createApiClient({ baseUrl = process.env.RAILSHOT_API_URL || 'htt
     options: () => request('/api/v1/options'),
     targets: () => request('/api/v1/targets'),
     deployment: (id) => request(`/api/v1/deployments/${encodeURIComponent(id)}`),
+    appOverview: (id, minutes) => request(`/api/v1/deployments/${encodeURIComponent(id)}/insights?minutes=${minutes}`),
+    deploymentEvidence: (id, area) => request(`/api/v1/deployments/${encodeURIComponent(id)}/evidence?area=${area}`),
     deploymentEvents: (id) => request(`/api/v1/deployments/${encodeURIComponent(id)}/events`),
     deploymentDiagnostics: (id) => request(`/api/v1/deployments/${encodeURIComponent(id)}/diagnostics`),
     build: (id) => request(`/api/v1/builds/${encodeURIComponent(id)}`),
