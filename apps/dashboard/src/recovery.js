@@ -140,3 +140,48 @@ export function renderRecovery(host, { question, deploymentId, submit, onRefresh
   host.append(form); update(); const timer = setInterval(update, 1000);
   return () => { disposed = true; clearInterval(timer); inputs.replaceChildren(); readers = []; };
 }
+
+// Keep this card separate from the question form so polling never discards answers.
+export function createAgentActivityCard(host) {
+  const labels = { analyzing: 'AI 처리 중', applying: '수정 적용 중', verifying: '재검증 중', succeeded: '복구 완료', failed: '이번 시도 실패', unknown: '처리 상태 확인 필요', awaiting_input: '사용자 확인 필요' };
+  const checks = { succeeded: '성공', failed: '실패', running: '진행 중', not_run: '미실행', unknown: '확인 필요' };
+  const card = node('section', '', 'dh-agent-card'); card.setAttribute('aria-label', 'AI 자동 복구');
+  const title = node('h4', 'AI 자동 복구'), badge = node('span', '', 'dh-status'), heading = node('div', '', 'dh-title-row');
+  heading.append(title, badge);
+  const summary = node('p'), action = node('p'), freshness = node('p', '', 'dh-note'), timing = node('p', '', 'dh-note');
+  action.setAttribute('role', 'status');
+  const changes = node('details'), files = node('ul'); changes.append(node('summary', '변경 내용 보기'), files);
+  const verification = node('ul', '', 'dh-agent-checks'); verification.setAttribute('aria-label', '재검증 결과');
+  const history = node('details'), attempts = node('ul'); history.append(node('summary', '이전 시도'), attempts);
+  card.append(heading, summary, action, freshness, timing, changes, verification, history); host.append(card);
+  return {
+    update(activity, unavailable = false) {
+      card.hidden = !activity;
+      if (!activity) return;
+      badge.textContent = labels[activity.state] || labels.unknown;
+      badge.className = `dh-status ${activity.state === 'succeeded' ? 'ok' : activity.state === 'failed' ? 'fail' : 'run'}`;
+      summary.textContent = activity.summary || '';
+      action.textContent = activity.current_action || '';
+      const state = unavailable ? 'unavailable' : activity.observation?.state;
+      freshness.textContent = state === 'unavailable' ? '최신 상태를 조회하지 못했습니다. 마지막 확인 내용을 표시합니다.'
+        : state === 'stale' ? '최근 진행 정보가 지연되고 있습니다. 마지막 확인 내용을 표시합니다.' : '';
+      const end = Date.parse(activity.finished_at || activity.updated_at), start = Date.parse(activity.started_at);
+      timing.textContent = `${activity.attempt}차 시도${Number.isFinite(end - start) ? ` · 확인된 경과 ${Math.max(0, Math.floor((end - start) / 1000))}초` : ''}`;
+      files.replaceChildren();
+      for (const change of activity.changes || []) files.append(node('li', `${change.path} — ${change.summary} (${change.status === 'applied' ? '적용 완료 · AI 수정 설명' : '제안'})`));
+      if (!files.children.length) files.append(node('li', '확인된 파일 변경이 없습니다.'));
+      if (activity.omitted?.changes) files.append(node('li', `추가 ${activity.omitted.changes}개 파일은 작업 로그에서 확인하세요.`));
+      verification.replaceChildren();
+      for (const check of activity.verification || []) verification.append(node('li', `${check.label} · ${checks[check.state] || '확인 필요'}`));
+      attempts.replaceChildren();
+      for (const prior of activity.previous_attempts || []) {
+        const item = node('li', `${prior.attempt}차 시도 · ${labels[prior.state] || labels.unknown}`);
+        const list = node('ul');
+        for (const change of prior.changes || []) list.append(node('li', `${change.path} — ${change.summary}`));
+        for (const check of prior.verification || []) list.append(node('li', `${check.label} · ${checks[check.state] || '확인 필요'}`));
+        item.append(list); attempts.append(item);
+      }
+      history.hidden = !attempts.children.length;
+    },
+  };
+}

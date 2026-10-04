@@ -1,4 +1,4 @@
-import { node, button, renderRecovery, validateQuestion } from './recovery.js';
+import { node, button, renderRecovery, validateQuestion, createAgentActivityCard } from './recovery.js';
 
 export const time = (value) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('ko-KR') : '시각 미제공';
 const states = { succeeded: ['배포 완료', 'ok'], published: ['이미지 게시 완료', 'ok'], running: ['배포 중', 'run'], queued: ['실행 대기', 'run'],
@@ -23,6 +23,12 @@ export function hasDeploymentIssue(record) {
   if (['succeeded', 'published', 'unchanged'].includes(record.status)) return false;
   return Boolean(record.error) || ['failed', 'blocked', 'unknown', 'awaiting_input', 'publication_unverified'].includes(record.status)
     || [record.ci?.state, record.environment?.status, record.cd?.state].some((state) => ['failed', 'blocked', 'unknown'].includes(state));
+}
+// An agent can be repairing a running build, or have repaired a now-successful deployment.
+export function hasProcessingDetail(record) {
+  return hasDeploymentIssue(record) || Boolean(record.agent_activity_summary || record.agent_activity)
+    || (record.kind !== 'builds' && record.status === 'running' && record.stage === 'ci')
+    || Boolean(record.telemetry?.items?.some(event => event.event_name?.startsWith('agent.')));
 }
 export function deploymentStages(record) {
   const describe = (id, label, value) => ({ id, label, state: value || 'not_started' });
@@ -106,24 +112,24 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       switchPane(false, event); originButton?.focus({ preventScroll: true });
     }
     async function showIssue(item, event, refresh = false) {
-      if (!hasDeploymentIssue(item)) return;
+      if (!hasProcessingDetail(item)) return;
       const sequence = ++issueSequence; issueController?.abort(); disposePipeline(); issueController = new AbortController();
       if (issueRecordId !== item.id) selectedStage = null;
       issueRecordId = item.id;
       originButton = [...body.querySelectorAll('.dh-issue-trigger')].find((trigger) => trigger.dataset.deploymentId === item.id);
       const backToHistory = button('‹ 배포내역으로 돌아가기', hideIssue, 'dh-back');
       const issueHeader = node('div', '', 'dh-issue-heading');
-      issueHeader.append(node('h3', '배포 오류 상세'), node('p', `${time(item.created_at)} · ${item.id}`, 'dh-note'));
+      issueHeader.append(node('h3', '문제 및 처리 내역'), node('p', `${time(item.created_at)} · ${item.id}`, 'dh-note'));
       const content = node('div');
       issuePane.replaceChildren(backToHistory, issueHeader, content);
       switchPane(true, event); backToHistory.focus({ preventScroll: true }); viewport.scrollIntoView({ block: 'nearest' });
       try {
         content.append(node('p', '오류 상세를 불러오고 있습니다.', 'dh-note'));
-        const result = item.id === record.id && !refresh ? [record, diagnostic, question, []] : await readDetail(item, issueController);
+        const result = item.id === record.id && !refresh && !record.agent_activity ? [record, diagnostic, question, []] : await readDetail(item, issueController);
         if (sequence !== issueSequence || generation !== epoch) return;
         content.replaceChildren(); const [selected, evidence, followup, warnings] = result;
         for (const warning of warnings) content.append(node('p', warning, 'dh-note'));
-        if (!hasDeploymentIssue(selected)) { content.append(node('p', '이 배포에는 현재 확인된 오류가 없습니다. 배포내역을 새로고침해 주세요.', 'dh-note')); return; }
+        if (!hasProcessingDetail(selected)) { content.append(node('p', '이 배포에는 현재 확인된 오류가 없습니다. 배포내역을 새로고침해 주세요.', 'dh-note')); return; }
         const pipeline = renderPipeline(selected, evidence, followup, () => showIssue(selected, null, true));
         disposePipeline = pipeline.dispose; content.append(pipeline.layout);
       } catch (error) {
@@ -152,13 +158,15 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       date.append(node('span', time(item.created_at)));
       if (application?.current_deployment_state === 'verified' && application.current_deployment?.id === item.id) { row.className = 'dh-current'; date.append(node('span', '현재', 'dh-tag')); }
       image.append(node('code', imageText(item)));
-      if (hasDeploymentIssue(item)) {
+      if (hasProcessingDetail(item)) {
         row.classList.add('dh-issue-row');
         const trigger = button('', (event) => { event.stopPropagation(); showIssue(item, event); }, 'dh-issue-trigger');
         trigger.dataset.deploymentId = item.id;
-        trigger.setAttribute('aria-label', `${time(item.created_at)} ${item.app || record.app} 오류 상세 보기`);
+        trigger.setAttribute('aria-label', `${time(item.created_at)} ${item.app || record.app} 처리 내역 보기`);
         const arrow = node('span', '→', 'dh-row-arrow'); arrow.setAttribute('aria-hidden', 'true');
-        trigger.append(stateBadge(item), arrow); status.append(trigger);
+        trigger.append(stateBadge(item));
+        if (item.agent_activity_summary) trigger.append(node('span', `자동 처리 ${item.agent_activity_summary.attempt}회`, 'dh-tag'));
+        trigger.append(arrow); status.append(trigger);
         row.addEventListener('click', (event) => showIssue(item, event));
       } else status.append(stateBadge(item));
       row.append(date, image, status); body.append(row);
@@ -170,12 +178,39 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
   function renderPipeline(record, diagnostic, question, refresh) {
     const stages = deploymentStages(record);
     if (!stages.some((stage) => stage.id === selectedStage)) selectedStage = null;
-    selectedStage ||= stages.find((stage) => ['failed', 'blocked', 'unknown'].includes(stage.state))?.id || (question ? 'deploy' : stages.at(-1).id);
+    selectedStage ||= (record.agent_activity ? 'build' : null) || stages.find((stage) => ['failed', 'blocked', 'unknown'].includes(stage.state))?.id || (question ? 'deploy' : stages.at(-1).id);
     const logLayout = node('div', '', 'dh-log-layout'), stepList = node('div', '', 'dh-steps'), detail = node('section', '', 'dh-stage-detail');
     stepList.setAttribute('role', 'group'); stepList.setAttribute('aria-label', '배포 단계');
-    let disposeForm = () => {};
+    let disposeForm = () => {}, activity = record.agent_activity || null, card = null, stopped = false, timer, polling = false;
+    const activityController = new AbortController();
+    let activityRevision = activity?.revision ?? -1, activityId = activity?.id, runAttempt = record.agent_run_attempt || 0;
+    const terminal = () => record.agent_events_complete === true;
+    async function poll() {
+      if (stopped || polling) return;
+      polling = true;
+      try {
+        if (document.hidden) return;
+        const { data } = await request(`/api/v1/deployments/${encodeURIComponent(record.id)}/events`, {}, activityController);
+        if (stopped) return;
+        if (data?.deployment_id !== record.id) throw new Error('배포 식별자 불일치');
+        if (data.run_attempt && data.run_attempt < runAttempt) return;
+        runAttempt = data.run_attempt || runAttempt;
+        const next = data.agent_activity;
+        if (next && (next.id !== activityId || next.revision >= activityRevision)) {
+          activity = next; activityId = next.id; activityRevision = next.revision;
+          card?.update(activity, data.state === 'unavailable');
+        } else if (activity) card?.update(activity, data.state === 'unavailable');
+        record.agent_events_complete = data.status === 'completed';
+        record.agent_poll_ms = Math.max(5000, data.progress?.poll_after_ms || 15000);
+      } catch {
+        if (!stopped) card?.update(activity, true);
+      } finally {
+        polling = false;
+        if (!stopped && !terminal()) timer = setTimeout(poll, record.agent_poll_ms || 15000);
+      }
+    }
     function select(stage, focus = false) {
-      disposeForm(); selectedStage = stage.id;
+      disposeForm(); card = null; selectedStage = stage.id;
       for (const item of stepList.querySelectorAll('button[data-stage]')) item.setAttribute('aria-pressed', String(item.dataset.stage === stage.id));
       detail.replaceChildren(); const heading = node('h3', `${stage.label} · ${stageLabel(stage.state)}`); heading.tabIndex = -1; detail.append(heading);
       const failureStage = record.stage === 'ci' ? 'build' : record.stage === 'environment' ? 'environment' : 'deploy';
@@ -185,12 +220,20 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
         detail.append(node('h4', '원인 요약'), node('p', question.summary.replace(/\s+/g, ' '), 'dh-cause'), node('h4', '근거'));
         for (const evidence of question.evidence || []) { detail.append(node('p', evidence.label, 'dh-label'), node('pre', evidence.text, 'dh-code')); }
       }
+      if (stage.id === 'build' && record.kind !== 'builds') {
+        const activityHost = node('div'); detail.append(activityHost);
+        card = createAgentActivityCard(activityHost); card.update(activity);
+      }
       detail.append(node('h4', '로그'), node('pre', logText(record, diagnostic, stage.id), 'dh-code'));
-      if (stage.id === 'build') {
-        const observed = record.telemetry?.items?.filter((event) => event.event_name?.startsWith('agent.')) || [];
-        if (observed.length) { const disclosure = node('details', '', 'dh-agent'); disclosure.append(node('summary', '에이전트 활동 기록'));
-          const list = node('ul'); for (const event of observed) list.append(node('li', `${time(event.occurred_at)} · ${event.event_name} · ${event.outcome}`));
-          disclosure.append(list); detail.append(disclosure); }
+      // Legacy producers have no repair receipt; retain their observed event list.
+      if (stage.id === 'build' && !activity) {
+        const observed = record.telemetry?.items?.filter(event => event.event_name?.startsWith('agent.')) || [];
+        if (observed.length) {
+          const disclosure = node('details', '', 'dh-agent'); disclosure.append(node('summary', '에이전트 활동 기록'));
+          const list = node('ul');
+          for (const event of observed) list.append(node('li', `${time(event.occurred_at)} · ${event.event_name} · ${event.outcome}`));
+          disclosure.append(list); detail.append(disclosure);
+        }
       }
       if (question && stage.id === (question.stage || failureStage)) {
         const formHost = node('div'); detail.append(formHost); disposeForm = renderRecovery(formHost, { question, deploymentId: record.id,
@@ -206,7 +249,10 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       icon.setAttribute('aria-hidden', 'true'); const label = node('span'); label.append(node('strong', stage.label), node('small', stageLabel(stage.state))); step.append(icon, label); stepList.append(step);
     }
     select(stages.find((stage) => stage.id === selectedStage) || stages[0]);
-    logLayout.append(stepList, detail); return { layout: logLayout, dispose: () => disposeForm() };
+    if (record.kind !== 'builds' && !terminal()) timer = setTimeout(poll, record.agent_poll_ms || 5000);
+    logLayout.append(stepList, detail); return { layout: logLayout, dispose: () => {
+      stopped = true; clearTimeout(timer); activityController.abort(); disposeForm();
+    } };
   }
 
   async function readDetail(record, activeController) {
@@ -218,6 +264,7 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       full.kind === 'deployments' && ['failed', 'blocked', 'unknown'].includes(full.status)
         ? request(`/api/v1/deployments/${encodeURIComponent(full.id)}/diagnostics`, {}, activeController) : Promise.resolve(null),
       recovery.load ? recovery.load(full, { signal: activeController.signal }) : Promise.resolve(null),
+      full.kind === 'deployments' ? request(`/api/v1/deployments/${encodeURIComponent(full.id)}/events`, {}, activeController) : Promise.resolve(null),
     ]);
     if (extras[0].status === 'fulfilled') {
       const value = extras[0].value?.data;
@@ -229,6 +276,14 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       catch (error) { notes.push(error.message); }
     }
     else if (extras[1].status === 'rejected') notes.push('해결 방법을 조회하지 못했습니다. 상태를 다시 확인해 주세요.');
+    const events = extras[2].status === 'fulfilled' ? extras[2].value?.data : null;
+    if (events?.deployment_id === full.id) {
+      full.agent_activity = events.agent_activity || null;
+      full.agent_events_complete = events.status === 'completed';
+      full.agent_poll_ms = Math.max(5000, events.progress?.poll_after_ms || 15000);
+      full.agent_run_attempt = events.run_attempt || 0;
+      if (events.timeline) full.telemetry = events.timeline;
+    }
     return [full, diagnostic, question, notes];
   }
   async function open(record) {

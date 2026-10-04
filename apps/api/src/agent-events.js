@@ -1,3 +1,4 @@
+import { redactDiagnostic } from './diagnostics.js';
 import { APP_NAME, TENANT_NAME, TARGET_ID, SOURCE_COMMIT } from './contract.js';
 
 export const agentEventLimits = Object.freeze({ items: 60, textBytes: 60_000, responseBytes: 2 * 1024 * 1024, cacheMs: 15_000 });
@@ -58,6 +59,21 @@ function validateItem(item) {
     if (Object.hasOwn(item, 'agent_budget')) requireValid(exact(item.agent_budget, ['enabled', 'max_invocations'])
       && [0, 1, 2, 3].includes(item.agent_budget.max_invocations)
       && item.agent_budget.enabled === (item.agent_budget.max_invocations > 0));
+  } else if (item.event_name === 'agent.repair') {
+    const repair = item.repair;
+    requireValid(exact(item, [...common, 'attempt_id', 'repair']) && typeof item.attempt_id === 'string' && safeId.test(item.attempt_id)
+      && exact(repair, ['state', 'role', 'changes', 'omitted_changes', 'failure_layer'])
+      && ['verifying', 'succeeded', 'failed', 'unknown'].includes(repair.state)
+      && ['adapter', 'fixer'].includes(repair.role) && [null, 'L0', 'L1', 'Q', 'L2', 'L3', 'L4'].includes(repair.failure_layer)
+      && integer(repair.omitted_changes) && Array.isArray(repair.changes) && repair.changes.length <= 24);
+    for (const change of repair.changes) {
+      requireValid(exact(change, ['path', 'summary', 'status']) && typeof change.path === 'string' && change.path.length <= 240
+        && /^[A-Za-z0-9_./@-]+$/.test(change.path) && !change.path.startsWith('/')
+        && !change.path.split('/').some(part => ['', '.', '..'].includes(part))
+        && redactDiagnostic(change.path) === change.path && change.status === 'applied'
+        && typeof change.summary === 'string' && change.summary.length > 0 && change.summary.length <= 300);
+      change.summary = redactDiagnostic(change.summary);
+    }
   } else if (['gate.layer.started', 'gate.layer.completed', 'gate.layer.heartbeat'].includes(item.event_name)) {
     requireValid(exact(item, [...common, 'attempt_id', 'phase', 'outcome', 'completed_steps', 'total_steps', 'duration_s'])
       && typeof item.attempt_id === 'string' && safeId.test(item.attempt_id)
@@ -123,7 +139,7 @@ export function readAgentEventCheck(check, binding) {
       && item.native_run_id === nativeRunId && (!item.attempt_id || item.attempt_id.startsWith(`${nativeRunId}:`)));
     sequence = item.sequence;
   }
-  // Only the exact content-free schema above can leave this module.
+  // Only allowlisted metadata and bounded, redacted repair descriptions leave this module.
   return structuredClone(value);
 }
 

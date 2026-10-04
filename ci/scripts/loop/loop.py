@@ -91,6 +91,36 @@ def agent_observer(run, role, provider, progress_sink=None):
     return observe
 
 
+def publish_repair(progress_sink, role, record, failure_layer, verdict=None):
+    """Publish actual writes and host gate outcomes, never the model's success claim."""
+    if progress_sink is None:
+        return
+    repair = record.get('repair_activity') or {'changes': [], 'omitted_changes': 0}
+    state = 'unknown' if (record.get('error') or {}).get('outcome') == 'UNKNOWN' else 'failed' if record.get('exit_code') else 'verifying'
+    if verdict is not None:
+        state = ('succeeded' if verdict.get('ok') and verdict.get('release_eligible')
+                 else 'unknown' if verdict.get('status') == 'UNKNOWN' else 'failed')
+    progress_sink.emit(event_record('agent.repair', component='loop', phase='agent', outcome='RUNNING',
+        run_id=os.environ.get('RAILSHOT_RUN_ID'), attempt_id=os.environ.get('RAILSHOT_ATTEMPT_ID'),
+        attributes={'repair': {**repair, 'role': role, 'state': state, 'failure_layer': failure_layer}}))
+
+
+def repair_changes(record):
+    """Bound public explanations separately from the private full proposal."""
+    from diagnostics import bounded, redact
+    reasons = {item.get('path'): item.get('why', '') for item in (record.get('output') or {}).get('files_changed', [])}
+    written = record.get('written') or []
+    changes = []
+    for path in written:
+        if (len(changes) >= 24 or not isinstance(path, str) or len(path) > 240
+                or not re.fullmatch(r'[A-Za-z0-9_./@-]+', path) or path.startswith('/')
+                or any(p in ('', '.', '..') for p in path.split('/')) or redact(path) != path):
+            continue
+        summary = bounded(reasons.get(path) or '수정안 적용', 300)[0]
+        changes.append({'path': path, 'summary': summary, 'status': 'applied'})
+    return {'changes': changes, 'omitted_changes': len(written) - len(changes)}
+
+
 def run_json(cmd, cwd=None, *, phase='subprocess', observer=None):
     try:
         p = run_bounded(cmd, cwd=cwd, timeout=1800, on_tick=observer)
@@ -387,10 +417,10 @@ def execute(a, run, state, progress_sink=None):
                         or not isinstance(record.get('output'), dict)):
                     raise StateError('SDK_OUTCOME_UNKNOWN', component='loop', phase='agent', outcome='UNKNOWN',
                                      retry_policy='after_reconcile', side_effect='unknown')
-                # The runner keeps its report; checkpoint only the control fields, never raw model text.
+                # Keep control fields and a bounded public write summary; the full proposal stays private.
                 output = record.get('output') or {}
                 return {**{k: record.get(k) for k in ('meta', 'written', 'rejected', 'instructions_sha256', 'error', 'proposal_rejection')},
-                        'role': role, 'repair_scope': attempt_scope,
+                        'role': role, 'repair_scope': attempt_scope, 'repair_activity': repair_changes(record),
                         'exit_code': rc, 'output': {k: output.get(k) for k in ('status', 'give_up')}}
 
             sidecars = (f'{role}-{attempt}-events.jsonl', f'{role}-{attempt}-session.json')
@@ -399,6 +429,7 @@ def execute(a, run, state, progress_sink=None):
                              optional_artifacts=sidecars + (f'{role}-{attempt}-plan.json',))
             if rec['role'] != role or rec['repair_scope'] != attempt_scope:
                 raise StateError('STATE_EVIDENCE_MISMATCH', component='loop', phase='agent.checkpoint', retry_policy='after_reconcile')
+            publish_repair(progress_sink, role, rec, current_failure.get('layer'))
             report = rec.get('output')
             if rec.get('exit_code'):
                 rejection, error, meta = rec.get('proposal_rejection') or {}, rec.get('error') or {}, rec.get('meta') or {}
@@ -463,6 +494,8 @@ def execute(a, run, state, progress_sink=None):
                              artifacts=(f'gate-{attempt}/verdict.json',),
                              optional_artifacts=(f'gate-{attempt}/failure.txt', f'gate-{attempt}/progress.jsonl', f'gate-{attempt}/diagnostics/case.json', f'gate-{attempt}/build.json',
                                                  *(f'gate-{attempt}/{layer}.json' for layer in a.layers.split(','))))
+        if attempt:
+            publish_repair(progress_sink, role, rec, current_failure.get('layer'), verdict)
         f = verdict.get('failure') or {}
         ev['attempts'].append({'attempt': attempt, 'attempt_id': os.environ['RAILSHOT_ATTEMPT_ID'], 'role': role,
             'repair_scope': attempt_scope, 'agent_invoked': bool(attempt), 'agent_meta': rec.get('meta'),

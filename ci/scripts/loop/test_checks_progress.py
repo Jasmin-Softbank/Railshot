@@ -54,6 +54,25 @@ class FakeChecks(progress.ChecksProgress):
 
 
 class ChecksProgressTest(unittest.TestCase):
+    def test_repair_receipt_requires_host_release_verdict_and_redacts_descriptions(self):
+        record = {'exit_code': 0, 'written': ['Dockerfile'], 'output': {
+            'status': 'proposed', 'files_changed': [{'path': 'Dockerfile', 'why': 'token=secret-canary'}]}}
+        record['repair_activity'] = loop.repair_changes(record)
+        self.assertEqual(record['repair_activity']['changes'][0]['summary'], '[REDACTED]')
+        sink = FakeChecks()
+        with patch.dict(os.environ, {'RAILSHOT_RUN_ID': 'native-run', 'RAILSHOT_ATTEMPT_ID': 'native-run:1'}):
+            loop.publish_repair(sink, 'fixer', record, 'L2')
+            loop.publish_repair(sink, 'fixer', record, 'L2', {'ok': True, 'release_eligible': False})
+            loop.publish_repair(sink, 'fixer', record, 'L2', {'ok': True, 'release_eligible': True})
+        rows = json.loads(sink.payload()['text'])['items']
+        self.assertEqual([r['repair']['state'] for r in rows], ['verifying', 'failed', 'succeeded'])
+        for r in rows:
+            self.assertEqual(progress.restored_row(r), r)
+        self.assertNotIn('secret-canary', json.dumps(rows))
+        invalid = event('agent.repair', repair={**rows[0]['repair'], 'raw_prompt': 'forbidden'})
+        with self.assertRaises(ValueError):
+            progress.row(invalid)
+
     def test_loop_budget_is_optional_bounded_and_survives_check_restore(self):
         self.assertNotIn('agent_budget', progress.row(event('loop.started')))
         for limit in (0, 1, 2, 3):
