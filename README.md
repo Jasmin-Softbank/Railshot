@@ -4,8 +4,6 @@
   </a>
 </p>
 
-# RAILSHOT
-
 **한국어** | [日本語](README.ja.md)
 
 **One Action, Infinite Clouds**
