@@ -16,6 +16,14 @@ CPU·메모리는 노드 전체 사용률, 디스크는 루트 `/` 파일시스�
 정책 반영·exporter 갱신·실제 샘플 수집이 끝나기 전에는 `no_data/null`이다. 정상 0 또는 시계열을 합성하지 않는다.
 노드·Pod·HTTP 질의의 부분 실패는 다른 질의의 현재 값을 지우지 않는다.
 
+AWS/GCP 공용 대상의 `credentials`는 기존 `railshot-credentials` 등록에서 환경별 Argo·observer
+자격 두 개만 읽고 실제 인증 주체를 확인한다. `state`, `checked_at`, `last_success_at`, `expires_at`,
+`reason`만 공개하며 토큰, 계정·ServiceAccount 목록은 반환하지 않는다. `last_success_at`는 현재
+검증된 두 자격의 발급시각 중 이른 값으로, CronJob 실행 완료 시각이 아니다. `expires_at`도 더 이른
+만료시각이다. 등록 누락은 `no_data`, 인증·연결 실패는 `collection_failed`와 null 시각으로 표시한다.
+환경별 수집은 최대 12초이며 동시 요청은 같은 작업을 기다린다. 완료된 결과를 60초 동안 재사용하므로
+대시보드의 15초 새로고침이 매번 자격 검증을 실행하지 않는다. 관측은 자격을 발급하거나 갱신하지 않는다.
+
 `GET /api/v1/deployments/{id}`는 영속 배포 기록과 `observation`을 함께 반환한다.
 `observation.deployment_id/target_id/app`은 조회한 기록과 동일하다. 새로운 실행이나
 배포 재시도는 하지 않는다. `ci.images`는 해당 run의 검증된 게시 receipt에서 읽은
@@ -25,6 +33,29 @@ CPU·메모리는 노드 전체 사용률, 디스크는 루트 `/` 파일시스�
 대시보드는 15초마다 조회하며 완료된 배포도 관측을 계속한다. 재접속 시 세션에 속한
 서버 배포 내역에서 최근 deployment ID를 다시 조회한다. 영속 실행 결과의 성공과 현재 운영 상태는 별개다.
 현재 HTTP probe 실패로 과거 배포 완료 기록을 실패로 바꾸지 않는다. 새로고침은 POST를 하지 않는다.
+
+## 앱의 현재 실행 상태
+
+`GET /api/v1/applications/{id}/observations`는 소유권을 확인한 뒤 가장 최근 CD 실행의
+고정 review와 같은 namespace, workload, image digest를 읽고 등록된 HTTPS 경로를 검사한다.
+앱 상세에서 한 번 조회하고 사용자가 갱신한다. 앱 목록별 polling이나 CI, Git 쓰기, Argo sync는 실행하지 않는다.
+읽기 실행기는 12초 안에 종료하며 실패하면 `collection_failed`를 반환한다.
+
+응답은 `application_id`, `deployment_id`, `state`, `checked_at`, `reason`, `workload`, `public_http`다.
+여기서 `state=ready`는 관측 성공이다. `workload.state=ready`와 `public_http.state=succeeded`를 함께
+확인해야 현재 정상으로 표시할 수 있다. 인증된 Deployment 목록이 비어 있으면 `workload.state=missing`,
+`reason=WORKLOAD_MISSING`이며, 인증 실패나 연결 실패를 missing으로 바꾸지 않는다.
+CD journal과 고정 revision이 아직 없으면 `no_data/deployment_not_started`다.
+조회 중 다른 배포가 해당 앱의 CD에 진입하면 `stale/deployment_superseded`로 결과를 버린다.
+
+앱의 `status=ready`는 등록 완료 상태다. `current_deployment.status=succeeded`와 그 시각의
+`public_http.verified_at`은 마지막 검증 배포 기록이며 현재 건강도로 대신 쓰지 않는다.
+현재 관측 실패도 이 기록을 덮어쓰지 않는다. 공개 HTTPS 실패만으로 provider LB 장애를 확정하지 않는다.
+
+AWS/GCP에 환경 observer가 등록되어 있으면 기존 로그/워크로드 읽기는 환경별 `railshot-observer`
+자격을 사용한다. 앱별 read-only RoleBinding, backend 소유권, 고정 review 및 Pod 소유자·digest 검사를
+유지하며 Argo 쓰기 자격을 재사용하지 않는다. observer 미등록 때만 이전 앱 자격을 사용한다.
+등록된 observer가 잘못되었거나 만료되면 수집 실패로 표시한다.
 
 ## 설정
 
@@ -92,4 +123,4 @@ CI의 `steps[].tasks`는 조회한 GitHub job의 내부 단계와 결과다. 알
 
 `GET /api/v1/deployments/{id}/logs`는 해당 세션 소유의 배포에서 최근 앱 로그를 읽는다. 서버의 CD 설정과 저장된 검증 receipt를 재사용하고, 현재 Argo revision·이미지·Deployment→ReplicaSet→Pod 소유권을 대조한다. 같은 앱에 새 CD 작업이 시작되면 이전 기록은 `superseded`로 막는다. 실제 앱 적용 전은 `not_deployed`, 설정 없음은 `not_configured`, 조회 실패는 `unavailable`, 출력 없음은 `no_data`다. HTTP 오류가 없는 빈 결과를 수집 성공 로그로 꾸미지 않는다.
 
-최대 세 컨테이너, 각각 최근 100줄, 전체 32 KiB로 제한하며 tail만 조회한다. 요청에서 namespace, Pod, 명령, 주소를 받지 않는다. 기존 namespace Role에 `pods/log:get`만 추가하고, 제품 API에는 등록된 클러스터 Secret 한 개의 `get`만 허용한다. 인증 정보는 서버 내부에서만 사용한다. 흔한 자격 문자열을 가리고 UI는 textContent로 표시하지만, 임의 앱이 출력한 모든 비밀을 탐지한다고 보장하지 않는다. 앱 로그 탭을 열었을 때만 조회하고 기존 15초 갱신과 연결한다.
+최대 세 컨테이너, 각각 최근 100줄, 전체 32 KiB로 제한하며 tail만 조회한다. 요청에서 namespace, Pod, 명령, 주소를 받지 않는다. 환경 observer는 기존 앱 namespace의 읽기 RoleBinding으로 범위를 제한하고 `pods/log:get`을 사용한다. 제품 API는 등록 정책에서 정한 Secret만 읽으며 인증 정보는 서버 내부에서만 사용한다. 흔한 자격 문자열을 가리고 UI는 textContent로 표시하지만, 임의 앱이 출력한 모든 비밀을 탐지한다고 보장하지 않는다. 앱 로그 탭을 열었을 때만 조회하고 기존 15초 갱신과 연결한다.

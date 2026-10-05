@@ -22,6 +22,14 @@ checkout's `gitops` directory. This adds no Terraform resources or CI stages.
 Existing authorizations are not recreated by this change; interrupted or failed
 certificate issuance still requires observing the existing certificate and DNS.
 
+When `application_certificate` registers an already ACTIVE shared wildcard,
+new routes reuse it and existing routes attach it alongside their dedicated
+certificate. This lets an existing route serve HTTPS while an earlier dedicated
+certificate is still awaiting DNS validation. Dedicated certificates and their
+DNS authorizations keep their Terraform ownership and are not deleted by this
+attachment change. Verify the shared certificate's project, domain and ACTIVE
+state before applying the input.
+
 Before apply, verify the named VM/private IP, its NodePort health, and its
 dedicated service account (the firewall applies to every VM using that account).
 Add `35.191.0.0/16` and `130.211.0.0/22` through the existing GitOps

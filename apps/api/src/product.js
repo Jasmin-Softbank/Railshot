@@ -1039,6 +1039,22 @@ export async function createProductService({ service, directory, target, provide
       const state = store.read();
       return publicApplication(state, applicationFor(state, id, sessionId));
     },
+    async getApplicationObservation(id, sessionId = null) {
+      const application = applicationFor({ applications: { [id]: store.read('applications', id) } }, id, sessionId);
+      const latest = () => store.latestDeployment({ application_id: id, app: application.app,
+        target_id: application.target_id, session_id: application.session_id }, { requireCdState: true });
+      const record = latest();
+      const empty = (state, reason) => ({ application_id: id, deployment_id: record?.id || null, state,
+        checked_at: new Date().toISOString(), reason, workload: null, public_http: null });
+      if (!record) return empty('no_data', 'deployment_not_started');
+      if (typeof applicationAdapter?.observeRuntime !== 'function') return empty('unsupported', 'runtime_observation_not_configured');
+      try {
+        const observation = await applicationAdapter.observeRuntime(application, record);
+        if (latest()?.id !== record.id || store.read('applications', id)?.status !== application.status)
+          return empty('stale', 'deployment_superseded');
+        return { ...observation, application_id: id, deployment_id: record.id };
+      } catch { return empty('collection_failed', 'runtime_observation_unavailable'); }
+    },
     async createApplicationPlan(applicationId, input, sessionId = null, { asynchronous = false } = {}) {
       if (!exact(input, ['action']) || !lifecycleActions.includes(input.action)) throw invalid('action은 stop, start, delete 중 하나여야 합니다.');
       const pending = await store.transaction((state) => {
@@ -1197,10 +1213,15 @@ export async function createProductService({ service, directory, target, provide
     async getTargetObservation(id, sessionId = null) {
       const target = TARGET_ID.test(id) && this.targets(sessionId).find((item) => item.id === id);
       if (!target) throw new ProductError(404, 'NOT_FOUND', '등록된 대상을 찾을 수 없습니다.');
-      let observation = await observeMetrics({ target_id: id, app: target.application_name ?? null });
+      let [observation, credentials] = await Promise.all([
+        observeMetrics({ target_id: id, app: target.application_name ?? null }),
+        target.scope !== 'owned' && ['aws', 'gcp'].includes(target.provider) && typeof applicationAdapter?.observeCredentials === 'function'
+          ? Promise.resolve().then(() => applicationAdapter.observeCredentials(id)).catch(() => ({ state: 'collection_failed',
+            reason: 'RENEWAL_FAILED', checked_at: new Date().toISOString(), last_success_at: null, expires_at: null })) : null,
+      ]);
       if (target.scope === 'owned') observation = personal.observation(id, sessionId, observation);
       const health = observation.metrics.runtime_healthz ?? { state: 'not_configured', observed_at: null };
-      return { ...observation, environment_id: target.environment_id ?? null,
+      return { ...observation, ...(credentials ? { credentials } : {}), environment_id: target.environment_id ?? null,
         runtime: { status: health.state === 'ready' ? (health.value === 1 ? 'healthy' : 'unhealthy') : 'unknown',
           observation_state: health.state, observed_at: health.observed_at } };
     },
@@ -1359,8 +1380,7 @@ export async function createProductService({ service, directory, target, provide
       if (!record.cd?.deployed) return empty('not_deployed');
       // A shared target can be reused even when its image/revision does not change.
       // Only the most recently admitted CD operation may expose its runtime logs.
-      const current = () => Object.values(store.read('operations')).reverse().find((row) => row.kind === 'deployments'
-        && row.target_id === record.target_id && row.app === record.app && row.cd?.state !== 'not_started')?.id === id;
+      const current = () => store.latestDeployment({ target_id: record.target_id, app: record.app })?.id === id;
       if (!current()) return empty('superseded');
       const observer = record.application_id ? (value) => applicationAdapter?.observeLogs(store.read('applications', record.application_id), value)
         : record.environment_id ? environmentAdapter?.observeLogs : observeLogs;

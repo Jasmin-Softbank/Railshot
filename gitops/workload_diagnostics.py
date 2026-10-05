@@ -4,6 +4,9 @@ No Pod output, exception messages, environment values or mutation is exported.
 Observation failure does not change the bridge's deterministic result.
 """
 from datetime import datetime, timezone
+import argparse
+import json
+from pathlib import Path
 import re
 from urllib.parse import urlencode
 
@@ -25,7 +28,13 @@ def workload(config, review):
         expected = next(item for item in review['workload']['items'] if item['kind'] == 'Deployment')
         template = expected['spec']['template']
         path = '/apis/apps/v1/namespaces/' + namespace + '/deployments/' + expected['metadata']['name']
-        live = credentials.customer(*auth, path, **tls)
+        listing = credentials.customer(*auth, '/apis/apps/v1/namespaces/' + namespace + '/deployments?' +
+                                       urlencode({'fieldSelector': 'metadata.name=' + expected['metadata']['name'], 'limit': 2}), **tls)
+        argo.require(listing['kind'] == 'DeploymentList' and not listing.get('metadata', {}).get('continue')
+                     and len(listing['items']) <= 1, 'bounded deployment required')
+        if not listing['items']:
+            return {'state': 'missing', 'checked_at': checked, 'pods': [], 'code': 'WORKLOAD_MISSING'}
+        live = listing['items'][0]
         argo.require(live['kind'] == 'Deployment' and live['metadata']['namespace'] == namespace
                      and live['metadata']['name'] == expected['metadata']['name'] and not live['metadata'].get('deletionTimestamp')
                      and live['spec']['selector'] == expected['spec']['selector']
@@ -78,3 +87,38 @@ def workload(config, review):
                 'code': None, 'observed_generation': status.get('observedGeneration'), 'desired_replicas': desired}
     except Exception:
         return missing
+
+
+def observe(config, identity):
+    """Inspect the recorded version without replaying CI, Git writes, or Argo sync."""
+    import bridge
+    review = logs.load_bound_review(config, identity)
+    registered = config['targets'][identity['target_id']]
+    current = workload(config, review)
+    public = bridge.public_probe(registered['public_http'], review['receipt']['http']['health_path'])
+    reason = ('runtime_observation_unavailable' if current['state'] == 'unavailable' else
+              'WORKLOAD_MISSING' if current['state'] == 'missing' else
+              'WORKLOAD_NOT_READY' if current['state'] != 'ready' else
+              'PUBLIC_HTTP_UNVERIFIED' if public['state'] != 'succeeded' else None)
+    return {'state': 'collection_failed' if current['state'] == 'unavailable' else 'ready',
+            'checked_at': datetime.now(timezone.utc).isoformat(), 'reason': reason,
+            'workload': current, 'public_http': public}
+
+
+def main():
+    import bridge
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', required=True, type=Path)
+    parser.add_argument('--identity', required=True)
+    args = parser.parse_args()
+    try:
+        argo.require(len(args.identity) <= 4096, 'bounded observation identity required')
+        value = observe(bridge.read_config(args.config), json.loads(args.identity))
+    except (ValueError, KeyError, TypeError, OSError, RuntimeError):
+        value = {'state': 'collection_failed', 'checked_at': datetime.now(timezone.utc).isoformat(),
+                 'reason': 'runtime_observation_unavailable', 'workload': None, 'public_http': None}
+    print(json.dumps(value, allow_nan=False))
+
+
+if __name__ == '__main__':
+    main()

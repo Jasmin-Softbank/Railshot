@@ -56,8 +56,9 @@ export async function createPersonalAdapter({ configPath, stateDirectory, base, 
       if (!selected) throw new Error('Application environment is not registered');
       return selected.describe(id, app);
     },
+    observeCredentials(id) { return (dynamicApplications.get(id) || base)?.observeCredentials?.(id); },
   };
-  for (const method of ['register', 'deployPublished', 'observePublished', 'observeLogs', 'planPendingDeletion', 'planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle', 'reconcileLifecycle', 'resumeLifecycle']) {
+  for (const method of ['register', 'deployPublished', 'observePublished', 'observeLogs', 'observeRuntime', 'planPendingDeletion', 'planLifecycle', 'verifyLifecyclePlan', 'applyLifecycle', 'reconcileLifecycle', 'resumeLifecycle']) {
     application[method] = (app, ...args) => {
       const selected = dynamicApplications.get(app.environment_target_id) || base;
       if (!selected?.[method]) throw new Error('Application environment is not registered');

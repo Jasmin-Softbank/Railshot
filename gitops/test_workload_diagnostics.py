@@ -36,4 +36,21 @@ class WorkloadDiagnosticsTest(unittest.TestCase):
             result=workload_diagnostics.workload(self.f.config,self.f.review)
         self.assertEqual(result['state'],'unavailable'); self.assertNotIn('private-secret',json.dumps(result))
 
+    def test_authorized_empty_deployment_list_is_missing_not_transport_failure(self):
+        with patch('logs.customer_auth', return_value=(('server', b'CA', 'token'), {})), \
+                patch('credentials.customer', return_value={'kind':'DeploymentList','items':[]}) as read:
+            result=workload_diagnostics.workload(self.f.config,self.f.review)
+        self.assertEqual(result['state'],'missing'); self.assertEqual(result['code'],'WORKLOAD_MISSING')
+        self.assertIn('fieldSelector=metadata.name%3D',read.call_args.args[3])
+        self.assertEqual(read.call_count,1)
+
+    def test_fresh_observation_reports_missing_workload_even_after_past_success(self):
+        with patch('logs.load_bound_review', return_value=self.f.review), \
+                patch('workload_diagnostics.workload', return_value={'state':'missing','checked_at':'2026-10-05T00:00:00Z','pods':[],'code':'WORKLOAD_MISSING'}), \
+                patch('bridge.public_probe', return_value={'state':'unverified','verified_at':None,'url':None}):
+            self.f.config['targets']['k3s-aws']['public_http']={'url':'https://app.example/health','expected_status':200}
+            result=workload_diagnostics.observe(self.f.config,self.f.value)
+        self.assertEqual(result['state'],'ready'); self.assertEqual(result['reason'],'WORKLOAD_MISSING')
+        self.assertEqual(result['public_http']['state'],'unverified')
+
 if __name__=='__main__': unittest.main()

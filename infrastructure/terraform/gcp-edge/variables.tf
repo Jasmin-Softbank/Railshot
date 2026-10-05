@@ -47,7 +47,7 @@ variable "health_path" {
 }
 
 variable "application_certificate" {
-  description = "An already ACTIVE shared wildcard certificate for new platform app routes. Existing routes retain their certificates."
+  description = "An already ACTIVE shared wildcard certificate for platform app routes. Existing routes retain their certificates and also attach the shared certificate."
   type        = object({ id = string, domain = string })
   default     = null
 }

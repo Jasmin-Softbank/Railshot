@@ -69,6 +69,33 @@ test('no-op transactions do not write rows; one operation update preserves all o
   assert.equal(store.read('applications', 'first').app, 'second');
 });
 
+test('latest deployment reads preserve admission order, ownership and detached results', async t => {
+  const { store } = await fixture(t);
+  const owner = store.dashboard.session().id, stranger = store.dashboard.session().id;
+  const identity = { app: 'demo', target_id: 'aws', application_id: 'app-1', session_id: owner };
+  await store.transaction(state => {
+    const record = { ...state.operations.first, ...identity, cd: { state: 'succeeded' } };
+    for (const [id, changes] of [
+      ['old', { created_at: '2099-01-01T00:00:00Z' }],
+      ['current', { created_at: '2026-01-01T00:00:00Z' }],
+      ['pending', { cd: { state: 'not_started' } }],
+      ['other-app', { application_id: 'app-2', session_id: stranger }],
+      ['other-target', { target_id: 'gcp' }],
+      ['build', { kind: 'builds' }],
+      ['legacy', { cd: undefined }],
+    ]) state.operations[id] = { ...record, ...changes, id };
+  });
+  const selected = store.latestDeployment(identity, { requireCdState: true });
+  assert.equal(selected.id, 'current', 'last admission, not wall-clock sorting');
+  selected.telemetry.events[0].message = 'modified';
+  assert.equal(store.read('operations', 'current').telemetry.events[0].message, 'private history');
+  assert.equal(store.latestDeployment({ app: 'demo', target_id: 'aws' }).id, 'legacy', 'legacy log ownership remains protected');
+  assert.equal(store.latestDeployment({ app: 'demo', target_id: 'aws' }, { requireCdState: true }).id, 'other-app');
+  assert.equal(store.latestDeployment({ ...identity, session_id: 'missing' }), undefined);
+  await store.updateOperation('pending', row => { row.cd.state = 'running'; });
+  assert.equal(store.latestDeployment(identity, { requireCdState: true }).id, 'pending', 'subsequent admission invalidates a prior read');
+});
+
 test('async operation updates serialize with full transactions and roll back failures', async t => {
   const { store, db } = await fixture(t);
   let release, started;

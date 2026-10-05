@@ -187,10 +187,13 @@ def job_proof(key, job, cron, image, policy, kube):
     if key == 'credentials_cron':
         lines = kube('logs', key, pod['metadata']['name']).strip().splitlines()
         results = json.loads(lines[-1]).get('results', []) if lines else []
-        names = {target['secret'] for target in policy['targets']}
+        selected = credentials.select_policy(policy, credentials.command_environments(container(cron['spec'])['command']))
+        names = {target['secret'] for target in selected['targets']}
         require(len(results) == len(names) and {row.get('secret') for row in results} == names and
                 all(row.get('status') == 'renewed' for row in results), 'WORKER_RENEWAL_TARGETS_NOT_VERIFIED')
         proof['renewed'] = sorted(names)
+        proof['environments'] = credentials.command_environments(container(cron['spec'])['command'])
+        proof['excluded_target_count'] = len(policy['targets']) - len(selected['targets'])
     return proof
 
 
@@ -222,7 +225,13 @@ def check_execution(state, path, key, cron, policy, kube, *, create):
             elif key == 'credentials_cron':
                 require(create and key not in executions, 'WORKER_EXECUTION_NOT_OBSERVED')
                 # Never overlap a scheduled renewal: its token CAS is not a substitute for serialized execution.
-                require(not cron.get('status', {}).get('active'), 'WORKER_RENEWAL_STILL_ACTIVE')
+                current_cron = kube('get', key)
+                require(current_cron['metadata']['uid'] == cron['metadata']['uid'] and current_cron['spec'] == cron['spec'],
+                        'WORKER_READBACK_DIFFERS')
+                if current_cron.get('status', {}).get('active'):
+                    require(time.monotonic() < deadline, 'WORKER_RENEWAL_STILL_ACTIVE')
+                    time.sleep(3)
+                    continue
                 name = 'railshot-credentials-release-' + state['source_sha'][:20]
                 require(kube('job', key, name) is None, 'WORKER_SAMPLE_ALREADY_EXISTS')
                 spec = copy.deepcopy(cron['spec']['jobTemplate']['spec'])
@@ -256,10 +265,10 @@ def check_execution(state, path, key, cron, policy, kube, *, create):
                 return proof
         require(time.monotonic() < deadline, 'WORKER_EXECUTION_TIMEOUT')
         time.sleep(3)
-def apply_workers(config, images, source_sha, state_path, *, kube=kubectl, before_resume=None, scope='all'):
+def apply_workers(config, images, source_sha, state_path, *, kube=kubectl, before_resume=None, scope='all', credentials_environments=None):
     require(re.fullmatch(r'[a-f0-9]{40}', source_sha or ''), 'SOURCE_SHA_REQUIRED')
     config = scoped_config(config, scope)
-    require(before_resume is None or scope == 'ci', 'CI_PROMOTION_SCOPE_REQUIRED')
+    require(before_resume is None or scope in {'ci', 'all'}, 'CI_PROMOTION_SCOPE_REQUIRED')
     require(not Path(state_path).exists(), 'WORKER_STATE_EXISTS_OBSERVE_OR_ROLLBACK')
     for name in ('api', 'ci-runner'):
         renderer.image_ref(images, name)
@@ -278,10 +287,13 @@ def apply_workers(config, images, source_sha, state_path, *, kube=kubectl, befor
         desired_crons['build_cron'] = next(obj for obj in desired if obj['kind'] == 'CronJob')
     if 'credentials_cron' in objects:
         policy = credentials.validate_policy(json.loads(objects['credentials_config']['data']['policy.json']))
-        desired_crons['credentials_cron'] = next(obj for obj in credentials.render(policy, images['api'])['items'] if obj['kind'] == 'CronJob')
+        previous_environments = credentials.command_environments(container(objects['credentials_cron']['spec'])['command'])
+        desired_crons['credentials_cron'] = next(obj for obj in credentials.render(policy, images['api'],
+            environments=previous_environments if credentials_environments is None else credentials_environments)['items'] if obj['kind'] == 'CronJob')
     for key, desired_cron in desired_crons.items():
         actual, expected = container(objects[key]['spec']), container(desired_cron['spec'])
-        require(actual['name'] == expected['name'] and actual['command'] == expected['command'], 'WORKER_COMMAND_DIFFERS')
+        require(actual['name'] == expected['name'] and (actual['command'] == expected['command']
+                or key == 'credentials_cron' and credentials_environments is not None), 'WORKER_COMMAND_DIFFERS')
     state = {'version': 1, 'kind': 'workers', 'source_sha': source_sha, 'images': images,
              'config': config, 'status': 'applying', 'operations': [],
              'prior_jobs': {key: [job['metadata']['uid'] for job in kube('jobs', key)] for key in desired_crons},
@@ -301,6 +313,8 @@ def apply_workers(config, images, source_sha, state_path, *, kube=kubectl, befor
             old = suspended if key == 'build_cron' else objects[key]['spec']
             new = copy.deepcopy(old)
             container(new)['image'] = images['api']
+            if key == 'credentials_cron':
+                container(new)['command'] = container(desired_crons[key]['spec'])['command']
             save_operation(state, state_path, key, 'spec', old, new, kube)
         if before_resume:
             verify_declarations(state, kube)

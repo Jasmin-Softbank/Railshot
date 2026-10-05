@@ -85,8 +85,9 @@ class ReleaseTests(unittest.TestCase):
     def test_ci_promotion_needs_no_provider_config_and_provider_failure_cannot_revert_it(self):
         core = {key: self.manifest[key] for key in ('version', 'source_sha', 'platform_revision', 'images')}
         config = {key: self.config[key] for key in ('version', 'state_dir', 'workers', 'apps')}
-        def apply(*args, scope, before_resume=None):
-            if scope == 'ci':
+        def apply(*args, scope, before_resume=None, credentials_environments=None):
+            if scope == 'all':
+                self.assertEqual(credentials_environments, ['k3s-aws', 'k3s-gcp'])
                 before_resume({'status': 'declarations_verified', 'source_sha': core['source_sha'],
                                'controller_suspended': True, 'runner_jobs': 'preserved'})
             else:
@@ -104,8 +105,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(self.workers.promote_apps.call_args.args[2]['status'], 'prepared')
         self.assertEqual(run_ci()['status'], 'verified')
         self.assertEqual(self.workers.apply_workers.call_count, 1)
-        # Credential-owner changes do not invalidate the CI proof or enter its reads.
+        # The normal release now owns the exact credential worker too.
+        previous_uid = self.config['workers']['object_uids']['credentials_cron']
         self.config['workers']['object_uids']['credentials_cron'] = 'changed-by-credential-owner'
+        with self.assertRaisesRegex(ValueError, 'RELEASE_INPUT_CHANGED'): run_ci()
+        self.config['workers']['object_uids']['credentials_cron'] = previous_uid
         failed = self.run_release(lambda row, _: self.proof(row, 'failed'))
         self.assertEqual(failed['status'], 'incomplete')
         self.assertEqual(run_ci()['status'], 'verified')
@@ -116,8 +120,9 @@ class ReleaseTests(unittest.TestCase):
 
     def test_uncertain_ci_promotion_does_not_resume_or_automatically_retry_workers(self):
         core = {key: self.manifest[key] for key in ('version', 'source_sha', 'platform_revision', 'images')}
-        def apply(*args, before_resume, scope):
-            self.assertEqual(scope, 'ci')
+        def apply(*args, before_resume, scope, credentials_environments):
+            self.assertEqual(scope, 'all')
+            self.assertEqual(credentials_environments, ['k3s-aws', 'k3s-gcp'])
             before_resume({'status': 'declarations_verified'})
             self.fail('worker resumed after uncertain promotion')
         self.workers.apply_workers = mock.Mock(side_effect=apply)

@@ -200,3 +200,48 @@ test('registration recovery distinguishes no native request from an attempted re
   assert.equal(f.calls.length, 1, 'observation must not invoke registration again');
   await assert.rejects(f.adapter.registrationStarted({ ...app, id: 'foreign' }), { code: 'APPLICATION_BINDING_MISMATCH' });
 });
+
+test('runtime observation does not launch CI or write a journal when CD has not started', async (t) => {
+  const f = await fixture(t);
+  const application = f.adapter.describe('runtime-gcp', 'clock');
+  const record = { id: '21943fb1-681b-4423-a5ad-39d0870abe8c', application_id: application.id,
+    app: application.app, target_id: application.target_id, cd: { state: 'blocked', revision: null },
+    source_commit: 'a'.repeat(40), ci: { state: 'published', run_id: '123' } };
+  const result = await f.adapter.observeRuntime(application, record);
+  assert.equal(result.state, 'no_data'); assert.equal(result.reason, 'deployment_not_started');
+  assert.equal(result.workload, null); assert.equal(f.calls.length, 0); assert.equal(f.loads.length, 0);
+  await assert.rejects(f.adapter.observeRuntime(application, { ...record, application_id: 'foreign' }), { code: 'APPLICATION_BINDING_MISMATCH' });
+});
+
+test('environment credential observation coalesces callers and caches bounded safe results', async (t) => {
+  const f = await fixture(t);
+  f.config.environments['k3s-gcp'] = f.config.environments['runtime-gcp'];
+  f.config.cd = { context: 'railshot-platform' };
+  await writeFile(f.configPath, JSON.stringify(f.config), { mode: 0o600 });
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  let calls = 0, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const expected = { state: 'ready', reason: null, checked_at: new Date().toISOString(),
+    last_success_at: '2026-10-05T00:00:00Z', expires_at: '2026-10-06T00:00:00Z' };
+  const adapter = await createApplicationAdapter({ ...f.options, runner: async (python, args, options) => {
+    calls++; assert.ok(args[0].endsWith('/gitops/credentials.py'));
+    assert.deepEqual(args.slice(1), ['observe', '--context', 'railshot-platform', '--environment', 'k3s-gcp']);
+    assert.deepEqual(options, { mutation: false, timeout: 12000 });
+    await gate; return { ...expected, bearerToken: 'never-expose' };
+  } });
+  const pending = Array.from({ length: 12 }, () => adapter.observeCredentials('k3s-gcp'));
+  release();
+  assert.deepEqual(await Promise.all(pending), Array(12).fill(expected));
+  assert.equal(calls, 1);
+  assert.deepEqual(await adapter.observeCredentials('k3s-gcp'), expected);
+  assert.equal(calls, 1, 'refreshes within 60 seconds reuse the completed observation');
+  now += 60001;
+  assert.deepEqual(await adapter.observeCredentials('k3s-gcp'), expected);
+  assert.equal(calls, 2, 'expired results trigger a fresh credential validation');
+  assert.equal((await adapter.observeCredentials('unregistered')).state, 'no_data');
+  assert.equal(calls, 2, 'unregistered environments cannot launch a collector');
+  const failed = await createApplicationAdapter({ ...f.options, runner: async () => { throw Error('private-token'); } });
+  assert.equal((await failed.observeCredentials('k3s-gcp')).reason, 'RENEWAL_FAILED');
+  assert.equal((await failed.observeCredentials('k3s-gcp')).last_success_at, null);
+});

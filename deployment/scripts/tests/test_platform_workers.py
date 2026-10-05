@@ -162,6 +162,55 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(self.cluster.objects[key][field], original[field])
             self.assertEqual(self.cluster.objects[key]['metadata']['annotations'], original['metadata']['annotations'])
 
+    def test_credentials_release_waits_for_existing_rotation_before_one_sample(self):
+        self.cluster.objects['credentials_cron']['status'] = {'active': [{'uid': 'prior-rotation'}]}
+        def complete_prior(_seconds):
+            self.cluster.objects['credentials_cron']['status']['active'] = []
+        with patch.object(workers.time, 'sleep', side_effect=complete_prior) as wait:
+            result = workers.apply_workers(self.config, IMAGES, SHA, self.state, kube=self.cluster,
+                scope='credentials', credentials_environments=['k3s-gcp'])
+        self.assertTrue(result['executable_verification'])
+        wait.assert_called_once_with(3)
+        self.assertEqual(self.cluster.calls.count(('create-job', 'credentials_cron')), 1)
+
+    def test_normal_release_promotes_before_resuming_and_verifies_both_workers(self):
+        called = []
+        def promote(proof):
+            self.assertTrue(self.cluster.objects['build_cron']['spec']['suspend'])
+            self.assertEqual(workers.container(self.cluster.objects['credentials_cron']['spec'])['image'], IMAGES['api'])
+            self.assertEqual(workers.credentials.command_environments(
+                workers.container(self.cluster.objects['credentials_cron']['spec'])['command']), ['k3s-gcp'])
+            called.append(proof)
+        result = workers.apply_workers(self.config, IMAGES, SHA, self.state, kube=self.cluster,
+            scope='all', before_resume=promote, credentials_environments=['k3s-gcp'])
+        self.assertEqual(len(called), 1)
+        self.assertTrue(result['executable_verification'])
+        self.assertEqual(set(result['executions']), {'build_cron', 'credentials_cron'})
+        self.assertFalse(self.cluster.objects['build_cron']['spec'].get('suspend', False))
+
+    def test_explicit_cloud_scope_updates_legacy_cron_command_and_is_verified(self):
+        result = workers.apply_workers(self.config, IMAGES, SHA, self.state, kube=self.cluster,
+            scope='credentials', credentials_environments=['k3s-gcp'])
+        self.assertEqual(workers.credentials.command_environments(
+            workers.container(self.cluster.objects['credentials_cron']['spec'])['command']), ['k3s-gcp'])
+        self.assertEqual(result['executions']['credentials_cron']['environments'], ['k3s-gcp'])
+        self.assertEqual(result['executions']['credentials_cron']['excluded_target_count'], 0)
+
+    def test_credentials_scope_survives_image_release_and_only_selected_results_are_required(self):
+        cron = self.cluster.objects['credentials_cron']
+        workers.container(cron['spec'])['command'] += ['--environment', 'k3s-gcp']
+        cm = self.cluster.objects['credentials_config']
+        policy = json.loads(cm['data']['policy.json'])
+        policy['targets'].append({**copy.deepcopy(POLICY['targets'][0]), 'target_id': 'k3s-openstack',
+            'secret': 'railshot-k3s-openstack', 'server': 'https://10.77.0.2:6443'})
+        cm['data']['policy.json'] = json.dumps(policy)
+        before = copy.deepcopy(cm)
+        result = workers.apply_workers(self.config, IMAGES, SHA, self.state, kube=self.cluster, scope='credentials')
+        self.assertTrue(result['executable_verification'])
+        self.assertEqual(workers.credentials.command_environments(workers.container(cron['spec'])['command']), ['k3s-gcp'])
+        self.assertEqual(self.cluster.objects['credentials_config'], before)
+        self.assertEqual(result['executions']['credentials_cron']['renewed'], ['railshot-k3s-gcp'])
+
     def test_promote_exact_digests_preserves_policy_and_explicit_rollback(self):
         result = self.apply()
         self.assertEqual(result['status'], 'verified')

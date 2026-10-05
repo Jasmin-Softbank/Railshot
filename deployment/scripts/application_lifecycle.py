@@ -78,9 +78,16 @@ def control_inventory(binding, profile, *, allow_active=False):
     cm = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
     policy = runtime.credentials.validate_policy(json.loads(cm['data']['policy.json']))
     renewal = next((item for item in policy['targets'] if item['target_id'] == app_id), None)
-    require(renewal and renewal['server'] == target['cluster_server'] and renewal['namespaces'] == [app_id]
+    observer_state = runtime.observer_snapshot(binding['cd'], binding['registered'], binding['environment_id'], allow_missing=True)
+    observer = None
+    if observer_state:
+        _, observed_policy, selected, observer_secret, _, _ = observer_state
+        require(observed_policy == policy, 'APPLICATION_CREDENTIAL_BINDING_CHANGED')
+        observer = {'renewal': selected, 'secret': identity(observer_secret)}
+    require((renewal['server'] == target['cluster_server'] and renewal['namespaces'] == [app_id]
             and renewal['project'] == app_id and renewal['service_account']['namespace'] == app_id
-            and renewal['service_account']['name'] == runtime.SA, 'APPLICATION_CREDENTIAL_BINDING_CHANGED')
+            and renewal['service_account']['name'] == runtime.SA) if renewal else observer is not None,
+            'APPLICATION_CREDENTIAL_BINDING_CHANGED')
     name = runtime.application_name(app_id, app_id, binding['registered']['app'])
     app = control('get', 'application', name, '--ignore-not-found', '-o', 'json')
     if app:
@@ -97,30 +104,34 @@ def control_inventory(binding, profile, *, allow_active=False):
             and project['spec'].get('destinations') == [{'server': target['cluster_server'], 'namespace': app_id}]
             and project['spec'].get('sourceRepos') == [target['repo_url']]
             and not project['spec'].get('clusterResourceWhitelist') and not project['metadata'].get('finalizers'), 'APPLICATION_PROJECT_CONFLICT')
-    secret = control('get', 'secret', renewal['secret'], '-o', 'json')
-    data = {key: base64.b64decode(secret['data'][key], validate=True).decode() for key in ('name', 'server', 'project', 'namespaces', 'clusterResources')}
-    require(data == {'name': app_id, 'server': target['cluster_server'], 'project': app_id, 'namespaces': app_id, 'clusterResources': 'false'}
-            and runtime.credentials.credential_labels_match(secret['metadata'].get('labels', {}), app_id, app_id, [app_id]),
-            'APPLICATION_CREDENTIAL_BINDING_CHANGED')
+    secret = None
+    if renewal:
+        secret = control('get', 'secret', renewal['secret'], '-o', 'json')
+        data = {key: base64.b64decode(secret['data'][key], validate=True).decode() for key in ('name', 'server', 'project', 'namespaces', 'clusterResources')}
+        require(data == {'name': app_id, 'server': target['cluster_server'], 'project': app_id, 'namespaces': app_id, 'clusterResources': 'false'}
+                and runtime.credentials.credential_labels_match(secret['metadata'].get('labels', {}), app_id, app_id, [app_id]),
+                'APPLICATION_CREDENTIAL_BINDING_CHANGED')
     shared = None
     environment = next((item for item in policy['targets'] if item['target_id'] == binding['environment_id']), None)
-    private = secret['metadata']['labels']['argocd.argoproj.io/secret-type'] == 'railshot-application'
+    private = secret is None or secret['metadata']['labels']['argocd.argoproj.io/secret-type'] == 'railshot-application'
     require(not private or (environment and environment['project'] == ''
             and (environment.get('cluster_read') or app_id in environment['namespaces'])),
             'APPLICATION_SHARED_CREDENTIAL_CHANGED')
     if environment and environment['project'] == '' and (environment.get('cluster_read') or app_id in environment['namespaces']):
         _, current_policy, selected, canonical, _, _ = runtime.shared_cluster_snapshot(
             binding['cd'], binding['registered'], binding['environment_id'])
+        expected_auth = renewal or observer['renewal']
         require(current_policy == policy and selected == environment
                 and selected['service_account']['namespace'] != app_id
-                and selected['ca_sha256'] == renewal['ca_sha256']
-                and selected.get('tls_server_name') == renewal.get('tls_server_name'), 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+                and selected['ca_sha256'] == expected_auth['ca_sha256']
+                and selected.get('tls_server_name') == expected_auth.get('tls_server_name'), 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
         # Tokens rotate independently; only identity and exact scope belong in the plan.
         shared = {'renewal': selected, 'secret': identity(canonical)}
     values, _ = ci_binding(profile, binding)
     return {'renewal': renewal, 'application_name': name, 'application': identity(app, spec=True),
             'skip': app['metadata'].get('annotations', {}).get(SKIP) if app else None,
-            'project': identity(project, spec=True), 'secret': identity(secret), 'shared': shared, 'ci_bound': app_id in values}
+            'project': identity(project, spec=True), 'secret': identity(secret), 'shared': shared,
+            **({'observer': observer} if observer else {}), 'ci_bound': app_id in values}
 
 
 def unbind_ci(profile, binding):
@@ -181,6 +192,10 @@ def remove_renewal(binding, expected, *, inspect=False):
     control = control_for(binding); selected = expected['renewal']; shared = expected.get('shared')
     cm = control('get', 'configmap', 'railshot-credentials', '-o', 'json')
     current = runtime.credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    if expected.get('observer'):
+        _, _, observed, canonical, _, _ = runtime.observer_snapshot(binding['cd'], binding['registered'], binding['environment_id'])
+        require(observed == expected['observer']['renewal'] and identity(canonical) == expected['observer']['secret'],
+                'APPLICATION_CREDENTIAL_BINDING_CHANGED')
     rows = [item for item in current['targets'] if item['target_id'] == binding['application_id']]
     require(rows in ([], [selected]), 'RENEWAL_POLICY_CHANGED')
     policy = {**current, 'targets': [item for item in current['targets'] if item['target_id'] != binding['application_id']]}
@@ -192,6 +207,10 @@ def remove_renewal(binding, expected, *, inspect=False):
             binding['cd'], binding['registered'], binding['environment_id'])
         require(updated == shared['renewal'] and identity(canonical) == shared['secret'],
                 'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+    if selected is None:
+        require(not rows and expected.get('observer') and shared and shared['renewal'].get('cluster_read'),
+                'APPLICATION_CREDENTIAL_BINDING_CHANGED')
+        return  # Environment credentials are outside this app's deletion scope.
     if shared and not shared['renewal'].get('cluster_read'):
         previous = shared['renewal']
         namespaces = [value for value in previous['namespaces'] if value != binding['application_id']]
@@ -248,9 +267,11 @@ def grant_cleanup(binding, expected):
     control = control_for(binding)
     role = control('get', 'role', 'railshot-product-registrations', '-o', 'json')
     names = {('argoproj.io', 'applications'): expected['application_name'],
-             ('argoproj.io', 'appprojects'): binding['application_id'], ('', 'secrets'): expected['renewal']['secret']}
+             ('argoproj.io', 'appprojects'): binding['application_id'], ('', 'secrets'): 'railshot-' + binding['application_id']}
     rules = role.get('rules') or []
     for rule in rules:
+        if observer_read_rule(rule):
+            continue
         require(set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
                 and len(rule.get('apiGroups', [])) == len(rule.get('resources', [])) == 1
                 and (rule['apiGroups'][0], rule['resources'][0]) in names
@@ -261,6 +282,8 @@ def grant_cleanup(binding, expected):
                        'secrets': r'railshot-app-[a-f0-9]{24}'}[rule['resources'][0]]
             require(all(re.fullmatch(pattern, name) for name in rule['resourceNames']), 'CONTROL_ROLE_CHANGED')
     for (group, resource), name in names.items():
+        if resource == 'secrets' and expected['renewal'] is None:
+            continue
         matching = [rule for rule in rules if rule['apiGroups'] == [group] and rule['resources'] == [resource]
                     and rule['verbs'] == ['delete']]
         require(len(matching) <= 1, 'CONTROL_ROLE_CHANGED')
@@ -275,13 +298,23 @@ def grant_cleanup(binding, expected):
             'CONTROL_GRANT_UNVERIFIED')
 
 
+def observer_read_rule(rule):
+    return (set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
+            and rule['apiGroups'] == [''] and rule['resources'] == ['secrets'] and rule['verbs'] == ['get']
+            and bool(rule['resourceNames']) and all(re.fullmatch(r'railshot-observer-[a-z0-9-]+', name)
+                                                   for name in rule['resourceNames']))
+
+
 def revoke_control_grants(binding, expected):
     control = control_for(binding)
     role = control('get', 'role', 'railshot-product-registrations', '-o', 'json')
     names = {('argoproj.io', 'applications'): expected['application_name'],
-             ('argoproj.io', 'appprojects'): binding['application_id'], ('', 'secrets'): expected['renewal']['secret']}
+             ('argoproj.io', 'appprojects'): binding['application_id'], ('', 'secrets'): 'railshot-' + binding['application_id']}
     updated = []
     for rule in role.get('rules') or []:
+        if observer_read_rule(rule):
+            updated.append(rule)
+            continue
         key = (rule['apiGroups'][0], rule['resources'][0])
         require(key in names and rule['verbs'] in (['get', 'patch'], ['delete'])
                 and rule.get('resourceNames'), 'CONTROL_ROLE_CHANGED')
@@ -298,6 +331,8 @@ def collect(kube, binding, profile, action, approved_edge=None, *, allow_active=
     control = control_inventory(binding, profile, allow_active=allow_active)
     require(action == 'delete' or control['application'] is not None, 'APPLICATION_NOT_DEPLOYED')
     options = {'shared_renewal': control['shared']['renewal']} if control.get('shared') else {}
+    if control.get('observer'):
+        options['observer_renewal'] = control['observer']['renewal']
     inventory = workloads.inventory(kube, binding, control['renewal'], action, **options)
     if approved_edge is not None:
         edge.validate(binding, action, approved_edge)
@@ -305,13 +340,16 @@ def collect(kube, binding, profile, action, approved_edge=None, *, allow_active=
     app_id = binding['application_id']
     resources = list(inventory['resources']) + list(provider['resources'])
     retained = list(inventory.get('retained', [])) + list(provider.get('retained', []))
-    refs = [reference('AppProject', app_id, 'argocd'), reference('Credential', control['renewal']['secret'], 'argocd'),
-            reference('CIBinding', app_id)]
+    refs = [reference('AppProject', app_id, 'argocd'), reference('CIBinding', app_id)]
+    if control['renewal']:
+        refs.append(reference('Credential', control['renewal']['secret'], 'argocd'))
     if control['application']:
         refs.append(reference('Application', control['application_name'], 'argocd'))
     (resources if action == 'delete' else retained).extend(refs)
     if control.get('shared'):
         retained.append(reference('Credential', control['shared']['renewal']['secret'], 'argocd'))
+    if control.get('observer'):
+        retained.append(reference('Credential', control['observer']['renewal']['secret'], 'argocd'))
     retained.extend([reference('SharedRuntime', binding['environment_id']), reference('AuditRecord', app_id), reference('BuildArtifacts', app_id)])
     def unique(items):
         return sorted({applications.digest(item): item for item in items}.values(), key=lambda x: (x['kind'], x['name'], x.get('namespace', '')))
@@ -405,9 +443,11 @@ def inspect_deletion(kube, binding, profile, snapshot):
     """Re-observe every remaining destructive target against the approved IDs."""
     expected = snapshot['control']; control = control_for(binding)
     ci_binding(profile, binding)
-    for kind, name, saved in [('application', expected['application_name'], expected['application']),
-                              ('appproject', binding['application_id'], expected['project']),
-                              ('secret', expected['renewal']['secret'], expected['secret'])]:
+    resources = [('application', expected['application_name'], expected['application']),
+                 ('appproject', binding['application_id'], expected['project'])]
+    if expected['renewal']:
+        resources.append(('secret', expected['renewal']['secret'], expected['secret']))
+    for kind, name, saved in resources:
         observed = control('get', kind, name, '--ignore-not-found', '-o', 'json')
         if observed:
             require(saved and identity(observed, spec='spec_sha256' in saved) == saved
@@ -419,6 +459,8 @@ def inspect_deletion(kube, binding, profile, snapshot):
     edge.inspect_execution(binding, 'delete', snapshot['edge'])
     if not workloads.deleted(kube, binding['application_id'], snapshot['runtime']):
         shared = {'shared_renewal': expected['shared']['renewal']} if expected.get('shared') else {}
+        if expected.get('observer'):
+            shared['observer_renewal'] = expected['observer']['renewal']
         observed = workloads.inventory(kube, binding, expected['renewal'], 'delete', **shared)
         require(workloads.comparable(observed) == workloads.comparable(snapshot['runtime']), 'APPLICATION_RUNTIME_PLAN_STALE')
 
@@ -528,7 +570,8 @@ def lifecycle(config_path, request):
                     step('runtime-cleanup', lambda: remove_runtime(kube, binding, snapshot['runtime']) if action == 'delete' and recovery
                          else workloads.execute(kube, binding, action, snapshot['runtime']))
                     if action == 'delete':
-                        step('remove-credential', lambda: delete_control(binding, 'secret', expected['renewal']['secret'], expected['secret']))
+                        if expected['renewal']:
+                            step('remove-credential', lambda: delete_control(binding, 'secret', expected['renewal']['secret'], expected['secret']))
                         step('remove-project', lambda: delete_control(binding, 'appproject', binding['application_id'], expected['project']))
                         step('revoke-permissions', lambda: revoke_control_grants(binding, expected))
                 else:

@@ -220,7 +220,7 @@ def owned_apply(kube, document):
     return observed
 
 
-def runtime_documents(target, owner, pull, binding):
+def runtime_documents(target, owner, pull, binding, *, shared_credentials=False):
     namespace = target['namespace']; labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': owner}
     def doc(kind, name, **fields):
         return {'apiVersion': 'rbac.authorization.k8s.io/v1' if kind in ('Role', 'RoleBinding') else 'v1',
@@ -238,6 +238,10 @@ def runtime_documents(target, owner, pull, binding):
               doc('Role', SA, rules=rules), doc('RoleBinding', SA,
                   roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': SA},
                   subjects=[{'kind': 'ServiceAccount', 'name': SA, 'namespace': namespace}])]
+    if shared_credentials:
+        result = [document for document in result if document['kind'] not in ('ServiceAccount', 'RoleBinding')]
+        next(document for document in result if document['kind'] == 'Role')['rules'] = [
+            rule for rule in rules if rule['resources'] != ['serviceaccounts/token']]
     def secret(name, values, kind='Opaque'):
         return doc('Secret', name, type=kind, data={k: base64.b64encode(v.encode()).decode() for k, v in values.items()})
     result.append(secret(target['image_pull_secret']['name'], {'.dockerconfigjson': json.dumps(pull)}, 'kubernetes.io/dockerconfigjson'))
@@ -419,19 +423,133 @@ def enable_shared_cluster_cache(kube, cd, registered, environment_id):
     return observed
 
 
-def share_application_cluster(kube, cd, registered, environment_id):
+
+OBSERVER = 'railshot-observer'
+OBSERVER_RULES = [
+    {'apiGroups': ['apps'], 'resources': ['deployments'], 'verbs': ['get', 'list']},
+    {'apiGroups': ['apps'], 'resources': ['replicasets'], 'verbs': ['list']},
+    {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list']},
+    {'apiGroups': [''], 'resources': ['pods/log'], 'verbs': ['get']},
+]
+
+
+def observer_snapshot(cd, registered, environment_id, *, allow_missing=False):
+    cm = argo.kubectl(cd['context'], 'argocd', 'get', 'configmap', 'railshot-credentials', '-o', 'json')
+    policy = credentials.validate_policy(json.loads(cm['data']['policy.json']))
+    rows = [row for row in policy['targets'] if row['target_id'] == 'observer-' + environment_id]
+    if not rows and allow_missing:
+        return None
+    argo.require(len(rows) == 1, 'environment observer registration required')
+    _, current_policy, anchor, _, _, _ = shared_cluster_snapshot(cd, registered, environment_id)
+    argo.require(current_policy == policy, 'observer policy changed during observation')
+    row = rows[0]; namespace = anchor['service_account']['namespace']
+    argo.require(anchor.get('cluster_read') is True and row['project'] == '' and row.get('cluster_read') is True
+        and 'previous_scope' not in row and row['namespaces'] == [namespace]
+        and row['service_account']['name'] == OBSERVER and row['service_account']['namespace'] == namespace
+        and all(row.get(key) == anchor.get(key) for key in ('server', 'ca_sha256', 'audiences', 'tls_server_name')),
+        'environment observer binding differs')
+    secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', row['secret'], '-o', 'json')
+    config, ca = credentials.registration(secret, row, time.time())
+    argo.require(not secret['metadata'].get('ownerReferences') and not secret['metadata'].get('deletionTimestamp'),
+                 'environment observer is not available')
+    return cm, policy, row, secret, config, ca
+
+
+def bind_application_observer(kube, row, namespace, owner):
+    labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': owner}
+    meta = {'namespace': namespace, 'labels': labels}
+    owned_apply(kube, {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role',
+        'metadata': {**meta, 'name': OBSERVER}, 'rules': copy.deepcopy(OBSERVER_RULES)})
+    owned_apply(kube, {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding',
+        'metadata': {**meta, 'name': 'railshot-environment-observer'},
+        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': OBSERVER},
+        'subjects': [{'kind': 'ServiceAccount', 'name': OBSERVER, 'namespace': row['service_account']['namespace']}]})
+
+
+def enable_shared_observer(kube, cd, registered, environment_id):
+    """Operator-only environment credential; app registration never creates tokens here."""
+    _, _, anchor, _, anchor_config, ca = shared_cluster_snapshot(cd, registered, environment_id)
+    argo.require(environment_id in ('k3s-aws', 'k3s-gcp') and anchor.get('cluster_read') is True,
+                 'fixed AWS/GCP environment required')
+    existing = observer_snapshot(cd, registered, environment_id, allow_missing=True)
+    namespace = anchor['service_account']['namespace']
+    labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': environment_id}
+    sa = owned_apply(kube, {'apiVersion': 'v1', 'kind': 'ServiceAccount', 'metadata': {
+        'name': OBSERVER, 'namespace': namespace, 'labels': labels}, 'automountServiceAccountToken': False})
+    row = {**{key: anchor[key] for key in ('server', 'ca_sha256', 'audiences')},
+        'target_id': 'observer-' + environment_id, 'secret': 'railshot-observer-' + environment_id,
+        'project': '', 'namespaces': [namespace], 'cluster_read': True,
+        'service_account': {'namespace': namespace, 'name': OBSERVER, 'uid': sa['metadata']['uid']}}
+    if 'tls_server_name' in anchor:
+        row['tls_server_name'] = anchor['tls_server_name']
+    if existing:
+        argo.require(existing[2] == row, 'existing observer identity differs')
+    bind_application_observer(kube, row, namespace, environment_id)
+    owned_apply(kube, {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role',
+        'metadata': {'name': OBSERVER + '-renewal', 'namespace': namespace, 'labels': labels},
+        'rules': [{'apiGroups': [''], 'resources': ['serviceaccounts/token'], 'resourceNames': [OBSERVER], 'verbs': ['create']}]})
+    owned_apply(kube, {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding',
+        'metadata': {'name': OBSERVER + '-renewal', 'namespace': namespace, 'labels': labels},
+        'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': OBSERVER + '-renewal'},
+        'subjects': [{'kind': 'ServiceAccount', 'name': OBSERVER, 'namespace': namespace}]})
+    control = lambda ns, *args, **kwargs: argo.kubectl(cd['context'], ns, *args, **kwargs)
+    secret = control('argocd', 'get', 'secret', row['secret'], '--ignore-not-found', '-o', 'json')
+    if not secret:
+        token = kube(namespace, 'create', '--raw', '/api/v1/namespaces/' + namespace + '/serviceaccounts/' + OBSERVER + '/token',
+            '-f', '-', document={'apiVersion': 'authentication.k8s.io/v1', 'kind': 'TokenRequest',
+                'spec': {'audiences': row['audiences'], 'expirationSeconds': credentials.LIFETIME}})['status']['token']
+        credentials.claims(token, row, time.time())
+        config = {'bearerToken': token, 'tlsClientConfig': copy.deepcopy(anchor_config['tlsClientConfig'])}
+        values = {'name': row['target_id'], 'server': row['server'], 'project': '', 'namespaces': '',
+                  'clusterResources': 'false', 'config': json.dumps(config)}
+        secret = owned_apply(control, {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {
+            'namespace': 'argocd', 'name': row['secret'], 'labels': {**labels, 'argocd.argoproj.io/secret-type': 'railshot-observer'}},
+            'type': 'Opaque', 'data': {key: base64.b64encode(value.encode()).decode() for key, value in values.items()}})
+    config, ca = credentials.registration(secret, row, time.time())
+    tls = {'server_name': row['tls_server_name']} if 'tls_server_name' in row else {}
+    for resource, group, verb, allowed in [('pods', '', 'list', True), ('pods/log', '', 'get', True),
+            ('deployments', 'apps', 'create', False), ('secrets', '', 'get', False)]:
+        access = credentials.customer(row['server'], ca, config['bearerToken'], '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews',
+            {'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectAccessReview', 'spec': {'resourceAttributes': {
+                'namespace': namespace, 'resource': resource, 'group': group, 'verb': verb}}}, **tls)
+        argo.require(access['status']['allowed'] is allowed, 'observer permissions differ')
+    # Publish the observer policy only after every existing owned app can be read.
+    namespaces = kube('default', 'get', 'namespaces', '-l', 'app.kubernetes.io/managed-by=railshot', '-o', 'json')['items']
+    for item in namespaces:
+        name = item['metadata']['name']
+        if re.fullmatch(credentials.APPLICATION_ID, name):
+            argo.require(item['metadata'].get('labels', {}).get('railshot.io/registration') == name
+                and not item['metadata'].get('ownerReferences'), 'observer app namespace owner differs')
+            bind_application_observer(kube, row, name, name)
+    role = control('argocd', 'get', 'role', 'railshot-product-registrations', '-o', 'json')
+    rules = role.get('rules') or []
+    read = next((rule for rule in rules if rule['apiGroups'] == [''] and rule['resources'] == ['secrets'] and rule['verbs'] == ['get']), None)
+    if read is None:
+        read = {'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get'], 'resourceNames': []}; rules.append(read)
+    argo.require(all(name in ('railshot-observer-k3s-aws', 'railshot-observer-k3s-gcp') for name in read['resourceNames']),
+                 'observer read role differs')
+    if row['secret'] not in read['resourceNames']:
+        read['resourceNames'].append(row['secret']); role['rules'] = rules
+        control('argocd', 'replace', '-f', '-', '-o', 'json', document=role)
+    install_renewal(cd, row)
+    return observer_snapshot(cd, registered, environment_id)[2]
+
+
+def share_application_cluster(kube, cd, registered, environment_id, *, shared_credentials=False):
     """Bind this app's writes without invalidating the shared read cache."""
     target = registered['target']; app_id = target['id']; namespace = target['namespace']
     argo.require(re.fullmatch(r'app-[a-f0-9]{24}', app_id) and namespace == target['project'] == app_id,
                  'application cluster scope differs')
     cm, policy, selected, secret, config, ca = shared_cluster_snapshot(cd, registered, environment_id)
-    app_row = next((row for row in policy['targets'] if row['target_id'] == app_id), None)
-    argo.require(app_row is not None and app_row['server'] == selected['server']
-                 and app_row['ca_sha256'] == selected['ca_sha256']
-                 and app_row.get('tls_server_name') == selected.get('tls_server_name')
-                 and app_row['project'] == app_id and app_row['namespaces'] == [namespace], 'app credential binding differs')
-    app_secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', app_row['secret'], '-o', 'json')
-    credentials.registration(app_secret, app_row, time.time())
+    observer = observer_snapshot(cd, registered, environment_id) if shared_credentials else None
+    if not shared_credentials:
+        app_row = next((row for row in policy['targets'] if row['target_id'] == app_id), None)
+        argo.require(app_row is not None and app_row['server'] == selected['server']
+                     and app_row['ca_sha256'] == selected['ca_sha256']
+                     and app_row.get('tls_server_name') == selected.get('tls_server_name')
+                     and app_row['project'] == app_id and app_row['namespaces'] == [namespace], 'app credential binding differs')
+        app_secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', app_row['secret'], '-o', 'json')
+        credentials.registration(app_secret, app_row, time.time())
     labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': app_id}
     live_namespace = kube('default', 'get', 'namespace', namespace, '-o', 'json')
     argo.require(not live_namespace['metadata'].get('ownerReferences') and all(
@@ -484,25 +602,29 @@ def share_application_cluster(kube, cd, registered, environment_id):
                          '--patch-file=/dev/stdin', '-o', 'json', document=patch)
             cm['data']['policy.json'] = json.dumps(replacement)
             argo.kubectl(cd['context'], 'argocd', 'replace', '-f', '-', '-o', 'json', document=cm)
-    # Old completed registrations retain their private credential, but stop announcing
-    # a second Argo cluster for the same server. Token renewal patches data only.
-    if app_secret['metadata']['labels'].get('argocd.argoproj.io/secret-type') == 'cluster':
-        patch = [{'op': 'test', 'path': '/metadata/uid', 'value': app_secret['metadata']['uid']},
-                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': app_secret['metadata']['resourceVersion']},
-                 {'op': 'replace', 'path': '/metadata/labels/argocd.argoproj.io~1secret-type', 'value': 'railshot-application'}]
-        argo.kubectl(cd['context'], 'argocd', 'patch', 'secret', app_row['secret'], '--type=json',
-                     '--patch-file=/dev/stdin', '-o', 'json', document=patch)
+    if not shared_credentials:
+        # Old completed registrations retain their private credential, but stop announcing
+        # a second Argo cluster for the same server. Token renewal patches data only.
+        if app_secret['metadata']['labels'].get('argocd.argoproj.io/secret-type') == 'cluster':
+            patch = [{'op': 'test', 'path': '/metadata/uid', 'value': app_secret['metadata']['uid']},
+                     {'op': 'test', 'path': '/metadata/resourceVersion', 'value': app_secret['metadata']['resourceVersion']},
+                     {'op': 'replace', 'path': '/metadata/labels/argocd.argoproj.io~1secret-type', 'value': 'railshot-application'}]
+            argo.kubectl(cd['context'], 'argocd', 'patch', 'secret', app_row['secret'], '--type=json',
+                         '--patch-file=/dev/stdin', '-o', 'json', document=patch)
     _, _, observed, live, _, _ = shared_cluster_snapshot(cd, registered, environment_id)
     argo.require(observed == updated and live['metadata']['uid'] == secret['metadata']['uid']
                  and {k: v for k, v in live['data'].items() if k != 'config'} == {
                      k: v for k, v in wanted_data.items() if k != 'config'}, 'shared cluster readback differs')
-    private_secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', app_row['secret'], '-o', 'json')
-    credentials.registration(private_secret, app_row, time.time())
-    argo.require(private_secret['metadata']['uid'] == app_secret['metadata']['uid']
-                 and {k: v for k, v in private_secret['data'].items() if k != 'config'} == {
-                     k: v for k, v in app_secret['data'].items() if k != 'config'}
-                 and private_secret['metadata']['labels'].get('argocd.argoproj.io/secret-type') == 'railshot-application',
-                 'private app credential readback differs')
+    if not shared_credentials:
+        private_secret = argo.kubectl(cd['context'], 'argocd', 'get', 'secret', app_row['secret'], '-o', 'json')
+        credentials.registration(private_secret, app_row, time.time())
+        argo.require(private_secret['metadata']['uid'] == app_secret['metadata']['uid']
+                     and {k: v for k, v in private_secret['data'].items() if k != 'config'} == {
+                         k: v for k, v in app_secret['data'].items() if k != 'config'}
+                     and private_secret['metadata']['labels'].get('argocd.argoproj.io/secret-type') == 'railshot-application',
+                     'private app credential readback differs')
+    else:
+        bind_application_observer(kube, observer[2], namespace, app_id)
     return {'secret': selected['secret'], 'uid': secret['metadata']['uid'], 'environment_id': environment_id,
             'service_account': anchor, 'namespace': namespace}
 
@@ -558,7 +680,7 @@ def install_renewal(cd, renewal):
     argo.require(renewal['secret'] in control('get', 'role', 'railshot-credentials', '-o', 'json')['rules'][0]['resourceNames'], 'renewal role readback differs')
 
 
-def grant_control_objects(cd, registered, target_id, *, environment_id=None):
+def grant_control_objects(cd, registered, target_id, *, environment_id=None, shared_credentials=False):
     """Append snapshot-derived names to one bootstrap-owned Role, under the registration lock."""
     namespace, name = 'argocd', 'railshot-product-registrations'
     expected = {('argoproj.io', 'appprojects'): registered['target']['project'],
@@ -570,18 +692,23 @@ def grant_control_objects(cd, registered, target_id, *, environment_id=None):
     for rule in rules:
         argo.require(set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'}
                      and len(rule['apiGroups']) == len(rule['resources']) == 1
-                     and rule['verbs'] in (['get', 'patch'], ['delete']) and rule['resourceNames']
+                     and rule['verbs'] in (['get', 'patch'], ['delete'], ['get']) and rule['resourceNames']
                      and all(label(value) for value in rule['resourceNames']), 'registration Role must contain exact names only')
         key = (rule['apiGroups'][0], rule['resources'][0])
         grant = (*key, tuple(rule['verbs']))
         argo.require(key in expected and grant not in seen, 'registration Role kind differs')
         seen.add(grant)
+        if rule['verbs'] == ['get']:
+            argo.require(key == ('', 'secrets') and all(value in ('railshot-observer-k3s-aws', 'railshot-observer-k3s-gcp')
+                for value in rule['resourceNames']), 'observer-only read grants required')
         if rule['verbs'] == ['delete']:
             pattern = {'applications': r'app-[a-f0-9]{24}-[a-z0-9-]+', 'appprojects': r'app-[a-f0-9]{24}',
                        'secrets': r'railshot-app-[a-f0-9]{24}'}[key[1]]
             argo.require(all(re.fullmatch(pattern, value) for value in rule['resourceNames']), 'app-only deletion grants required')
     original = copy.deepcopy(rules)
     for (group, resource), resource_name in expected.items():
+        if shared_credentials and resource == 'secrets':
+            continue
         rule = next((r for r in rules if r['apiGroups'] == [group] and r['resources'] == [resource] and r['verbs'] == ['get', 'patch']), None)
         if rule is None:
             rule = {'apiGroups': [group], 'resources': [resource], 'verbs': ['get', 'patch'], 'resourceNames': []}

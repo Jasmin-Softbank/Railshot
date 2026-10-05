@@ -198,6 +198,15 @@ export async function createProductStore(directory) {
       const value = table === undefined ? state : Object.hasOwn(state, table) ? state[table] : undefined;
       return structuredClone(id === undefined ? value : value && Object.hasOwn(value, id) ? value[id] : undefined);
     },
+    latestDeployment(identity, { requireCdState = false } = {}) {
+      // Inspect identities in memory and detach only the matching deployment.
+      // Full operation history includes CI logs and must not be cloned for a detail read.
+      return structuredClone(Object.values(state.operations).findLast(row => row.kind === 'deployments'
+        && row.target_id === identity.target_id && row.app === identity.app && row.cd?.state !== 'not_started'
+        && (!requireCdState || Boolean(row.cd?.state))
+        && (!Object.hasOwn(identity, 'application_id') || row.application_id === identity.application_id)
+        && (!Object.hasOwn(identity, 'session_id') || row.session_id === identity.session_id)));
+    },
     schedulingState() {
       // Queue admission needs identities and phase markers, never CI logs or telemetry.
       return structuredClone({ applications: state.applications, bindings: state.bindings,

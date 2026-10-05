@@ -216,7 +216,8 @@ test('expired and foreign plans cannot execute; lost replies recover from the sa
   state.outcome = 'lost';
   await appAction(page, 'paused-app', '삭제').click();
   await page.getByRole('button', { name: '영구 삭제', exact: true }).click();
-  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-message').textContent.includes('상태 조회 실패'));
+  await page.waitForFunction(() => document.querySelector('#lifecycle-operation-message').textContent.includes('상태 조회 실패')
+    && !document.querySelector('#lifecycle-operation-refresh').disabled);
   assert.equal(await appAction(page, 'paused-app', '삭제').isDisabled(), true);
   assert.equal(await page.locator('#lifecycle-operation-refresh').isEnabled(), true);
   state.outcome = 'succeeded';
