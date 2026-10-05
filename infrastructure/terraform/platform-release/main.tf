@@ -15,9 +15,9 @@ provider "aws" {
 
 variable "trusted_ref" {
   type    = string
-  default = "refs/heads/integration/team-assembly-20261002"
+  default = "refs/heads/develop"
   validation {
-    condition     = contains(["refs/heads/integration/team-assembly-20261002", "refs/heads/main"], var.trusted_ref)
+    condition     = contains(["refs/heads/develop", "refs/heads/main", "refs/heads/integration/team-assembly-20261002"], var.trusted_ref)
     error_message = "One exact reviewed release ref is required."
   }
 }

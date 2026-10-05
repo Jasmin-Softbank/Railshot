@@ -14,7 +14,7 @@ import zipfile
 
 REPOSITORY = 'Jasmin-Softbank/Railshot'
 REPOSITORY_ID = 1400202256
-REFS = {'refs/heads/main', 'refs/heads/integration/team-assembly-20261002'}
+REFS = {'refs/heads/main', 'refs/heads/develop', 'refs/heads/integration/team-assembly-20261002'}
 COMPONENTS = ('dashboard', 'api', 'ci-runner')
 ARCHIVE_LIMIT = 1_000_000
 

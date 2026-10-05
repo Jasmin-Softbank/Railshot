@@ -12,13 +12,13 @@
 | control instance | `i-033ae2db907fde68e` |
 | 새 role | `railshot-platform-verifier` |
 | 기존 OIDC provider | `arn:aws:iam::721622471953:oidc-provider/token.actions.githubusercontent.com` |
-| 초기 trusted ref | `refs/heads/integration/team-assembly-20261002` 하나 |
+| 기본 trusted ref | `refs/heads/develop` 하나 |
 | audience | `sts.amazonaws.com` |
-| exact subject | `repo:Jasmin-Softbank@335003159/Railshot@1400202256:ref:refs/heads/integration/team-assembly-20261002` |
+| exact subject | `repo:Jasmin-Softbank@335003159/Railshot@1400202256:ref:refs/heads/develop` |
 | SSM document | `Railshot-VerifyPlatform`, 실행 시 version과 SHA256 모두 고정 |
 | public origin | `https://railshot.io`만, redirect·proxy 사용 안 함 |
 
-2026-10-02 저장소 OIDC 설정 조회에서 `use_default=true`, `use_immutable_subject=true`, 위 `sub_claim_prefix`를 확인했다. IAM 조건은 지원되는 `aud`와 `sub`의 `StringEquals`만 사용한다. `repository_id`라는 custom IAM condition key는 사용하지 않는다. 별도로 workflow admission이 저장소 이름과 `GITHUB_REPOSITORY_ID=1400202256`, 정확한 trusted ref를 검사한다. IAM 역할은 해당 ref의 신뢰된 workflow에 대한 권한이므로 그 ref의 변경 권한도 제한해야 한다. [GitHub AWS OIDC 계약](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [immutable subject 형식](https://docs.github.com/en/actions/reference/security/oidc), [AWS trust 조건](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html).
+2026-10-02 저장소 OIDC 설정 조회에서 `use_default=true`, `use_immutable_subject=true`, 저장소 ID를 포함한 `sub_claim_prefix`를 확인했다. 브랜치 부분은 현재 선택한 `trusted_ref`로 결정한다. IAM 조건은 지원되는 `aud`와 `sub`의 `StringEquals`만 사용한다. `repository_id`라는 custom IAM condition key는 사용하지 않는다. 별도로 workflow admission이 저장소 이름과 `GITHUB_REPOSITORY_ID=1400202256`, 정확한 trusted ref를 검사한다. IAM 역할은 해당 ref의 신뢰된 workflow에 대한 권한이므로 그 ref의 변경 권한도 제한해야 한다. [GitHub AWS OIDC 계약](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws), [immutable subject 형식](https://docs.github.com/en/actions/reference/security/oidc), [AWS trust 조건](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-idp_oidc.html).
 
 `ssm:SendCommand`는 위 document ARN과 control instance ARN에만 허용한다. `ssm:GetCommandInvocation`은 AWS가 resource 수준 제한을 제공하지 않아 `Resource:"*"`인 상태·출력 조회 권한이 필요하다. 실행 코드는 자신이 방금 받은 command ID와 고정 instance만 조회한다. `StartSession`, `AWS-RunShellScript` 직접 실행, document 수정, Secret/Parameter 조회, EC2 변경, IAM 변경 권한은 부여하지 않는다. [AWS Run Command 권한](https://docs.aws.amazon.com/systems-manager/latest/userguide/run-command-setting-up.html), [SSM IAM actions](https://docs.aws.amazon.com/service-authorization/latest/reference/list_awssystemsmanager.html).
 
@@ -56,7 +56,7 @@ PY
 gh api repos/Jasmin-Softbank/Railshot/actions/oidc/customization/sub
 ```
 
-검증 코드가 바뀌면 같은 모듈·state에서 새 saved plan을 적용하고 네 개 workflow 변수의 document version/hash를 갱신한다. 기존 검증 문서는 기본 버전 변경에 관계없이 pin한 버전으로 실행된다. 일반 앱/API 이미지 게시만으로는 이 bootstrap을 반복할 필요가 없다. trusted ref를 main으로 옮길 때는 검토한 `-var='trusted_ref=refs/heads/main'` plan과 `RAILSHOT_PLATFORM_VERIFY_REF`를 함께 갱신한다. 초기 trust에 main이나 `integration/*` wildcard를 추가하지 않는다.
+검증 코드가 바뀌면 같은 모듈·state에서 새 saved plan을 적용하고 네 개 workflow 변수의 document version/hash를 갱신한다. 기존 검증 문서는 기본 버전 변경에 관계없이 pin한 버전으로 실행된다. 일반 앱/API 이미지 게시만으로는 이 bootstrap을 반복할 필요가 없다. 기존 integration에서 develop으로 옮길 때는 두 모듈(`platform-verification`, `platform-release`)의 기존 backend에서 `-var='trusted_ref=refs/heads/develop'` saved plan을 검토·적용한다. release 문서는 신뢰하는 ref를 본문에 포함하므로 새 version/hash도 갱신한다. 같은 전환에서 `RAILSHOT_PLATFORM_VERIFY_REF`를 `refs/heads/develop`로 갱신한다. IAM에는 선택한 ref 하나만 유지하며 wildcard를 추가하지 않는다. Argo CD의 `deployment/platform` 대상은 바꾸지 않는다.
 
 workflow는 버전·해시를 고정한 SSM 문서로 짧은 읽기 검사를 수행한다. 완료된 검사가 대기 상태를 반환하면 10초 후 다시 조회하며, 응답이 불확실한 요청은 재전송하지 않는다. 이전 revision 처리, API 준비, 준비 재시도, 일반 동기화 대기를 구분해 Actions에 표시한다. 확정된 Argo 실패는 즉시 실패하고, 성공 조건은 기존과 같은 revision·Pod digest·Ready·공개 HTTPS다. 각 SSM 문서는 최대 90초, 전체 검증은 준비 Job의 15분과 Pod 교체 여유 2분을 합한 최대 17분이다. 이 값은 최대 대기 한도이며 정상 준비 완료 후 첫 검사에서 바로 끝난다. 검증 역할 세션은 30분, workflow job은 25분이다.
 

@@ -23,7 +23,7 @@ class ScopeTests(unittest.TestCase):
                      'new-scope/policy.json', '../README.md'):
             with self.subTest(path=path):
                 self.assertTrue(ci_scope.release_required([path]))
-        for paths in ([], ['apps/api/test/product.test.js'], ['deployment/scripts/tests/test_runtime_update.py'], ['README.md'], ['docs/operations/release.md', 'apps/api/README.md']):
+        for paths in ([], ['apps/api/test/product.test.js'], ['deployment/scripts/tests/test_runtime_update.py'], ['README.md'], ['README.ja.md'], ['docs/operations/release.md', 'apps/api/README.md']):
             self.assertFalse(ci_scope.release_required(paths))
         self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
 
@@ -65,8 +65,9 @@ class ScopeTests(unittest.TestCase):
                         with self.assertRaises(ValueError):
                             ci_scope.validate_gate(checks)
 
-    def test_unfinished_predecessor_catches_up_all_deployed_images(self):
-        for paths in (['apps/api/src/server.js'], ['docs/operations/release.md'], []):
+    def test_unfinished_predecessor_catches_up_runtime_changes_only(self):
+        for paths in (['apps/api/src/server.js'], ['deployment/scripts/platform_workers.py'], None,
+                      ['docs/operations/release.md'], ['README.ja.md'], ['apps/api/test/product.test.js'], []):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp); (root / 'event').write_text('{}')
                 env = {'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push',
@@ -74,12 +75,14 @@ class ScopeTests(unittest.TestCase):
                        'GITHUB_STEP_SUMMARY': str(root / 'summary')}
                 with patch.dict(os.environ, env), patch('sys.argv', ['ci_scope.py', 'select']), \
                         patch.object(ci_scope, 'changed_paths', return_value=paths), \
-                        patch.object(ci_scope, 'previous_release_complete', return_value=False):
+                        patch.object(ci_scope, 'previous_release_complete', return_value=False) as previous:
                     ci_scope.main()
                 values = dict(line.split('=', 1) for line in (root / 'output').read_text().splitlines())
-                self.assertEqual(json.loads(values['container_components']), list(ci_scope.COMPONENTS))
-                self.assertEqual(values['release'], 'true')
-                self.assertEqual(json.loads(values['selected']), ['containers'])
+                release = ci_scope.release_required(paths)
+                self.assertEqual(json.loads(values['container_components']), list(ci_scope.COMPONENTS) if release else [])
+                self.assertEqual(values['release'], str(release).lower())
+                self.assertEqual(json.loads(values['selected']), ['containers'] if release else [])
+                self.assertEqual(previous.call_count, int(release))
 
     def test_previous_green_but_skipped_deploy_is_not_a_completed_release(self):
         runs = {'workflow_runs': [{'id': 12, 'run_attempt': 1, 'head_branch': 'integration/test', 'conclusion': 'success'}]}
@@ -103,6 +106,7 @@ class ScopeTests(unittest.TestCase):
         cases = {
             'docs/architecture/README.md': set(),
             'README.md': set(),
+            'README.ja.md': set(),
             'AGENT.md': set(),
             'apps/api/src/server.js': {'api-browser', 'containers'},
             'apps/api/src/metrics.js': {'api-browser', 'observability', 'containers'},

@@ -84,7 +84,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$PUBLISH" = true ]; then
-            case "$GITHUB_REF" in refs/heads/main|refs/heads/integration/*) ;; *) echo 'Publish requires a reviewed main or integration ref' >&2; exit 1 ;; esac
+            case "$GITHUB_REF" in refs/heads/main|refs/heads/develop|refs/heads/integration/team-assembly-20261002) ;; *) echo 'Publish requires an exact reviewed release ref' >&2; exit 1 ;; esac
           fi
           python3 - <<'PYCODE'
           import json, os, re

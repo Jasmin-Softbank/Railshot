@@ -53,11 +53,11 @@ class PlatformReleaseTests(unittest.TestCase):
     def run_step(self, job, name, overrides=None):
         step = next(step for step in self.workflow["jobs"][job]["steps"] if step.get("name") == name)
         env = {**os.environ, "RUNNER_TEMP": str(self.home), "GITHUB_SHA": self.source_sha,
-               "GITHUB_REF": "refs/heads/integration/test", "PUBLISH": "true", "DEPLOY": "true",
+               "GITHUB_REF": "refs/heads/develop", "PUBLISH": "true", "DEPLOY": "true",
                "SKIP_BUILD": "false", "AUTO_RELEASE": "false", "MULTICLOUD": "false", "MULTICLOUD_ENABLED": "",
                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_RUN_ID": "123", "CI_RUN_ID": "123",
                "GITHUB_REPOSITORY": "Jasmin-Softbank/Railshot", "GITHUB_REPOSITORY_ID": "1400202256",
-               "GITHUB_OUTPUT": str(self.home / "github-output"), "VERIFY_REF": "refs/heads/integration/test",
+               "GITHUB_OUTPUT": str(self.home / "github-output"), "VERIFY_REF": "refs/heads/develop",
                "VERIFY_ROLE": "arn:aws:iam::721622471953:role/railshot-platform-verifier",
                "VERIFY_VERSION": "1", "VERIFY_HASH": "e" * 64,
                "RELEASE_VERSION": "", "RELEASE_HASH": "",
@@ -80,6 +80,7 @@ class PlatformReleaseTests(unittest.TestCase):
         for overrides in ({'PUBLISH': 'false'}, {'COMPONENTS': '["ci-runner"]'},
                           {'PLATFORM_TARGET': ''}, {'PLATFORM_PORT': '443'},
                           {'GITHUB_REF': 'refs/heads/feature/unreviewed'},
+                          {'GITHUB_REF': 'refs/heads/integration/unreviewed', 'VERIFY_REF': 'refs/heads/integration/unreviewed'},
                           {'COMPONENTS': '["dashboard","api","api"]'},
                           {'VERIFY_REF': 'refs/heads/main'}, {'VERIFY_HASH': ''},
                           {'VERIFY_ROLE': ''}, {'GITHUB_REPOSITORY_ID': '1'},
@@ -108,6 +109,7 @@ class PlatformReleaseTests(unittest.TestCase):
         self.assertIn("contains(fromJSON(inputs.components), 'ci-runner')", jobs['ci-runtime']['if'])
         self.assertIn("github.event_name == 'workflow_dispatch'", jobs['multicloud']['if'])
         ci = yaml.safe_load((ROOT / '.github/workflows/railshot-ci.yml').read_text())
+        self.assertEqual(ci[True]['push']['branches'], ['main', 'develop'])
         self.assertIs(ci['jobs']['release']['with']['multicloud'], False)
         self.assertEqual(ci['concurrency'], {
             'group': 'railshot-ci-${{ github.event.pull_request.number || github.sha }}',
@@ -117,13 +119,13 @@ class PlatformReleaseTests(unittest.TestCase):
         steps = build['jobs']['publish']['steps']
         guard = next(step for step in steps if step.get('name') == 'Restrict publication to the trusted repository and ref')
         self.assertEqual(guard['if'], 'inputs.publish')
-        for event, ref, repo, success in [('push', 'refs/heads/integration/test', 'Jasmin-Softbank/Railshot', True),
-                                          ('pull_request', 'refs/heads/integration/test', 'Jasmin-Softbank/Railshot', False),
+        for event, ref, repo, success in [('push', 'refs/heads/develop', 'Jasmin-Softbank/Railshot', True),
+                                          ('pull_request', 'refs/heads/develop', 'Jasmin-Softbank/Railshot', False),
                                           ('push', 'refs/heads/feature/test', 'Jasmin-Softbank/Railshot', False),
-                                          ('push', 'refs/heads/integration/test', 'fork/Railshot', False)]:
+                                          ('push', 'refs/heads/develop', 'fork/Railshot', False)]:
             result = subprocess.run(['bash', '-e', '-c', guard['run']], env={**os.environ,
                 'GITHUB_EVENT_NAME': event, 'GITHUB_REF': ref, 'GITHUB_REPOSITORY': repo,
-                'GITHUB_REPOSITORY_ID': '1400202256', 'VERIFY_REF': 'refs/heads/integration/test'}, capture_output=True)
+                'GITHUB_REPOSITORY_ID': '1400202256', 'VERIFY_REF': 'refs/heads/develop'}, capture_output=True)
             self.assertEqual(result.returncode == 0, success)
         text = json.dumps(steps)
         self.assertNotIn('docker save', text)
