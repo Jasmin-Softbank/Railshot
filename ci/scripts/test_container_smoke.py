@@ -1,6 +1,7 @@
 """Offline regressions for the container smoke's isolation and proxy assertions."""
 import importlib.util
 import json
+import hashlib
 from pathlib import Path
 import subprocess
 import unittest
@@ -33,13 +34,23 @@ class ContainerSmokeTests(unittest.TestCase):
 
     def test_dashboard_verifier_rejects_token_leaks_lost_origin_and_browser_auth_forwarding(self):
         token, marker, endpoint = 'synthetic-internal-token', 'local-marker', 'http://127.0.0.1:1234'
-        for broken in (None, 'asset-secret', 'origin', 'authorization', 'static-secret', 'mcp-authorization'):
+        for broken in (None, 'asset-secret', 'origin', 'authorization', 'static-secret', 'mcp-authorization', 'personal-authorization', 'personal-artifact'):
             calls = []
             def http(url, headers=None, data=None):
                 if url == endpoint:
                     return 200, {}, b'<script src="/app.js"></script>'
                 if url.endswith('/app.js'):
                     return 200, {}, token.encode() if broken == 'asset-secret' else b'public dashboard'
+                if url.endswith('/personal/manifest.json'):
+                    content = b'immutable-personal-fixture'; digest = hashlib.sha256(content).hexdigest()
+                    return 200, {}, json.dumps({'version': 1, 'release': digest,
+                        **{kind + key: value for kind in ('installer', 'artifact')
+                           for key, value in (('_path', '/personal/' + kind), ('_sha256', digest), ('_size', len(content)))}}).encode()
+                if url.removeprefix(endpoint) in ('/personal/installer', '/personal/artifact'):
+                    return 200, {}, b'changed' if broken == 'personal-artifact' else b'immutable-personal-fixture'
+                if url.endswith('/api/v1/enrollments/enrollment_1/claims'):
+                    calls.append({'authorization': 'Bearer ' + token if broken == 'personal-authorization' else headers['Authorization']})
+                    return 401, {}, b'authentication required'
                 if '/api/' in url:
                     self.assertEqual(headers['Host'], 'console.example.test')
                     if data is None:
