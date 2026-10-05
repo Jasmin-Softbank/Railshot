@@ -1,7 +1,10 @@
 # README 이미지 출처
 
-- `railshot-wordmark.svg`: `apps/dashboard/index.html`의 RAILSHOT 워드마크를 이미지로 옮겼습니다. 글자색 `#1f2b3d`, 점 색상 `#07856b`, 굵기 800과 자간은 `apps/dashboard/styles.css`를 따릅니다. GitHub 밝은 테마와 어두운 테마에서 모두 읽히도록 흰 배경을 사용합니다.
-- `aws-deployment-complete.jpg`: 2026-10-04 실제 서비스 확인 기록 `reports/cloud-delivery-20261004/aws-dashboard.jpg`의 원본 사본입니다.
-- `application-management.png`: 2026-10-04 실제 서비스 확인 기록 `reports/frontend-provider-check-20261004/browser-final.png`의 원본 사본입니다.
+| 파일 | 출처와 용도 |
+| --- | --- |
+| `railshot-wordmark.svg` | 대시보드의 RAILSHOT 워드마크. `apps/dashboard/index.html`과 `styles.css`의 글자색, 초록색 점, 굵기 및 자간을 따릅니다. |
+| `new-deployment.png` | 사용자가 2026-10-05 제공한 발표 이미지 6번. 프로젝트 입력과 실행 환경 선택 화면입니다. |
+| `agent-pipeline.png` | 같은 첨부의 2번, On-pipeline Agent Flow. 실패 분석·허용된 수정·재검사·이미지 게시를 설명합니다. |
+| `service-serving.png` | 같은 첨부의 4번, Service Serving Architecture. AWS 운영 클러스터와 고객 앱 실행 클러스터의 분리를 설명합니다. |
 
-화면은 촬영 당시의 상태이며 현재 가용성이나 배포 결과를 보증하지 않습니다. 스크린샷은 수정하지 않았습니다.
+발표 이미지 세 장은 원본을 수정하지 않고 사용합니다. 한국어·일본어 README에서 같은 파일을 참조합니다.
