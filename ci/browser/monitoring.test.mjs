@@ -64,6 +64,27 @@ test('monitor follows the bound Actions run and keeps long console output scroll
   assert.match(await page.locator('#monitor-steps').innerText(), /GitOps 반영\s+대기/);
   assert.match(await page.locator('#monitor-steps').innerText(), /URL 및 앱 상태 확인\s+대기/);
 
+  // A durable completion must render before a delayed metrics read, and an old
+  // full response must not overwrite that completion when it eventually arrives.
+  let releaseMetrics;
+  const metricsWait = new Promise(resolve => { releaseMetrics = resolve; });
+  t.after(() => releaseMetrics());
+  await page.route('**/api/v1/deployments/deploy-monitor', async route => {
+    await metricsWait;
+    await route.fulfill({ json: { id: 'deploy-monitor', target_id: 'demo-aws', status: 'running', observation: null } });
+  });
+  await page.route('**/api/v1/deployments/deploy-monitor?view=record', route => route.fulfill({ json: {
+    id: 'deploy-monitor', app: 'sample-app', target_id: 'demo-aws', source_commit: sourceCommit,
+    status: 'succeeded', stage: 'http', ci: { run_id: '4242', state: 'published', steps: [] },
+    cd: { state: 'deployed', deployed: true }, public_http: { state: 'succeeded', verified_at: new Date().toISOString() },
+  } }));
+  await page.locator('#refresh-run').evaluate(button => button.click());
+  await page.waitForFunction(() => document.querySelector('#run-state').textContent.includes('완료'), { timeout: 2000 });
+  assert.match(await page.locator('#monitor-steps').innerText(), /외부 접속 확인/);
+  releaseMetrics();
+  await page.waitForResponse(response => response.url().endsWith('/api/v1/deployments/deploy-monitor'));
+  assert.match(await page.locator('#run-state').innerText(), /완료/);
+
   const dimensions = await page.locator('#console-output').evaluate((node) => {
     node.textContent = '긴 작업 로그\n'.repeat(400);
     node.scrollTop = node.scrollHeight;
