@@ -56,7 +56,11 @@ jobs:
         run: |
           for suite in ci/scripts ci/scripts/gate ci/scripts/loop ci/scripts/runner ci/scripts/poc ci/scripts/infra infrastructure/ansible deployment/scripts/tests deployment/cloudflared gitops infrastructure/providers/terraform_tools; do
             echo "::group::$suite"
-            python -m unittest discover -s "$suite" -p 'test_*.py' -v
+            if [[ "$suite" == deployment/scripts/tests ]]; then
+              python -m pytest "$suite" -v
+            else
+              python -m unittest discover -s "$suite" -p 'test_*.py' -v
+            fi
             echo "::endgroup::"
           done
       - name: OpenAPI structure

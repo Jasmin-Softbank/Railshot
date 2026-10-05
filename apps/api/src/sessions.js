@@ -31,7 +31,7 @@ export function cookieToken(header) {
 
 export async function createDashboardData(db, root) {
   const keyPath = join(root, 'connections.key');
-  // Keep the key separate from DB backups. A missing key with saved ciphertext is an error.
+  // Keep the key in its own private file; restore it with the DB that uses it.
   try { await lstat(keyPath); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;

@@ -103,8 +103,11 @@ class BootstrapTests(unittest.TestCase):
         shared = {**registration, 'project': '', 'namespaces': ['tenant-demo', 'app-' + 'a' * 24]}
         actual = {**copy.deepcopy(wanted), 'metadata': {**wanted['metadata'], 'uid': 'same'}}
         actual['data']['policy.json'] = json.dumps({'version': 1, 'targets': [shared]})
-        for baseline in (registration, {**registration, 'project': ''}, shared):
-            with self.subTest(project=baseline['project'], namespaces=baseline['namespaces']):
+        for baseline, observed in [(registration, shared), ({**registration, 'project': ''}, shared),
+                                   (shared, shared), (registration, {**shared, 'cluster_read': True}),
+                                   (shared, {**shared, 'cluster_read': True})]:
+            actual['data']['policy.json'] = json.dumps({'version': 1, 'targets': [observed]})
+            with self.subTest(project=baseline['project'], namespaces=baseline['namespaces'], observed=observed):
                 wanted['data']['policy.json'] = json.dumps({'version': 1, 'targets': [baseline]})
                 with patch.object(bootstrap, 'kube_get', return_value=actual), patch.object(bootstrap, 'kube') as mutate:
                     self.assertEqual(bootstrap.ensure_object(wanted, {bootstrap.object_key(wanted): 'same'}), 'same')
@@ -115,7 +118,10 @@ class BootstrapTests(unittest.TestCase):
                 {'namespaces': ['tenant-demo', 'tenant-demo']}, {'server': 'https://10.0.0.18:6443'},
                 {'secret': 'railshot-other'}, {'target_id': 'other'}, {'ca_sha256': 'b' * 64},
                 {'service_account': {**registration['service_account'], 'uid': '00000000-0000-0000-0000-000000000002'}},
-                {'audiences': ['other-api']}, {'tls_server_name': '10.0.0.18'}, {'unknown': 'drift'}):
+                {'audiences': ['other-api']}, {'tls_server_name': '10.0.0.18'}, {'unknown': 'drift'},
+                {'cluster_read': False}, {'cluster_read': 'true'},
+                {'cluster_read': True, 'previous_scope': {'project': 'railshot', 'namespaces': ['tenant-demo']}},
+                {'cluster_read': True, 'server': 'https://10.0.0.18:6443'}):
             with self.subTest(changes=changes):
                 actual['data']['policy.json'] = json.dumps({'version': 1, 'targets': [{**shared, **changes}]})
                 with patch.object(bootstrap, 'kube_get', return_value=actual), patch.object(bootstrap, 'kube') as mutate:

@@ -495,10 +495,14 @@ def l3(spec, images, run_id, *, network=None):
                 raise ValueError("runtime container network identity changed")
             raw_address = attachments[net].get("IPAddress", "")
             if not raw_address:
+                state = json.loads(sh(["docker", "inspect", "--format", "{{json .State}}", name],
+                                      timeout=15, check=True).stdout)
+                if not isinstance(state, dict) or state.get("Status") not in {"exited", "dead"}:
+                    raise OperationError("GATE_ENVIRONMENT_UNAVAILABLE", component="gate", phase="runtime-network",
+                                         outcome="UNKNOWN", retry_policy="after_configuration", side_effect="possible")
                 logs = sh(["docker", "logs", "--tail", "200", name])
-                state = sh(["docker", "inspect", "-f", "{{json .State}}", name])
-                errs.append(f"{s['name']}: container has no runtime address; startup failed\n"
-                            f"{state.stdout[-2000:]}\n{(logs.stdout + logs.stderr)[-6000:]}")
+                errs.append(f"{s['name']}: container exited before health check (exit code {state.get('ExitCode')})\n"
+                            f"{(logs.stdout + logs.stderr)[-6000:]}")
                 continue
             address = ipaddress.IPv4Address(raw_address)
             if not address.is_private or address.is_loopback or address.is_link_local:

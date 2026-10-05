@@ -650,11 +650,11 @@ class GateNetworkTest(unittest.TestCase):
                     "Driver": "bridge", "Internal": True, "EnableIPv6": False,
                     "Options": {"com.docker.network.bridge.name": "rsrun-aaaaaaaa"}}]))
             if cmd[:3] == ["docker", "inspect", "--format"]:
+                if cmd[3] == "{{json .State}}":
+                    return SimpleNamespace(returncode=0, stdout='{"Status":"exited","Running":false,"ExitCode":1}')
                 return SimpleNamespace(returncode=0, stdout=json.dumps({net: {"IPAddress": ""}}))
             if cmd[:2] == ["docker", "logs"]:
                 return SimpleNamespace(returncode=0, stdout="", stderr="startup permission denied")
-            if cmd[:3] == ["docker", "inspect", "-f"]:
-                return SimpleNamespace(returncode=0, stdout='{"Running":false,"ExitCode":1}')
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         spec = {"services": [{"name": "web", "port": 8080}]}
         with patch.object(gate, "require_ci_network"), patch.object(gate, "sh", side_effect=command) as shell, \
@@ -662,7 +662,7 @@ class GateNetworkTest(unittest.TestCase):
             errors = gate.l3(spec, {"web": "image"}, "a" * 16, network=gate.CI_NETWORK)
         self.assertEqual(len(errors), 1)
         self.assertIn("startup permission denied", errors[0])
-        self.assertIn('"ExitCode":1', errors[0])
+        self.assertIn("exit code 1", errors[0])
         http.assert_not_called()
         commands = [call.args[0] for call in shell.call_args_list]
         self.assertIn(["docker", "rm", "-f", net + "-web"], commands)
@@ -671,7 +671,7 @@ class GateNetworkTest(unittest.TestCase):
     def test_runtime_empty_address_reports_exited_app_or_unknown_network(self):
         net = "railshot-gate-" + "a" * 16
         spec = {"services": [{"name": "web", "port": 8080}]}
-        for status in ("exited", "running"):
+        for status in ("exited", "dead", "running", "created", "restarting"):
             def command(cmd, **kwargs):
                 if cmd[:3] == ["docker", "network", "inspect"]:
                     return SimpleNamespace(returncode=0, stdout=json.dumps([{
@@ -685,7 +685,7 @@ class GateNetworkTest(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
             with self.subTest(status=status), patch.object(gate, "require_ci_network"), \
                  patch.object(gate, "sh", side_effect=command) as shell, patch.object(gate, "http_status") as http:
-                if status == "exited":
+                if status in {"exited", "dead"}:
                     errors = gate.l3(spec, {"web": "sha256:" + "b" * 64}, "a" * 16, network=gate.CI_NETWORK)
                     self.assertIn("container exited before health check (exit code 1)", errors[0])
                     self.assertIn("unable to load evlib plugin evlib_uv", errors[0])

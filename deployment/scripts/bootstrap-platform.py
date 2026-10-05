@@ -235,7 +235,7 @@ def kube_get(kind, name, namespace=None):
 
 
 def renewal_preserved(actual, expected):
-    """Accept only the shared environment scope extension, without replacing it."""
+    """Preserve the shared environment scope and its explicit fixed-reader migration."""
     if actual == expected:
         return True
     fields = {'secret', 'target_id', 'server', 'project', 'namespaces', 'service_account', 'ca_sha256', 'audiences'}
@@ -243,7 +243,8 @@ def renewal_preserved(actual, expected):
             and fields <= set(expected) <= fields | {'tls_server_name'}
             and isinstance(expected['target_id'], str) and not expected['target_id'].startswith('app-')
             and expected['secret'] == 'railshot-' + expected['target_id'] and actual.get('project') == ''
-            and {k: v for k, v in actual.items() if k not in ('project', 'namespaces')} ==
+            and ('cluster_read' not in actual or actual['cluster_read'] is True)
+            and {k: v for k, v in actual.items() if k not in ('project', 'namespaces', 'cluster_read')} ==
                 {k: v for k, v in expected.items() if k not in ('project', 'namespaces')}):
         return False
     old, new = expected['namespaces'], actual.get('namespaces')
