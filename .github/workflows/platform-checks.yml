@@ -63,10 +63,11 @@ jobs:
         run: |
           python - <<'PY'
           import json
+          from pathlib import Path
           from openapi_spec_validator import validate
           for path in ['docs/api/ansible.openapi.json', 'docs/api/product.openapi.json']:
               with open(path) as stream:
-                  validate(json.load(stream))
+                  validate(json.load(stream), base_uri=Path(path).resolve().as_uri())
           PY
 
   observability:
@@ -167,9 +168,11 @@ jobs:
         run: |
           python - <<'PY'
           import json
+          from pathlib import Path
           from openapi_spec_validator import validate
-          with open('docs/api/product.openapi.json') as stream:
-              validate(json.load(stream))
+          path = Path('docs/api/product.openapi.json').resolve()
+          with path.open() as stream:
+              validate(json.load(stream), base_uri=path.as_uri())
           PY
       - name: Install current workspace and build packaged dashboard
         run: |
