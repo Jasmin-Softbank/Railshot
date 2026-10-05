@@ -70,7 +70,8 @@ def render(images, target_id, dashboard_node_port=None, provider_targets=None, p
             document['spec']['template']['spec']['containers'][0]['image'] = images['api']
         if dashboard_node_port and document["kind"] == "Service" and document["metadata"]["name"] == "railshot-dashboard":
             document["spec"]["type"] = "NodePort"
-            document["spec"]["externalTrafficPolicy"] = "Local"
+            # The ALB still targets control while stateless Pods run on an agent.
+            document["spec"]["externalTrafficPolicy"] = "Cluster"
             document["spec"]["ports"][0]["nodePort"] = dashboard_node_port
         if document["kind"] != "Deployment":
             continue

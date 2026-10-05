@@ -102,15 +102,15 @@ class PlatformTests(unittest.TestCase):
         # The executor document passed AWS ValidatePolicy on 2026-10-03 (KST).
         # SSM context/target/document and edge-read simulations were refreshed;
         # the earlier 57-check receipt applies to the prior policy bytes only.
-        # The exact edge hash below separately passed AWS ValidatePolicy with
-        # zero findings on 2026-10-03. This is not an IAM rollout or proof that a
-        # live principal can execute lifecycle deletes; scope tests are separate.
+        # Edge bytes include 04ef32b's owned-app health update permission and
+        # matching bootstrap-target deny. The older 2026-10-03 ValidatePolicy
+        # receipt does not certify these bytes; scope tests remain separate.
         policy = (ROOT / 'infrastructure/terraform/control/product-executor-policy.json').read_bytes()
         self.assertEqual(hashlib.sha256(policy).hexdigest(),
                          '0ab96416ae2537a339b5f2fbe7a3d1331b9f7063ca56596c53dedcf66602f814')
         edge_policy = (ROOT / 'infrastructure/terraform/control/product-edge-policy.json').read_bytes()
         self.assertEqual(hashlib.sha256(edge_policy).hexdigest(),
-                         'fb401be9f21ee946592cd56f1e2991359df0d60785bca03ddf36decb7a118dfb')
+                         '173af39c46b8d91792b07e110281a69114e7ed918851a139722767d263d00531')
         self.assertLessEqual(len(json.dumps(json.loads(edge_policy), separators=(',', ':'))), 6144)
 
     @unittest.skipUnless(os.environ.get("RAILSHOT_ARGO_SCHEMA_MANIFEST"),
@@ -131,6 +131,29 @@ class PlatformTests(unittest.TestCase):
                 errors = sorted(Draft7Validator(schemas[item["kind"]]).iter_errors(item), key=lambda error: str(error.path))
                 self.assertFalse(errors, "\n".join(f"{list(error.path)}: {error.message}" for error in errors))
 
+    def test_agent_gateway_keeps_control_nodeport_routable_and_api_on_existing_pvc(self):
+        worker = (ROOT / 'infrastructure/ansible/platform-worker.sh').read_text()
+        agent = yaml.safe_load(worker.split('<<YAML\n', 1)[1].split('\nYAML', 1)[0])
+        # Existing Cilium pods use the node-local API on 6443, not the agent's 6444 default.
+        self.assertEqual(agent['lb-server-port'], 6443)
+        self.assertEqual(agent['token-file'], '/etc/rancher/k3s/agent-token')
+        self.assertNotIn('token', agent)
+        self.assertEqual(agent['node-label'], ['railshot.io/node-role=platform-worker'])
+        images = {name: f"ghcr.io/jasmin-softbank/railshot-{name}@sha256:" + "a" * 64 for name in ("dashboard", "api", "mcp")}
+        items = module.render(images, "k3s-aws", dashboard_node_port=31080)['items']
+        gateway = next(item for item in items if item['kind'] == 'Service' and item['metadata']['name'] == 'railshot-dashboard')
+        self.assertEqual(gateway['spec']['externalTrafficPolicy'], 'Cluster')
+        for item in items:
+            if item['kind'] != 'Deployment':
+                continue
+            pod = item['spec']['template']['spec']
+            if item['metadata']['name'] == 'railshot-api':
+                self.assertEqual(pod['nodeSelector']['railshot.io/node-role'], 'platform')
+                self.assertIn({'name': 'state', 'persistentVolumeClaim': {'claimName': 'railshot-api'}}, pod['volumes'])
+            else:
+                self.assertEqual(pod['nodeSelector']['railshot.io/node-role'], 'platform-worker')
+                self.assertFalse(any('persistentVolumeClaim' in volume for volume in pod['volumes']))
+
     def test_pinned_images_private_api_and_configured_readiness(self):
         images = {name: f"ghcr.io/jasmin-softbank/railshot-{name}@sha256:" + "a" * 64 for name in ("dashboard", "api")}
         output = module.render(images, "k3s-aws")
@@ -145,7 +168,8 @@ class PlatformTests(unittest.TestCase):
         container = api["spec"]["template"]["spec"]["containers"][0]
         for item in output['items']:
             if item['kind'] == 'Deployment':
-                self.assertEqual(item['spec']['template']['spec']['nodeSelector']['railshot.io/node-role'], 'platform')
+                expected_role = 'platform' if item['metadata']['name'] == 'railshot-api' else 'platform-worker'
+                self.assertEqual(item['spec']['template']['spec']['nodeSelector']['railshot.io/node-role'], expected_role)
         self.assertEqual(container["image"], images["api"])
         self.assertEqual(api['spec']['strategy']['type'], 'Recreate')
         self.assertEqual(api['spec']['template']['spec']['securityContext']['fsGroupChangePolicy'], 'OnRootMismatch')

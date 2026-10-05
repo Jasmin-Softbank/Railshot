@@ -8,6 +8,25 @@ application. Keep its local state separate from the provider edge states.
 
 기본 배포 소스는 `refs/heads/develop`이다. 브랜치 전환 시 기존 state에서 이 모듈과 `../platform-verification`의 `trusted_ref`를 함께 변경한다. 이 모듈은 IAM trust뿐 아니라 SSM 문서 안의 fetch ref도 고정하므로, 적용 후 `RAILSHOT_RELEASE_DOCUMENT_VERSION`과 `RAILSHOT_RELEASE_DOCUMENT_SHA256`을 출력값으로 갱신해야 한다. Argo CD는 계속 `deployment/platform`의 렌더링된 선언을 읽는다.
 
+## 기존 플랫폼 worker의 GCP API 연결
+
+`platform_worker_api_source_cidr`는 별도 플랫폼 worker의 public IPv4 `/32`다. 설정하면 등록된 GCP 앱 노드에 TCP6443 ingress rule 하나를 추가한다. 기존 control API rule의 소유권과 source 범위는 유지한다. worker의 AWS SG에도 같은 GCP API 주소로 TCP6443 egress가 있어야 한다.
+
+2026-10-05 적용 입력은 authoritative state 옆 `inputs.tfvars.json`에 `trusted_ref`와 함께 보존했다. 이 입력 없이 plan하면 기본값 null이 worker rule 삭제를 제안하므로, 기존 운영 state에는 항상 이 파일을 지정한다. worker가 stop/start 뒤 다른 public IP를 받으면 현재 IP를 확인하고 이 입력을 갱신한다.
+
+```sh
+TF_DATA_DIR=/Users/mango/.local/share/railshot/runtime-stability-20261005/node-separation/gcp-tf-data \
+terraform -chdir=infrastructure/terraform/platform-release init -input=false -lockfile=readonly \
+  -backend-config=path=/Users/mango/.local/share/railshot/multicloud-release-20261003/bootstrap/terraform.tfstate
+
+TF_DATA_DIR=/Users/mango/.local/share/railshot/runtime-stability-20261005/node-separation/gcp-tf-data \
+terraform -chdir=infrastructure/terraform/platform-release plan -input=false \
+  -var-file=/Users/mango/.local/share/railshot/multicloud-release-20261003/bootstrap/inputs.tfvars.json \
+  -out=/Users/mango/.local/share/railshot/multicloud-release-20261003/bootstrap/reviewed.tfplan
+```
+
+리소스 교체·삭제가 없는지 새 saved plan을 검토한 뒤 적용한다. state와 입력은 비공개로 보존하며 저장소에 추가하지 않는다.
+
 ## CI runtime promotion
 
 A trusted automatic platform release runs `ci-runtime` only when CI runner or

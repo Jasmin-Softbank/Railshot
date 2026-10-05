@@ -2,7 +2,16 @@ name: Platform full checks
 
 on:
   workflow_call:
+    inputs:
+      selected:
+        type: string
+        default: '["contracts","openstack","database-ansible","api-browser","terraform","runtime-smoke","observability","containers"]'
   workflow_dispatch:
+    inputs:
+      selected:
+        description: JSON array of checks to run
+        type: string
+        default: '["contracts","openstack","database-ansible","api-browser","terraform","runtime-smoke","observability","containers"]'
 
 permissions: {contents: read}
 concurrency:
@@ -14,6 +23,7 @@ env:
 
 jobs:
   contracts:
+    if: contains(fromJSON(inputs.selected), 'contracts')
     name: Python contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -60,6 +70,7 @@ jobs:
           PY
 
   observability:
+    if: contains(fromJSON(inputs.selected), 'observability')
     name: Observability configuration and probes
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -91,6 +102,7 @@ jobs:
             python -m unittest discover -s observability -p 'test_*.py' -v
 
   openstack:
+    if: contains(fromJSON(inputs.selected), 'openstack')
     name: OpenStack contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -113,6 +125,7 @@ jobs:
         run: uv run --frozen --project infrastructure/providers/openstack --with-requirements deployment/bootstrap/requirements.lock bash ci/scripts/check-bootstrap.sh
 
   database-ansible:
+    if: contains(fromJSON(inputs.selected), 'database-ansible')
     name: Database Ansible contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -135,6 +148,7 @@ jobs:
           ansible-playbook -i inventory/hosts.example.yml runtime.yml --syntax-check
 
   api-browser:
+    if: contains(fromJSON(inputs.selected), 'api-browser')
     name: HTTP publication and browser E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -182,6 +196,7 @@ jobs:
           retention-days: 7
 
   terraform:
+    if: contains(fromJSON(inputs.selected), 'terraform')
     name: Terraform validation
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -212,6 +227,7 @@ jobs:
           done
 
   runtime-smoke:
+    if: contains(fromJSON(inputs.selected), 'runtime-smoke')
     name: Linux amd64 runtime E2E and cleanup
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -253,6 +269,7 @@ jobs:
           retention-days: 7
 
   containers:
+    if: contains(fromJSON(inputs.selected), 'containers')
     name: Container build and smoke
     uses: ./.github/workflows/platform-containers.yml
     with:

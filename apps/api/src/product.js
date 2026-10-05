@@ -74,7 +74,7 @@ function checkFree(state, sessionId = null, except = null) {
     { retryable: blocker.status !== 'unknown', admission });
 }
 
-export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 5000, unknownGraceMs = 60_000, maxConcurrentDeployments = 3, maxOperations = 100, maxSourceBytes = 512 * 1024 * 1024 }) {
+export async function createProductService({ service, directory, target, providerTargets, deployPublished, environmentAdapter, applicationAdapter, personalAdapter, classifyFailure, observeMetrics = createMetricsObserver(), observeLogs, pollInterval = 5000, unknownGraceMs = 60_000, maxConcurrentDeployments = 3, maxOperations = 500, maxSourceBytes = 512 * 1024 * 1024 }) {
   const targetId = target?.id || service?.targetId;
   if (targetId && !TARGET_ID.test(targetId)) throw invalid('등록된 대상 ID가 잘못되었습니다.');
   const selections = new Map(target?.provider && targetId ? [[target.provider, targetId]] : []);
@@ -657,9 +657,9 @@ export async function createProductService({ service, directory, target, provide
       if (abort.signal.aborted || deletionRequested(record.id)) return;
       const succeeded = result.cd?.deployed === true && result.cd.revision && result.public_http?.state === 'succeeded'
         && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
-      const stopped = ['blocked', 'failed'].includes(result.cd?.state);
       const unknown = result.cd?.state === 'unknown';
-      const cd = unknown ? store.read('operations', record.id).cd : result.cd;
+      const stopped = ['blocked', 'failed'].includes(result.cd?.state) || unknown && result.error?.retryable === false;
+      const cd = unknown ? { ...store.read('operations', record.id).cd, ...(stopped ? { state: 'blocked' } : {}) } : result.cd;
       const missing = result.error?.code === 'DEPLOYMENT_NOT_FOUND';
       const originalError = missing && store.read('operations', record.id).error;
       if (missing && originalError?.code === 'INTERRUPTED' && !record.cd?.deployed && !record.cd?.revision) {
@@ -670,7 +670,8 @@ export async function createProductService({ service, directory, target, provide
         await observe(record, String(record.ci.run_id), { resume: true });
         return;
       }
-      const error = unknown ? { code: result.error?.code || 'CD_OBSERVATION_UNAVAILABLE', message: '클러스터 결과 조회를 재시도하고 있습니다.', retryable: true }
+      const error = unknown ? { code: result.error?.code || 'CD_OBSERVATION_UNAVAILABLE',
+        message: stopped ? '기존 CD 기록과 클러스터 상태를 확인해야 합니다. 자동 조회를 중단했습니다.' : '클러스터 결과 조회를 재시도하고 있습니다.', retryable: !stopped }
         : missing ? { code: 'DEPLOYMENT_NOT_FOUND', message: '클러스터 적용 기록이 아직 없습니다. 앞선 경로 구성 오류를 확인하세요.', retryable: false } : null;
       const observation = { checked_at: now, last_success_at: unknown ? cd.observation?.last_success_at || null : now,
         error, next_retry_at: succeeded || stopped ? null : new Date(Date.now() + Math.max(pollInterval, 5000)).toISOString() };

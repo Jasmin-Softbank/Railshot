@@ -267,11 +267,11 @@ resource "aws_instance" "control" {
   instance_type                        = "t3.medium"
   subnet_id                            = var.subnet_id
   associate_public_ip_address          = true
-  vpc_security_group_ids               = [aws_security_group.control.id, aws_security_group.edge.id]
+  vpc_security_group_ids               = concat([aws_security_group.control.id, aws_security_group.edge.id], aws_security_group.operations_peer[*].id)
   source_dest_check                    = false
   iam_instance_profile                 = aws_iam_instance_profile.control.name
   instance_initiated_shutdown_behavior = "stop"
-  credit_specification { cpu_credits = "standard" }
+  credit_specification { cpu_credits = "unlimited" }
   metadata_options {
     http_tokens                 = "required"
     http_put_response_hop_limit = var.enable_product_executor ? var.product_metadata_hop_limit : 1

@@ -199,15 +199,23 @@ class WorkflowPolicyTest(unittest.TestCase):
         workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/railshot-ci.yml').read_text())
         jobs = workflow['jobs']
         self.assertEqual(set(jobs), {'changes', 'containers', 'gate', 'release', 'full-checks'})
-        self.assertEqual(set(jobs['gate']['needs']), {'changes', 'containers'})
+        self.assertEqual(set(jobs['gate']['needs']), {'changes', 'containers', 'full-checks'})
         self.assertEqual(jobs['gate']['if'], "always() && github.event_name != 'workflow_dispatch'")
-        self.assertEqual(jobs['full-checks']['if'], "github.event_name == 'workflow_dispatch'")
+        self.assertEqual(jobs['full-checks']['needs'], 'changes')
+        self.assertEqual(jobs['full-checks']['if'], "always() && !cancelled() && (github.event_name == 'workflow_dispatch' || (needs.changes.result == 'success' && needs.changes.outputs.checks != '[]'))")
+        self.assertEqual(jobs['full-checks']['uses'], './.github/workflows/platform-checks.yml')
+        self.assertIn('needs.changes.outputs.checks', jobs['full-checks']['with']['selected'])
         self.assertEqual(jobs['changes']['if'], "github.event_name != 'workflow_dispatch'")
         self.assertEqual(set(jobs['changes']['outputs']),
-                         {'containers', 'selected', 'container_components', 'release'})
+                         {'containers', 'selected', 'checks', 'container_components', 'release'})
         full = yaml.safe_load((HERE.parents[1] / '.github/workflows/platform-checks.yml').read_text())
         self.assertEqual(set(full.get('on', full.get(True))), {'workflow_call', 'workflow_dispatch'})
         self.assertEqual(set(full['jobs']), set(ci_scope.JOBS))
+        for event in ('workflow_call', 'workflow_dispatch'):
+            default = full.get('on', full.get(True))[event]['inputs']['selected']['default']
+            self.assertEqual(set(json.loads(default)), set(ci_scope.JOBS))
+        for job in ci_scope.JOBS:
+            self.assertEqual(full['jobs'][job]['if'], f"contains(fromJSON(inputs.selected), '{job}')")
         self.assertIs(full['jobs']['containers']['with']['publish'], False)
         events = workflow.get('on', workflow.get(True))  # PyYAML's YAML 1.1 "on" key.
         for event in ('pull_request', 'push'):

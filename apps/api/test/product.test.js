@@ -1628,6 +1628,42 @@ test('restart reobserves published customer CD through the read-only adapter, wi
   } finally { await restarted.close(); }
 });
 
+test('nonretryable unknown CD requires reconciliation instead of an endless recovery poll', async t => {
+  const f = await applicationFixture(t), owner = f.product.dashboard.session().id;
+  let applies = 0, observations = 0;
+  f.adapter.deployPublished = async () => { applies++; throw new EnvironmentError('INTERRUPTED', 502, true); };
+  const accepted = await f.product.createDeployment(applicationSource('reconcile-cd'), 'reconcile-cd', undefined, owner);
+  await settle(() => f.product.getDeployment(accepted.id, owner));
+  await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.updateOperation(accepted.id, row => { row.cd.revision = 'a'.repeat(40); });
+  await store.close();
+  f.adapter.observePublished = async () => {
+    observations++;
+    return { cd: { state: 'unknown', revision: 'a'.repeat(40), deployed: false },
+      public_http: { state: 'not_run', url: null, verified_at: null },
+      error: { code: 'CD_RECONCILE_REQUIRED', retryable: false, outcome_unknown: true } };
+  };
+  const restarted = await createProductService(f.options);
+  try {
+    const blocked = await settle(() => restarted.getDeployment(accepted.id, owner), row => row.status === 'blocked');
+    assert.equal(blocked.error.code, 'CD_RECONCILE_REQUIRED');
+    assert.equal(blocked.error.outcome_unknown, true);
+    assert.equal(blocked.cd.state, 'blocked');
+    assert.equal(blocked.cd.revision, 'a'.repeat(40));
+    assert.equal(blocked.cd.observation.error.retryable, false);
+    assert.equal(blocked.cd.observation.next_retry_at, null);
+    await pause(40);
+    assert.equal(observations, 1); assert.equal(applies, 1); assert.equal(f.submissions.length, 1);
+  } finally { await restarted.close(); }
+  const again = await createProductService(f.options);
+  try {
+    await pause(40);
+    assert.equal((await again.getDeployment(accepted.id, owner)).status, 'blocked');
+    assert.equal(observations, 1); assert.equal(applies, 1);
+  } finally { await again.close(); }
+});
+
 test('platform restart resumes an unapplied published image without another upload or CI dispatch', async t => {
   for (const status of ['unknown', 'blocked']) await t.test(status, async t => {
     const f = await applicationFixture(t), owner = f.product.dashboard.session().id;

@@ -61,7 +61,7 @@ def validate_policy(policy):
     require(isinstance(targets, list), 'registered targets required')
     for target in targets:
         required = {'secret', 'target_id', 'server', 'project', 'namespaces', 'service_account', 'ca_sha256', 'audiences'}
-        require(required <= set(target) <= required | {'tls_server_name', 'previous_scope'}, 'invalid registration binding')
+        require(required <= set(target) <= required | {'tls_server_name', 'previous_scope', 'cluster_read'}, 'invalid registration binding')
         for key in ('secret', 'target_id'):
             require(isinstance(target[key], str) and re.fullmatch(LABEL, target[key]), 'invalid registration name')
         require(isinstance(target['project'], str) and (target['project'] == '' or re.fullmatch(LABEL, target['project'])),
@@ -85,6 +85,9 @@ def validate_policy(policy):
         sa = target['service_account']
         require(set(sa) == {'name', 'namespace', 'uid'} and sa['namespace'] in namespaces and
                 re.fullmatch(LABEL, sa['name']) and re.fullmatch(r'[a-f0-9-]{36}', sa['uid']), 'registered SA required')
+        if 'cluster_read' in target:
+            require(target['cluster_read'] is True and not re.fullmatch(APPLICATION_ID, target['target_id'])
+                    and target['project'] == '', 'cluster read scope requires an environment credential')
         if 'previous_scope' in target:
             previous = target['previous_scope']
             require(not re.fullmatch(APPLICATION_ID, target['target_id']) and target['project'] == ''
@@ -99,7 +102,8 @@ def validate_policy(policy):
                     and (set(old_namespaces) <= set(namespaces) or set(namespaces) <= set(old_namespaces))
                     and all(re.fullmatch(APPLICATION_ID, n) for n in set(namespaces) ^ set(old_namespaces)),
                     'scope transition must retain its SA and grow or shrink only app namespaces')
-            require(previous['project'] != target['project'] or set(old_namespaces) != set(namespaces),
+            require(previous['project'] != target['project'] or set(old_namespaces) != set(namespaces)
+                    or target.get('cluster_read') is True,
                     'scope transition must change project or namespaces')
         require(isinstance(target['audiences'], list) and target['audiences'] and
                 len(set(target['audiences'])) == len(target['audiences']) and
@@ -172,7 +176,7 @@ def platform(*args, document=None):
 
 
 def registration(secret, target, now):
-    if 'previous_scope' in target:
+    if 'previous_scope' in target or 'cluster_read' in target:
         validate_policy({'version': 1, 'targets': [target]})
     meta = secret['metadata']
     require(secret['kind'] == 'Secret' and meta['name'] == target['secret'] and meta['namespace'] == 'argocd',
@@ -181,10 +185,11 @@ def registration(secret, target, now):
     require(credential_labels_match(meta.get('labels'), target['target_id'], data['project'], data['namespaces'].split(',')),
             'registration owner or application scope differs')
     scopes = [target] + ([target['previous_scope']] if 'previous_scope' in target else [])
-    namespaces = data['namespaces'].split(',')
+    namespaces = data['namespaces'].split(',') if data['namespaces'] else []
     require(data['name'] == target['target_id'] and data['server'] == target['server'] and
             data['clusterResources'] == 'false' and any(data['project'] == scope['project'] and
-                len(namespaces) == len(scope['namespaces']) and set(namespaces) == set(scope['namespaces']) for scope in scopes),
+                (not namespaces if scope.get('cluster_read') else
+                 len(namespaces) == len(scope['namespaces']) and set(namespaces) == set(scope['namespaces'])) for scope in scopes),
             'registration scope differs')
     config = json.loads(data['config'])
     tls_fields = {'caData', 'insecure'} | ({'serverName'} if 'tls_server_name' in target else set())
@@ -220,7 +225,9 @@ def renew(target, now=None):
     who = customer(target['server'], ca, token, '/apis/authentication.k8s.io/v1/selfsubjectreviews',
                    {'apiVersion': 'authentication.k8s.io/v1', 'kind': 'SelfSubjectReview'}, **tls)['status']['userInfo']
     require(who['username'] == new_claims['sub'] and who['uid'] == sa['uid'], 'new token authentication differs')
-    for namespace in target['namespaces']:
+    # A fixed environment reader no longer enumerates per-app cache scopes.
+    # Its original SA namespace remains the token renewal authority.
+    for namespace in ([sa['namespace']] if target.get('cluster_read') else target['namespaces']):
         pods = customer(target['server'], ca, token, f'/api/v1/namespaces/{namespace}/pods?limit=1', **tls)
         require(pods['kind'] == 'PodList' and isinstance(pods['items'], list), 'namespace read verification failed')
     updated = copy.deepcopy(config); updated['bearerToken'] = token

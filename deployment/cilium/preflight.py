@@ -78,8 +78,8 @@ def check_cluster(pod_cidr, service_cidr, wait_seconds=300, profile='customer', 
         if profile == 'control' and nodes:
             server_roles = {'node-role.kubernetes.io/control-plane', 'node-role.kubernetes.io/master'}
             servers = [node for node in nodes if server_roles & set(node.get('metadata', {}).get('labels', {}))]
-            if len(nodes) > 2 or len(servers) > 1:
-                raise ValueError('control requires one server and at most one approved build agent')
+            if len(nodes) > 3 or len(servers) > 1:
+                raise ValueError('control requires one server, one build agent and one platform agent at most')
             # A newly registered server can have a PodCIDR before K3s patches
             # its role label. Missing identity is pending, never authorization.
             selected = servers[0] if servers else None
@@ -88,15 +88,19 @@ def check_cluster(pod_cidr, service_cidr, wait_seconds=300, profile='customer', 
                         or any(t.get('key') == 'railshot.io/dedicated' and t.get('value') == 'build'
                                for t in selected.get('spec', {}).get('taints', []))):
                     raise ValueError('control-plane server cannot also be the dedicated build worker')
+                agent_roles = set()
                 for node in nodes:
                     if node is selected:
                         continue
                     labels = node.get('metadata', {}).get('labels', {})
                     dedicated = {'key': 'railshot.io/dedicated', 'value': 'build', 'effect': 'NoSchedule'}
                     taints = [t for t in node.get('spec', {}).get('taints', []) if t.get('key') == dedicated['key']]
-                    if (labels.get('railshot.io/node-role') != 'build'
-                            or 'node-role.kubernetes.io/etcd' in labels or taints != [dedicated]):
-                        raise ValueError('additional control node must be the approved tainted build agent')
+                    role = labels.get('railshot.io/node-role')
+                    if role not in {'build', 'platform-worker'} or role in agent_roles or 'node-role.kubernetes.io/etcd' in labels:
+                        raise ValueError('additional control nodes must be distinct build and platform agents')
+                    if role == 'build' and taints != [dedicated] or role == 'platform-worker' and taints:
+                        raise ValueError('only the build agent may have the dedicated build taint')
+                    agent_roles.add(role)
         if selected is not None and all(node.get('spec', {}).get('podCIDR') for node in nodes):
             break
         if time.monotonic() >= deadline:

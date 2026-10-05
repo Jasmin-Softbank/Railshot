@@ -279,14 +279,17 @@ def previous_release_complete(before):
 
 def validate_gate(checks):
     jobs = set(checks) - {'changes'}
-    if jobs not in (set(JOBS), {'containers'}) or 'changes' not in checks:
+    if jobs not in (set(JOBS), {'containers', 'full-checks'}) or 'changes' not in checks:
         raise ValueError('Gate dependencies do not match the complete check set')
     if checks['changes']['result'] != 'success':
         raise ValueError('Change selection failed or was cancelled')
     selected = json.loads(checks['changes']['outputs']['selected'])
     if (not isinstance(selected, list) or not all(isinstance(job, str) for job in selected)
-            or len(selected) != len(set(selected)) or not set(selected) <= jobs):
+            or len(selected) != len(set(selected)) or not set(selected) <= set(JOBS)):
         raise ValueError('Invalid selected check set')
+    if 'full-checks' in jobs:
+        selected = ({'containers'} if 'containers' in selected else set()) | (
+            {'full-checks'} if set(selected) - {'containers'} else set())
     for job in jobs:
         expected = 'success' if job in selected else 'skipped'
         if checks[job]['result'] != expected:
@@ -320,11 +323,12 @@ def main():
         if 'ci-runner' in components:
             components.update(('dashboard', 'api'))
         release = bool(components)
-    if os.environ['GITHUB_EVENT_NAME'] in ('push', 'pull_request'):
-        selected = {'containers'} if components else set()
+    if components:
+        selected.add('containers')
     result = json.dumps([job for job in JOBS if job in selected])
     with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
         stream.write(f'selected={result}\n')
+        stream.write('checks=' + json.dumps([job for job in JOBS if job in selected and job != 'containers']) + '\n')
         stream.write(f'release={str(release).lower()}\n')
         stream.write('container_components=' + json.dumps([name for name in COMPONENTS if name in components]) + '\n')
         for job in JOBS:

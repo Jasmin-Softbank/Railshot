@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createProductStore } from '../../api/src/product-store.js';
 import { createRemoteMcpServer } from '../src/remote-mcp.js';
 import { createApiClient } from '../src/api.js';
 
@@ -23,8 +27,21 @@ test('an expired bound API session never switches to a newly issued session', as
 
 test('OAuth joins an existing web session and issues a distinct AI-first session', async (t) => {
   const seen = [];
-  const api = createServer((request, response) => {
+  const directory = await mkdtemp(join(tmpdir(), 'railshot-mcp-restart-'));
+  let store = await createProductStore(directory), unavailable = false;
+  const webCookie = store.dashboard.session().token, aiCookie = store.dashboard.session().token;
+  t.after(async () => { await store.close(); await rm(directory, { recursive: true, force: true }); });
+  const api = createServer(async (request, response) => {
     assert.equal(request.headers.authorization, `Bearer ${apiSecret}`);
+    if (request.url.startsWith('/internal/mcp/tokens')) {
+      if (unavailable) { response.writeHead(503).end('{}'); return; }
+      let raw = ''; for await (const chunk of request) raw += chunk;
+      try {
+        const result = request.url.endsWith('/lookup') ? store.dashboard.mcpToken(JSON.parse(raw)) : store.dashboard.saveMcpToken(JSON.parse(raw));
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(result));
+      } catch (error) { response.writeHead(error.status || 500).end('{}'); }
+      return;
+    }
     const cookie = /railshot_session=([A-Za-z0-9_-]{43})/.exec(request.headers.cookie || '')?.[1];
     const session = cookie || aiCookie;
     seen.push({ path: request.url, session });
@@ -113,8 +130,8 @@ test('OAuth joins an existing web session and issues a distinct AI-first session
   assert.match(ai.cookie, new RegExp(`railshot_session=${aiCookie}`));
   assert.notEqual(web.token, ai.token);
   assert.notEqual(claude.token, web.token);
-  async function tool(token, name = 'get_deployment') {
-    const response = await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${token}`,
+  async function tool(token, name = 'get_deployment', endpoint = base) {
+    const response = await fetch(`${endpoint}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${token}`,
       'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { deployment_id: 'web-app' } } }) });
     assert.equal(response.status, 200);
@@ -128,6 +145,15 @@ test('OAuth joins an existing web session and issues a distinct AI-first session
   assert.equal((await tool(claude.token, 'get_deployment_progress')).result.structuredContent.agent_activity.summary, '배포 설정 복구 완료');
   assert.equal((await tool(ai.token)).result.isError, true);
   assert.equal((await tool(ai.token, 'get_deployment_progress')).result.isError, true);
+  await store.close(); store = await createProductStore(directory);
+  const restartedBase = `http://127.0.0.1:${restarted.server.address().port}`;
+  assert.equal((await tool(web.token, 'get_deployment', restartedBase)).result.structuredContent.id, 'web-app');
+  assert.equal((await tool(ai.token, 'get_deployment', restartedBase)).result.isError, true);
+  unavailable = true;
+  const delayed = await fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${web.token}` } });
+  assert.equal(delayed.status, 503, 'storage unavailability is not an invalid bearer');
+  assert.equal((await delayed.text()).includes(web.token), false);
+  unavailable = false;
   assert.equal((await fetch(`${base}/mcp`, { method: 'POST' })).status, 401);
   assert.ok(seen.some((entry) => entry.path === '/api/v1/deployments/web-app' && entry.session === webCookie));
   assert.ok(seen.some((entry) => entry.path === '/api/v1/deployments/web-app' && entry.session === aiCookie));

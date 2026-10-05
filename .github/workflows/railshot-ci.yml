@@ -27,6 +27,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       selected: ${{ steps.select.outputs.selected }}
+      checks: ${{ steps.select.outputs.checks }}
       containers: ${{ steps.select.outputs.containers }}
       container_components: ${{ steps.select.outputs.container_components }}
       release: ${{ steps.select.outputs.release }}
@@ -57,7 +58,7 @@ jobs:
   gate:
     name: Railshot CI gate
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [changes, containers]
+    needs: [changes, containers, full-checks]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -85,6 +86,10 @@ jobs:
     secrets: inherit
 
   full-checks:
-    if: github.event_name == 'workflow_dispatch'
+    name: Selected platform checks
+    needs: changes
+    if: always() && !cancelled() && (github.event_name == 'workflow_dispatch' || (needs.changes.result == 'success' && needs.changes.outputs.checks != '[]'))
     uses: ./.github/workflows/platform-checks.yml
+    with:
+      selected: ${{ needs.changes.outputs.checks || '["contracts","openstack","database-ansible","api-browser","terraform","runtime-smoke","observability","containers"]' }}
     permissions: {contents: read, packages: write}
