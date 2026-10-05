@@ -1,5 +1,64 @@
 # 로컬 WireGuard 수신·OpenStack 제어 연결 시험
 
+## 운영과 같은 분리 컨테이너 로컬 검증
+
+`production.compose.yaml`은 일반 API, 공개 대시보드, root WireGuard 게이트웨이를 서로 다른 컨테이너로 실행합니다. API는 UID/GID 1000과 권한 없음으로 실행되고, 게이트웨이만 `NET_ADMIN`(네트워크 관리 권한)을 가집니다. 두 컨테이너는 API 네트워크 공간과 Unix 도메인 소켓만 공유합니다. 기본 호스트 포트는 API TCP 4193, 대시보드 TCP 4194, WireGuard UDP 51920이므로 기존 4173 서버를 바꾸지 않습니다.
+
+아래 생성기는 외부 시스템에서 쓰지 않는 로컬 시험 전용 키와 토큰만 새 비공개 디렉터리에 만듭니다. 운영 Secret을 만들거나 추정하는 도구가 아니며, URL도 격리 Compose의 `dashboard` 이름만 허용합니다.
+
+```sh
+fixture=/private/tmp/railshot-personal-production-fixture
+python3 deployment/scripts/prepare-personal-local-fixture.py --output "$fixture"
+export RAILSHOT_PERSONAL_PRODUCTION_CONFIG_DIR="$fixture"
+
+docker compose -f deployment/manifests/personal/production.compose.yaml config --quiet
+docker compose -f deployment/manifests/personal/production.compose.yaml build
+docker compose -f deployment/manifests/personal/production.compose.yaml up -d
+docker compose -f deployment/manifests/personal/production.compose.yaml ps
+```
+
+one-shot `prepare` 컨테이너는 소켓 볼륨을 `root:1000`과 0770으로 만든 뒤 종료합니다. 게이트웨이는 시작할 때 이를 0750으로 제한하고 `root:1000`과 0660인 소켓을 만듭니다. API는 디렉터리를 통과해 소켓에 연결할 수 있지만 잠금 파일이나 소켓을 바꿀 수 없습니다. 실행 중인 실제 볼륨과 컨테이너 권한은 비밀값을 출력하지 않는 다음 검사로 확인합니다.
+
+```sh
+docker compose -f deployment/manifests/personal/production.compose.yaml run --rm --no-deps \
+  --entrypoint sh gateway -ec \
+  'test "$(stat -c %u:%g:%a /run/railshot-personal-gateway)" = 0:1000:750'
+docker compose -f deployment/manifests/personal/production.compose.yaml exec api \
+  python3 /app/deployment/scripts/personal-production-preflight.py \
+  --config /var/lib/railshot/config/personal.json --test-allow-http
+```
+
+운영자 토큰과 다른 개인 클라이언트 bearer가 Nginx에서 그대로 전달되는지는 실제 대시보드 이미지의 `/api/v1/enrollments/<id>/claims`와 `/api/v1/targets/<id>/{heartbeats,receipts,runtimes}` 경로로 검사합니다. 그 밖의 `/api/` 경로는 대시보드의 중앙 토큰을 계속 사용합니다. 종료에는 `docker compose ... down`을 사용하며, 재시작 영속성 검증 전에는 `down -v`로 볼륨을 지우지 않습니다.
+
+## Kubernetes 운영 연결
+
+운영 개인 기능은 기본적으로 렌더링되지 않습니다. 기존 AWS와 일반 API 배포는 저장소 변수 `RAILSHOT_PERSONAL_ENABLED`가 정확히 `true`가 되기 전까지 개인 Secret, 영속 볼륨, UDP 포트, 게이트웨이 sidecar를 참조하지 않습니다. 활성화 배포는 API와 `personal-gateway` 이미지를 함께 빌드해야 합니다.
+
+`personal.production.example.json`은 필드 설명용이며 그대로 적용할 수 없습니다. 먼저 대시보드 이미지가 생성한 `/personal/manifest.json`에서 배포 해시와 설치기 해시를 확인하고, 같은 해시 디렉터리의 두 URL을 실제 `personal.json`에 기록합니다. `runtime` 설정이 아직 없으면 해당 항목을 생략할 수 있지만 서버 readiness는 `RUNTIME_OPERATOR_NOT_CONFIGURED`로 차단됩니다.
+
+운영 값은 출력하지 말고 운영자 소유의 절대경로 파일로 준비한 뒤 다음처럼 이름만 연결합니다.
+
+```sh
+kubectl -n railshot-system create secret generic railshot-personal-config \
+  --from-file=personal.json=/absolute/private/personal.json --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n railshot-system create secret generic railshot-personal-gateway-key \
+  --from-file=private-key=/absolute/private/wireguard-private-key --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n railshot-system create secret generic railshot-personal-gateway-ipc \
+  --from-file=ipc-token=/absolute/private/gateway-ipc-token --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n railshot-system create configmap railshot-personal-settings \
+  --from-literal=gateway_endpoint='<reviewed-public-host>:51820' --dry-run=client -o yaml | kubectl apply -f -
+```
+
+게이트웨이 개인키 Secret은 게이트웨이에만 마운트됩니다. IPC(프로세스 사이 통신) 토큰은 `private-config` 초기 컨테이너가 API 소유 0600 파일로 복사하고, API는 원본 Secret이나 개인키를 직접 마운트하지 않습니다. 게이트웨이와 WireGuard 상태는 각각 1GiB `ReadWriteOnce` 영속 볼륨에 남습니다. UDP 51820은 선택된 platform 노드의 hostPort로 열리므로 `gateway_endpoint`의 호스트가 그 노드를 가리키고 방화벽도 UDP 51820을 허용해야 합니다.
+
+Secret·ConfigMap·PVC(영속 볼륨 요청)가 준비되고 로컬 분리 검증이 통과한 뒤에만 `RAILSHOT_PERSONAL_ENABLED=true`를 설정합니다. 배포 후 다음 무변경 사전검사를 통과해야 등록을 열 수 있습니다. 이 검사는 개인 설정 권한, 인증된 게이트웨이 health, 설치 manifest, 설치기 SHA256, 압축파일 SHA256과 크기를 확인하며 키·토큰을 출력하지 않습니다.
+
+```sh
+kubectl -n railshot-system exec deploy/railshot-api -c api -- \
+  python3 /app/deployment/scripts/personal-production-preflight.py \
+  --config /var/lib/railshot/config/personal.json
+```
+
 이 배치는 Docker의 Linux 컨테이너 하나에 API와 전용 WireGuard 게이트웨이를 둡니다. 같은 네트워크 공간을 사용하므로 API가 게이트웨이 주소를 출발지로 지정하여 고객의 전용 SSH 서비스에 접속할 수 있습니다. 서버는 고객 별도 VM의 준비 증거를 받아 실제 K3s 건강·권한과 중앙 배포 연결을 검증합니다. VM 선택·생성과 K3s 설치는 고객 설치기가 기존 기능을 호출하며, 이 이미지가 관리 호스트에 K3s를 설치하지 않습니다. 시험 앱은 배포하지 않습니다. 기존 운영 API 이미지와 별개인 연결 시험용 이미지입니다.
 
 기본값은 localhost에만 포트를 공개합니다. 아래 예제는 승인된 사설망 시험에 한해 HTTP를 명시적으로 허용하고 VPN 주소로 수신하는 설정입니다. VPN 주소는 실행 전에 현재 값과 원격 호스트에서의 도달 여부를 확인해야 합니다. HTTP를 통한 등록 자격은 해당 망에서 암호화되지 않으므로 공개 인터넷에 이 예제를 그대로 배치하지 않습니다. 일반 설치 흐름의 HTTPS 기본값은 유지됩니다.

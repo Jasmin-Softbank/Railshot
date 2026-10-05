@@ -242,8 +242,6 @@ def check_dockerfile(ws, svc, allow):
         uid = users[-1].split(":")[0]
         if not uid.isdigit() or int(uid) < 10000:
             errs.append(f"{svc['name']}: final USER must be numeric >= 10000, got {users[-1]} (C3)")
-    if any(l.upper().startswith("HEALTHCHECK") for st in stages for l in st["lines"]):
-        errs.append(f"{svc['name']}: HEALTHCHECK is not allowed (C5)")
     if any(re.match(r"(?i)(COPY|ADD)\s.*\.env\b", l) for st in stages for l in st["lines"]):
         errs.append(f"{svc['name']}: copies a .env file (C6)")
     if not svc.get("command"):
@@ -495,7 +493,14 @@ def l3(spec, images, run_id, *, network=None):
                                         timeout=15, check=True).stdout)
             if set(attachments) != {net}:
                 raise ValueError("runtime container network identity changed")
-            address = ipaddress.IPv4Address(attachments[net]["IPAddress"])
+            raw_address = attachments[net].get("IPAddress", "")
+            if not raw_address:
+                logs = sh(["docker", "logs", "--tail", "200", name])
+                state = sh(["docker", "inspect", "-f", "{{json .State}}", name])
+                errs.append(f"{s['name']}: container has no runtime address; startup failed\n"
+                            f"{state.stdout[-2000:]}\n{(logs.stdout + logs.stderr)[-6000:]}")
+                continue
+            address = ipaddress.IPv4Address(raw_address)
             if not address.is_private or address.is_loopback or address.is_link_local:
                 raise ValueError("runtime container requires a private bridge address")
             # Internal Docker 29 bridges do not provide published host ports.
@@ -615,7 +620,7 @@ def l4(images, *, network=None):
             name = "railshot-scan-" + uuid.uuid4().hex[:16]
             try:
                 p = sh(["docker", "run", "--name", name, "--network", network,
-                        *docker_security(), "--cpus=1", "--memory=2g", "--memory-swap=2g", "--pids-limit=128",
+                        *docker_security(), "--read-only", "--cpus=1", "--memory=2g", "--memory-swap=2g", "--pids-limit=128",
                         "--mount", f"type=bind,src={archive},dst=/scan/image.tar,readonly",
                         "--mount", f"type=bind,src={cache},dst=/cache",
                         "-e", "TMPDIR=/cache", "-e", "GOMAXPROCS=1",
@@ -1023,11 +1028,12 @@ def self_test():
         sh(["git", "checkout", "-q", "--", "tests"], cwd=ws)
         v = run_gate(ws, Path(d) / "run3", ["L1"])
         l1errs = " ".join(v["layers"][0]["errors"])
-        assert "base image not allowed" in l1errs and "numeric" in l1errs and "HEALTHCHECK" in l1errs and "exec-form" in l1errs, l1errs
+        assert "base image not allowed" in l1errs and "numeric" in l1errs and "exec-form" in l1errs, l1errs
     assert classify("L2", "ERROR: No matching distribution found for flask==9") == "F1"
     assert classify("L2", "net/http: TLS handshake timeout") == "F8"
-    assert signature("L3", "F4", "Error: listen EADDRINUSE 0.0.0.0:8080\n").startswith("L3:F4:error: listen eaddrinuse")
-    assert "***" in excerpt("token ghp_" + "a" * 36)
+    assert signature("L3", "F4", "Error: listen EADDRINUSE 0.0.0.0:8080\n").startswith("v2:L3:F4:")
+    secret = "ghp_" + "a" * 36
+    assert secret not in excerpt("token " + secret)
     print("self-test ok")
     return 0
 

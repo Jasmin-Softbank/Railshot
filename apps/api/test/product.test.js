@@ -1290,6 +1290,50 @@ test('explicit CD resume survives restart, preserves the deployment and publishe
   } finally { finish(); await product.close(); }
 });
 
+test('published CD failure can resume after cluster permissions are repaired without another CI run', async (t) => {
+  const f = await applicationFixture(t);
+  const owner = f.product.dashboard.session().id;
+  const deliver = f.adapter.deployPublished;
+  f.adapter.deployPublished = async (...args) => {
+    await deliver(...args);
+    return { cd: { state: 'failed', deployed: false, revision: 'd'.repeat(40),
+      evidence: { sync: 'Unknown', health: 'Healthy' } },
+    public_http: { state: 'not_run', url: null, verified_at: null } };
+  };
+  const accepted = await f.product.createDeployment(applicationSource('calculator'), 'permission-repair', undefined, owner);
+  const failed = await settle(() => f.product.getDeployment(accepted.id, owner));
+  assert.equal(failed.status, 'failed'); assert.equal(failed.stage, 'cd');
+  assert.equal(failed.ci.state, 'published'); assert.equal(failed.url, null);
+  await assert.rejects(f.product.resumeDeployment(accepted.id, f.product.dashboard.session().id), { status: 404 });
+  f.adapter.deployPublished = deliver;
+  await f.product.resumeDeployment(accepted.id, owner);
+  const done = await settle(() => f.product.getDeployment(accepted.id, owner));
+  assert.equal(done.status, 'succeeded'); assert.equal(done.id, accepted.id);
+  assert.equal(done.ci.run_id, failed.ci.run_id); assert.deepEqual(done.ci.images, failed.ci.images);
+  assert.equal(done.resume_count, 1);
+  assert.equal(f.registrations.length, 1); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 2);
+});
+
+test('published app resume is not blocked by an unrelated app awaiting registration reconciliation', async (t) => {
+  const f = await interruptedApplication(t);
+  await f.product.close();
+  const store = await createProductStore(f.directory);
+  await store.transaction(state => {
+    state.operations.other = { id: 'other', kind: 'deployments', app: 'other-app',
+      application_id: 'app-other', environment_target_id: 'runtime-aws', status: 'unknown', stage: 'registration' };
+  });
+  await store.close();
+  f.adapter.deployPublished = f.deliver;
+  const product = await createProductService(f.options);
+  try {
+    await product.resumeDeployment(f.created.id, f.owner);
+    const done = await settle(() => product.getDeployment(f.created.id, f.owner));
+    assert.equal(done.status, 'succeeded'); assert.equal(done.ci.run_id, f.original.ci.run_id);
+    assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1);
+    assert.equal(diskState(f.directory).operations.other.status, 'unknown');
+  } finally { await product.close(); }
+});
+
 test('resume checks exact session ownership before any CI or CD observation', async (t) => {
   const f = await interruptedApplication(t);
   f.service.status = async () => assert.fail('Unauthorized resume must not read CI');
@@ -1359,6 +1403,8 @@ test('resume rejects altered registration or run bindings, lifecycle actions and
     unpublished: (_state, record) => { record.ci.state = 'running'; },
     cancelled: (_state, record) => { record.status = 'cancelled'; },
     busy: (state) => { state.operations.other = { id: 'other', kind: 'deployments', status: 'unknown' }; },
+    same_application_busy: (state, record) => { state.operations.other = { id: 'other', kind: 'deployments',
+      application_id: record.application_id, app: record.app, status: 'running', stage: 'cd' }; },
   };
   for (const [name, change] of Object.entries(changes)) await t.test(name, async (t) => {
     const f = await interruptedApplication(t);
@@ -1637,10 +1683,10 @@ test('missing CD observation preserves the route failure and the owner can resum
   } finally { await product.close(); }
 });
 
-test('16 independent deployments overlap CI, retain slots between polls and serialize shared writers', async (t) => {
+for (const limit of [3, 16]) test(`${limit === 3 ? 'default' : 'explicit'} ${limit}-slot queue retains admission between polls and starts waiting work FIFO`, async (t) => {
   const submitted = new Map(), completed = new Set();
   let sourceWriters = 0, peakSourceWriters = 0, cdWriters = 0, peakCdWriters = 0;
-  const f = await fixture(t, { maxConcurrentDeployments: 16, service: {
+  const f = await fixture(t, { ...(limit === 3 ? {} : { maxConcurrentDeployments: limit }), service: {
     deploy: async ({ app, target_id }) => {
       peakSourceWriters = Math.max(peakSourceWriters, ++sourceWriters);
       await pause(2);
@@ -1660,28 +1706,41 @@ test('16 independent deployments overlap CI, retain slots between polls and seri
     await pause(4); cdWriters--;
     return deployed;
   } });
-  const rows = await Promise.all(Array.from({ length: 18 }, (_, i) =>
+  const rows = await Promise.all(Array.from({ length: limit + 2 }, (_, i) =>
     f.product.createDeployment({ ...input, app: `parallel-${i}` }, `parallel-${i}`)));
-  await settle(() => f.product.getDeployment(rows[15].id), row => Boolean(row.ci.run_id));
+  await settle(() => f.product.getDeployment(rows[limit - 1].id), row => Boolean(row.ci.run_id));
   await pause(60); // Several polling rounds must not manufacture more admission slots.
-  assert.equal(submitted.size, 16);
-  assert.equal((await f.product.getDeployment(rows[16].id)).status, 'queued');
-  assert.equal((await f.product.getDeployment(rows[17].id)).queue.started_at, undefined);
+  assert.equal(submitted.size, limit);
+  assert.equal((await f.product.getDeployment(rows[limit].id)).status, 'queued');
+  assert.equal((await f.product.getDeployment(rows[limit + 1].id)).queue.started_at, undefined);
   const same = await f.product.createDeployment({ ...input, app: 'parallel-0' }, 'same-app-later');
   completed.add('parallel-1');
-  await settle(() => f.product.getDeployment(rows[16].id), row => Boolean(row.ci.run_id));
-  assert.equal(submitted.size, 17);
+  await settle(() => f.product.getDeployment(rows[limit].id), row => Boolean(row.ci.run_id));
+  assert.equal(submitted.size, limit + 1);
   assert.equal((await f.product.getDeployment(same.id)).status, 'queued');
-  for (let i = 0; i < 18; i++) completed.add(`parallel-${i}`);
+  for (let i = 0; i < limit + 2; i++) completed.add(`parallel-${i}`);
   await Promise.all([...rows, same].map(row => settle(() => f.product.getDeployment(row.id))));
-  assert.equal(submitted.size, 19);
+  assert.equal(submitted.size, limit + 3);
   assert.equal(peakSourceWriters, 1);
   assert.equal(peakCdWriters, 1);
-  assert.equal(new Set((await Promise.all([...rows, same].map(row => f.product.getDeployment(row.id)))).map(row => row.ci.run_id)).size, 19);
+  assert.equal(new Set((await Promise.all([...rows, same].map(row => f.product.getDeployment(row.id)))).map(row => row.ci.run_id)).size, limit + 3);
 });
 
 test('concurrency configuration is bounded and rejects invalid limits before opening the store', async (t) => {
   for (const maxConcurrentDeployments of [0, -1, 65, 1.5, NaN, '16']) {
     await assert.rejects(fixture(t, { maxConcurrentDeployments }), { code: 'INVALID_INPUT' });
   }
+});
+
+test('operator resumes only the exact published operation without new CI', async t => {
+  const f = await interruptedApplication(t);
+  const identity = { operation_id: f.created.id, source_commit: f.original.source_commit, run_id: f.original.ci.run_id };
+  await assert.rejects(f.product.resumePublishedOperation({ ...identity, source_commit: 'f'.repeat(40) }), { code: 'RESUME_BINDING_MISMATCH' });
+  await assert.rejects(f.product.resumePublishedOperation({ ...identity, run_id: '999999' }), { code: 'RESUME_BINDING_MISMATCH' });
+  f.adapter.deployPublished = f.deliver;
+  await f.product.resumePublishedOperation(identity);
+  const result = await settle(() => f.product.getDeployment(f.created.id, f.owner));
+  assert.equal(result.status, 'succeeded');
+  assert.equal(f.submissions.length, 1);
+  assert.equal(diskState(f.directory).operations[f.created.id].resume_initiated_by, 'operator');
 });

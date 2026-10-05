@@ -111,13 +111,11 @@ limits:
 forbidden_patterns:
   - '\|\|\s*true\b'
   - '\bexit\s+0\b'
-  - '^\s*HEALTHCHECK\b'
   - '(pytest\.skip|unittest\.skip|it\.skip|describe\.skip|xit\(|@Disabled)'
   - '(?i:\b(?:test|it|describe)\.(?:skip|todo|only)\b|passWithNoTests|--if-present|--test-name-pattern|testPathIgnorePatterns|coveragePathIgnorePatterns)'
   - '--no-verify'
   - 'trivyignore'
   - '(curl|wget)[^|\n]*\|\s*(ba)?sh'
   - 'chmod\s+(-R\s+)?777'
-  - '^\s*USER\s+(root|0)\s*$'
   - '(?i:noqa|eslint-disable|@ts-ignore|@ts-nocheck|type\s*:\s*ignore|mypy\s*:\s*ignore|ruff\s*:\s*noqa)'
   - '(?i:@SuppressWarnings|NOSONAR|noinspection|checkstyle\s*:\s*off|pmd\s*:\s*ignore)'

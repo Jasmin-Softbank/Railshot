@@ -6,6 +6,7 @@ import yazl from 'yazl';
 import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from './contract.js';
 import { readApiToken } from './access.js';
 import { cookieToken, SESSION_COOKIE } from './sessions.js';
+import { archiveLimits } from './archive.js';
 
 const skipped = new Set(['.git', 'node_modules', '.DS_Store', '__MACOSX']);
 const defaultUrl = process.env.RAILSHOT_API_URL || process.env.JASMIN_API_URL || 'http://127.0.0.1:4173';
@@ -59,6 +60,7 @@ async function sendDeploy(form, baseUrl) {
 async function zipFolder(folder) {
   const zip = new yazl.ZipFile();
   let count = 0;
+  let sourceBytes = 0;
   async function visit(directory) {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (skipped.has(entry.name)) continue;
@@ -70,9 +72,11 @@ async function zipFolder(folder) {
       if (/^\.env(?:\.|$)/i.test(entry.name) || /\.(?:pem|key|p12|pfx)$/i.test(entry.name)) {
         throw new Error(`비밀키로 보이는 파일을 제거하세요: ${path}`);
       }
+      sourceBytes += (await lstat(absolute)).size;
+      if (sourceBytes > archiveLimits.maxBytes) throw new Error('파일 총 크기는 100 MB 이하여야 합니다.');
       zip.addFile(absolute, path);
       count++;
-      if (count > 2000) throw new Error('파일은 최대 2,000개까지 업로드할 수 있습니다.');
+      if (count > archiveLimits.maxFiles) throw new Error('파일은 최대 2,000개까지 업로드할 수 있습니다.');
     }
   }
   await visit(folder);
@@ -83,7 +87,7 @@ async function zipFolder(folder) {
     let size = 0;
     zip.outputStream.on('data', (chunk) => {
       size += chunk.length;
-      if (size > 100 * 1024 * 1024) zip.outputStream.destroy(new Error('ZIP이 100 MB를 초과했습니다.'));
+      if (size > archiveLimits.maxBytes) zip.outputStream.destroy(new Error('ZIP이 100 MB를 초과했습니다.'));
       else chunks.push(chunk);
     });
     zip.outputStream.once('error', fail);
@@ -96,7 +100,10 @@ export async function archiveFromPath(input) {
   const stat = await lstat(path);
   if (stat.isSymbolicLink()) throw new Error('심볼릭 링크는 업로드할 수 없습니다.');
   if (stat.isDirectory()) return { bytes: await zipFolder(path), name: `${basename(path)}.zip` };
-  if (stat.isFile() && path.toLowerCase().endsWith('.zip')) return { bytes: await readFile(path), name: basename(path) };
+  if (stat.isFile() && path.toLowerCase().endsWith('.zip')) {
+    if (stat.size > archiveLimits.maxBytes) throw new Error('ZIP 파일은 100 MB 이하이어야 합니다.');
+    return { bytes: await readFile(path), name: basename(path) };
+  }
   throw new Error('폴더 또는 ZIP 파일 경로를 지정하세요.');
 }
 

@@ -5,7 +5,7 @@ on:
     inputs:
       components:
         type: string
-        default: '["dashboard","api","mcp","ci-runner"]'
+        default: '["dashboard","api","mcp","personal-gateway","ci-runner"]'
       publish:
         type: boolean
         default: false
@@ -14,7 +14,7 @@ on:
       components:
         description: JSON array of components to build
         type: string
-        default: '["dashboard","api","mcp","ci-runner"]'
+        default: '["dashboard","api","mcp","personal-gateway","ci-runner"]'
 
 permissions: {contents: read, packages: write}
 
@@ -66,7 +66,7 @@ jobs:
           set -euo pipefail
           case "$COMPONENT" in
             dashboard) dockerfile=apps/dashboard/Dockerfile; target=dashboard ;;
-            api|mcp) dockerfile=apps/api/Dockerfile; target="$COMPONENT" ;;
+            api|mcp|personal-gateway) dockerfile=apps/api/Dockerfile; target="$COMPONENT" ;;
             ci-runner) dockerfile=ci/scripts/runner/Dockerfile; target=runner ;;
             *) echo "Unsupported component" >&2; exit 1 ;;
           esac
@@ -85,7 +85,7 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          case "$COMPONENT" in dashboard|api|mcp|ci-runner) ;; *) exit 1 ;; esac
+          case "$COMPONENT" in dashboard|api|mcp|personal-gateway|ci-runner) ;; *) exit 1 ;; esac
           test "$(docker inspect "railshot/$COMPONENT:ci" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           export DOCKER_CONFIG="$RUNNER_TEMP/platform-registry"
           trap 'rm -rf "$DOCKER_CONFIG"' EXIT

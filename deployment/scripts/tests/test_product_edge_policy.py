@@ -73,7 +73,7 @@ class ProductEdgePolicyTests(unittest.TestCase):
     def test_target_lifecycle_keeps_rsapp_prefix_and_explicit_bootstrap_denials(self):
         bootstrap = next(s['Resource'] for s in self.policy['Statement'] if s['Sid'] == 'PreserveBootstrapTargets')
         self.assertEqual(len(bootstrap), 4)
-        for action in ('DeleteTargetGroup', 'DeregisterTargets', 'RegisterTargets', 'ModifyTargetGroupAttributes'):
+        for action in ('DeleteTargetGroup', 'DeregisterTargets', 'RegisterTargets', 'ModifyTargetGroupAttributes', 'ModifyTargetGroup'):
             action = 'elasticloadbalancing:' + action
             self.assertDecision('allowed', action, ELB + 'targetgroup/rsapp-new-application/1234')
             for resource in bootstrap:

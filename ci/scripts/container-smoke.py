@@ -4,6 +4,7 @@ import argparse
 from contextlib import contextmanager
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 from pathlib import Path
 import secrets
@@ -55,6 +56,7 @@ def mock_api(token):
             body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
             calls.append({"path": self.path, "method": self.command, "host": self.headers.get('Host'),
                           "origin": self.headers.get('Origin'), "body": body,
+                          "authorization": self.headers.get('Authorization'),
                           "authenticated": self.headers.get('Authorization') == 'Bearer ' + token,
                           "idempotency_key": self.headers.get('Idempotency-Key')})
             code = 200 if calls[-1]['authenticated'] else 401
@@ -104,6 +106,20 @@ def verify_dashboard(endpoint, token, calls, marker):
     assert status == 200 and calls[-1]['authenticated'], 'Browser supplied authorization reached the private API'
     assert calls[-1]['path'] == '/api/v1/deployments' and calls[-1]['method'] == 'POST'
     assert calls[-1]['body'] == b'local-source-fixture' and calls[-1]['idempotency_key'] == 'proxy-smoke'
+    client_token = 'client.' + secrets.token_urlsafe(32)
+    status, _, _ = http(endpoint + '/api/v1/enrollments/enrollment_1/claims',
+                        {**headers, 'Authorization': 'Bearer ' + client_token,
+                         'Content-Type': 'application/json'}, b'{}')
+    assert status == 401 and calls[-1]['authorization'] == 'Bearer ' + client_token, \
+        'Personal client bearer was replaced by the dashboard credential'
+    status, _, manifest_raw = http(endpoint + '/personal/manifest.json')
+    manifest = json.loads(manifest_raw)
+    assert status == 200 and manifest['version'] == 1 and manifest['release'] == manifest['artifact_sha256']
+    for path, digest, size in ((manifest['installer_path'], manifest['installer_sha256'], manifest['installer_size']),
+                               (manifest['artifact_path'], manifest['artifact_sha256'], manifest['artifact_size'])):
+        status, _, content = http(endpoint + path)
+        assert status == 200 and len(content) == size and hashlib.sha256(content).hexdigest() == digest, \
+            'Dashboard immutable personal release is incomplete'
     for path in ['/mcp', '/mcp/', '/.well-known/oauth-protected-resource']:
         status, _, _ = http(endpoint + path, headers)
         assert status == 401 and calls[-1]['path'] == path, 'MCP proxy did not reach fixture'
@@ -223,6 +239,15 @@ def mcp_http_smoke(image):
 
 
 def smoke(component, image):
+    if component == 'personal-gateway':
+        # Native WireGuard needs a Linux kernel and NET_ADMIN. Image admission
+        # still proves that only the fixed helper and required tools are present.
+        for command in (['python3', '/opt/railshot/deployment/scripts/personal_gateway_service.py', '--help'],
+                        ['python3', '/opt/railshot/deployment/scripts/personal_wireguard.py', '--help'],
+                        ['wg', '--version'], ['ip', '-Version'], ['iptables', '--version']):
+            docker('run', '--rm', '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+                   '--entrypoint', command[0], image, *command[1:])
+        return
     if component == 'ci-runner':
         # Registration and host firewall integration need the dedicated CI VM.
         print(docker('run', '--rm', '--network', 'none', image, '--check-image'))
@@ -274,7 +299,7 @@ def smoke(component, image):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('component', choices=('dashboard', 'api', 'mcp', 'ci-runner'))
+    parser.add_argument('component', choices=('dashboard', 'api', 'mcp', 'personal-gateway', 'ci-runner'))
     parser.add_argument('image')
     args = parser.parse_args()
     smoke(args.component, args.image)

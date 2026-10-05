@@ -76,14 +76,14 @@ class WorkflowPolicyTest(unittest.TestCase):
                         self.assertEqual(Path(tmp, 'pip.log').read_text(), 'install -q pyyaml jsonschema\n')
                         self.assertEqual(Path(tmp, 'output').read_text(), f'passed={str(loop_exit == 0).lower()}\n')
 
-    def test_default_allows_one_adapter_and_two_fixers_with_configured_provider(self):
+    def test_default_allows_two_adapters_and_eight_fixers_with_configured_provider(self):
         for attempts in (None, ''):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, attempts, credentials=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 invocation = json.loads(Path(tmp, 'invocation.json').read_text())
-                self.assertEqual(invocation['args'][invocation['args'].index('--max-attempts') + 1], '2')
-                self.assertEqual(invocation['args'][invocation['args'].index('--max-packaging-attempts') + 1], '1')
+                self.assertEqual(invocation['args'][invocation['args'].index('--max-attempts') + 1], '8')
+                self.assertEqual(invocation['args'][invocation['args'].index('--max-packaging-attempts') + 1], '2')
                 self.assertIn('CODEX_API_KEY', invocation['model_env'])
 
     def test_nonzero_repair_requires_explicit_budget_and_provider_auth(self):
@@ -103,8 +103,21 @@ class WorkflowPolicyTest(unittest.TestCase):
                         self.assertEqual(Path(tmp, 'pip.log').read_text().splitlines(),
                                          [f'install -q {sdk}', 'install -q pyyaml jsonschema'])
 
+    def test_packaging_accepts_eight_and_rejects_larger_or_noncanonical_values(self):
+        for packaging in ('0', '1', '2', '3', '8', '9', '-1', '02', '2.0', ' 2', '2\n'):
+            with self.subTest(packaging=packaging), tempfile.TemporaryDirectory() as tmp:
+                result = self.run_loop_policy(tmp, '2', packaging=packaging, credentials=True)
+                if packaging in ('0', '1', '2', '3', '8'):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = json.loads(Path(tmp, 'invocation.json').read_text())['args']
+                    self.assertEqual(args[args.index('--max-packaging-attempts') + 1], packaging)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(Path(tmp, 'pip.log').exists())
+                    self.assertFalse(Path(tmp, 'invocation.json').exists())
+
     def test_repair_attempts_reject_noncanonical_values_before_install_or_loop(self):
-        for attempts in ('-1', '3', '4', '00', '03', '1.0', 'true', ' 0', '0 ', '0\n', '1; true', '$(true)'):
+        for attempts in ('-1', '9', '16', '00', '03', '1.0', 'true', ' 0', '0 ', '0\n', '1; true', '$(true)'):
             with self.subTest(attempts=attempts), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, attempts, credentials=True)
                 self.assertNotEqual(result.returncode, 0)
@@ -328,10 +341,10 @@ class WorkflowPolicyTest(unittest.TestCase):
             self.assertEqual(Path(env['DOCKER_CONFIG']).stat().st_mode & 0o777, 0o700)
 
     def test_zero_disables_sdk_even_with_packaging_enabled(self):
-        for packaging in ('0', '1', '2', '-1'):
+        for packaging in ('0', '1', '2', '3', '8', '9', '-1'):
             with self.subTest(packaging=packaging), tempfile.TemporaryDirectory() as tmp:
                 result = self.run_loop_policy(tmp, '0', packaging=packaging, credentials=True)
-                if packaging not in ('0', '1'):
+                if packaging not in ('0', '1', '2', '3', '8'):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertFalse(Path(tmp, 'pip.log').exists())
                     continue

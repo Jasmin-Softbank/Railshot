@@ -7,6 +7,74 @@ import { chromium } from 'playwright';
 import { validateQuestion, validateAnswer } from '../../apps/dashboard/src/recovery.js';
 import { filterHistory, relatedRecords, deploymentStages, hasDeploymentIssue } from '../../apps/dashboard/src/deployment-history.js';
 
+test('open detail follows completion and URL without replacing the pane; stale responses stay isolated', { timeout: 30000 }, async (t) => {
+  const root = new URL('../../apps/dashboard/', import.meta.url);
+  const server = createServer(async (req, res) => {
+    if (req.url === '/') { res.setHeader('Content-Type', 'text/html'); res.end('<main id="detail"></main>'); return; }
+    try {
+      if (!/^\/src\/[a-z-]+\.js$/.test(req.url)) { res.writeHead(404).end(); return; }
+      res.setHeader('Content-Type', 'text/javascript'); res.end(await readFile(new URL(req.url.slice(1), root)));
+    } catch { res.writeHead(404).end(); }
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const browser = await chromium.launch({ executablePath: process.env.CHROME_EXECUTABLE || undefined });
+  t.after(async () => { await browser.close(); await new Promise(resolve => server.close(resolve)); });
+  const page = await browser.newPage(); const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.clock.install();
+  await page.evaluate(async () => {
+    const { createHistoryDetail } = await import('/src/deployment-history.js');
+    window.row = { id: 'one', app: 'sample', application_id: 'app-one', kind: 'deployments', target_id: 'aws',
+      source_commit: 'abc', created_at: new Date().toISOString(), status: 'running', stage: 'ci',
+      ci: { state: 'running', run_id: '123' } };
+    window.apps = []; window.reads = 0; window.failure = false; window.slow = false;
+    window.detail = createHistoryDetail({ host: document.querySelector('#detail'), getRecords: () => [window.row],
+      getApplications: () => window.apps, serviceUrl: app => app?.url, onLogs() {}, onMonitor() {},
+      onRecord(record) { window.lastRecord = structuredClone(record); },
+      refreshApplications: async () => { window.apps = [{ id: 'app-one', url: 'https://sample.example/', latest_deployment: { status: 'succeeded' } }]; },
+      request: async (path, options, controller) => {
+        if (path.endsWith('/events')) return { data: { deployment_id: 'one', status: 'completed', state: 'complete', agent_activity: null } };
+        window.reads++;
+        if (controller.signal.aborted) throw Error('previous timeout poisoned the next read');
+        if (window.failure) { controller.abort(); throw Error('temporary read failure'); }
+        const result = structuredClone(window.row);
+        if (window.slow) await new Promise(resolve => { window.releaseRead = resolve; });
+        return { data: result };
+      },
+    });
+    await window.detail.open(window.row);
+    window.headingNode = document.querySelector('.dh-title-row');
+  });
+  assert.match(await page.locator('.dh-head .dh-title-row').innerText(), /배포 중/);
+  await page.locator('.dh-issue-trigger').click();
+  await page.getByRole('button', { name: /빌드.*진행 중/ }).click();
+  await page.evaluate(() => { window.row = { ...window.row, status: 'succeeded', stage: 'http', ci: { state: 'published', run_id: '123' }, cd: { state: 'deployed' } }; });
+  await page.clock.runFor(5000);
+  await page.waitForFunction(() => document.querySelector('.dh-title-row').textContent.includes('배포 완료'));
+  assert.equal(await page.getByRole('link', { name: '서비스 접속 ↗' }).getAttribute('href'), 'https://sample.example/');
+  assert.match(await page.locator('.dh-stage-detail h3').innerText(), /빌드 · 성공/);
+  await page.getByRole('button', { name: /배포.*성공/ }).click();
+  await page.getByRole('button', { name: /빌드.*성공/ }).click();
+  assert.match(await page.locator('.dh-stage-detail h3').innerText(), /빌드 · 성공/);
+  assert.equal(await page.locator('.dh-detail-viewport').getAttribute('data-pane'), 'issue');
+  assert.equal(await page.evaluate(() => window.headingNode === document.querySelector('.dh-title-row')), true);
+  assert.equal(await page.evaluate(() => window.lastRecord.status), 'succeeded');
+  await page.evaluate(() => { window.failure = true; });
+  await page.clock.runFor(30000);
+  assert.match(await page.locator('.dh-head .dh-title-row').innerText(), /배포 완료/);
+  assert.match(await page.locator('.dh-head').innerText(), /상태 갱신 지연/);
+  await page.evaluate(() => { window.failure = false; window.slow = true; });
+  await page.clock.runFor(30000);
+  await page.waitForFunction(() => typeof window.releaseRead === 'function');
+  await page.evaluate(async () => {
+    window.slow = false; window.row = { ...window.row, id: 'two', app: 'other', status: 'running' };
+    await window.detail.open(window.row); window.releaseRead();
+  });
+  assert.match(await page.locator('.dh-head .dh-title-row').innerText(), /other.*배포 중/s);
+  assert.deepEqual(errors, []);
+});
+
 const question = () => ({ id: 'q-1', deployment_id: 'deployment-1', revision: 'r-1', summary: '연결 실패', prompt: '방법 선택',
   expires_at: new Date(Date.now() + 60000).toISOString(), evidence: [{ label: '로그', text: 'connection refused' }],
   options: [{ id: 'retry', label: '다시 시도', fields: [
@@ -51,7 +119,7 @@ test('history preview: stage navigation, conditional inputs, one submission, key
   const server = createServer(async (req, res) => {
     try {
       const path = new URL(req.url, 'http://localhost').pathname;
-      if (!/^\/(preview\/history\.(html|js)|src\/(deployment-history|recovery)\.js|styles\.css)$/.test(path)) { res.writeHead(404).end(); return; }
+      if (!/^\/(preview\/history\.(html|js)|src\/(deployment-history|recovery|insights|insights-view)\.js|styles\.css)$/.test(path)) { res.writeHead(404).end(); return; }
       const data = await readFile(new URL(path.slice(1), root));
       res.writeHead(200, { 'Content-Type': path.endsWith('.js') ? 'text/javascript' : path.endsWith('.css') ? 'text/css' : 'text/html' }).end(data);
     } catch { res.writeHead(500).end(); }
@@ -156,7 +224,7 @@ test('agent card opens on successful history, polls independently and preserves 
     const path = new URL(req.url, 'http://localhost').pathname;
     try {
       if (path === '/') { res.setHeader('Content-Type', 'text/html'); res.end('<html lang="ko"><head><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="stylesheet" href="/styles.css"></head><body><main class="content"><section id="history-view"><div id="detail"></div></section></main></body></html>'); return; }
-      if (!['/src/recovery.js', '/src/deployment-history.js', '/styles.css'].includes(path)) { res.writeHead(404).end(); return; }
+      if (!['/src/recovery.js', '/src/deployment-history.js', '/src/insights.js', '/src/insights-view.js', '/styles.css'].includes(path)) { res.writeHead(404).end(); return; }
       res.setHeader('Content-Type', path.endsWith('.js') ? 'text/javascript' : 'text/css');
       res.end(await readFile(new URL(path.slice(1), root)));
     } catch { res.writeHead(500).end(); }

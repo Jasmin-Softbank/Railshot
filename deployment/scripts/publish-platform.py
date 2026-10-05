@@ -17,7 +17,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 BRANCH = "deployment/platform"
 WORKLOAD = "gitops/applications/railshot-platform/workload.json"
-COMPONENTS = {"dashboard", "api", "mcp", "ci-runner"}
+COMPONENTS = {"dashboard", "api", "mcp", "personal-gateway", "ci-runner"}
 
 
 def git(*args, check=True):
@@ -28,7 +28,7 @@ def git(*args, check=True):
     return result
 
 
-def render(artifacts, target, port, provider_targets="{}", previous=None):
+def render(artifacts, target, port, provider_targets="{}", previous=None, personal=False):
     images = {}
     for item in sorted(artifacts.iterdir()):
         if item.is_symlink() or not item.is_file() or item.suffix != ".json" or item.stem not in COMPONENTS:
@@ -41,31 +41,49 @@ def render(artifacts, target, port, provider_targets="{}", previous=None):
                 rf"ghcr\.io/jasmin-softbank/railshot-{item.stem}@sha256:[a-f0-9]{{64}}", image):
             raise ValueError("published component requires its immutable GHCR digest")
         images.update(value)
-    changed = set(images) & {"dashboard", "api", "mcp"}
+    changed = set(images) & {"dashboard", "api", "mcp", "personal-gateway"}
     if not changed:
         raise ValueError("a platform publication artifact is required")
-    preserved = {}
-    for component in {"dashboard", "api", "mcp"} - changed:
-        matches = [item for item in (previous or {}).get("items", [])
-                   if item.get("kind") == "Deployment" and item.get("metadata", {}).get("name") == "railshot-" + component
-                   and item["metadata"].get("namespace") == "railshot-system"]
-        if len(matches) != 1 and component == "mcp":
+    previous_deployments = {item.get('metadata', {}).get('name', '').removeprefix('railshot-'): item
+                            for item in (previous or {}).get('items', [])
+                            if item.get('kind') == 'Deployment'
+                            and item.get('metadata', {}).get('namespace') == 'railshot-system'}
+    previous_api = previous_deployments.get('api')
+    previous_personal = any(container.get('name') == 'personal-gateway'
+                            for container in (previous_api or {}).get('spec', {}).get('template', {}).get('spec', {}).get('initContainers', []))
+    personal_mode_changed = previous is not None and previous_personal != personal
+    if personal_mode_changed and personal and not {'api', 'personal-gateway'} <= changed:
+        raise ValueError('initial personal enablement requires tested api and personal-gateway artifacts')
+    for component in {'dashboard', 'api', 'mcp'} - changed:
+        deployment = previous_deployments.get(component)
+        if not deployment and component == 'mcp':
             continue
-        if len(matches) != 1:
-            raise ValueError("initial deployment requires dashboard and api artifacts")
-        preserved[component] = matches[0]
-        containers = matches[0]["spec"]["template"]["spec"]["containers"]
-        images[component] = next(c["image"] for c in containers if c["name"] == component)
+        if not deployment:
+            raise ValueError('initial deployment requires dashboard and api artifacts')
+        images[component] = next(c['image'] for c in deployment['spec']['template']['spec']['containers']
+                                 if c['name'] == component)
+    if personal and 'personal-gateway' not in changed:
+        previous_api = previous_deployments.get('api')
+        gateway = next((container for container in (previous_api or {}).get('spec', {}).get('template', {}).get('spec', {}).get('initContainers', [])
+                        if container.get('name') == 'personal-gateway'), None)
+        if not gateway:
+            raise ValueError('initial personal gateway deployment requires its image artifact')
+        images['personal-gateway'] = gateway['image']
+    preserved = {component: previous_deployments[component]
+                 for component in {'dashboard', 'mcp'} - changed if component in previous_deployments}
+    api_changed = 'api' in changed or personal and 'personal-gateway' in changed or personal_mode_changed
+    if not api_changed and 'api' in previous_deployments:
+        preserved['api'] = previous_deployments['api']
 
-    previous_api = next((item for item in (previous or {}).get('items', [])
-                         if item.get('kind') == 'Deployment' and item.get('metadata', {}).get('name') == 'railshot-api'), None)
     prepare = ['--prepare-api-rollout'] if 'api' in changed and previous_api else []
     with tempfile.TemporaryDirectory(prefix="platform-render-") as temporary:
         image_file = Path(temporary) / "images.json"
         image_file.write_text(json.dumps(images))
+        personal_argument = ['--personal'] if personal else []
         rendered = subprocess.run([sys.executable, str(ROOT / "deployment/scripts/render-platform.py"),
                                    str(image_file), "--target-id", target,
-                                   "--dashboard-node-port", str(port), "--provider-targets", provider_targets, *prepare], text=True, capture_output=True)
+                                   "--dashboard-node-port", str(port), "--provider-targets", provider_targets,
+                                   *prepare, *personal_argument], text=True, capture_output=True)
         if rendered.returncode:
             raise ValueError("platform renderer rejected deployment configuration")
         declaration = json.loads(rendered.stdout)
@@ -82,7 +100,7 @@ def render(artifacts, target, port, provider_targets="{}", previous=None):
         return json.dumps(declaration, indent=2) + "\n"
 
 
-def publish(artifacts, source_sha, target, port, provider_targets="{}"):
+def publish(artifacts, source_sha, target, port, provider_targets="{}", personal=False):
     if not re.fullmatch(r"[a-f0-9]{40}", source_sha) or git("rev-parse", "HEAD").stdout.strip() != source_sha:
         raise ValueError("checkout must match the reviewed source SHA")
     if git("status", "--porcelain").stdout:
@@ -95,10 +113,11 @@ def publish(artifacts, source_sha, target, port, provider_targets="{}"):
         raise ValueError("cannot inspect the deployment branch")
     previous = json.loads(git("show", f"FETCH_HEAD:{WORKLOAD}").stdout) if remote.returncode == 0 else None
     # Render with reviewed source before switching; untouched Deployment objects stay byte-equivalent.
-    declaration = render(artifacts, target, port, provider_targets, previous)
-    digests = {container["name"] + "_digest": container["image"].rsplit(":", 1)[1]
+    declaration = render(artifacts, target, port, provider_targets, previous, personal)
+    digests = {container["name"].replace('-', '_') + "_digest": container["image"].rsplit(":", 1)[1]
                for item in json.loads(declaration)["items"] if item["kind"] == "Deployment"
-               for container in item["spec"]["template"]["spec"]["containers"]}
+               for container in (item["spec"]["template"]["spec"]["containers"]
+                                 + item["spec"]["template"]["spec"].get("initContainers", []))}
     if remote.returncode == 0:
         git("switch", "--detach", "FETCH_HEAD")
     base = git("rev-parse", "HEAD").stdout.strip()
@@ -132,9 +151,11 @@ if __name__ == "__main__":
     parser.add_argument("--target-id", required=True)
     parser.add_argument("--dashboard-node-port", type=int, required=True)
     parser.add_argument("--provider-targets", default="{}", help="optional registered provider-to-target JSON map")
+    parser.add_argument('--personal', action='store_true', help='enable personal only after operator preflight succeeds')
     args = parser.parse_args()
     try:
-        result = publish(args.artifacts, args.source_sha, args.target_id, args.dashboard_node_port, args.provider_targets)
+        result = publish(args.artifacts, args.source_sha, args.target_id, args.dashboard_node_port,
+                         args.provider_targets, args.personal)
         if os.environ.get("GITHUB_OUTPUT"):
             with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                 for key in ("revision", "dashboard_digest", "api_digest"):

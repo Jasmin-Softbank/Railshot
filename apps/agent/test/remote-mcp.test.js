@@ -102,7 +102,9 @@ test('OAuth joins an existing web session and issues a distinct AI-first session
         redirect_uri: redirectUri, code: callback.searchParams.get('code'),
         code_verifier: verifier, resource: 'http://127.0.0.1:4181/mcp' }) });
     assert.equal(exchanged.status, 200);
-    return { token: (await exchanged.json()).access_token, cookie: authorized.headers.get('set-cookie') };
+    const token = await exchanged.json();
+    assert.equal(token.expires_in, undefined);
+    return { token: token.access_token, cookie: authorized.headers.get('set-cookie') };
   }
 
   const web = await connect(webCookie), ai = await connect(null);

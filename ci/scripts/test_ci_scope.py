@@ -30,12 +30,12 @@ class ScopeTests(unittest.TestCase):
     def test_normal_runs_build_only_images_and_manual_runs_keep_full_checks(self):
         cases = [(['apps/api/src/server.js'], ['api']), (['apps/dashboard/app.js'], ['dashboard']),
                  (['apps/agent/src/remote-mcp.js'], ['mcp']),
-                 (['ci/scripts/ci_scope.py'], ['dashboard', 'api', 'mcp', 'ci-runner']),
+                 (['ci/scripts/ci_scope.py'], ['dashboard', 'api', 'mcp', 'personal-gateway', 'ci-runner']),
                  (['ci/workflows/railshot-deploy.yml'], ['dashboard', 'api', 'ci-runner']),
                  (['deployment/scripts/platform_workers.py'], []),
                  (['docs/operations/release.md'], []), (['apps/api/test/product.test.js'], []),
                  (['ci/scripts/loop/test_native_packaging.py'], []), ([], []),
-                 (None, ['dashboard', 'api', 'mcp', 'ci-runner'])]
+                 (None, ['dashboard', 'api', 'mcp', 'personal-gateway', 'ci-runner'])]
         for event in ('push', 'pull_request', 'workflow_dispatch'):
             for paths, automatic_components in cases:
                 with self.subTest(event=event, paths=paths), tempfile.TemporaryDirectory() as tmp:
@@ -155,11 +155,11 @@ class ScopeTests(unittest.TestCase):
             'apps/dashboard/styles.css': {'dashboard'},
             'apps/dashboard/package.json': {'dashboard', 'api', 'mcp'},
             'apps/api/src/server.js': {'api'},
-            'apps/api/Dockerfile': {'api', 'mcp'},
+            'apps/api/Dockerfile': {'api', 'mcp', 'personal-gateway'},
             'apps/agent/src/mcp.js': {'mcp'},
             'apps/agent/test/agent.test.js': {'mcp'},
             'apps/agent/package.json': {'mcp'},
-            'apps/agent/sender.py': {'api'},
+            'apps/agent/sender.py': {'dashboard', 'api'},
             'apps/api/package.json': {'dashboard', 'api', 'mcp'},
             'package-lock.json': {'dashboard', 'api', 'mcp'},
             '.dockerignore': set(ci_scope.COMPONENTS),
@@ -168,19 +168,19 @@ class ScopeTests(unittest.TestCase):
             'ci/scripts/runner/entrypoint.sh': {'ci-runner'},
             'ci/scripts/runner/replenish.py': {'api', 'ci-runner'},
             'ci/runner-compose.yml': {'ci-runner'},
-            'deployment/manifests/platform.yaml': {'dashboard', 'api', 'mcp'},
+            'deployment/manifests/platform.yaml': {'dashboard', 'api', 'mcp', 'personal-gateway'},
             'deployment/manifests/build-runner.yaml': {'ci-runner'},
             'deployment/manifests/build-controller.yaml': set(ci_scope.COMPONENTS),
             'infrastructure/ansible/ci.yml': {'ci-runner'},
             'deployment/scripts/render-platform.py': set(ci_scope.COMPONENTS),
-            'deployment/bootstrap/install-k3s.sh': {'api'},
+            'deployment/bootstrap/install-k3s.sh': {'dashboard', 'api'},
             'deployment/bootstrap/claim_token.py': {'api'},
             'docs/architecture/README.md': set(),
             'docs/api/product.openapi.json': set(),
             'gitops/bridge.py': {'api'},
             'gitops/credentials.py': {'api'},
             'infrastructure/terraform/gcp/main.tf': {'api'},
-            'deployment/cilium/preflight.py': {'api'},
+            'deployment/cilium/preflight.py': {'dashboard', 'api'},
             '.github/workflows/platform-containers.yml': set(ci_scope.COMPONENTS),
             'ci/scripts/container-smoke.py': set(ci_scope.COMPONENTS),
             'unknown/source.py': set(ci_scope.COMPONENTS),
@@ -210,6 +210,10 @@ class ScopeTests(unittest.TestCase):
                     if relative.startswith('apps/agent/src/') or relative == 'apps/agent/package.json':
                         with self.subTest(path=relative):
                             self.assertIn('mcp', ci_scope.container_components([relative]))
+                        continue
+                    if relative in ci_scope.PERSONAL_GATEWAY_FILES and not ci_scope.api_native_dependency(relative):
+                        with self.subTest(path=relative):
+                            self.assertIn('personal-gateway', ci_scope.container_components([relative]))
                         continue
                     with self.subTest(path=relative):
                         self.assertIn('api', ci_scope.container_components([relative]))

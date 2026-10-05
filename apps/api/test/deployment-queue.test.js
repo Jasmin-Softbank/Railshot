@@ -24,7 +24,7 @@ async function until(read, predicate = (record) => !['queued', 'running'].includ
   assert.fail(`Queue did not settle: ${JSON.stringify(value)}`);
 }
 
-async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments = 16 } = {}) {
+async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-queue-'));
   const submissions = [], deliveries = [], publications = new Map(), releases = [];
   const service = { targetId: 'runtime-aws', targetIds: ['runtime-aws', 'runtime-gcp'],
@@ -297,4 +297,59 @@ test('a released unknown app does not prevent confirmed deletion of another app 
   assert.equal((await f.read(beta.id)).stage, 'cancelled');
   assert.equal(f.product.getApplication(beta.application_id, f.owner).status, 'deleted');
   assert.equal((await f.read(alpha.id)).status, 'unknown');
+});
+
+test('restart completes the original GCP deployment only when native registration never started', async t => {
+  for (const started of [false, true]) await t.test(`native request exists: ${started}`, async t => {
+    const f = await fixture(t);
+    let attempts = 0;
+    f.adapter.register = async () => { attempts++; throw new Error('Worker stopped before acquiring writer'); };
+    const first = await f.product.createDeployment(source('memos', 'gcp'), 'original-upload', undefined, f.owner);
+    const stopped = await until(() => f.read(first.id));
+    assert.equal(stopped.status, 'unknown');
+    assert.equal(stopped.stage, 'registration');
+    assert.equal(f.submissions.length, 0);
+    await f.product.close();
+    f.adapter.registrationStarted = async application => {
+      assert.equal(application.environment_target_id, 'runtime-gcp');
+      assert.equal(application.app, 'memos');
+      return started;
+    };
+    f.adapter.register = async () => { attempts++; return { status: 'ready' }; };
+    f.product = await createProductService(f.options);
+    if (started) {
+      const blocked = await f.read(first.id);
+      assert.equal(blocked.status, 'unknown');
+      assert.equal(attempts, 1); assert.equal(f.submissions.length, 0);
+    } else {
+      const completed = await until(() => f.read(first.id));
+      assert.equal(completed.status, 'succeeded');
+      assert.equal(completed.id, first.id); assert.equal(completed.application_id, first.application_id);
+      assert.equal(attempts, 2); assert.equal(f.submissions.length, 1); assert.equal(f.deliveries.length, 1);
+      assert.equal(f.submissions[0].files[0].content.toString(), 'source for memos');
+    }
+  });
+});
+
+test('operator source replay is idempotent, preserves ownership and requires a known unsent request or successful cross-provider source', async t => {
+  const { SubmissionError } = await import('../src/github.js');
+  const f = await fixture(t), deploy = f.service.deploy;
+  f.service.deploy = async () => { throw new SubmissionError('source_ref', { upstreamStatus: 422 }); };
+  const original = await f.create('terminal');
+  await until(() => f.read(original.id));
+  f.service.deploy = deploy;
+  await assert.rejects(f.product.replaySubmittedSource(original.id, 'runtime-aws', { 'app.js': 'changed' }), { code: 'INVALID_INPUT' });
+  const packaging = { Dockerfile: 'FROM python:3.13-slim' };
+  const replay = await f.product.replaySubmittedSource(original.id, 'runtime-aws', packaging);
+  assert.notEqual(replay.id, original.id);
+  assert.equal((await f.product.replaySubmittedSource(original.id, 'runtime-aws', packaging)).id, replay.id);
+  assert.equal((await until(() => f.read(replay.id))).status, 'succeeded');
+  assert.equal((await f.read(original.id)).status, 'failed');
+  await assert.rejects(f.product.getDeployment(replay.id, 'another-session'), { code: 'NOT_FOUND' });
+  const gcp = await f.product.replaySubmittedSource(replay.id, 'runtime-gcp');
+  assert.equal((await until(() => f.read(gcp.id))).status, 'succeeded');
+  assert.deepEqual(f.submissions[0].files, f.submissions[1].files);
+  assert.equal(f.submissions[0].files.find(file => file.path === 'app.js').content.toString(), 'source for terminal');
+  await assert.rejects(f.product.replaySubmittedSource(replay.id, 'runtime-aws'), { code: 'SOURCE_REPLAY_REJECTED' });
+  await assert.rejects(f.product.replaySubmittedSource(original.id, 'runtime-gcp'), { code: 'SOURCE_REPLAY_REJECTED' });
 });

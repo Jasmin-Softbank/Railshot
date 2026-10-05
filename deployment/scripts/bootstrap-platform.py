@@ -394,6 +394,35 @@ def node_ready(node):
     return actual
 
 
+def argo_reconciliation(workloads):
+    """Bound Git discovery latency; restart only the two consumers of these settings."""
+    settings = {'timeout.reconciliation': '30s', 'timeout.reconciliation.jitter': '5s'}
+    consumers = [w for w in workloads if w['metadata']['name'] in
+                 {'argocd-repo-server', 'argocd-application-controller'}]
+    require(len(consumers) == 2, 'ARGO_RECONCILIATION_CONSUMERS_MISSING')
+    config = kube_get('configmap', 'argocd-cm', 'argocd')
+    require(config is not None, 'ARGO_CONFIGURATION_MISSING')
+    if any(config.get('data', {}).get(key) != value for key, value in settings.items()):
+        kube('patch', 'configmap', 'argocd-cm', '-n', 'argocd', '--type=merge', '--patch-file=/dev/stdin', '-o', 'json',
+             document={'data': settings})
+    current = kube_get('configmap', 'argocd-cm', 'argocd')
+    require(current['metadata']['uid'] == config['metadata']['uid'] and
+            all(current.get('data', {}).get(key) == value for key, value in settings.items()), 'ARGO_RECONCILIATION_DIFFERS')
+    binding = current['metadata']['uid'] + ':' + current['metadata']['resourceVersion']
+    annotation = 'railshot.io/argocd-reconciliation-config'
+    for workload in consumers:
+        name = workload['metadata']['name']
+        current = kube_get(workload['kind'], name, 'argocd')
+        if current['spec']['template'].get('metadata', {}).get('annotations', {}).get(annotation) != binding:
+            kube('patch', workload['kind'], name, '-n', 'argocd', '--type=merge', '--patch-file=/dev/stdin', '-o', 'json',
+                 document={'spec': {'template': {'metadata': {'annotations': {annotation: binding}}}}})
+        native(['k3s', 'kubectl', '-n', 'argocd', 'rollout', 'status', workload['kind'] + '/' + name, '--timeout=180s'], timeout=190)
+        current = kube_get(workload['kind'], name, 'argocd')
+        require(current['metadata']['uid'] == workload['metadata']['uid'] and
+                current['spec']['template']['spec']['containers'] == workload['spec']['template']['spec']['containers'] and
+                current['spec']['template']['metadata']['annotations'].get(annotation) == binding, 'ARGO_IDENTITY_CHANGED')
+
+
 def argo_health_persistence(workloads):
     controllers = [w for w in workloads if w['metadata']['name'] == 'argocd-application-controller']
     require(len(controllers) == 1, 'ARGO_CONTROLLER_MISSING')
@@ -625,6 +654,7 @@ def guest(request):
             kube('patch', 'configmap', 'argocd-cm', '-n', 'argocd', '--type=merge', '--patch-file=/dev/stdin', '-o', 'json',
                  document={'data': {'resource.respectRBAC': 'strict'}})
             argo_health_persistence(workloads)
+            argo_reconciliation(workloads)
             result = {'node_uid': actual['metadata']['uid'], 'argo_workloads': len(workloads)}
         elif action == 'agent-token':
             node_ready(request['node'])

@@ -75,7 +75,7 @@ class ChecksProgressTest(unittest.TestCase):
 
     def test_loop_budget_is_optional_bounded_and_survives_check_restore(self):
         self.assertNotIn('agent_budget', progress.row(event('loop.started')))
-        for limit in (0, 1, 2, 3):
+        for limit in (0, 1, 2, 3, 4, 10, 16):
             budget = {'enabled': limit > 0, 'max_invocations': limit}
             for name in ('loop.started', 'loop.completed'):
                 with self.subTest(limit=limit, event=name):
@@ -84,7 +84,7 @@ class ChecksProgressTest(unittest.TestCase):
                     self.assertIsNone(row['sdk_invocations'])
                     row['sequence'] = 1
                     self.assertEqual(progress.restored_row(row), row)
-        for budget in (None, {}, {'enabled': True, 'max_invocations': 4},
+        for budget in (None, {}, {'enabled': True, 'max_invocations': 17},
                        {'enabled': True, 'max_invocations': 0}, {'enabled': False, 'max_invocations': 2},
                        {'enabled': 1, 'max_invocations': 1}, {'enabled': True, 'max_invocations': True},
                        {'enabled': True, 'max_invocations': 2, 'token': 'sentinel'}):
@@ -92,7 +92,7 @@ class ChecksProgressTest(unittest.TestCase):
                 progress.row(event('loop.started', agent_budget=budget))
 
     def test_real_loop_emits_declared_budget_and_confirmed_zero_without_sdk(self):
-        for repair, packaging, limit in ((0, 1, 0), (1, 0, 1), (1, 1, 2), (2, 1, 3)):
+        for repair, packaging, limit in ((0, 2, 0), (1, 0, 1), (1, 1, 2), (2, 1, 3), (1, 2, 3), (2, 2, 4)):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); upload = root / 'upload'; run = root / 'run'
                 upload.mkdir(); (upload / 'app.py').write_text('print(1)')
@@ -133,6 +133,24 @@ class ChecksProgressTest(unittest.TestCase):
         self.assertNotIn('sentinel', json.dumps(sink.calls))
         self.assertNotIn('private-thread', json.dumps(sink.calls))
         self.assertEqual(document['items'][1]['progress']['item_counts']['reasoning'], 1)
+
+    def test_transitions_publish_immediately_but_heartbeats_and_backoff_stay_bounded(self):
+        sink = FakeChecks()
+        with patch.object(progress.time, 'monotonic', return_value=0):
+            sink.emit(event('loop.started'))
+            sink.emit(event())
+            self.assertEqual(len(sink.calls), 2)
+            sink.emit(event('agent.observation'))
+            self.assertEqual(sink.calls[-1][0], 'PATCH')
+            self.assertEqual(len(sink.calls), 3)
+            gate = event_record('gate.layer.completed', component='gate', phase='L3', outcome='PASS',
+                                run_id='native-run', attempt_id='native-run:1',
+                                attributes={'completed_steps': 4, 'total_steps': 4, 'duration_s': 1})
+            sink.emit(gate)
+            self.assertEqual(len(sink.calls), 4)
+            sink.backoff_until = 120
+            sink.emit(event('agent.observation'))
+            self.assertEqual(len(sink.calls), 4)
 
     def test_nested_arbitrary_text_is_rejected_without_remote_call(self):
         sink, output = FakeChecks(), io.StringIO()

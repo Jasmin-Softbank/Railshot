@@ -1,3 +1,4 @@
+import { openInsights } from './insights.js';
 import { node, button, renderRecovery, validateQuestion, createAgentActivityCard } from './recovery.js';
 
 export const time = (value) => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('ko-KR') : '시각 미제공';
@@ -31,7 +32,7 @@ export function hasProcessingDetail(record) {
     || Boolean(record.telemetry?.items?.some(event => event.event_name?.startsWith('agent.')));
 }
 export function deploymentStages(record) {
-  const describe = (id, label, value) => ({ id, label, state: value || 'not_started' });
+  const describe = (id, label, value) => ({ id, label, state: normalizeStageState(value) });
   const failure = ['failed', 'blocked', 'unknown'].includes(record.status) ? record.status : undefined;
   const ci = record.ci?.state || (record.kind === 'builds' ? record.status : record.stage === 'ci' ? failure : undefined);
   const stages = [describe('build', '빌드', ci === 'published' ? 'succeeded' : ci),
@@ -40,9 +41,21 @@ export function deploymentStages(record) {
   if (record.kind === 'builds') return stages.slice(0, 1);
   return stages;
 }
-const stageLabel = (state) => ({ succeeded: '성공', failed: '실패', blocked: '조치 필요', running: '진행 중', progressing: '진행 중',
-  queued: '대기', unknown: '결과 확인 필요', not_started: '기록 없음', awaiting_input: '응답 대기' }[state] || '결과 확인 필요');
-const tone = (state) => state === 'succeeded' ? 'ok' : state === 'failed' ? 'fail' : ['running', 'progressing'].includes(state) ? 'run' : 'wait';
+export function normalizeStageState(value) {
+  return ({ success: 'succeeded', published: 'succeeded', deployed: 'succeeded', failure: 'failed',
+    in_progress: 'running', progressing: 'running', pending: 'queued', waiting: 'queued',
+    publication_unverified: 'failed' })[value] || value || 'not_started';
+}
+export const stageLabel = (value) => ({ succeeded: '성공', failed: '실패', blocked: '조치 필요', running: '진행 중',
+  queued: '대기', unknown: '결과 확인 필요', not_started: '기록 없음', awaiting_input: '응답 대기',
+  completed: '결과 확인 중', cancelled: '취소', timed_out: '시간 초과', skipped: '건너뜀' }[normalizeStageState(value)] || '결과 확인 필요');
+export const stageTone = (value) => {
+  const state = normalizeStageState(value);
+  return state === 'succeeded' ? 'success' : ['failed', 'cancelled', 'timed_out', 'blocked'].includes(state) ? 'failed'
+    : state === 'running' ? 'running' : 'pending';
+};
+const tone = (state) => ({ success: 'ok', failed: 'fail', running: 'run', pending: 'wait' })[stageTone(state)];
+export const progressPollMs = (record) => ['succeeded', 'failed', 'cancelled', 'published', 'unchanged', 'expired'].includes(record.status) ? 30000 : 5000;
 function imageText(record) {
   const images = record.ci?.images;
   if (!images || typeof images !== 'object') return '이미지 정보 미제공';
@@ -62,7 +75,7 @@ function logText(record, diagnostic, stage) {
 }
 
 export function createHistoryDetail({ host, request, getRecords, getApplications, serviceUrl, onLogs, onMonitor, downloads,
-  recovery = { load: null, submit: null }, preview = false, onVisibility = () => {} }) {
+  recovery = { load: null, submit: null }, preview = false, onVisibility = () => {}, onRecord = () => {}, refreshApplications = async () => {} }) {
   let generation = 0, controller, cleanup = () => {}, selectedStage = null, currentRecord = null;
   const submissions = new Map();
   const submissionKey = (value) => JSON.stringify([value.deployment_id, value.question_id || value.id, value.revision]);
@@ -80,7 +93,7 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
   const close = () => { generation++; controller?.abort(); cleanup(); host.replaceChildren(); host.hidden = true; onVisibility(false); };
   function draw(record) {
     cleanup(); host.replaceChildren(); host.hidden = false; currentRecord = record;
-    const application = getApplications().find((item) => item.id === record.application_id);
+    let application = getApplications().find((item) => item.id === record.application_id);
     const back = button('‹ 배포 내역', close, 'dh-back');
     const header = node('header', '', 'dh-head'), title = node('div', '', 'dh-title-row'), h1 = node('h2', record.app || '배포 상세');
     h1.tabIndex = -1; title.append(h1, stateBadge(record));
@@ -89,8 +102,10 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       if (value) { const chip = node('span', '', 'dh-chip'); chip.append(node('span', label), node('b', value)); metadata.append(chip); }
     }
     const heading = node('div'); heading.append(title, metadata);
-    const actions = node('div', '', 'dh-actions'); actions.append(button('모니터링', () => onMonitor(record)), button('작업 로그', () => onLogs(record)), button('새로고침', () => open(record)));
-    const url = serviceUrl(application);
+    let disposeInsights = () => {};
+    const actions = node('div', '', 'dh-actions');
+    if (record.kind !== 'builds') actions.append(button('운영 인사이트', () => { disposeInsights(); disposeInsights = openInsights(record, request); })); actions.append(button('모니터링', () => onMonitor(record)), button('작업 로그', () => onLogs(record)), button('새로고침', () => open(record)));
+    let url = serviceUrl(application);
     if (url) { const link = node('a', '서비스 접속 ↗', 'primary-button'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; actions.append(link); }
     header.append(heading, actions); host.append(back, header);
     const viewport = node('div', '', 'dh-detail-viewport'); viewport.dataset.pane = 'history';
@@ -99,7 +114,14 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
     issuePane.inert = true; issuePane.setAttribute('aria-hidden', 'true');
     viewport.append(overview, issuePane); host.append(viewport);
     let issueSequence = 0, issueController, disposePipeline = () => {}, originButton = null, issueRecordId = null;
+    const freshness = node('p', '', 'dh-note'); header.append(freshness);
     const epoch = generation;
+    let recordTimer, recordStopped = false, recordBusy = false, applicationBusy = false;
+    let lastRead = Date.now();
+    let recordController;
+    const rowBindings = [];
+    let patchPipeline = () => {};
+    let serviceCell;
     function switchPane(show, event) {
       viewport.classList.toggle('dh-instant', event?.detail === 0);
       viewport.dataset.pane = show ? 'issue' : 'history';
@@ -130,17 +152,20 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
         for (const warning of warnings) content.append(node('p', warning, 'dh-note'));
         if (!hasProcessingDetail(selected)) { content.append(node('p', '이 배포에는 현재 확인된 오류가 없습니다. 배포내역을 새로고침해 주세요.', 'dh-note')); return; }
         const pipeline = renderPipeline(selected, evidence, followup, () => showIssue(selected));
-        disposePipeline = pipeline.dispose; content.append(pipeline.layout);
+        disposePipeline = pipeline.dispose; patchPipeline = pipeline.update; content.append(pipeline.layout);
       } catch (error) {
         if (sequence !== issueSequence || generation !== epoch) return;
         content.replaceChildren(node('p', `오류 상세 조회 실패: ${error.message}`, 'dh-error'), button('다시 시도', () => showIssue(item)));
       }
     }
-    cleanup = () => { issueSequence++; issueController?.abort(); disposePipeline(); };
+    cleanup = () => { recordStopped = true; clearTimeout(recordTimer); recordController?.abort();
+      document.removeEventListener('visibilitychange', resumeRecord);
+      disposeInsights(); issueSequence++; issueController?.abort(); disposePipeline(); };
     const connections = node('section', '', 'dh-panel'); connections.append(node('h3', '접속정보'));
     const grid = node('div', '', 'dh-connections');
     for (const [label, value] of [['서비스 주소', url || '현재 검증된 서비스 주소가 없습니다.'], ['모니터링', '환경 모니터링에서 확인'], ['배포환경', record.environment_target_id || record.target_id || '미제공']]) {
       const cell = node('div'); cell.append(node('span', label, 'dh-label'));
+      if (label === '서비스 주소') serviceCell = cell;
       if (label === '모니터링') cell.append(button(value, () => onMonitor(record), 'text-button'));
       else if (label === '서비스 주소' && url) { const link = node('a', value); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; cell.append(link); }
       else cell.append(node('strong', value)); grid.append(cell);
@@ -168,25 +193,74 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
         trigger.append(arrow); status.append(trigger);
         row.addEventListener('click', (event) => showIssue(item, event));
       } else status.append(stateBadge(item));
-      row.append(date, image, status); body.append(row);
+      row.append(date, image, status); body.append(row); rowBindings.push({ item, row, image, status });
     }
     table.append(head, body); tableWrap.append(table); historyPanel.append(tableWrap, node('p', '현재 불러온 페이지의 같은 앱·배포환경 기록입니다. 다른 기록은 목록의 이전·다음 페이지에서 확인하세요.', 'dh-table-note'));
     overview.append(connections, historyPanel);
+    function patchRecord(next, error = false) {
+      Object.assign(record, next); currentRecord = record;
+      application = getApplications().find((item) => item.id === record.application_id);
+      url = serviceUrl(application);
+      title.querySelector('.dh-status')?.replaceWith(stateBadge(record));
+      freshness.textContent = `${error ? '상태 갱신 지연 · 마지막 확인' : '상태 확인'} ${time(lastRead)}`;
+      if (record.ci?.observation?.last_success_at) freshness.textContent += ` · CI 원본 확인 ${time(record.ci.observation.last_success_at)}`;
+      if (record.ci?.observation?.error) freshness.textContent += ' · 원본 조회 지연';
+      let link = actions.querySelector('a.primary-button');
+      if (url && !link) { link = node('a', '서비스 접속 ↗', 'primary-button'); link.target = '_blank'; link.rel = 'noopener noreferrer'; actions.append(link); }
+      if (link) { link.hidden = !url; if (url) link.href = url; }
+      if (serviceCell) {
+        const value = url ? node('a', url) : node('strong', '현재 검증된 서비스 주소가 없습니다.');
+        if (url) { value.href = url; value.target = '_blank'; value.rel = 'noopener noreferrer'; }
+        serviceCell.lastElementChild.replaceWith(value);
+      }
+      for (const entry of rowBindings) {
+        if (entry.item.id !== record.id) continue;
+        Object.assign(entry.item, record);
+        entry.status.querySelector('.dh-status')?.replaceWith(stateBadge(record));
+        entry.image.querySelector('code').textContent = imageText(record);
+      }
+      patchPipeline(record);
+    }
+    async function pollRecord() {
+      if (recordStopped || recordBusy || document.hidden) return;
+      clearTimeout(recordTimer); recordBusy = true; recordController = new AbortController();
+      try {
+        const next = await readRecord(record, recordController);
+        if (recordStopped || generation !== epoch) return;
+        lastRead = Date.now(); patchRecord(next); onRecord(record);
+        if (record.status === 'succeeded' && !applicationBusy && (!url || application?.latest_deployment?.status !== 'succeeded')) {
+          applicationBusy = true;
+          Promise.resolve(refreshApplications()).then(() => {
+            if (!recordStopped && generation === epoch) patchRecord(record);
+          }).catch(() => {}).finally(() => { applicationBusy = false; });
+        }
+      } catch {
+        if (!recordStopped && generation === epoch) patchRecord(record, true);
+      } finally {
+        recordBusy = false;
+        if (!recordStopped) recordTimer = setTimeout(pollRecord, record.status === 'succeeded' && !url ? 5000 : progressPollMs(record));
+      }
+    }
+    function resumeRecord() { if (!document.hidden) pollRecord(); }
+    document.addEventListener('visibilitychange', resumeRecord);
+    patchRecord(record);
+    recordTimer = setTimeout(pollRecord, 5000);
     h1.focus();
   }
   function renderPipeline(record, diagnostic, question, refresh) {
-    const stages = deploymentStages(record);
+    let stages = deploymentStages(record);
     if (!stages.some((stage) => stage.id === selectedStage)) selectedStage = null;
     selectedStage ||= (record.agent_activity ? 'build' : null) || stages.find((stage) => ['failed', 'blocked', 'unknown'].includes(stage.state))?.id || (question ? 'deploy' : stages.at(-1).id);
     const logLayout = node('div', '', 'dh-log-layout'), stepList = node('div', '', 'dh-steps'), detail = node('section', '', 'dh-stage-detail');
     stepList.setAttribute('role', 'group'); stepList.setAttribute('aria-label', '배포 단계');
     let disposeForm = () => {}, activity = record.agent_activity || null, card = null, stopped = false, timer, polling = false;
-    const activityController = new AbortController();
+    let activityController;
     let activityRevision = activity?.revision ?? -1, activityId = activity?.id, runAttempt = record.agent_run_attempt || 0;
     const terminal = () => record.agent_events_complete === true;
     async function poll() {
       if (stopped || polling) return;
       polling = true;
+      activityController = new AbortController();
       try {
         if (document.hidden) return;
         const { data } = await request(`/api/v1/deployments/${encodeURIComponent(record.id)}/events`, {}, activityController);
@@ -246,21 +320,37 @@ export function createHistoryDetail({ host, request, getRecords, getApplications
       if (focus) heading.focus({ preventScroll: true });
     }
     for (const stage of stages) {
-      const step = button('', () => select(stage, true), 'dh-step'); step.dataset.stage = stage.id;
+      const step = button('', () => select(stages.find(value => value.id === stage.id), true), 'dh-step'); step.dataset.stage = stage.id;
       const icon = node('span', stage.state === 'succeeded' ? '✓' : stage.state === 'failed' ? '×' : '·', `dh-dot ${tone(stage.state)}`);
       icon.setAttribute('aria-hidden', 'true'); const label = node('span'); label.append(node('strong', stage.label), node('small', stageLabel(stage.state))); step.append(icon, label); stepList.append(step);
     }
     select(stages.find((stage) => stage.id === selectedStage) || stages[0]);
     if (record.kind !== 'builds' && !terminal()) timer = setTimeout(poll, record.agent_poll_ms || 5000);
-    logLayout.append(stepList, detail); return { layout: logLayout, dispose: () => {
-      stopped = true; clearTimeout(timer); activityController.abort(); disposeForm();
+    logLayout.append(stepList, detail); return { layout: logLayout, update(next) {
+      if (next.id !== record.id || stopped) return;
+      Object.assign(record, next); stages = deploymentStages(record);
+      for (const stage of stages) {
+        const step = stepList.querySelector(`button[data-stage="${stage.id}"]`);
+        if (!step) continue;
+        step.querySelector('small').textContent = stageLabel(stage.state);
+        const icon = step.querySelector('.dh-dot'); icon.className = `dh-dot ${tone(stage.state)}`;
+        icon.textContent = stage.state === 'succeeded' ? '✓' : stage.state === 'failed' ? '×' : '·';
+        if (stage.id === selectedStage) {
+          detail.querySelector('h3').textContent = `${stage.label} · ${stageLabel(stage.state)}`;
+          if (!question) detail.querySelector('pre.dh-code').textContent = logText(record, diagnostic, stage.id);
+        }
+      }
+    }, dispose: () => {
+      stopped = true; clearTimeout(timer); activityController?.abort(); disposeForm();
     } };
   }
 
   async function readRecord(record, activeController) {
     const build = record.kind === 'builds';
     const { data } = await request(`/api/v1/${build ? 'builds' : 'deployments'}/${encodeURIComponent(record.id)}${build ? '' : '?view=record'}`, {}, activeController);
-    if (data?.id !== record.id || typeof data.app !== 'string') throw new Error('요청한 배포와 상세 정보가 일치하지 않습니다.');
+    if (data?.id !== record.id || typeof data.app !== 'string' || data.app !== record.app
+        || (record.target_id && data.target_id !== record.target_id)
+        || (record.source_commit && data.source_commit !== record.source_commit)) throw new Error('요청한 배포와 상세 정보가 일치하지 않습니다.');
     return { ...data, kind: record.kind || 'deployments' };
   }
   async function readDetail(record, activeController) {

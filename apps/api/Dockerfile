@@ -55,11 +55,28 @@ RUN cd /app/gitops && python3 -c 'import credentials' \
 USER 1000:1000
 ENTRYPOINT ["python3", "/app/gitops/credentials.py"]
 
+# Root-only WireGuard sidecar. The general API remains a separate non-root
+# container and can reach this image only through the Pod-local Unix socket.
+FROM ${PYTHON_IMAGE} AS personal-gateway
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates wireguard-tools iproute2 iptables \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/railshot
+COPY deployment/scripts/personal_wireguard.py deployment/scripts/personal_gateway_service.py deployment/scripts/
+COPY --chmod=0555 deployment/manifests/personal/gateway-service-entrypoint.sh /usr/local/bin/railshot-personal-gateway-service
+RUN python3 deployment/scripts/personal_wireguard.py --help >/dev/null \
+    && python3 deployment/scripts/personal_gateway_service.py --help >/dev/null
+ENV PYTHONDONTWRITEBYTECODE=1
+EXPOSE 51820/udp
+ENTRYPOINT ["/usr/local/bin/railshot-personal-gateway-service"]
+
 FROM base AS api
 USER root
 ENV PATH=/opt/railshot-python/bin:${PATH}
 COPY apps/api/runtime-install.sh apps/api/runtime-smoke.py apps/api/runtime-tools.json ./
 COPY apps/api/prepare-state.js ./
+COPY deployment/manifests/personal/production-compose-prepare.py /app/deployment/manifests/personal/production-compose-prepare.py
 COPY ci/requirements-dev.txt ci/requirements-test.txt /app/ci/
 COPY gitops/bridge.py gitops/argo.py gitops/handoff.py /app/gitops/
 COPY gitops/edge.py gitops/service_name.py /app/gitops/
@@ -92,6 +109,7 @@ COPY deployment/scripts/applications.py deployment/scripts/application_release.p
 COPY deployment/scripts/application_lifecycle.py deployment/scripts/lifecycle_runtime.py /app/deployment/scripts/
 COPY deployment/scripts/openstack_route_worker.py deployment/scripts/personal_wireguard.py /app/deployment/scripts/
 COPY deployment/scripts/personal_runtime.py /app/deployment/scripts/
+COPY deployment/scripts/personal-production-preflight.py /app/deployment/scripts/
 COPY deployment/cloudflared/register.py deployment/cloudflared/render.py /app/deployment/cloudflared/
 COPY deployment/bootstrap/preflight.sh deployment/bootstrap/install-k3s.sh deployment/bootstrap/health.sh deployment/bootstrap/runtime-healthz.py /app/deployment/bootstrap/
 COPY deployment/cilium/install.sh deployment/cilium/preflight.py deployment/cilium/health.sh /app/deployment/cilium/

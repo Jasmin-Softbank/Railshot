@@ -85,7 +85,7 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
   const mcp = createMcpHandler(({ authInfo }) => {
     const bound = tokens.get(authInfo?.token);
     if (!bound || bound.expires <= now()) throw new Error('AI 연결이 만료되었습니다.');
-    return createToolServer(createApiClient({ baseUrl: apiUrl, env, fetchImpl, session: bound.session }));
+    return createToolServer(createApiClient({ baseUrl: apiUrl, env, fetchImpl, session: bound.session }), { publicOrigin: origin.origin });
   }, { legacy: 'stateless' });
 
   async function ensureSession(request) {
@@ -184,10 +184,10 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
         if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier)) { json(response, 400, { error: 'invalid_grant' }); return; }
         const digest = createHash('sha256').update(verifier).digest('base64url');
         if (!timingSafeEqual(Buffer.from(digest), Buffer.from(entry.challenge))) { json(response, 400, { error: 'invalid_grant' }); return; }
-        const accessToken = randomToken(), expires = Math.min(entry.sessionExpires, now() + 86400000);
+        const accessToken = randomToken(), expires = Infinity;
         if (tokens.size >= 10000) { json(response, 429, { error: 'temporarily_unavailable' }); return; }
         tokens.set(accessToken, { session: entry.session, clientId: entry.clientId, resource: entry.resource, expires });
-        json(response, 200, { access_token: accessToken, token_type: 'Bearer', expires_in: Math.max(1, Math.floor((expires - now()) / 1000)) }); return;
+        json(response, 200, { access_token: accessToken, token_type: 'Bearer' }); return;
       }
       if (url.pathname === '/mcp') {
         const match = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.authorization || '');

@@ -15,7 +15,7 @@ The classifier (deterministic) assigns one class to the first failing gate step 
 | F9 | Infra plan error or policy | `terraform validate/plan` error, destroy or replace in plan, cost policy deny | fixer for spec errors; destroy/replace always stops for confirmation | up to N |
 | INJ | Suspected prompt injection | agent reports INJECTION_SUSPECTED, or deny-listed phrases in logs sent to the agent | Stop, flag for review | 0 |
 
-Loop stops on: gate pass, `give_up`, class F8/INJ (also F7 in packaging scope), environmental/unknown outcomes, the same normalized signature twice, or attempt N (CLI/model-free baseline N=0; workflow fallback N=2; configured maximum 3).
+Loop stops on: gate pass, `give_up`, class F8/INJ (also F7 in packaging scope), environmental/unknown outcomes, the same normalized signature twice, or the role's attempt limit (default: at most two packaging calls and two repair calls; repair limit 0 disables all SDK calls).
 
 Q is advisory when explicitly enabled. Missing tests/checkers or completed
 lint/type/unit failures do not request source/test changes. Environment,

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { join, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lstat } from 'node:fs/promises';
+import { lstat, readdir } from 'node:fs/promises';
 import { APP_NAME, TARGET_ID, TENANT_NAME } from './contract.js';
 import { EnvironmentError, privateJson, privateDirectory, savePrivate, runEnvironmentCommand } from './environments.js';
 import { createCdAdapter } from './cd.js';
@@ -54,7 +54,7 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
     if (!lifecycleId.test(payload.operation_id || '') || !lifecycleActions.includes(payload.action)) throw fail('APPLICATION_INPUT_INVALID', 422);
     const run = join(home, 'lifecycle', payload.operation_id);
     await privateDirectory(run);
-    const request = join(run, payload.phase + '-request.json');
+    const request = join(run, payload.phase + (['reconcile', 'resume'].includes(payload.phase) ? '-' + randomUUID() : '') + '-request.json');
     // An uncertain executor invocation is never repeated, even with identical bytes.
     try { await lstat(request); throw fail('APPLICATION_OPERATION_RECONCILE_REQUIRED', 409, mutation); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -103,6 +103,27 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       private: { configuration_sha256: fingerprint, native_plan_id: nativeId } };
     },
     verifyLifecyclePlan,
+    async reconcileLifecycle(application, plan, { id }) {
+      await current(application);
+      if (plan.private?.configuration_sha256 !== fingerprint || plan.public?.application_id !== application.id
+          || plan.public.action !== 'delete' || plan.private.deferred) throw fail('APPLICATION_PLAN_STALE');
+      const result = await lifecycleRequest(application, { phase: 'reconcile', action: 'delete', operation_id: id,
+        plan_id: plan.private.native_plan_id || plan.public.id, plan_hash: plan.public.plan_hash, delete_data: true }, false);
+      if (result.application_id !== application.id || result.action !== 'delete'
+          || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502);
+      return { status: result.status, resumable: result.resumable === true, resume_mode: result.resume_mode,
+        steps: lifecycleSteps(result.steps), residuals: lifecycleResources(result.residuals) };
+    },
+    async resumeLifecycle(application, plan, { id, deleteData }) {
+      await current(application);
+      if (deleteData !== true || plan.private?.configuration_sha256 !== fingerprint || plan.public?.application_id !== application.id
+          || plan.public.action !== 'delete' || plan.private.deferred) throw fail('APPLICATION_PLAN_STALE');
+      const result = await lifecycleRequest(application, { phase: 'resume', action: 'delete', operation_id: id,
+        plan_id: plan.private.native_plan_id || plan.public.id, plan_hash: plan.public.plan_hash, delete_data: true }, true);
+      if (result.application_id !== application.id || result.action !== 'delete'
+          || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502, true);
+      return { status: result.status, steps: lifecycleSteps(result.steps), residuals: lifecycleResources(result.residuals) };
+    },
     async applyLifecycle(application, plan, { id, deleteData }) {
       await verifyLifecyclePlan(application, plan);
       if (plan.private.deferred) throw fail('APPLICATION_PLAN_STALE');
@@ -115,6 +136,15 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
           || !['succeeded', 'blocked', 'unknown'].includes(result.status)) throw fail('APPLICATION_LIFECYCLE_RECEIPT_INVALID', 502, true);
       return { status: result.status, application_id: application.id, action,
         steps: lifecycleSteps(result.steps), residuals: lifecycleResources(result.residuals) };
+    },
+    async registrationStarted(application) {
+      const home = await current(application);
+      try { await lstat(home); }
+      catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+      await privateDirectory(home);
+      // register persists request.json before invoking any native command. Any
+      // file, including an interrupted temporary write, keeps recovery fenced.
+      return (await readdir(home)).length !== 0;
     },
     async register(application) {
       const home = await current(application);
@@ -158,8 +188,17 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
         throw fail('APPLICATION_PUBLICATION_MISMATCH');
       const configPath = join(home, 'deployments', args.deploymentId, 'cd.json');
       // Recovery reads an existing CD journal; it never runs route finalization or apply.
-      try { await privateJson(configPath); }
-      catch (error) { if (error.code === 'ENOENT') throw fail('CD_RECORD_MISSING', 409, true); throw error; }
+      // privateJson intentionally normalizes read errors, so distinguish an absent
+      // journal before validating it. The product layer decides whether an
+      // interrupted publication can resume; malformed/unsafe files still fail closed.
+      try { await lstat(configPath); }
+      catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+        return { cd: { state: 'blocked', deployed: false, revision: null },
+          public_http: { state: 'not_run', url: null, verified_at: null },
+          error: { code: 'DEPLOYMENT_NOT_FOUND' } };
+      }
+      await privateJson(configPath);
       return createCdAdapter({ configPath, loadPublished, python })({ ...args, observeOnly: true });
     },
     async observeLogs(application, record) {

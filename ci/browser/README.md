@@ -22,3 +22,5 @@ CHROME_EXECUTABLE='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 ```
 
 Set `RAILSHOT_BROWSER_SCREENSHOT` to an absolute PNG path to keep the successful dashboard render. The Playwright version is locked in this package. These tests establish local browser and HTTP behavior. Container proxy checks, native executor tools, CI image publication, Argo sync and public cloud HTTP are verified separately.
+
+Deployment progress regression coverage keeps the detail pane open through a running-to-success transition, verifies the service URL and shared stage labels, and preserves the selected pane. It also exercises recovery after a timed-out read, stale replies after changing deployments, and delayed metrics responses that must not block or overwrite durable completion. Active deployment records refresh every five seconds; terminal records back off to thirty seconds. These timings begin after a record response, not at the original CI event.

@@ -1,4 +1,5 @@
-import { createHistoryDetail, filterHistory } from './src/deployment-history.js';
+import { openInsights } from './src/insights.js';
+import { createHistoryDetail, filterHistory, stageLabel, stageTone, progressPollMs } from './src/deployment-history.js';
 import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from '../../contracts/application.mjs';
 import { request, requests } from './src/api.js';
 import { applicationLabel, createLifecycleController } from './src/lifecycle.js';
@@ -29,7 +30,7 @@ function showView(name) {
   if (sessionReady && ['monitor', 'deploy'].includes(name)) loadEnvironments();
   else stopEnvironmentPolling();
   if (sessionReady && name === 'personal') { loadOwnerInfo(); loadOwnedTargets(); }
-  else stopOwnedTargetPolling();
+  else { stopOwnedTargetPolling(); stopRuntimeReconciliationPolling(); }
   if (sessionReady && name === 'monitor' && consoleTab === 'app') refreshLogs();
   if (sessionReady && name === 'monitor' && consoleTab === 'work') refreshEvents();
 }
@@ -85,6 +86,7 @@ let deploymentProject = null;
 let ownedTargets = [], ownedTargetError = null, ownedTargetController, ownedTargetTimer, selectedOwnedTarget = null;
 let selectedOwnedDetail = null, ownedObservation = null, ownedApplications = [], enrollmentTargetId = null, environmentDeleteDraft = null;
 let environmentDeleteOperation = null, environmentDeletePlanController = null, environmentDeleteReconciliationTimer;
+let runtimeReconciliationTimer, runtimeReconciliationBusy = false;
 let enrollmentRequestGeneration = 0, ownedTargetSelectionGeneration = 0;
 let environmentRegistrationTargetId = null;
 let ownerRecoveryConfigured = false, ownerInfoGeneration = 0;
@@ -94,6 +96,7 @@ let preferences = { view: 'deploy', environment: 'cloud', provider: '' };
 try { localStorage.removeItem('railshot.lastExecution'); } catch { /* Storage may be disabled. */ }
 let timer;
 let pollController;
+let runDetailsController, runDetailsId, runDetailsReadAt = 0;
 let lastReadAt = null;
 let observationError = false;
 let ciSnapshot = null, ciReadError = false;
@@ -205,7 +208,8 @@ function selectedOption() {
   return deploymentOptions.find((item) => item.environment === selected.environment && item.provider === selected.provider);
 }
 function selectedProfiles() {
-  return profiles.filter((item) => item.provider === deploymentSelection().provider && item.deployment_supported);
+  const selected = deploymentSelection();
+  return selected.environment === 'cloud' ? profiles.filter((item) => item.provider === selected.provider && item.deployment_supported) : [];
 }
 function selectedProfile() { const matches = selectedProfiles(); return matches.length === 1 ? matches[0] : null; }
 function planCost(plan) {
@@ -546,7 +550,6 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
   else if (selected.environment === 'onprem' && !selected.targetId) error.textContent = '배포할 등록 OpenStack 환경을 선택하세요.';
   else if (selected.environment === 'onprem' && (ownedTargetError || option?.status !== 'ready' || option?.deployable !== true)) error.textContent = document.querySelector('#connection-status').textContent;
   else if (selected.environment === 'cloud' && (connectionError || selectedProfiles().length > 1 || (profile ? !profile.supported : !option?.available))) error.textContent = connectionError || (profile || selectedProfiles().length > 1 ? document.querySelector('#connection-status').textContent : option?.message) || '실행 가능한 인프라가 아직 연결되지 않았습니다.';
-  else if (activeRun()) error.textContent = '진행 중인 실행을 먼저 확인하세요.';
   else {
     invalidateReview();
     const generation = reviewGeneration, source = selectedSource;
@@ -558,7 +561,9 @@ document.querySelector('#deploy-form').addEventListener('submit', async (event) 
       app = applicationName.value.trim() || sourceApplication(source);
       if (!APP_NAME.test(app)) throw new Error(APP_NAME_MESSAGE);
       if (!profile) {
-        const { data } = await request(`/api/v1/applications/resolve?${new URLSearchParams({ ...selected, app })}`);
+        const query = new URLSearchParams({ environment: selected.environment, provider: selected.provider, app });
+        if (selected.targetId) query.set('target_id', selected.targetId);
+        const { data } = await request(`/api/v1/applications/resolve?${query}`);
         if (generation !== reviewGeneration) return;
         if (data.app !== app || !resourceId(data.environment_target_id) || !Object.hasOwn(data, 'application'))
           throw new Error('기존 앱 조회 결과가 선택 내용과 일치하지 않습니다.');
@@ -635,24 +640,16 @@ function taskList(tasks = []) {
   for (const task of tasks) list.append(element('li', `${task.number}. ${task.name}: ${task.conclusion || task.status}`));
   return list;
 }
-const stageStatus = { queued: '대기', pending: '대기', waiting: '대기', in_progress: '진행 중', running: '진행 중',
-  completed: '결과 확인 중', success: '성공', succeeded: '성공', failure: '실패', failed: '실패',
-  cancelled: '취소', timed_out: '시간 초과', skipped: '건너뜀', blocked: '차단', unknown: '결과 확인 필요' };
-function stageResult(value) { return stageStatus[value] || (value ? '결과 확인 필요' : '대기'); }
-function stageTone(value) {
-  if (['success', 'succeeded', 'published'].includes(value)) return 'success';
-  if (['failure', 'failed', 'cancelled', 'timed_out', 'blocked', 'publication_unverified'].includes(value)) return 'failed';
-  if (['in_progress', 'running'].includes(value)) return 'running';
-  return 'pending';
-}
+const stageResult = (value) => value ? stageLabel(value) : '대기';
 function renderMonitorSteps() {
   const runId = current.ci?.run_id || (current.kind === 'builds' ? current.id : null);
   const direct = current.kind === 'builds' ? current
     : ciSnapshot?.deployment_id === current.id && String(ciSnapshot.run_id) === String(runId) ? ciSnapshot : null;
-  const steps = direct?.steps || current.ci?.steps || [];
+  const recordedFinal = ['published', 'failed', 'cancelled', 'publication_unverified'].includes(current.ci?.state);
+  const steps = recordedFinal && current.ci?.steps?.length ? current.ci.steps : direct?.steps || current.ci?.steps || [];
   const loop = steps.find((step) => step.key === 'loop');
   const release = steps.find((step) => step.key === 'release');
-  const ciState = direct?.status || current.ci?.state;
+  const ciState = recordedFinal ? current.ci.state : direct?.status || current.ci?.state;
   const checkedAt = current.kind === 'builds' ? lastReadAt : direct?.read_at;
   document.querySelector('#monitor-ci-status').textContent = runId
     ? `GitHub Actions #${runId} · ${ciReadError || observationError ? '조회 실패, 마지막 기록 표시' : checkedAt ? `확인 ${new Date(checkedAt).toLocaleTimeString('ko-KR')}` : '서버 기록 표시'}`
@@ -697,7 +694,7 @@ function renderRun() {
   document.querySelector('#run-meta').textContent = `${current.app || '앱'} · ${current.id} · ${current.target_id || ''}`;
   document.querySelector('#run-state').textContent = label;
   document.querySelector('#run-message').textContent = current.error?.message || current.message || (activeRun()
-    ? '15초마다 상태를 확인합니다. 페이지를 닫아도 서버의 실행은 계속됩니다.'
+    ? '5초마다 상태를 확인합니다. 페이지를 닫아도 서버의 실행은 계속됩니다.'
     : current.status === 'published' ? '검증된 이미지가 게시됐습니다. 앱 배포 완료와는 별개입니다.'
     : current.status === 'unknown' ? '결과를 확인하기 전에는 같은 작업을 새로 실행하지 않습니다.' : '서버가 확인한 최종 실행 결과입니다.');
   if (current.status === 'queued' && current.queue?.enqueued_at)
@@ -847,50 +844,76 @@ function stopPolling() {
   document.querySelector('#stop-polling').hidden = true;
   document.querySelector('#refresh-run').hidden = !current;
 }
+async function refreshRunDetails(record) {
+  const identity = JSON.stringify([record.kind, record.id, record.ci?.run_id, record.source_commit, !views.monitor.hidden]);
+  if (runDetailsId === identity && (runDetailsController || Date.now() - runDetailsReadAt < 15000)) return;
+  runDetailsController?.abort();
+  const controller = new AbortController(); runDetailsController = controller; runDetailsId = identity;
+  const matches = () => runDetailsController === controller && current?.id === record.id
+    && current?.kind === record.kind && current?.source_commit === record.source_commit
+    && String(current?.ci?.run_id || '') === String(record.ci?.run_id || '');
+  try {
+    await Promise.allSettled([
+      (async () => {
+        if (record.kind !== 'deployments') return;
+        const { data } = await request(`/api/v1/deployments/${encodeURIComponent(record.id)}`, {}, controller);
+        if (!matches() || data.id !== record.id || data.target_id !== record.target_id) return;
+        // Full reads supply metrics only; their older status cannot overwrite the fast record.
+        current.observation = data.observation; renderMetrics();
+      })(),
+      (async () => {
+        if (!record.ci?.run_id || views.monitor.hidden) return;
+        const runId = String(record.ci.run_id);
+        try {
+          const { data: ci } = await request(`/api/v1/builds/${encodeURIComponent(runId)}`, {}, controller);
+          if (!matches()) return;
+          if (ci.id !== runId || ci.app !== record.app || ci.target_id !== record.target_id
+              || (ci.source_commit ?? null) !== (record.source_commit ?? null) || !Array.isArray(ci.steps)) throw new Error('CI 실행 대상 불일치');
+          ciSnapshot = { ...ci, deployment_id: record.id, run_id: runId, read_at: Date.now() }; ciReadError = false;
+          for (const selector of ['#actions-link', '#monitor-actions-link']) safeLink(selector, ci.actions_url, true, true);
+        } catch { if (matches()) ciReadError = true; }
+        if (matches()) renderMonitorSteps();
+      })(),
+    ]);
+  } finally {
+    if (runDetailsController === controller) { runDetailsController = null; runDetailsReadAt = Date.now(); }
+  }
+}
 async function refreshRun() {
   stopPolling();
   if (!current) return;
   const controller = new AbortController(); pollController = controller;
+  const id = current.id, kind = current.kind;
   document.querySelector('#stop-polling').hidden = false;
   document.querySelector('#refresh-run').hidden = true;
   try {
-    const { data } = await request(`/api/v1/${current.kind}/${encodeURIComponent(current.id)}`, {}, controller);
-    if (pollController !== controller) return;
-    if (data.id !== current.id || (current.target_id && data.target_id !== current.target_id)) throw new Error('실행 또는 대상이 요청과 일치하지 않습니다.');
+    const { data } = await request(`/api/v1/${kind}/${encodeURIComponent(id)}${kind === 'deployments' ? '?view=record' : ''}`, {}, controller);
+    if (pollController !== controller || current?.id !== id || current.kind !== kind) return;
+    if (data.id !== id || (current.target_id && data.target_id !== current.target_id)) throw new Error('실행 또는 대상이 요청과 일치하지 않습니다.');
+    const previousStatus = current.status;
     current = { ...current, ...data }; lastReadAt = Date.now(); observationError = false; remember();
-    if (current.kind === 'deployments' && current.status === 'succeeded' && !applicationsController) await loadApplications();
-    if (pollController !== controller) return;
-    renderRun();
-    if (current.kind === 'deployments' && current.ci?.run_id && !views.monitor.hidden) {
-      const id = current.id, runId = String(current.ci.run_id);
-      try {
-        const { data: ci } = await request(`/api/v1/builds/${encodeURIComponent(runId)}`, {}, controller);
-        if (pollController !== controller || current.id !== id) return;
-        if (ci.id !== runId || ci.app !== current.app || ci.target_id !== current.target_id
-            || (ci.source_commit ?? null) !== (current.source_commit ?? null) || !Array.isArray(ci.steps)) throw new Error('CI 실행 대상 불일치');
-        ciSnapshot = { ...ci, deployment_id: id, run_id: runId, read_at: Date.now() };
-        ciReadError = false;
-        for (const selector of ['#actions-link', '#monitor-actions-link']) safeLink(selector, ci.actions_url, true, true);
-      } catch {
-        if (pollController !== controller || current.id !== id) return;
-        ciReadError = true;
-      }
-      renderMonitorSteps();
-    }
+    history = history.map((row) => row.id === id && row.kind === kind ? { ...row, ...data } : row);
+    renderRun(); renderHistory();
+    if (kind === 'deployments' && current.status === 'succeeded' && !applicationsController
+        && (previousStatus !== 'succeeded' || applications.find((app) => app.id === current.application_id)?.current_deployment?.id !== id)) loadApplications();
+    refreshRunDetails({ ...current });
     if (consoleTab === 'app' && !views.monitor.hidden) refreshLogs();
     if (consoleTab === 'work' && !views.monitor.hidden) refreshEvents();
-    if (!terminal.has(current.status) || current.kind === 'deployments') timer = setTimeout(refreshRun, 15000);
+    if (!terminal.has(current.status) || kind === 'deployments') timer = setTimeout(refreshRun, progressPollMs(current));
     else stopPolling();
   } catch (cause) {
     if (pollController !== controller) return;
     stopPolling(); observationError = true;
-    timer = setTimeout(refreshRun, 15000); renderRun();
+    timer = setTimeout(refreshRun, 5000); renderRun();
     document.querySelector('#stop-polling').hidden = false;
-    document.querySelector('#run-message').textContent = `${cause.name === 'AbortError' ? '상태 조회 시간이 초과되었습니다.' : cause.message} 15초 후 다시 조회합니다.`;
+    document.querySelector('#run-message').textContent = `${cause.name === 'AbortError' ? '상태 조회 시간이 초과되었습니다.' : cause.message} 5초 후 다시 조회합니다.`;
   }
 }
-document.querySelector('#stop-polling').addEventListener('click', () => { stopPolling(); renderMetrics(); document.querySelector('#run-message').textContent = '상태 조회를 중지했습니다. 서버의 실행은 계속됩니다.'; });
-document.querySelector('#refresh-run').addEventListener('click', refreshRun);
+document.querySelector('#stop-polling').addEventListener('click', () => { stopPolling(); runDetailsController?.abort(); runDetailsController = null; renderMetrics(); document.querySelector('#run-message').textContent = '상태 조회를 중지했습니다. 서버의 실행은 계속됩니다.'; });
+document.querySelector('#refresh-run').addEventListener('click', () => { runDetailsReadAt = 0; refreshRun(); });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && current && (timer || pollController)) { runDetailsReadAt = 0; refreshRun(); }
+});
 document.querySelector('#resume-run').addEventListener('click', async () => {
   if (resuming || document.querySelector('#resume-run').disabled || document.querySelector('#resume-run').hidden) return;
   const id = current.id;
@@ -964,7 +987,7 @@ async function refreshEvents() {
 function agentEvents() {
   const events = eventsMatch(eventSnapshot) ? eventSnapshot : null;
   const age = events?.updated_at ? Date.now() - Date.parse(events.updated_at) : NaN;
-  const stale = events?.stale || events?.state === 'live' && (!Number.isFinite(age) || age > 90000);
+  const stale = events?.stale || events?.state === 'live' && (!Number.isFinite(age) || age > (events?.progress?.stale_after_seconds || 60) * 1000);
   const messages = { loading: 'CI 진행 이벤트를 조회하고 있습니다.', live: 'CI 단계 관측 중',
     complete: 'CI 관측이 종료되었습니다. 앱 적용과 외부 응답은 별도 기록에서 확인하세요.',
     not_started: '아직 CI 진행 이벤트가 기록되지 않았습니다.', no_data: '이 실행에 기록된 CI 진행 이벤트가 없습니다.',
@@ -1343,6 +1366,11 @@ async function loadHistory(markers = historyMarkers) {
 const historyDetail = createHistoryDetail({ host: document.querySelector('#deployment-history-detail'), request,
   getRecords: () => history, getApplications: () => applications, serviceUrl: applicationSiteUrl,
   onLogs: (record) => openExecution(record), onMonitor: (record) => openExecution(record), downloads: sourceDownloads,
+  refreshApplications: () => applicationsController ? Promise.resolve() : loadApplications(),
+  onRecord: (record) => {
+    history = history.map((row) => row.id === record.id && row.kind === record.kind ? { ...row, ...record } : row);
+    renderHistory();
+  },
   onVisibility: (visible) => { document.querySelector('#history-overview').hidden = visible;
     document.querySelector('#history-view > .page-header').hidden = visible;
     if (!visible && !views.history.hidden) document.querySelector('#history-title').focus(); },
@@ -1579,7 +1607,7 @@ async function loadEnvironmentDeleteOperation(target = selectedOwnedDetail) {
     if (selectedOwnedDetail?.id !== target.id) return null;
     environmentDeleteOperation = data; renderEnvironmentDeleteOperation(); scheduleEnvironmentDeleteReconciliation(target, data);
     if (data.status === 'succeeded') {
-      clearEnvironmentRegistrationFeedback(target.id);
+      removeOwnedTargetLocally(target.id, '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.');
       await loadOwnedTargets({ preserveDetail: false, removedMessage: '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.' });
     }
     return data;
@@ -1856,6 +1884,12 @@ function renderOwnedTargetDetail() {
     : runtime.status === 'blocked' || runtime.status === 'failed' ? '아래 사유를 해결한 뒤 서버 배포 준비를 다시 확인해야 합니다.' : '서버 배포 준비 상태를 확인하고 있습니다.';
   document.querySelector('#environment-runtime-preparation-blockers').replaceChildren(...(runtimeBlockers.length
     ? runtimeBlockers.map((blocker) => element('li', runtimePreparationBlockerLabel(blocker))) : [element('li', runtimeNote, 'field-note')]));
+  const runtimeReconcile = document.querySelector('#environment-runtime-reconcile');
+  const reconciliationActive = ['queued', 'running'].includes(runtime.status) && runtime.stage === 'reconciliation';
+  const reconciliationAvailable = ['blocked', 'unknown'].includes(runtime.status) && runtime.client_reported_ready === true;
+  runtimeReconcile.hidden = !(reconciliationActive || reconciliationAvailable);
+  runtimeReconcile.disabled = runtimeReconciliationBusy || reconciliationActive;
+  runtimeReconcile.textContent = reconciliationActive ? '준비 상태 확인 중' : '준비 다시 확인';
   const appMessage = document.querySelector('#environment-applications-message');
   appMessage.textContent = Array.isArray(ownedApplications) ? (ownedApplications.length ? `RailShot으로 배포한 서비스 ${ownedApplications.length}개` : 'RailShot으로 배포한 서비스가 없습니다.') : '서비스 목록을 불러오지 못했습니다.';
   const appList = document.querySelector('#environment-applications-list');
@@ -1871,6 +1905,32 @@ function renderOwnedTargetDetail() {
   const deleteButton = document.querySelector('#environment-delete');
   deleteButton.textContent = target.deletion_operation_id ? '삭제 상태 확인' : '환경 삭제';
   deleteButton.disabled = target.status === 'deleted';
+}
+function stopRuntimeReconciliationPolling() { clearTimeout(runtimeReconciliationTimer); runtimeReconciliationTimer = undefined; }
+function mergeOwnedTarget(target) {
+  const index = ownedTargets.findIndex((item) => item.id === target.id);
+  if (index >= 0) ownedTargets.splice(index, 1, target);
+  if (selectedOwnedTarget === target.id) selectedOwnedDetail = target;
+  renderOwnedTargetOptions(); renderOwnedTargetList(); renderOwnedTargetDetail(); updateSelection();
+}
+async function pollRuntimeReconciliation(id) {
+  stopRuntimeReconciliationPolling();
+  try {
+    const { data } = await request(`/api/v1/targets/${encodeURIComponent(id)}`);
+    if (data?.id !== id || !data.runtime_preparation || typeof data.runtime_preparation.status !== 'string')
+      throw new Error('서버 배포 준비 상태 응답을 확인하지 못했습니다.');
+    if (selectedOwnedTarget !== id) return;
+    mergeOwnedTarget(data);
+    if (['queued', 'running'].includes(data.runtime_preparation.status)) {
+      runtimeReconciliationTimer = setTimeout(() => pollRuntimeReconciliation(id), 2000);
+    } else {
+      await loadOwnedTargets({ preserveDetail: false });
+    }
+  } catch (cause) {
+    if (selectedOwnedTarget === id) {
+      document.querySelector('#environment-detail-message').textContent = `서버 배포 준비 상태 조회 실패: ${cause.message} 목록 새로고침으로 다시 확인하세요.`;
+    }
+  }
 }
 function clearEnrollment() {
   enrollmentRequestGeneration += 1;
@@ -1893,6 +1953,17 @@ function clearEnvironmentRegistrationFeedback(targetId) {
     document.querySelector('#environment-register-message').textContent = '';
   }
 }
+function removeOwnedTargetLocally(targetId, message) {
+  clearEnvironmentRegistrationFeedback(targetId);
+  ownedTargets = ownedTargets.filter((target) => target.id !== targetId);
+  if (selectedOwnedTarget === targetId) {
+    stopEnvironmentDeleteReconciliationPolling(); stopRuntimeReconciliationPolling(); ownedTargetSelectionGeneration += 1;
+    selectedOwnedTarget = null; selectedOwnedDetail = null; ownedObservation = null; ownedApplications = []; environmentDeleteOperation = null;
+  }
+  if (provider.value === targetId || provider.dataset.restoreTarget === targetId) { provider.value = ''; delete provider.dataset.restoreTarget; }
+  renderOwnedTargetOptions(); renderOwnedTargetList(); renderOwnedTargetDetail(); renderEnvironmentDeleteOperation(); updateSelection();
+  document.querySelector('#environment-detail-message').textContent = message;
+}
 function showEnrollmentState(id, commandState, message, { retry = true } = {}) {
   enrollmentTargetId = id;
   document.querySelector('#environment-enrollment').hidden = false;
@@ -1910,6 +1981,7 @@ function canIssueEnrollment(target) {
 }
 function resetOwnedEnvironmentSelection() {
   stopEnvironmentDeleteReconciliationPolling();
+  stopRuntimeReconciliationPolling();
   clearEnrollment();
   ownedTargetSelectionGeneration += 1;
   selectedOwnedTarget = null; selectedOwnedDetail = null; ownedObservation = null; ownedApplications = [];
@@ -1954,7 +2026,7 @@ async function loadOwnedTargets({ preserveDetail = true, removedMessage = '' } =
 }
 async function selectOwnedTarget(id, refreshList = true) {
   const target = ownedTargets.find((item) => item.id === id); if (!target) return;
-  if (selectedOwnedTarget !== id) clearEnrollment();
+  if (selectedOwnedTarget !== id) { clearEnrollment(); stopRuntimeReconciliationPolling(); }
   const selectionGeneration = ++ownedTargetSelectionGeneration;
   selectedOwnedTarget = id; selectedOwnedDetail = target; ownedObservation = null; ownedApplications = [];
   stopEnvironmentDeleteReconciliationPolling(); environmentDeleteOperation = null; renderEnvironmentDeleteOperation();
@@ -2061,6 +2133,32 @@ document.querySelector('#environment-register-form').addEventListener('submit', 
 });
 document.querySelector('#environment-owned-refresh').addEventListener('click', () => loadOwnedTargets({ preserveDetail: false }));
 document.querySelector('#environment-regenerate-command').addEventListener('click', () => { if (enrollmentTargetId) issueEnrollment(enrollmentTargetId); });
+document.querySelector('#environment-runtime-reconcile').addEventListener('click', async () => {
+  const target = selectedOwnedDetail, runtime = target?.runtime_preparation;
+  if (!target || runtimeReconciliationBusy || !['blocked', 'unknown'].includes(runtime?.status) || runtime.client_reported_ready !== true) return;
+  runtimeReconciliationBusy = true; renderOwnedTargetDetail();
+  document.querySelector('#environment-detail-message').textContent = '서버 배포 준비 상태를 다시 확인하고 있습니다.';
+  try {
+    const { data, status } = await request(`/api/v1/targets/${encodeURIComponent(target.id)}/reconciliations`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope: 'runtime' }),
+    });
+    if (status !== 202 || data?.target_id !== target.id || !Number.isSafeInteger(data.generation)
+        || !data.runtime_preparation || !['queued', 'running', 'succeeded', 'blocked', 'unknown'].includes(data.runtime_preparation.status))
+      throw new Error('서버 배포 준비 재확인 응답을 확인하지 못했습니다.');
+    if (selectedOwnedTarget !== target.id) return;
+    mergeOwnedTarget({ ...target, ...data, id: target.id });
+    if (['queued', 'running'].includes(data.runtime_preparation.status)) {
+      runtimeReconciliationTimer = setTimeout(() => pollRuntimeReconciliation(target.id), 2000);
+    } else {
+      await loadOwnedTargets({ preserveDetail: false });
+    }
+  } catch (cause) {
+    if (selectedOwnedTarget === target.id) document.querySelector('#environment-detail-message').textContent = `서버 배포 준비 재확인 실패: ${cause.message}`;
+  } finally {
+    runtimeReconciliationBusy = false;
+    if (selectedOwnedTarget === target.id) renderOwnedTargetDetail();
+  }
+});
 document.querySelector('#environment-continue-deploy').addEventListener('click', () => {
   if (!selectedOwnedDetail || !(selectedOwnedDetail.status === 'ready' && selectedOwnedDetail.deployable === true)) return;
   document.querySelector('[name="environment"][value="onprem"]').checked = true; renderOwnedTargetOptions(); provider.value = selectedOwnedDetail.id; updateSelection(); showView('deploy');
@@ -2159,7 +2257,7 @@ async function refreshEnvironmentDeleteOperation(id, targetId) {
     document.querySelector('#environment-detail-message').textContent = `환경 삭제 상태 조회 실패: ${cause.message}`;
   }), 5000);
   else {
-    if (data.status === 'succeeded') clearEnvironmentRegistrationFeedback(targetId);
+    if (data.status === 'succeeded') removeOwnedTargetLocally(targetId, '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.');
     loadOwnedTargets({ preserveDetail: false, removedMessage: data.status === 'succeeded' ? '환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.' : '' });
   }
 }
@@ -2280,3 +2378,7 @@ async function initializeDashboard() {
   }
 }
 initializeDashboard();
+
+// Shared MCP fallback link; the existing API still checks the browser session.
+const insightsId = new URLSearchParams(window.location.search).get('insights');
+if (insightsId && /^[A-Za-z0-9._-]{1,128}$/.test(insightsId)) openInsights({ id: insightsId }, request);

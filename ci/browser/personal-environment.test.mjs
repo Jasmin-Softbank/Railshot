@@ -12,7 +12,7 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   { id: 'retry-target', label: '대기 중 OpenStack', provider: 'openstack', status: 'pending', deployable: false,
     connection_status: 'connecting', runtime_preparation: { status: 'not_started', stage: 'client', blockers: [], verified_at: null }, application_count: 0, registration_stage: 'enrollment' },
   { id: 'blocked-target', label: '준비 확인 OpenStack', provider: 'openstack', status: 'preparing', connection_status: 'ready', deployable: false,
-    runtime_preparation: { status: 'blocked', stage: 'configuration', blockers: ['RUNTIME_OPERATOR_NOT_CONFIGURED', 'RUNTIME_FUTURE_CODE'], verified_at: null },
+    runtime_preparation: { status: 'blocked', stage: 'configuration', blockers: ['RUNTIME_OPERATOR_NOT_CONFIGURED', 'RUNTIME_FUTURE_CODE'], verified_at: null, client_reported_ready: true },
     project_id: 'project-b', application_count: 0, last_seen_at: '2099-01-01T00:00:00Z', client_version: '1.0.0', registration_stage: 'runtime' },
   { id: 'legacy-target', label: '기존 등록 OpenStack', provider: 'openstack', status: 'preparing', connection_status: 'ready', deployable: false,
     runtime_preparation: { status: 'not_started', stage: 'client', blockers: [], verified_at: null },
@@ -23,19 +23,24 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   let retryEnrollmentAttempts = 0;
   let failNextRecoveredList = false;
   let failNextCreatedList = false;
+  let failNextDeletedList = false;
   let ownerConfigured = false;
   let personalReady = false;
   let deletionReconciled = false;
   let deletionResumed = false;
+  let runtimeReconciliationPolls = 0;
+  let ownerToken = null, recoveryKey = 'recover-this-once', ownerRotation = 0;
   let releaseDeletePlan;
   const deletePlanGate = new Promise((resolve) => { releaseDeletePlan = resolve; });
-  const respond = (response, status, body, location) => {
-    response.writeHead(status, { 'content-type': 'application/json', ...(location ? { location } : {}) }); response.end(JSON.stringify(body));
+  const respond = (response, status, body, location, headers = {}) => {
+    response.writeHead(status, { 'content-type': 'application/json', ...(location ? { location } : {}), ...headers }); response.end(JSON.stringify(body));
   };
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost'), path = url.pathname;
     const chunks = []; for await (const chunk of request) chunks.push(chunk); const bytes = Buffer.concat(chunks);
     const json = () => bytes.length ? JSON.parse(bytes.toString('utf8')) : {};
+    const cookies = Object.fromEntries((request.headers.cookie || '').split(';').map((item) => item.trim().split('=')).filter((item) => item.length === 2));
+    const ownsTargets = Boolean(ownerToken && cookies.railshot_owner === ownerToken);
     if (path === '/api/v1/sessions') return respond(response, 200, { expires_at: '2099-01-01T00:00:00Z' });
     if (path === '/api/v1/readiness' && url.searchParams.get('scope') === 'personal') return respond(response, 200,
       personalReady ? { scope: 'personal', ready: true, verification_scope: 'configuration_only', blockers: [] }
@@ -46,8 +51,11 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
     if (path === '/api/v1/options') return respond(response, 200, { items: [{ environment: 'cloud', provider: 'aws', label: 'AWS', available: true }] });
     if (path === '/api/v1/connections') return respond(response, 200, { items: [] });
     if (path === '/api/v1/applications') return respond(response, 200, { items: [] });
-    if (path === '/api/v1/applications/resolve') return respond(response, 200,
-      { app: url.searchParams.get('app'), environment_target_id: url.searchParams.get('targetId'), application: null });
+    if (path === '/api/v1/applications/resolve') {
+      assert.deepEqual([...url.searchParams.keys()].sort(), ['app', 'environment', 'provider', 'target_id']);
+      assert.equal(url.searchParams.get('environment'), 'onprem'); assert.equal(url.searchParams.get('provider'), 'openstack');
+      return respond(response, 200, { app: url.searchParams.get('app'), environment_target_id: url.searchParams.get('target_id'), application: null });
+    }
     if (path === '/api/v1/deployments') {
       if (request.method === 'GET') return respond(response, 200, { items: [] });
       const form = await new Request('http://localhost', { method: 'POST', body: bytes, headers: request.headers }).formData();
@@ -58,30 +66,35 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
     if (path === '/api/v1/owners') {
       assert.equal(request.headers['x-railshot-request'], 'dashboard');
       if (request.method === 'POST') {
-        if (ownerConfigured) return respond(response, 200, { id: 'owner-1', recovery_configured: true });
-        ownerConfigured = true;
-        return respond(response, 201, { id: 'owner-1', recovery_key: 'recover-this-once', recovery_key_once: true });
+        if (ownerConfigured && ownsTargets) return respond(response, 200, { id: 'owner-1', recovery_configured: true });
+        ownerConfigured = true; ownerToken = 'A'.repeat(43);
+        return respond(response, 201, { id: 'owner-1', recovery_key: recoveryKey, recovery_key_once: true }, null,
+          { 'set-cookie': `railshot_owner=${ownerToken}; Path=/; HttpOnly; SameSite=Strict` });
       }
-      return respond(response, 200, { id: ownerConfigured ? 'owner-1' : null, recovery_configured: ownerConfigured });
+      return respond(response, 200, { id: ownsTargets ? 'owner-1' : null, recovery_configured: ownsTargets });
     }
     if (path === '/api/v1/recoveries') {
       assert.equal(request.headers['x-railshot-request'], 'dashboard');
-      const recoveryKey = json().recovery_key;
-      assert.ok(['recover-this-once', 'recover-list-failure'].includes(recoveryKey));
+      const supplied = json().recovery_key;
+      assert.ok(supplied === recoveryKey || supplied === 'recover-list-failure');
       ownerConfigured = true;
-      if (recoveryKey === 'recover-list-failure') failNextRecoveredList = true;
-      return respond(response, 200, { id: 'owner-1', recovery_key: 'rotated-recovery-key' });
+      if (supplied === 'recover-list-failure') failNextRecoveredList = true;
+      ownerRotation += 1; ownerToken = String.fromCharCode(65 + ownerRotation).repeat(43); recoveryKey = `rotated-recovery-key-${ownerRotation}`;
+      return respond(response, 200, { id: 'owner-1', recovery_key: recoveryKey }, null,
+        { 'set-cookie': `railshot_owner=${ownerToken}; Path=/; HttpOnly; SameSite=Strict` });
     }
     if (path === '/api/v1/targets' && request.method === 'GET') {
       assert.equal(request.headers['x-railshot-request'], 'dashboard');
-      if (url.searchParams.get('scope') === 'owned' && (failNextRecoveredList || failNextCreatedList)) {
-        failNextRecoveredList = false; failNextCreatedList = false;
+      if (!ownsTargets) return respond(response, 200, { items: [] });
+      if (url.searchParams.get('scope') === 'owned' && (failNextRecoveredList || failNextCreatedList || failNextDeletedList)) {
+        failNextRecoveredList = false; failNextCreatedList = false; failNextDeletedList = false;
         return respond(response, 503, { error: { message: '개인 환경 목록 서버가 응답하지 않습니다.' } });
       }
       return respond(response, 200, { items: url.searchParams.get('scope') === 'owned' ? targets : [] });
     }
     if (path === '/api/v1/targets' && request.method === 'POST') {
       assert.equal(request.headers['x-railshot-request'], 'dashboard');
+      if (!ownsTargets) return respond(response, 404, { error: { message: 'missing owner' } });
       const target = { id: 'pending-target', label: json().label, provider: 'openstack', status: 'pending', connection_status: 'connecting', deployable: false,
         runtime_preparation: { status: 'not_started', stage: 'client', blockers: [], verified_at: null }, application_count: 0 };
       targets.push(target); failNextCreatedList = true; calls.push({ kind: 'create-target', body: json() }); return respond(response, 201, target);
@@ -89,9 +102,18 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
     const targetMatch = path.match(/^\/api\/v1\/targets\/([^/]+)(?:\/(enrollments|observations|applications|plans|operations|reconciliations))?$/);
     if (targetMatch) {
       assert.equal(request.headers['x-railshot-request'], 'dashboard');
+      if (!ownsTargets) return respond(response, 404, { error: { message: 'missing target' } });
       const [, id, child] = targetMatch, target = targets.find((item) => item.id === id);
       if (!target) return respond(response, 404, { error: { message: 'missing target' } });
-      if (!child) return respond(response, 200, target);
+      if (!child) {
+        if (id === 'blocked-target' && ['queued', 'running'].includes(target.runtime_preparation.status)) {
+          runtimeReconciliationPolls += 1;
+          if (runtimeReconciliationPolls === 1) target.runtime_preparation = { ...target.runtime_preparation, status: 'running' };
+          else Object.assign(target, { status: 'ready', deployable: true,
+            runtime_preparation: { status: 'succeeded', stage: 'complete', blockers: [], verified_at: '2099-01-01T00:00:00Z', client_reported_ready: true } });
+        }
+        return respond(response, 200, target);
+      }
       if (child === 'enrollments') {
         if (id === 'retry-target') {
           retryEnrollmentAttempts += 1;
@@ -115,14 +137,21 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
         return respond(response, 202, { id: 'operation-1', status: 'running' }, '/api/v1/operations/operation-1');
       }
       if (child === 'reconciliations') {
+        if (json().scope === 'runtime') {
+          calls.push({ kind: 'runtime-reconciliation', body: json() });
+          target.runtime_preparation = { ...target.runtime_preparation, status: 'queued', stage: 'reconciliation', blockers: [] };
+          return respond(response, 202, { target_id: id, generation: 1, status: 'preparing', connection_status: 'ready', deployable: false,
+            runtime_preparation: target.runtime_preparation });
+        }
         calls.push({ kind: 'delete-reconciliation', body: json() }); deletionReconciled = true;
         return respond(response, 202, { id: 'operation-1', kind: 'target-lifecycle', target_id: id, status: 'unknown', stage: 'reconciliation', residuals: [{ kind: 'RemovalVerification', name: id }],
           reconciliation: { id: 'reconciliation-1', status: 'pending', expires_at: '2099-01-01T00:00:00Z', resumable: false, blockers: [] } }, '/api/v1/operations/operation-1');
       }
     }
     if (path === '/api/v1/operations/operation-1') {
+      if (!ownsTargets) return respond(response, 404, { error: { message: 'missing operation' } });
       if (deletionResumed) {
-        const target = targets.find((item) => item.id === 'ready-target'); target.status = 'deleted';
+        const target = targets.find((item) => item.id === 'ready-target'); target.status = 'deleted'; failNextDeletedList = true;
         return respond(response, 200, { id: 'operation-1', kind: 'target-lifecycle', target_id: 'ready-target', status: 'succeeded', stage: 'complete', steps: [], residuals: [] });
       }
       return respond(response, 200, { id: 'operation-1', kind: 'target-lifecycle', target_id: 'ready-target', status: 'unknown', stage: 'reconciliation',
@@ -131,16 +160,20 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
         ...(deletionReconciled ? { reconciliation: { id: 'reconciliation-1', status: 'ready', expires_at: '2099-01-01T00:00:00Z', resumable: true, blockers: [] } } : {}) });
     }
     if (path === '/api/v1/operations/operation-complete') {
+      if (!ownsTargets) return respond(response, 404, { error: { message: 'missing operation' } });
       const target = targets.find((item) => item.id === 'completed-target'); target.status = 'deleted';
       return respond(response, 200, { id: 'operation-complete', kind: 'target-lifecycle', target_id: 'completed-target', status: 'succeeded', stage: 'complete', steps: [], residuals: [] });
     }
     if (path === '/api/v1/operations/operation-pending') {
+      if (!ownsTargets) return respond(response, 404, { error: { message: 'missing operation' } });
       const target = targets.find((item) => item.id === 'pending-target'); target.status = 'deleted';
       return respond(response, 200, { id: 'operation-pending', kind: 'target-lifecycle', target_id: 'pending-target', status: 'succeeded', stage: 'complete', steps: [], residuals: [] });
     }
     const files = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/styles.css': ['styles.css', 'text/css'],
       '/contracts/application.mjs': ['../../contracts/application.mjs', 'text/javascript'],
       '/src/api.js': ['src/api.js', 'text/javascript'], '/src/lifecycle.js': ['src/lifecycle.js', 'text/javascript'],
+      '/src/insights.js': ['src/insights.js', 'text/javascript'],
+      '/src/insights-view.js': ['src/insights-view.js', 'text/javascript'],
       '/src/deployment-history.js': ['src/deployment-history.js', 'text/javascript'], '/src/recovery.js': ['src/recovery.js', 'text/javascript'] };
     if (!files[path]) return respond(response, 404, { error: { message: 'fixture path unavailable' } });
     response.writeHead(200, { 'content-type': files[path][1] }); response.end(await readFile(new URL('../../apps/dashboard/' + files[path][0], import.meta.url)));
@@ -173,7 +206,7 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   await page.locator('#environment-recovery-input').fill('recover-this-once');
   await page.getByRole('button', { name: '관리권 복구' }).click();
   await page.getByText('이 브라우저에서 관리권을 복구했습니다.').waitFor();
-  assert.equal(await page.locator('#environment-recovery-key-value').innerText(), 'rotated-recovery-key');
+  assert.equal(await page.locator('#environment-recovery-key-value').innerText(), 'rotated-recovery-key-1');
   assert.match(await page.locator('#environment-recover-message').innerText(), /등록한 환경 6개를 불러왔습니다/);
   assert.equal(await page.locator('#environment-owned-list-panel').evaluate((node) => node.classList.contains('recovery-highlight')), true);
   assert.equal(await page.locator('#environment-owned-items button.active').innerText(), '연구실 OpenStack');
@@ -185,6 +218,9 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   await page.getByText('진행 차단 · 중앙 배포 설정 확인').waitFor();
   await page.getByText('중앙 서버에 OpenStack 배포 준비 설정이 없습니다. 운영자 설정이 필요합니다.').waitFor();
   await page.getByText('확인 필요 (RUNTIME_FUTURE_CODE)').waitFor();
+  await page.getByRole('button', { name: '준비 다시 확인' }).click();
+  assert.deepEqual(calls.find((call) => call.kind === 'runtime-reconciliation').body, { scope: 'runtime' });
+  await page.getByText('완료 · 준비 완료').waitFor();
 
   await page.getByRole('button', { name: '기존 등록 OpenStack' }).click();
   assert.match(await page.locator('#environment-detail-facts').innerText(), /등록 단계\s+OpenStack 등록 완료/);
@@ -257,6 +293,8 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   await page.getByText('환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.').waitFor();
   assert.equal(await page.getByRole('button', { name: '연구실 OpenStack' }).count(), 0);
   assert.equal(await page.locator('#provider option[value="ready-target"]').count(), 0);
+  assert.match(await page.locator('#environment-owned-message').innerText(), /목록 조회 실패/,
+    '삭제 완료 직후 목록 재조회가 실패해도 확인된 삭제 대상을 로컬 목록에서 제거해야 합니다.');
   assert.match(await page.locator('#environment-register-message').innerText(), /새 OpenStack 환경을 만들었습니다/,
     '다른 환경을 삭제할 때 등록 성공 문구를 지우지 않아야 합니다.');
 
@@ -279,5 +317,18 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   assert.equal(await page.locator('#environment-install-command').innerText(), '');
   assert.equal(await page.locator('#environment-register-message').innerText(), '');
   assert.equal(await page.locator('#provider option[value="pending-target"]').count(), 0);
+
+  const currentRecoveryKey = await page.locator('#environment-recovery-key-value').innerText();
+  const recoveredPage = await browser.newPage();
+  await recoveredPage.goto(origin);
+  await recoveredPage.getByRole('button', { name: '개인 배포환경 관리' }).click();
+  await recoveredPage.getByText('복구 키로 관리권 복구').click();
+  await recoveredPage.locator('#environment-recovery-input').fill(currentRecoveryKey);
+  await recoveredPage.getByRole('button', { name: '관리권 복구' }).click();
+  await recoveredPage.getByText('이 브라우저에서 관리권을 복구했습니다.').waitFor();
+  await page.getByRole('button', { name: '목록 새로고침' }).click();
+  await page.getByText('아직 등록한 OpenStack 환경이 없습니다.').waitFor();
+  assert.equal(await page.locator('#environment-owned-items button').count(), 0, '복구 후 이전 브라우저의 관리 권한이 폐기되어야 합니다.');
+  await recoveredPage.close();
   assert.deepEqual(errors, []);
 });

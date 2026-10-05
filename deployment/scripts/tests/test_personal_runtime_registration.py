@@ -167,6 +167,57 @@ class PersonalRuntimeTest(unittest.TestCase):
                          ('default', '66666666-6666-4666-8666-666666666666', 'released'))
         self.assertNotEqual(self.run_helper('prepare')['status'], 'succeeded')
 
+    def test_reconcile_completed_registration_after_lost_receipt_performs_no_external_writes(self):
+        self.assertEqual(self.run_helper()['status'], 'succeeded')
+        path = self.root / 'personal' / self.ident / 'registration.json'
+        saved = env.read_private(path)
+        env.save(path, {'status': 'unknown', 'input_sha256': saved['input_sha256']})
+        before = (self.fixture.control.applications, self.fixture.runtime.applications)
+        with patch.object(personal.openstack_routes, 'register_runtime', side_effect=AssertionError('readback cannot mutate')):
+            result = self.run_helper('reconcile')
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(before, (self.fixture.control.applications, self.fixture.runtime.applications))
+        self.assertEqual(env.read_private(path)['binding'], saved['binding'])
+
+    def test_reconcile_unstarted_registration_is_explicitly_resumable(self):
+        result = self.run_helper('reconcile')
+        self.assertEqual(result['status'], 'blocked')
+        self.assertTrue(result['resumable'])
+        self.assertFalse((self.root / 'personal' / self.ident / 'registration.json').exists())
+        self.assertEqual(self.run_helper()['status'], 'succeeded')
+
+    def test_partial_runtime_removal_resumes_only_original_remaining_object_ids(self):
+        self.assertEqual(self.run_helper()['status'], 'succeeded')
+        original = personal.delete_exact
+        count = 0
+        def interrupted(*args):
+            nonlocal count
+            original(*args); count += 1
+            if count == 2:
+                raise RuntimeError('lost delete reply')
+        with patch.object(personal, 'delete_exact', side_effect=interrupted):
+            self.assertEqual(self.run_helper('delete')['status'], 'unknown')
+        self.assertEqual(env.read_private(self.root / 'personal' / self.ident / 'registration.json')['status'], 'succeeded')
+        before = copy.deepcopy(self.fixture.runtime.objects)
+        result = self.run_helper('inspect-delete')
+        self.assertTrue(result['resumable'], result)
+        self.assertEqual(before, self.fixture.runtime.objects)
+        result = self.run_helper('resume-delete')
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertIn(('default', 'namespace', self.ident), self.fixture.runtime.objects)
+        self.assertNotIn((self.ident, 'serviceaccount', env.SA), self.fixture.runtime.objects)
+
+    def test_partial_removal_rejects_replaced_remaining_object(self):
+        self.assertEqual(self.run_helper()['status'], 'succeeded')
+        with patch.object(personal, 'remove_environment', side_effect=RuntimeError('interrupted')):
+            self.assertEqual(self.run_helper('delete')['status'], 'unknown')
+        self.fixture.runtime.objects[self.ident, 'serviceaccount', env.SA]['metadata']['uid'] = 'foreign-replacement'
+        before = copy.deepcopy(self.fixture.runtime.objects)
+        result = self.run_helper('inspect-delete')
+        self.assertFalse(result.get('resumable', False))
+        self.assertEqual(result['blockers'], [{'code': 'RUNTIME_DELETE_IDENTITY_CHANGED'}])
+        self.assertEqual(before, self.fixture.runtime.objects)
+
     def test_automatic_profile_selection_uses_free_capacity_and_released_tombstones(self):
         _, _, _, profiles = personal.load_operator_config(self.config)
         spare = copy.deepcopy(profiles['default'])

@@ -57,7 +57,7 @@ async function completed(client, id) {
 test('anonymous sessions isolate histories, IDs, legacy reads, plans and idempotency; survive restart', async (t) => {
   const f = await fixture(t), a = f.client(), b = f.client();
   const session = await a.request('/api/v1/sessions', { method: 'POST' });
-  assert.equal(session.response.status, 201); assert.match(session.response.headers.get('set-cookie'), /HttpOnly; SameSite=Strict; Max-Age=604800/);
+  assert.equal(session.response.status, 201); assert.match(session.response.headers.get('set-cookie'), /HttpOnly; SameSite=Strict; Max-Age=2147483647/);
   assert.deepEqual(Object.keys(session.body), ['expires_at']);
   await b.request('/api/v1/sessions', { method: 'POST' }); assert.notEqual(a.cookie, b.cookie);
   const plan = await a.request('/api/v1/plans', json('POST', {}));

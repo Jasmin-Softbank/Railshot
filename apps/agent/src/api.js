@@ -101,9 +101,24 @@ export function createApiClient({ baseUrl = process.env.RAILSHOT_API_URL || 'htt
     options: () => request('/api/v1/options'),
     targets: () => request('/api/v1/targets'),
     deployment: (id) => request(`/api/v1/deployments/${encodeURIComponent(id)}`),
+    appOverview: (id, minutes) => request(`/api/v1/deployments/${encodeURIComponent(id)}/insights?minutes=${minutes}`),
+    deploymentEvidence: (id, area) => request(`/api/v1/deployments/${encodeURIComponent(id)}/evidence?area=${area}`),
     deploymentEvents: (id) => request(`/api/v1/deployments/${encodeURIComponent(id)}/events`),
     deploymentDiagnostics: (id) => request(`/api/v1/deployments/${encodeURIComponent(id)}/diagnostics`),
     build: (id) => request(`/api/v1/builds/${encodeURIComponent(id)}`),
+    deployArchive: async ({ app, target_id, idempotency_key, bytes, name }) => {
+      const form = new FormData();
+      form.set('app', app);
+      form.set('target_id', target_id);
+      form.set('archive', new Blob([bytes], { type: 'application/zip' }), name);
+      try {
+        return await request('/api/v1/deployments', { method: 'POST', body: form, key: idempotency_key });
+      } catch (error) {
+        // A lost response cannot establish whether the upload was accepted. Never auto-retry it.
+        if (error.status === undefined) error.outcomeUnknown = true;
+        throw error;
+      }
+    },
     deploy: ({ repository_url, app, target_id, idempotency_key }) => {
       const form = new FormData();
       form.set('repository_url', repository_url);

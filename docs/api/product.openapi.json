@@ -3543,7 +3543,7 @@
       "get": {
         "operationId": "resolveApplication",
         "summary": "Resolve the submitted app name to an existing session-owned application",
-        "description": "Read-only lookup before source upload. Uses the same provider-to-environment and app identity mapping as new deployment, independent of app inventory pagination. Same-owner successful applications use the existing update preview/start flow. Does not transfer ownership, register an app, or dispatch CI. Optional target_id selects a session-owned personal OpenStack target. The deployed dashboard alias targetId is also accepted (literal null is ignored for cloud selection), together with registerNew=false; duplicate fields and both target aliases together are rejected.",
+        "description": "Read-only lookup before source upload. Uses the same provider-to-environment and app identity mapping as new deployment, independent of app inventory pagination. Same-owner successful applications use the existing update preview/start flow. Does not transfer ownership, register an app, or dispatch CI. Optional target_id selects a session-owned personal OpenStack target; the server verifies current ownership and runtime deployment readiness. The deployed dashboard alias targetId is also accepted (literal null is ignored for cloud selection), together with registerNew=false; duplicate fields and both target aliases together are rejected.",
         "parameters": [
           {
             "name": "environment",
@@ -3579,11 +3579,21 @@
               "type": "string",
               "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
             }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "required": false,
+            "description": "Existing personal OpenStack target selected by the current owner. Valid only with environment=onprem and provider=openstack.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,128}$"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Exact existing app match in the server-selected environment, or null. Another session owner returns 409 without app details.",
+            "description": "Exact existing app match in the server-selected shared environment or the explicitly selected owned personal target, or null. Another session owner returns 404 for a personal target or 409 for a shared app without app details.",
             "headers": {
               "X-Request-ID": {
                 "description": "Fresh server-generated UUID for this HTTP request.",
@@ -9283,7 +9293,7 @@
           "max_invocations": {
             "type": "integer",
             "minimum": 0,
-            "maximum": 3
+            "maximum": 4
           }
         },
         "required": [
@@ -9291,7 +9301,7 @@
           "max_invocations"
         ],
         "additionalProperties": false,
-        "description": "Executor-declared total SDK invocation budget, up to one initial packaging call and two repair calls. This is an allowance, not actual usage. enabled must equal max_invocations > 0. Older limits of 0, 1 and 2 remain valid; missing metadata stays null."
+        "description": "Executor-declared total SDK invocation budget, up to two initial packaging calls and two repair calls. This is an allowance, not actual usage. enabled must equal max_invocations > 0. Older limits of 0, 1, 2 and 3 remain valid; missing metadata stays null."
       },
       "CiProgress": {
         "type": "object",

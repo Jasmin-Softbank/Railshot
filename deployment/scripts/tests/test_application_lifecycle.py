@@ -85,6 +85,43 @@ class LifecycleTest(unittest.TestCase):
         shared = next(row for row in policy['targets'] if row['target_id'] == self.app['environment_id'])
         return shared, self.control.objects['argocd', 'secret', shared['secret']]
 
+    def test_partial_delete_reconciles_and_resumes_remaining_original_resources(self):
+        self.edge_execute.side_effect = RuntimeError('route transport unavailable before dispatch')
+        request, result = self.apply(self.plan())
+        self.assertEqual(result['status'], 'unknown')
+        name = runtime.application_name(self.app['application_id'], self.app['application_id'], self.app['app'])
+        self.assertNotIn(('argocd', 'application', name), self.control.objects)
+        before = copy.deepcopy(self.control.objects)
+        self.edge_execute.side_effect = None
+        with patch.object(lifecycle.edge, 'inspect_execution', return_value='not_started'), patch.object(lifecycle.workloads, 'deleted', return_value=False):
+            inspected = lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'reconcile'})
+            self.assertTrue(inspected['resumable'], inspected)
+            self.assertEqual(before, self.control.objects)
+            resumed = lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'resume'})
+        self.assertEqual(resumed['status'], 'succeeded', resumed)
+        self.assertEqual(runtime.read_private(self.home / 'lifecycle.json')['status'], 'deleted')
+
+    def test_partial_delete_reconciliation_rejects_unknown_route_write(self):
+        self.edge_execute.side_effect = RuntimeError('provider reply lost')
+        request, result = self.apply(self.plan())
+        self.assertEqual(result['status'], 'unknown')
+        before = copy.deepcopy(self.control.objects)
+        with patch.object(lifecycle.edge, 'inspect_execution', side_effect=ValueError('route outcome unknown')):
+            with self.assertRaises(ValueError):
+                lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'reconcile'})
+        self.assertEqual(before, self.control.objects)
+
+    def test_lost_namespace_delete_reply_resumes_without_repeating_namespace_delete(self):
+        self.execute.side_effect = RuntimeError('namespace delete reply lost')
+        request, result = self.apply(self.plan())
+        self.assertEqual(result['status'], 'unknown')
+        with patch.object(lifecycle.edge, 'inspect_execution', return_value='succeeded'), patch.object(lifecycle.workloads, 'deleted', return_value=True):
+            inspected = lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'reconcile'})
+            self.assertTrue(inspected['resumable'], inspected)
+            resumed = lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'resume'})
+        self.assertEqual(resumed['status'], 'succeeded', resumed)
+        self.assertEqual(self.execute.call_count, 1)
+
     def test_shared_cluster_delete_preserves_anchor_and_other_namespaces(self):
         self.assertEqual(self.fixture.register('second-app')['status'], 'succeeded')
         shared, secret = self.shared_registration()
@@ -332,6 +369,8 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.edge_plan.assert_not_called(); self.edge_execute.assert_not_called(); self.execute.assert_not_called()
         self.assertEqual(lifecycle.lifecycle(self.fixture.config_path, request), result)
+        self.assertEqual(lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'reconcile'}), result)
+        self.assertEqual(lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'resume'}), result)
         with self.assertRaisesRegex(ValueError, 'APPLICATION_LIFECYCLE_BLOCKED'):
             self.fixture.register('queued-app')
 

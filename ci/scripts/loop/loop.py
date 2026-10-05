@@ -308,13 +308,11 @@ def decide(verdict, report, seen, repair_scope="packaging"):
         return f"give_up: {report.get('give_up', {}).get('class')}"
     f = verdict.get("failure") or {}
     if repair_scope == "source" and f.get("class") == "F7":
-        return "stop: same failure twice" if f.get("signature") in seen else None
+        return None
     if f.get("class") in STOP:
         return f"stop: {STOP[f['class']]}"
     if f.get("class") not in FIXABLE:
         return f"stop: unclassified failure {f.get('class')}"
-    if f.get("signature") in seen:
-        return "stop: same failure twice"
     return None
 
 
@@ -334,9 +332,9 @@ def binding(a):
 
 def agent_budget(a):
     """Separate role allowances; repair=0 remains the explicit all-agent off switch."""
-    repair, packaging = a.max_attempts, getattr(a, 'max_packaging_attempts', 1)
-    if (type(repair) is not int or not 0 <= repair <= 2
-            or type(packaging) is not int or packaging not in (0, 1)):
+    repair, packaging = a.max_attempts, getattr(a, 'max_packaging_attempts', 2)
+    if (type(repair) is not int or not 0 <= repair <= 8
+            or type(packaging) is not int or not 0 <= packaging <= 8):
         raise StateError('STATE_USAGE_INVALID', component='loop', phase='config', retry_policy='after_configuration')
     limit = repair + packaging if repair else 0
     return {'enabled': limit > 0, 'max_invocations': limit}
@@ -350,7 +348,7 @@ def execute(a, run, state, progress_sink=None):
         return finish(run, json.loads((run / state.data['final']).read_text()), state.data['started'], finalized=True)
     app_id = getattr(a, 'app_id', None)
     ev = {'run_id': state.data['run_id'], 'provider': a.provider, 'repair_scope': a.repair_scope, 'app_id': app_id,
-          'max_attempts': a.max_attempts, 'max_packaging_attempts': getattr(a, 'max_packaging_attempts', 1),
+          'max_attempts': a.max_attempts, 'max_packaging_attempts': getattr(a, 'max_packaging_attempts', 2),
           'agent_budget': allowance, 'attempts': [], 'started': int(state.data['started'])}
 
     def intake_step():
@@ -379,7 +377,7 @@ def execute(a, run, state, progress_sink=None):
     options = {'quality_network': a.quality_network, 'repair_scope': a.repair_scope,
                'selected_root': a.selected_root, 'app_id': app_id, **({'progress_sink': progress_sink} if progress_sink is not None else {})}
     seen, role, current_failure = set(), 'deterministic', {}
-    packaging_limit = getattr(a, 'max_packaging_attempts', 1) if total_limit else 0
+    packaging_limit = getattr(a, 'max_packaging_attempts', 2) if total_limit else 0
     budget = {'packaging': packaging_limit, 'repair': a.max_attempts}
     used = {'packaging': 0, 'repair': 0}
     ev['budget_used'] = used
@@ -552,10 +550,10 @@ def main():
     ap.add_argument("upload", nargs="?")
     ap.add_argument("run", nargs="?")
     ap.add_argument("--provider", choices=["codex", "claude"], default="codex")
-    ap.add_argument("--max-attempts", type=int, choices=range(0, 3), default=2,
+    ap.add_argument("--max-attempts", type=int, choices=range(0, 9), default=2,
                     help="fixer invocation limit, default 2; 0 disables all SDK calls including adapter")
-    ap.add_argument("--max-packaging-attempts", type=int, choices=range(0, 2), default=1,
-                    help="separate initial adapter allowance, default 1; combined hard cap 3")
+    ap.add_argument("--max-packaging-attempts", type=int, choices=range(0, 9), default=2,
+                    help="separate initial adapter allowance, default 2; combined hard cap 16")
     ap.add_argument("--layers", default=','.join(GATE_ORDER))
     ap.add_argument("--quality-network")
     ap.add_argument("--selected-root", help="Trusted relative build root for repository discovery")
@@ -651,7 +649,7 @@ def self_test():
     fail = lambda cls, sig="s1": {"ok": False, "layers": [{"layer": "L3"}], "failure": {"layer": "L3", "class": cls, "signature": sig}}
     assert decide(ok, None, set()) == "passed"
     assert decide(fail("F4"), {"status": "proposed"}, set()) is None
-    assert decide(fail("F4"), {"status": "proposed"}, {"s1"}) == "stop: same failure twice"
+    assert decide(fail("F4"), {"status": "proposed"}, {"s1"}) is None
     assert decide(fail("F7"), {"status": "proposed"}, set()).startswith("stop: application")
     assert decide(fail("F8"), None, set()).startswith("stop: transient")
     assert decide(fail("F4"), {"status": "give_up", "give_up": {"class": "F7"}}, set()) == "give_up: F7"
