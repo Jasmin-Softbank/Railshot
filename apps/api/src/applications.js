@@ -169,6 +169,7 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       const request = join(run, 'publication.json');
       const payload = { deployment_id: args.deploymentId, application_id: application.id,
         environment_id: application.environment_target_id, publication: args.publication,
+        ...(args.configuration ? { configuration: args.configuration } : {}),
         files: Object.fromEntries(files.map(({ path, content }) => [path, content.toString('base64')])) };
       let exists;
       try { exists = await lstat(request); } catch (error) { if (error.code !== 'ENOENT') throw error; }

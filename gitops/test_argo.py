@@ -33,13 +33,16 @@ class ArgoTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.prepare()
 
-    def prepare(self, database=False, image_digest='c' * 64, migration_command=None, storage=False):
+    def prepare(self, database=False, image_digest='c' * 64, migration_command=None, configuration=None, storage=False):
         published = self.root / 'published'; published.mkdir(exist_ok=True)
         spec = {'apiVersion': 'railshot/v0', 'app': 'demo', 'services': [
             {'name': 'web', 'build': {'dockerfile': 'Dockerfile'}, 'port': 8080, 'route': '/health', 'health': '/health'}]}
         if database:
             spec['resources'] = {'postgres': {'size': 'small'}}
             spec['services'][0].update(migrate={'command': migration_command or ['python', 'migrate.py']}, secrets=['DATABASE_URL'])
+        if configuration:
+            spec['services'][0]['env'] = {name: 'source-must-not-win' for name in configuration['plain_names']}
+            spec['services'][0]['secrets'] = configuration['secret_names']
         if storage:
             spec['services'][0]['storage'] = {'mountPath': '/var/opt/memos', 'sizeGi': 1}
         verdict = {'release_eligible': True, 'ok': True, 'status': 'PASS', 'source_sha256': 'a' * 64,
@@ -68,6 +71,8 @@ class ArgoTest(unittest.TestCase):
         if database:
             target['database'] = {'host': '10.20.0.10', 'port': 5432, 'runtime_secret': 'demo-runtime',
                                   'migration_secret': 'demo-migration', 'ca_secret': 'demo-ca'}
+        if configuration:
+            target['configuration'] = configuration
         rendered = handoff.render(published, target)
         self.review = {'application': rendered.pop('application'), 'workload': rendered.pop('workload'), 'receipt': rendered}
         self.directory = self.root / 'review'; self.save_review(self.review, self.directory)
@@ -142,6 +147,25 @@ class ArgoTest(unittest.TestCase):
             else: job['metadata']['annotations']['argocd.argoproj.io/ignore-healthcheck'] = 'true'
             self.save_review(bad, self.directory)
             with self.subTest(field=field), self.assertRaises(ValueError): argo.load_review(self.directory)
+
+    def test_configuration_revision_is_pinned_and_overrides_source_env_without_values_in_receipt(self):
+        configuration = {'project_id': 'project-1', 'binding_id': 'binding-1', 'revision_id': 'revision-7',
+            'namespace': 'tenant-demo', 'configmap_name': 'railshot-env-123', 'secret_name': 'railshot-secret-123',
+            'external_secret_name': 'railshot-external-123', 'plain_names': ['LOG_LEVEL'], 'secret_names': ['API_TOKEN']}
+        self.prepare(configuration=configuration)
+        review = argo.load_review(self.directory)
+        deployment = next(item for item in review['workload']['items'] if item['kind'] == 'Deployment')
+        template = deployment['spec']['template']; container = template['spec']['containers'][0]
+        self.assertEqual(template['metadata']['annotations']['railshot.io/configuration-revision'], 'revision-7')
+        self.assertEqual(container['envFrom'], [{'configMapRef': {'name': 'railshot-env-123'}},
+                                                {'secretRef': {'name': 'railshot-secret-123'}}])
+        self.assertNotIn('source-must-not-win', json.dumps(container))
+        self.assertNotIn('do-not-leak', json.dumps(review))
+        tampered = copy.deepcopy(review)
+        tampered['workload']['items'][0]['spec']['template']['spec']['containers'][0]['envFrom'][0]['configMapRef']['name'] = 'latest'
+        self.save_review(tampered, self.directory)
+        with self.assertRaisesRegex(ValueError, 'configuration revision references'):
+            argo.load_review(self.directory)
 
     def test_retained_migrations_require_owned_completed_jobs_and_current_deployment_images(self):
         self.prepare(database=True)

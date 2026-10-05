@@ -814,6 +814,7 @@
           "status",
           "guest_ready",
           "runtime_ready",
+          "secrets_ready",
           "application_ready",
           "public_http_verified",
           "replayed",
@@ -835,6 +836,10 @@
           },
           "runtime_ready": {
             "type": "boolean"
+          },
+          "secrets_ready": {
+            "type": "boolean",
+            "description": "True only after the requested trusted secrets readiness phase has a validated receipt. secrets.configure performs configure followed by verify; standalone secrets.verify validates an earlier completed configuration. The legacy HTTP runtime path does not accept a provider profile and therefore returns false."
           },
           "application_ready": {
             "type": "boolean",

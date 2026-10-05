@@ -10,6 +10,7 @@ disable-network-policy: true
 cluster-cidr: 10.42.0.0/16
 service-cidr: 10.43.0.0/16
 write-kubeconfig-mode: "0600"
+secrets-encryption: true
 disable:
   - traefik
   - servicelb

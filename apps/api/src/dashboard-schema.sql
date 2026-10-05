@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS connections (
   updated_at TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS connections_session ON connections(session_id);
+
+CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, record TEXT NOT NULL CHECK(json_valid(record))) STRICT;
+
+CREATE TABLE IF NOT EXISTS revisions (id TEXT PRIMARY KEY, record TEXT NOT NULL CHECK(json_valid(record))) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_bindings (id TEXT PRIMARY KEY, record TEXT NOT NULL CHECK(json_valid(record))) STRICT;
+
+CREATE TABLE IF NOT EXISTS project_keys (id TEXT PRIMARY KEY, record TEXT NOT NULL CHECK(json_valid(record))) STRICT;
 CREATE TABLE IF NOT EXISTS owners (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id),

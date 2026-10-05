@@ -205,7 +205,7 @@ AWS 운영자가 CLI로 직접 생성·조회한 자원은 `execution_driver: "a
 | `failed`, `blocked` | 실패 또는 실행 전제 미충족 |
 | `unknown` | 실행 후 결과를 확정할 수 없어 운영자 확인 필요 |
 
-`database.configure` 결과에는 `database_ready`를 추가하며 native playbook 종료 코드 0과 요청·전체 target 목록·nonce가 같은 receipt를 모두 확인한 경우에만 true입니다. DB의 `guest_ready`는 팀 HA preflight를 통과했다는 의미이고 runtime용 CPU/RAM 검사를 대신하지 않습니다. DB 작업에서 `runtime_ready`는 false입니다. `application_ready`와 `public_http_verified`는 항상 false입니다. K3s 설치 성공을 앱·DB·공개 HTTPS 성공으로 바꾸어 표시하지 않습니다. guest는 Ubuntu·systemd·CPU 2개 이상·RAM 1800MiB 이상·swap 비활성·root 여유 10GiB·NIC 주소·초기화 완료를 확인합니다.
+`database.configure` 결과에는 `database_ready`를 추가하며 native playbook 종료 코드 0과 요청·전체 target 목록·nonce가 같은 receipt를 모두 확인한 경우에만 true입니다. 모든 결과에는 `secrets_ready`가 있으며, 신뢰된 Provider 프로필로 `secrets.configure`와 `secrets.verify` 영수증을 모두 검증한 실행에서만 true입니다. 기존 HTTP 실행 경로는 Provider 프로필을 받지 않으므로 false입니다. DB의 `guest_ready`는 팀 HA preflight를 통과했다는 의미이고 runtime용 CPU/RAM 검사를 대신하지 않습니다. DB 작업에서 `runtime_ready`는 false입니다. `application_ready`와 `public_http_verified`는 항상 false입니다. K3s 설치 성공을 앱·DB·비밀정보·공개 HTTPS 성공으로 바꾸어 표시하지 않습니다. guest는 Ubuntu·systemd·CPU 2개 이상·RAM 1800MiB 이상·swap 비활성·root 여유 10GiB·NIC 주소·초기화 완료를 확인합니다.
 
 ### D-2. 중복 요청과 오류
 
@@ -332,6 +332,77 @@ profile·인증서·키·Vault·Vault password·SSH 참조는 모두 실행기 �
 
 etcd는 Patroni가 사용하는 v3 JSON gateway를 명시적으로 활성화합니다. gRPC `etcdctl endpoint health`와 별도로 mTLS HTTP `/v3/cluster/member/list`의 성공 응답과 전체 member 이름을 확인합니다. 초기화된 etcd의 설정 차이는 기존 유지보수 guard가 차단하므로, 운영자 검토와 스냅샷 후 member별 재시작·quorum 확인이 필요합니다. unknown 이후 수동 재개가 승인되면 원본 기록을 보존하고 모든 기존 worker·터널의 종료 및 실제 상태 대조 증거를 남긴 뒤 별도 검증 state 디렉터리와 새 요청 ID를 사용합니다. 이는 자동 재시도나 기존 실패 기록의 삭제 기능이 아닙니다.
 
+## E-4. Vault·External Secrets 운영자 프로필
+
+신규 runtime 생성 흐름은 `runtime.install` 성공 직후 내부 CLI의 `secrets.configure`를 호출합니다. 이 작업은 같은 등록 대상과 사설 SSH/SSM/IAP/OpenStack relay를 사용하며, HTTP 요청에서 Vault 주소·namespace·파일 경로를 받지 않습니다. `secrets.configure`는 설치와 재시작 readback을 수행한 뒤 `secrets.verify`까지 이어서 검사합니다. 읽기 전용 재검사만 필요할 때는 `secrets.verify`를 별도 실행할 수 있습니다. 프로필이 없거나 파일·해시·Provider가 다르면 `SECRETS_CONFIGURATION_REQUIRED` 또는 `SECRETS_CONFIGURATION_INVALID`로 차단합니다.
+
+아래는 AWS용 최소 형식입니다. 모든 경로와 값은 예시 placeholder이며 실제 비밀값이 아닙니다. 프로필, 개인키, seal 환경 파일은 실행기 소유 0600 일반 파일이어야 합니다. 설치 manifest는 운영자가 검토해 고정한 전체 Storage Provider/External Secrets Operator YAML과 정확한 SHA-256을 가리켜야 합니다.
+
+```json
+{
+  "version": 1,
+  "environment_id": "runtime-target-id",
+  "provider_profile": {
+    "provider": "aws",
+    "namespace": "railshot-secrets",
+    "storage": {
+      "class_name": "vault-retain",
+      "capacity": "10Gi",
+      "manifest_file": "/secure/artifacts/storage-provider.yaml",
+      "manifest_sha256": "<64-hex-sha256>"
+    },
+    "vault": {
+      "image": "hashicorp/vault@sha256:<64-hex-image-digest>",
+      "tls_secret": "vault-tls",
+      "seal_secret": "vault-seal",
+      "seal": {"type": "awskms"},
+      "tls": {
+        "cert_file": "/secure/vault/runtime-target-id/tls.crt",
+        "key_file": "/secure/vault/runtime-target-id/tls.key",
+        "ca_file": "/secure/vault/runtime-target-id/ca.crt"
+      },
+      "seal_env_file": "/secure/vault/runtime-target-id/seal-env.json"
+    },
+    "external_secrets": {
+      "manifest_file": "/secure/artifacts/external-secrets.yaml",
+      "manifest_sha256": "<64-hex-sha256>"
+    },
+    "recovery": {
+      "helper": "/usr/local/libexec/railshot-recovery-escrow",
+      "endpoint": "https://escrow.internal.example/v1/vault-material",
+      "ca_file": "/secure/escrow/ca.crt",
+      "client_cert_file": "/secure/escrow/client.crt",
+      "client_key_file": "/secure/escrow/client.key"
+    }
+  }
+}
+```
+
+AWS `awskms`와 GCP `gcpckms` 설정은 유지하며, 네 Provider 모두 중앙 `transit` seal을 선택할 수 있습니다. Transit 설정은 `seal:{type:"transit",address:"https://…",key_name:"railshot-<environment_id>",mount_path:"transit/",ca_file:"/관리/중앙-ca.crt"}`입니다. 중앙 주소와 CA는 HCL에 명시하고 `/vault/transit/ca.crt`를 별도로 마운트합니다. 토큰 파일은 `{"VAULT_TOKEN":"…"}`이며 실제 지원되는 `token="env://VAULT_TOKEN"` 참조를 사용합니다. 로컬 Vault CLI의 `VAULT_ADDR`·`VAULT_CACERT`와 중앙 연결을 혼용하지 않습니다. TLS/seal/중앙 CA Secret과 HCL ConfigMap은 내용 해시를 포함한 불변 이름으로 만들며, 교체 실패 시 이전 소유 StatefulSet의 참조를 복원하고 이전 자료는 자동 삭제하지 않습니다.
+
+복구자료 보관 서버와 환경 인증서 발급 구현은 [복구 API](recovery.md)를 따릅니다. 고정 `recovery_escrow.py` 클라이언트는 mTLS로 `POST /api/v1/escrows`에 `version/environment_id/kind/material/operation_id`를 보내고 같은 작업 조회로 확인 응답을 검증합니다. 응답 유실 때 같은 자료를 무조건 다시 보내지 않습니다. 재개 자료는 수신 인증서로 암호화한 envelope로만 내보내며, 대상 runtime에는 `root_token`만 복원하고 5개 복구 share나 중앙 저장 암호화 키를 전달하지 않습니다. root 폐기 응답이 유실되면 영수증·준비 검사 checkpoint와 실제 token 조회 403을 함께 확인합니다. 초기화 응답 자체가 보관 전에 영구 소실되면 다시 초기화하지 않고 unknown을 유지합니다.
+
+프로젝트 전달 설정 템플릿은 다음 형식입니다. `token_file`이라는 기존 필드명은 root token 파일이 아니라 escrow가 복구·배포 실행기 호스트에 안전하게 제공한 `{"role_id":"...","secret_id":"..."}` 0600 파일을 가리킵니다. `{environment_id}`만 서버가 신뢰된 파생 ID로 바꿉니다. AppRole secret ID는 24시간·최대 1,000회로 제한하며 로그인 token은 15분/최대 30분입니다. 관리자만 `secrets_delivery.py --config … --request … --rotate-credentials <새-generation> [--retire-previous]`로 교체합니다. 기존 secret ID가 만료되어도 등록된 관리 SSH 경로에서 `vault` ServiceAccount의 audience=`vault`, 10분 TokenRequest를 만들고, 특정 AppRole 발급 경로만 허용하는 5분 issuer token으로 새 자격을 발급할 수 있습니다. 이는 공개 제품 API의 작업이 아닙니다. 새 자격의 로그인과 암호화 보관·관리 파일 전달 성공 후에만 명시적인 이전 자격 폐기를 수행합니다. 응답을 잃은 발급 시도는 원장에 남기고, 보관 영수증이 없으면 같은 generation을 재발급하지 않습니다. 자동 주기 작업은 없으므로 운영자가 만료 전에 교체하거나 만료 후 이 복구 명령을 실행해야 합니다.
+
+
+```json
+{
+  "version": 1,
+  "vault": {
+    "namespace": "railshot-secrets",
+    "pod": "vault-0",
+    "mount": "railshot",
+    "auth_mount": "kubernetes",
+    "ca_file": "/secure/vault/{environment_id}/ca.crt",
+    "token_file": "/secure/escrow/{environment_id}/delivery-approle.json"
+  }
+}
+```
+
+신규 K3s 설정은 `secrets-encryption: true`를 포함하며 secrets 단계는 `k3s secrets-encrypt status`에서 활성 상태를 확인합니다. 기존 클러스터의 설정 차이는 자동 재구성하지 않고 차단합니다. 기존 Secret을 다시 암호화하거나 서버를 재시작하는 migration은 별도 검토·백업·명시적 승인 후 수행해야 합니다.
+
+코드는 Vault Raft PV, TLS listener, Provider auto-unseal, Kubernetes TokenReview RBAC, audit file, AppRole, External Secrets Operator와 실제 nonce의 Vault→Secret 동기화, Vault Pod 교체 뒤 같은 값의 재동기화를 검사하도록 구현되어 있습니다. 현재 검증은 가짜 키·임시 파일·모의 Kubernetes/Vault 응답만 사용했습니다. AWS/GCP/OpenStack/온프레미스의 실제 KMS·PV·인증서·escrow 서버·Vault/ESO 설치는 실행하지 않았으며 준비 완료 증거가 아닙니다.
+
 ## F. Integration / Verification
 
 ### F-1. 회의 요구사항과 이번 반영
@@ -384,3 +455,13 @@ python3 infrastructure/ansible/run.py \
 OpenStack은 실행기에서 사설 주소까지 운영자가 준비한 경로로 SSH에 도달해야 합니다. WireGuard는 지원 선택지에서 제거했습니다. AWS SSM·GCP IAP도 게스트의 SSH를 운반하는 관리 터널이며 SSH를 제거하는 방식이 아닙니다. `StrictHostKeyChecking=yes`를 유지하고 임의 ProxyCommand·ProxyJump·agent 전달은 차단합니다. 키 내용·클라우드 토큰을 Ansible 변수로 전달하지 않습니다.
 
 일반 SIGTERM/SIGINT 종료는 새 접수를 닫고 현재 worker의 자체 제한 시간과 Ansible·SSM/IAP 정리까지 기다립니다. 서비스 관리자나 컨테이너의 종료 유예 시간은 `timeout_seconds`에 터널별 정리 여유(최대 5초씩)를 더한 값 이상으로 설정해야 합니다. SIGKILL·호스트 장애 시 자식 프로세스 정리는 보장하지 않습니다. 남은 intent는 재시작 시 `unknown`으로 처리하고 운영자가 실제 노드 상태를 대조하기 전 자동 재실행하지 않습니다.
+
+### 중앙 발급 권한 경계와 중단된 환경 복구
+
+관리 profile 최상위에 `central_provisioning:{"helper":"/usr/local/libexec/railshot-provision-environment","state_dir":"/관리-api/환경자격"}`를 지정하면 새 환경 ID가 확정된 후 고정 helper를 `sudo -n`으로 호출합니다. Provider·namespace·이미지·스토리지·ESO 산출물 해시는 발급 전에 검사하며 `--validate-only`는 발급하지 않습니다. 중앙 생성 자료는 환경별 Transit key/token, Vault server TLS, runtime/manager mTLS 인증서로 분리합니다. 발급 완료 자료의 환경 ID·고정 출력 위치를 검증한 뒤 target staging과 관리 전달기에 연결합니다.
+
+운영자는 `control-provision-helper.py`를 root 소유 0755 `/usr/local/libexec/railshot-provision-environment`에, `control-environment-provision.sh`, `control_vault.py`, `recovery_enroll.py`를 root 소유 `/usr/local/libexec/railshot/`에 설치합니다. `/etc/railshot/control-provisioner.json`은 root 0600이고 다음 필드를 고정합니다: `version:1`, `caller_uid`, `caller_gid`, `root_state_dir`(root 0700), `output_root`(API 사용자 0700), `provision_config`(root 중앙 설정). sudoers에는 해당 API 사용자에게 이 helper만 허용합니다. 예: `railshot ALL=(root) NOPASSWD: /usr/local/libexec/railshot-provision-environment *`. helper는 환경 ID 한 개만 허용하며 임의 경로·명령을 받지 않습니다. root 원장 잠금 아래 발급 자료를 읽고, 보조 그룹 제거→등록 gid→등록 uid로 영구 권한 하향한 다음 사용자 소유 출력 디렉터리에 씁니다. API 전체를 root로 실행하거나 중앙 CA 개인키를 API 컨테이너에 마운트하지 않습니다. 컨테이너 실행 환경에서는 이 helper와 고정 경로가 실제 운영 실행 호스트에 설치된 별도 실행 경계가 필요하며, 기본 compose만으로 자동 제공된다고 주장하지 않습니다.
+
+native 재개는 원래 입력과 같은 request에 `run.py … --resume-secrets --secrets-config-file …`를 명시합니다. `secrets.configure`만 허용하고 기존 request digest·대상 잠금과 이전 시도 원장을 보존합니다. 공개 API는 이 옵션을 노출하지 않습니다.
+
+제품 환경 원장까지 복구하려면 API 프로세스를 정상 중지한 뒤 동일 서비스 사용자로 `node apps/api/src/recover-environment.js --workspace <제품상태> --environment-state-dir <환경상태> --profiles-file <등록프로필> --environment-id <기존환경작업ID>`를 실행합니다. 독점 원장 잠금, 원래 계획 checksum과 소유권, 자원·guest·runtime 성공 기록, 실패 secrets 단계가 모두 일치해야 합니다. Terraform 자원 생성·runtime 설치는 재실행하지 않고 secrets의 증거 기반 재개 후 아직 수행하지 않은 DB 설정·등록을 이어갑니다. 환경 단독 작업은 성공 상태로 반영합니다. 배포에 포함된 환경이면 환경 복구 뒤 부모 배포는 `ENVIRONMENT_RECOVERED` blocked로 남기고, 소스 build를 자동 재전송하지 않으므로 보존된 소스로 새 배포를 요청합니다. 다른 단계의 unknown은 이 명령으로 해제하지 않습니다.

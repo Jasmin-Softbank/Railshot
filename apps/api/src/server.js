@@ -65,8 +65,8 @@ function configuredDeploymentService(env = process.env) {
 export function createAppServer({ sourceLoader = fetchPublicGithubSource, access = apiAccessConfig(),
   service = configuredDeploymentService(),
   stateDirectory = process.env.RAILSHOT_STATE_DIR || join(homedir(), '.local', 'state', 'railshot'),
-  deployPublished, environmentAdapter, applicationAdapter, personalAdapter, observeMetrics, observeLogs, observeTraffic, classifyFailure, product, pollInterval,
-  maxConcurrentDeployments = Number(process.env.RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS ?? 3),
+  deployPublished, environmentAdapter, applicationAdapter, personalAdapter, secretsAdapter, projectCipher, projectKeyFile = process.env.RAILSHOT_PROJECT_KEY_FILE, observeMetrics, observeLogs, classifyFailure, product, pollInterval,
+  maxConcurrentDeployments = Number(process.env.RAILSHOT_MAX_CONCURRENT_DEPLOYMENTS ?? 16),
   target = { provider: process.env.RAILSHOT_TARGET_PROVIDER }, providerTargets, releaseLeaseMs = 120_000,
 } = {}) {
   // Keep the dedicated API credential in the adapter closure. Child CI/CD tools
@@ -83,6 +83,8 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
       const { createCdAdapter } = await import('./cd.js');
       cd = await createCdAdapter({ configPath: process.env.RAILSHOT_CD_CONFIG, loadPublished: service.publishedFiles });
     }
+    const { createSecretsAdapter } = await import('./project-secrets.js');
+    const secrets = secretsAdapter || (process.env.RAILSHOT_SECRETS_FILE ? await createSecretsAdapter({ configPath: process.env.RAILSHOT_SECRETS_FILE, stateDirectory: join(stateDirectory, 'secrets-delivery') }) : undefined);
     const environment = environmentAdapter || (process.env.RAILSHOT_PROFILES_FILE ? await createEnvironmentAdapter({ profilesFile: process.env.RAILSHOT_PROFILES_FILE, stateDir: join(stateDirectory, 'environments'), loadPublished: service?.publishedFiles }) : undefined);
     const { createApplicationAdapter } = await import('./applications.js');
     let applications = applicationAdapter || (process.env.RAILSHOT_APPLICATIONS_FILE ? await createApplicationAdapter({ configPath: process.env.RAILSHOT_APPLICATIONS_FILE, ciIdentity: service?.identity, loadPublished: service?.publishedFiles }) : undefined);
@@ -96,7 +98,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
     const selections = providerTargets ?? (process.env.RAILSHOT_PROVIDER_TARGETS === undefined ? undefined : JSON.parse(process.env.RAILSHOT_PROVIDER_TARGETS));
     const { createAppLogsObserver } = await import('./logs.js');
     const logs = observeLogs || createAppLogsObserver({ configPath: process.env.RAILSHOT_CD_CONFIG });
-    return createProductService({ observeMetrics: observer, observeLogs: logs, classifyFailure: classifier, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, personalAdapter: personal, pollInterval, maxConcurrentDeployments });
+    return createProductService({ observeMetrics: observer, observeLogs: logs, classifyFailure: classifier, service, target, providerTargets: selections, directory: stateDirectory, deployPublished: cd, environmentAdapter: environment, applicationAdapter: applications, personalAdapter: personal, secretsAdapter: secrets, projectCipher, projectKeyFile, pollInterval, maxConcurrentDeployments });
   });
   // Hold initialization errors until a request can receive a safe 503; never leak private config paths.
   let productInitialized = false;
@@ -222,7 +224,7 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
         // Public visitors are anonymous cookie sessions. Existing localhost maintenance clients
         // without a cookie retain their private maintenance channel and legacy contracts.
         const dashboardRoute = isDashboardRoute(url.pathname);
-        const scoped = !clientRoute && (access.remote || access.publicDemo || dashboardRoute || registrationRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`) || (request.headers.cookie || '').includes(`${OWNER_COOKIE}=`) || /^\/api\/v1\/(owners|recoveries)$/.test(url.pathname));
+        const scoped = !clientRoute && (access.remote || access.publicDemo || dashboardRoute || url.pathname.startsWith('/api/v1/projects') || registrationRoute || (request.headers.cookie || '').includes(`${SESSION_COOKIE}=`) || (request.headers.cookie || '').includes(`${OWNER_COOKIE}=`) || /^\/api\/v1\/(owners|recoveries)$/.test(url.pathname));
         const session = scoped ? products.dashboard.session(cookieToken(request.headers.cookie)) : null;
         const owner = clientRoute ? null : products.dashboard?.owner?.(ownerToken(request.headers.cookie));
         const sessionId = owner?.session_id ?? session?.id ?? null;
@@ -284,6 +286,39 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           if (dashboardRoute) {
             await serveDashboard(request, response, url, products, session, requestId, sessionId);
             return;
+          }
+          const projectRoute = /^\/api\/v1\/projects(?:\/([A-Za-z0-9._-]+))?(?:\/(variables|revisions|deliveries|transfers))?(?:\/([A-Za-z0-9._-]+))?(?:\/(actions))?$/.exec(url.pathname);
+          if (projectRoute) {
+            const [, projectId, child, childId, action] = projectRoute;
+            const allowed = !projectId ? ['GET', 'POST'] : !child || child === 'variables' ? ['GET']
+              : child === 'revisions' && !childId || ['deliveries', 'transfers'].includes(child) && !childId || ['deliveries', 'transfers'].includes(child) && childId && action ? ['POST']
+              : ['deliveries', 'transfers'].includes(child) && childId && !action ? ['GET'] : [];
+            if (!allowed.length || child && !projectId || action && !['deliveries', 'transfers'].includes(child) || childId && child === 'variables') throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
+            if (!allowed.includes(request.method)) { const e = new ServiceError('지원하지 않는 메서드입니다.', 405); e.allow = allowed.join(', '); throw e; }
+            if (!projectId && request.method === 'GET') { json(response, 200, page(products.projects(sessionId), url.searchParams)); return; }
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            if (request.method === 'GET') {
+              const value = !child ? products.getProject(projectId, sessionId) : child === 'variables' ? products.variables(projectId, sessionId) : products.getProjectOperation(projectId, child, childId, sessionId);
+              json(response, 200, value); return;
+            }
+            if (projectId) products.getProject(projectId, sessionId);
+            const key = requestKey(request), input = await jsonInput(request);
+            if (!projectId) {
+              const value = await products.createProject(input, key, sessionId); json(response, 201, value, { Location: `/api/v1/projects/${value.id}` }); return;
+            }
+            if (child === 'revisions') {
+              const value = await products.createRevision(projectId, input, key, sessionId); json(response, 201, value, { Location: `/api/v1/projects/${projectId}/variables` }); return;
+            }
+            if (child === 'transfers' && !childId) {
+              const value = await products.createTransfer(projectId, input, key, sessionId); json(response, 201, value, { Location: `/api/v1/projects/${projectId}/transfers/${value.id}` }); return;
+            }
+            if (action && input.action === 'observe') {
+              const value = await products.observeProjectOperation(projectId, child, childId, input, key, sessionId);
+              json(response, 200, value, { Location: `/api/v1/projects/${projectId}/${child}/${childId}` }); return;
+            }
+            if (action && child === 'deliveries') throw new ServiceError('action=observe만 허용합니다.', 422);
+            const value = child === 'deliveries' ? await products.createDelivery(projectId, input, key, sessionId) : await products.executeProjectTransfer(projectId, childId, input, key, sessionId);
+            accepted(response, `projects/${projectId}/${child}`, value, requestId); return;
           }
           if (url.pathname === '/api/v1/options') {
             if (request.method !== 'GET') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'GET'; throw error; }

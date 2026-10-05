@@ -280,6 +280,23 @@ details.provider-field > summary:focus-visible { outline: 2px solid var(--color-
 .application-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .application-title strong { min-width: 0; overflow-wrap: anywhere; }
 .application-panel, .update-context { margin-bottom: 24px; }
+.project-panel { margin-bottom: 24px; padding: 28px; }
+.project-create-form, .variable-form, .project-actions { margin-top: 24px; padding-top: 22px; border-top: 1px solid var(--color-border); }
+.project-create-form > div { display: flex; gap: 12px; margin-top: 8px; max-width: 560px; }
+.project-create-form input { flex: 1; }
+.project-create-form p { margin: 8px 0 0; font-size: 13px; }
+.project-status { display: grid; gap: 6px; margin: 18px 0; }
+.project-status p { margin: 0; }
+.variable-grid { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 12px; margin: 16px 0; }
+.variable-grid .field-label { display: grid; gap: 7px; }
+.variable-form h3, .project-actions h3 { margin: 0 0 8px; font-size: 16px; }
+.project-actions { display: grid; gap: 10px; max-width: 680px; }
+.project-actions .field-label { display: grid; gap: 7px; }
+#project-confirm-dialog { width: min(600px, calc(100% - 36px)); padding: 28px; border: 1px solid var(--color-border); border-radius: 12px; color: var(--color-ink); background: var(--color-surface); }
+#project-confirm-dialog::backdrop { background: rgb(19 35 48 / 55%); }
+#project-confirm-dialog h2 { margin-top: 0; }
+@media (max-width: 800px) { .variable-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 680px) { .project-panel { padding: 20px; } .project-create-form > div { display: grid; } .variable-grid { grid-template-columns: 1fr; } }
 .update-context { padding: 24px; }
 .update-context p, .application-detail, .update-changes { overflow-wrap: anywhere; line-height: 1.7; }
 .application-detail { margin-top: 24px; padding-top: 20px; border-top: 1px solid #e5e9e7; }

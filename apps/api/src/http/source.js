@@ -22,7 +22,7 @@ export async function uploadedSource(request, strict = false, allowSelection = f
   const fail = (message) => { throw new ServiceError(message, strict ? 422 : 400); };
   const allowed = new Set(['app', 'target_id', 'plan_id', 'source_type', 'repository_url', 'archive', 'files', 'paths']);
   if (sourceOnly) for (const name of ['app', 'target_id', 'plan_id']) allowed.delete(name);
-  if (allowSelection) for (const name of ['environment', 'provider', 'source_name', 'expected_target_id']) allowed.add(name);
+  if (allowSelection) for (const name of ['environment', 'provider', 'source_name', 'expected_target_id', 'project_id', 'revision_id']) allowed.add(name);
   for (const key of form.keys()) {
     if (!allowed.has(key)) fail('알 수 없는 입력 필드입니다.');
     if (key !== 'files' && form.getAll(key).length !== 1) fail('단일 입력 필드를 중복해서 보낼 수 없습니다.');
@@ -35,7 +35,9 @@ export async function uploadedSource(request, strict = false, allowSelection = f
   if (strict && !selecting && !sourceOnly && !target_id) fail('대상 ID가 필요합니다.');
   const plan_id = form.has('plan_id') ? form.get('plan_id') : undefined;
   if (plan_id !== undefined && (!allowSelection || typeof plan_id !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(plan_id))) fail('환경 계획 ID가 잘못되었습니다.');
-  let selected = {};
+  const project_id = form.get('project_id'), revision_id = form.get('revision_id');
+  if (Boolean(project_id) !== Boolean(revision_id) || project_id && (![project_id, revision_id].every(v => typeof v === 'string' && /^[A-Za-z0-9._-]{1,128}$/.test(v)))) fail('프로젝트와 설정 버전을 함께 지정하세요.');
+  let selected = project_id ? { project_id, revision_id } : {};
   if (selecting) {
     const environment = form.get('environment'), provider = form.get('provider');
     if (form.has('app') || form.has('plan_id')) fail('환경 선택과 직접 대상·계획 지정을 함께 사용할 수 없습니다.');
@@ -45,7 +47,7 @@ export async function uploadedSource(request, strict = false, allowSelection = f
     const expected = form.has('expected_target_id') ? form.get('expected_target_id') : undefined;
     if (expected !== undefined && (typeof expected !== 'string' || !TARGET_ID.test(expected))) fail('검토한 배포 대상 ID가 잘못되었습니다.');
     if (target_id !== undefined && !(environment === 'onprem' && provider === 'openstack')) fail('개인 환경은 OpenStack에서만 선택하세요.');
-    selected = { target_id: undefined, deployment_selection: { environment, provider, ...(target_id !== undefined ? { target_id } : {}) }, source_name, ...(expected !== undefined ? { expected_target_id: expected } : {}) };
+    selected = { ...selected, target_id: undefined, deployment_selection: { environment, provider, ...(target_id !== undefined ? { target_id } : {}) }, source_name, ...(expected !== undefined ? { expected_target_id: expected } : {}) };
   } else if (form.has('source_name') || form.has('expected_target_id')) fail('소스 이름과 검토 대상은 환경 선택과 함께 입력하세요.');
   const uploads = form.getAll('files');
   const supplied = [form.has('repository_url') && 'github', uploads.length > 0 && 'folder', form.has('archive') && 'zip'].filter(Boolean);

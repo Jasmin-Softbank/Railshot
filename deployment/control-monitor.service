@@ -1,0 +1,19 @@
+[Unit]
+Description=Railshot central Vault renewal and local failure signal
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/railshot/control-monitor.env
+ExecStart=/usr/local/libexec/railshot/control-monitor.sh ${CONTROL_PROVISION_CONFIG} ${CONTROL_CUSTODY_DATA_DIR} ${CONTROL_CUSTODY_KEYRING} ${CONTROL_LATEST_BACKUP_BUNDLE}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/railshot-control/custody-data
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=railshot-control-monitor
+TimeoutStartSec=90

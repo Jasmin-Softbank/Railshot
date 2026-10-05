@@ -1,0 +1,57 @@
+# Dedicated control-plane Vault. Run only with an operator-owned env file outside Git.
+name: railshot-control-vault
+services:
+  vault:
+    restart: unless-stopped
+    image: ${CONTROL_VAULT_IMAGE:?Set an operator-verified Vault image digest}
+    command: ["vault", "server", "-config=/vault/config/vault.hcl"]
+    user: "100:1000"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: ["/tmp:uid=100,gid=1000,mode=1770"]
+    ports: ["127.0.0.1:${CONTROL_VAULT_PORT:-18200}:8200"]
+    volumes:
+      - type: bind
+        source: ${CONTROL_VAULT_CONFIG_DIR:?Set an absolute private config directory}
+        target: /vault/config
+        read_only: true
+      - type: bind
+        source: ${CONTROL_VAULT_TLS_DIR:?Set an absolute private TLS directory}
+        target: /vault/tls
+        read_only: true
+      - type: bind
+        source: ${CONTROL_VAULT_DATA_DIR:?Set an absolute persistent data directory}
+        target: /vault/data
+    healthcheck:
+      test: ["CMD-SHELL", "VAULT_ADDR=https://127.0.0.1:8200 VAULT_CACERT=/vault/tls/ca.crt vault status -format=json >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+  custody:
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: deployment/control-recovery.Dockerfile
+    user: "0:0"
+    ports: ["127.0.0.1:${CONTROL_CUSTODY_PORT:-19443}:9443"]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - type: bind
+        source: ${CONTROL_CUSTODY_DATA_DIR:?Set absolute persistent custody data directory}
+        target: /var/lib/railshot-recovery
+      - type: bind
+        source: ${CONTROL_CUSTODY_SECRET_DIR:?Set absolute private custody secret directory}
+        target: /run/secrets
+        read_only: true
+    command: ["python3", "/opt/railshot/recovery_service.py", "--data-dir", "/var/lib/railshot-recovery", "--keyring", "/run/secrets/recovery-keyring.json", "serve", "--listen", "0.0.0.0", "--port", "9443", "--registry", "/run/secrets/recovery-clients.json", "--cert", "/run/secrets/server.crt", "--key", "/run/secrets/server.key", "--ca", "/run/secrets/client-ca.crt"]
+    healthcheck:
+      # `ready` verifies the encrypted custody store with a bounded decrypt/read.
+      # The HTTP endpoint itself remains mTLS-only and is checked by registered clients.
+      test: ["CMD", "python3", "/opt/railshot/recovery_service.py", "--data-dir", "/var/lib/railshot-recovery", "--keyring", "/run/secrets/recovery-keyring.json", "ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 4

@@ -45,6 +45,31 @@ def secret_env(name, secret, key):
     return {'name': name, 'valueFrom': {'secretKeyRef': {'name': secret, 'key': key}}}
 
 
+def configuration_binding(value, namespace=None):
+    """Validate metadata-only references produced by secrets_delivery.prepare."""
+    fields = {'project_id', 'binding_id', 'revision_id', 'namespace', 'configmap_name', 'secret_name',
+              'external_secret_name', 'plain_names', 'secret_names'}
+    require(isinstance(value, dict) and set(value) == fields, 'approved project configuration references required')
+    identity = r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}'
+    require(all(isinstance(value[key], str) and re.fullmatch(identity, value[key]) for key in
+                ('project_id', 'binding_id', 'revision_id')), 'configuration identities are invalid')
+    dns = r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?'
+    require(all(isinstance(value[key], str) and re.fullmatch(dns, value[key]) for key in
+                ('namespace', 'configmap_name', 'secret_name', 'external_secret_name')),
+            'configuration Kubernetes references are invalid')
+    require(namespace is None or value['namespace'] == namespace, 'configuration namespace differs from target')
+    variable = r'[A-Za-z_][A-Za-z0-9_]{0,127}'
+    for key in ('plain_names', 'secret_names'):
+        require(isinstance(value[key], list) and value[key] == sorted(set(value[key])) and
+                all(isinstance(name, str) and re.fullmatch(variable, name) for name in value[key]),
+                'configuration variable names must be sorted and unique')
+    require(not set(value['plain_names']) & set(value['secret_names']), 'configuration variable kinds overlap')
+    require(not (set(value['plain_names']) | set(value['secret_names'])) & {
+        'PORT', 'DATABASE_URL', 'MIGRATION_DATABASE_URL', 'PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD',
+        'PGDATABASE', 'PGSSLMODE', 'PGSSLROOTCERT'}, 'platform-owned environment cannot be overridden')
+    return value
+
+
 def document_hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
@@ -130,6 +155,7 @@ def render(directory, target):
         require(int(resources['requests'][kind].removesuffix(unit)) <= int(resources['limits'][kind].removesuffix(unit)),
                 'request exceeds limit')
     spec, images, receipt = read_artifact(directory, target['id'])
+    configuration = configuration_binding(target['configuration'], target['namespace']) if target.get('configuration') else None
     pull_secret = receipt['registry']['image_pull_secret']
     if receipt['registry']['visibility'] == 'private':
         require(target.get('image_pull_secret') == pull_secret and pull_secret['namespace'] == target['namespace'],
@@ -141,17 +167,24 @@ def render(directory, target):
     require(bool(database) == bool(target.get('database')), 'workload and target database bindings must agree')
     require(not set(svc.get('env', {})) & {'PORT', 'DATABASE_URL', 'MIGRATION_DATABASE_URL', 'PGSSLMODE', 'PGSSLROOTCERT'},
             'platform-owned connection environment cannot be overridden')
-    require(set(svc.get('secrets', [])) <= ({'DATABASE_URL'} if database else set()),
-            'only the approved DATABASE_URL Secret is supported')
+    allowed_secrets = ({'DATABASE_URL'} if database else set()) | (set(configuration['secret_names']) if configuration else set())
+    require(set(svc.get('secrets', [])) <= allowed_secrets,
+            'workload Secret declarations require an approved project revision or database binding')
     require(target.get('path_mode', 'preserve') == 'preserve', 'HTTP paths must be forwarded without rewriting')
     route, health = http_path(svc.get('route')), http_path(svc.get('health'))
     name, namespace = spec['app'], target['namespace']
     labels = {'app.kubernetes.io/name': name, 'railshot.io/target': target['id']}
     runtime_labels = {**labels, 'railshot.io/role': 'runtime'} if database else labels
+    configured_names = (set(configuration['plain_names']) | set(configuration['secret_names'])) if configuration else set()
+    explicit_env = {key: value for key, value in svc.get('env', {}).items() if key not in configured_names}
     container = {'name': svc['name'], 'image': images[svc['name']], 'ports': [{'containerPort': svc['port']}],
-                 'env': [{'name': k, 'value': v} for k, v in {**svc.get('env', {}), 'PORT': str(svc['port'])}.items()],
+                 'env': [{'name': k, 'value': v} for k, v in {**explicit_env, 'PORT': str(svc['port'])}.items()],
                  'resources': resources, 'securityContext': container_security(),
                  'volumeMounts': [{'name': 'tmp', 'mountPath': '/tmp'}]}
+    if configuration:
+        container['envFrom'] = [{'configMapRef': {'name': configuration['configmap_name']}}]
+        if configuration['secret_names']:
+            container['envFrom'].append({'secretRef': {'name': configuration['secret_name']}})
     if svc.get('command'):
         container['command'] = svc['command']
     if database:
@@ -166,6 +199,9 @@ def render(directory, target):
                              'automountServiceAccountToken': False, 'nodeSelector': {'kubernetes.io/arch': 'amd64'},
                              'securityContext': pod_security(), 'containers': [container],
                              'volumes': [{'name': 'tmp', 'emptyDir': {'sizeLimit': '64Mi'}}]}}}}
+    if configuration:
+        workload['spec']['template']['metadata']['annotations'] = {
+            'railshot.io/configuration-revision': configuration['revision_id']}
     if pull_secret is not None:
         workload['spec']['template']['spec']['imagePullSecrets'] = [{'name': pull_secret['name']}]
     if database:
@@ -231,6 +267,7 @@ def render(directory, target):
                      'container_port': svc['port'], 'node_port': target['node_port']},
             'source_commit': receipt['source_commit'], 'target_id': target['id'],
             **({'database': database, 'migration': migration} if database else {}),
+            **({'configuration': configuration} if configuration else {}),
             **{k: receipt[k] for k in ('tenant', 'app', 'run_id', 'producer_attempt', 'bundle_artifact_id', 'registry')}}
 
 

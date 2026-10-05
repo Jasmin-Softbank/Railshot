@@ -1,0 +1,11 @@
+[Unit]
+Description=Renew and inspect Railshot central control services every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+RandomizedDelaySec=20s
+
+[Install]
+WantedBy=timers.target

@@ -753,7 +753,7 @@
       "post": {
         "operationId": "createPlan",
         "summary": "Create plan",
-        "description": "Strict JSON. name is an application name of 3 through 30 characters. Operator profiles expose no credentials or local paths. Execution supports one registered AWS/GCP amd64 runtime node with database.mode=none or configured Patroni placements. Each placement must exactly match its registered database, DCS voter and proxy role counts; the combined topology needs at least two database nodes, at least three odd-numbered DCS voters and at least one proxy. standalone and unsupported runtime counts/providers/topologies produce a saved non-executable plan with blockers. Plans expire after 15 minutes, bind policy and target snapshots plus every provider plan digest, and admit only new resources without changes to existing resources. Plan creation uses the same execution admission lock. A saved or executable plan is not deployment evidence. For profiles with deployment configuration, the target database binding requirement must equal whether the request uses patroni; mismatches produce DATABASE_BINDING_PROFILE_MISMATCH before Terraform planning. Profiles without deployment configuration can independently select database preparation.",
+        "description": "Strict JSON. name is an application name of 3 through 30 characters. Operator profiles expose no credentials or local paths. Execution supports one registered AWS/GCP amd64 runtime node with database.mode=none or configured Patroni placements. Each placement must exactly match its registered database, DCS voter and proxy role counts; the combined topology needs at least two database nodes, at least three odd-numbered DCS voters and at least one proxy. standalone and unsupported runtime counts/providers/topologies produce a saved non-executable plan with blockers. Plans expire after 15 minutes, bind policy and target snapshots plus every provider plan digest, and admit only new resources without changes to existing resources. Plan creation uses the same execution admission lock. A saved or executable plan is not deployment evidence. For profiles with deployment configuration, the target database binding requirement must equal whether the request uses patroni; mismatches produce DATABASE_BINDING_PROFILE_MISMATCH before Terraform planning. Profiles without deployment configuration can independently select database preparation. A runtime profile without secrets_config_file is blocked with SECRETS_CONFIGURATION_REQUIRED. Runtime is followed by secrets.configure, whose exact secrets_ready receipt is required.",
         "parameters": [],
         "requestBody": {
           "required": true,
@@ -3914,6 +3914,867 @@
     },
     "/api/v1/readiness": {
       "$ref": "./personal.openapi.json#/paths/~1api~1v1~1readiness"
+    },
+    "/api/v1/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "summary": "List session-owned projects",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/marker"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "summary": "Create environment-independent project",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Stored resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}": {
+      "get": {
+        "operationId": "getProject",
+        "summary": "Read a project",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/variables": {
+      "get": {
+        "operationId": "projectVariables",
+        "summary": "Read normal values and secret metadata",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectVariables"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/revisions": {
+      "post": {
+        "operationId": "createProjectRevision",
+        "summary": "Save immutable encrypted revision",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Stored resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectRevision"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevisionInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/deliveries": {
+      "post": {
+        "operationId": "createProjectDelivery",
+        "summary": "Re-publish verified source with a pinned configuration revision",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted operation",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "2"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectOperation"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/deliveries/{delivery}": {
+      "get": {
+        "operationId": "getProjectDelivery",
+        "summary": "Observe a configuration delivery",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "delivery",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/deliveries/{delivery}/actions": {
+      "post": {
+        "operationId": "observeProjectDelivery",
+        "summary": "Read-only reconciliation of an unknown delivery",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "delivery",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectObserveInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/transfers": {
+      "post": {
+        "operationId": "createProjectTransfer",
+        "summary": "Review a source and destination pinned transfer plan",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Stored resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferInput"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/transfers/{transfer}": {
+      "get": {
+        "operationId": "getProjectTransfer",
+        "summary": "Observe an environment transfer",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transfer",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectOperation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/transfers/{transfer}/actions": {
+      "post": {
+        "operationId": "executeProjectTransfer",
+        "summary": "Execute a reviewed plan or reconcile with read-only observation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transfer",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted operation",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "2"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error400"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error403"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error404"
+          },
+          "405": {
+            "$ref": "#/components/responses/Error405"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error409"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error422"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error503"
+          },
+          "200": {
+            "description": "Resource",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectOperation"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectAction"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4915,6 +5776,21 @@
                 "type": "null"
               }
             ]
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "revision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "configuration": {
+            "$ref": "#/components/schemas/ConfigurationReference"
           }
         },
         "required": [
@@ -5414,6 +6290,24 @@
             "type": "string",
             "format": "date-time",
             "description": "Start of the current unknown interval; reads do not extend the queue release deadline."
+          },
+          "secrets": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "secrets_ready": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -5723,6 +6617,24 @@
             ],
             "additionalProperties": false,
             "description": "Deployment target registration, including the private database binding when one was produced."
+          },
+          "secrets": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "ansible_job_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "additionalProperties": false
+          },
+          "secrets_ready": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -5924,7 +6836,7 @@
         "description": "Either explicit app/target_id with optional plan_id, or the original UI environment/provider choice, never both. A plan binds app to its name and target_id to its runtime_target_id. Without a plan, explicit fields may reuse a successful saved environment registration. For environment/provider selection, the server resolves the target and derives the app name from source_name (required for folders), the ZIP filename or the GitHub repository name using the shared CLI/MCP naming rules. It never substitutes the registered target app. A different app on a fixed target is rejected before source retrieval or execution; a new app needs its own registration or an executable create_per_request plan. Missing or invalid source names are rejected without a placeholder or hash fallback. Personal OpenStack selection additionally accepts target_id; multipart deployment_selection JSON is not accepted. Server revalidates owner, connectivity and deletion state.",
         "oneOf": [
           {
-            "$ref": "#/components/schemas/Source"
+            "$ref": "#/components/schemas/ProjectDeploymentExplicitSource"
           },
           {
             "type": "object",
@@ -5964,6 +6876,12 @@
                 "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
               },
               "target_id": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "revision_id": {
                 "type": "string"
               }
             },
@@ -6019,7 +6937,15 @@
                   }
                 }
               }
-            ]
+            ],
+            "dependentRequired": {
+              "project_id": [
+                "revision_id"
+              ],
+              "revision_id": [
+                "project_id"
+              ]
+            }
           },
           {
             "type": "object",
@@ -6059,6 +6985,12 @@
                 "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
               },
               "target_id": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "revision_id": {
                 "type": "string"
               }
             },
@@ -6114,7 +7046,15 @@
                   }
                 }
               }
-            ]
+            ],
+            "dependentRequired": {
+              "project_id": [
+                "revision_id"
+              ],
+              "revision_id": [
+                "project_id"
+              ]
+            }
           },
           {
             "type": "object",
@@ -6161,6 +7101,12 @@
                 "description": "Optional reviewed environment target returned by applications/resolve. Reject with 409 DEPLOYMENT_TARGET_CHANGED before source retrieval or dispatch if it differs from the current provider mapping."
               },
               "target_id": {
+                "type": "string"
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "revision_id": {
                 "type": "string"
               }
             },
@@ -6218,7 +7164,15 @@
                   }
                 }
               }
-            ]
+            ],
+            "dependentRequired": {
+              "project_id": [
+                "revision_id"
+              ],
+              "revision_id": [
+                "project_id"
+              ]
+            }
           }
         ]
       },
@@ -7515,6 +8469,26 @@
               "not_deployed"
             ],
             "description": "A later unresolved CD operation marks the current version unverified; the last successful deployment remains historical evidence."
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "revision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "registration_kind": {
+            "enum": [
+              "environment"
+            ]
+          },
+          "environment_operation_id": {
+            "type": "string"
           }
         },
         "required": [
@@ -8786,6 +9760,744 @@
       },
       "PersonalReceipt": {
         "$ref": "./personal.openapi.json#/components/schemas/PersonalReceipt"
+      },
+      "Project": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "active_binding_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "active_binding_id",
+          "revision_id"
+        ]
+      },
+      "ProjectInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "ProjectList": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Project"
+            }
+          },
+          "next_marker": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "next_marker"
+        ]
+      },
+      "ProjectVariable": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "plain",
+              "secret"
+            ]
+          },
+          "scope": {
+            "enum": [
+              "common",
+              "environment"
+            ]
+          },
+          "environment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "origin": {
+            "const": "user"
+          },
+          "has_value": {
+            "type": "boolean"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string",
+            "description": "Only returned for plain variables. Secret values never appear in GET responses."
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "scope",
+          "environment_id",
+          "required",
+          "has_value"
+        ]
+      },
+      "ProjectBinding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "environment_id": {
+            "type": "string"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "applied_revision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "environment_id",
+          "application_id",
+          "status",
+          "applied_revision_id"
+        ]
+      },
+      "ProjectVariables": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "revision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectVariable"
+            }
+          },
+          "bindings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectBinding"
+            }
+          },
+          "capabilities": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "storage": {
+                "type": "boolean"
+              },
+              "delivery": {
+                "type": "boolean"
+              },
+              "transfer": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "storage",
+              "delivery",
+              "transfer"
+            ]
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "project_id",
+          "revision_id",
+          "items",
+          "bindings",
+          "capabilities",
+          "blockers"
+        ]
+      },
+      "VariableChange": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "const": "set"
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Z_][A-Z0-9_]{0,127}$"
+              },
+              "kind": {
+                "enum": [
+                  "plain",
+                  "secret"
+                ]
+              },
+              "scope": {
+                "enum": [
+                  "common",
+                  "environment"
+                ]
+              },
+              "environment_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "required": {
+                "type": "boolean"
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 16384
+              }
+            },
+            "required": [
+              "operation",
+              "name"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "operation": {
+                "const": "delete"
+              },
+              "name": {
+                "type": "string"
+              },
+              "scope": {
+                "enum": [
+                  "common",
+                  "environment"
+                ]
+              },
+              "environment_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "operation",
+              "name"
+            ]
+          }
+        ]
+      },
+      "RevisionInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_revision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 200,
+            "items": {
+              "$ref": "#/components/schemas/VariableChange"
+            }
+          }
+        },
+        "required": [
+          "base_revision_id",
+          "operations"
+        ]
+      },
+      "ProjectRevision": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "parent_revision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "project_id",
+          "parent_revision_id",
+          "created_at"
+        ]
+      },
+      "DeliveryInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "revision_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_id",
+          "revision_id"
+        ]
+      },
+      "TransferInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source_binding_id": {
+            "type": "string"
+          },
+          "destination_environment_id": {
+            "type": "string"
+          },
+          "revision_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_binding_id",
+          "destination_environment_id",
+          "revision_id"
+        ]
+      },
+      "ProjectAction": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "execute"
+              },
+              "plan_hash": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "plan_hash"
+            ]
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "observe"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          }
+        ]
+      },
+      "ProjectOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "deliveries",
+              "transfers"
+            ]
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "revision_id": {
+            "type": "string"
+          },
+          "observed_revision_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "queued",
+              "running",
+              "succeeded",
+              "blocked",
+              "failed",
+              "unknown"
+            ]
+          },
+          "stage": {
+            "type": "string"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OperationError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "source_binding_id": {
+            "type": "string"
+          },
+          "destination_binding_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_deployment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destination_deployment_id": {
+            "type": "string"
+          },
+          "deployment_id": {
+            "type": "string"
+          },
+          "destination_application_id": {
+            "type": "string"
+          },
+          "destination_environment_id": {
+            "type": "string"
+          },
+          "plan_hash": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required_overrides": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "traffic_switch": {
+            "const": "not_requested"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "project_id",
+          "revision_id",
+          "status",
+          "stage"
+        ]
+      },
+      "ProjectDeploymentExplicitSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "app": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$"
+              },
+              "source_type": {
+                "const": "github"
+              },
+              "repository_url": {
+                "type": "string",
+                "format": "uri",
+                "description": "Public HTTPS GitHub owner/repository URL. Default branch SHA is pinned once."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "revision_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "app",
+              "target_id",
+              "repository_url"
+            ],
+            "additionalProperties": false,
+            "dependentRequired": {
+              "project_id": [
+                "revision_id"
+              ],
+              "revision_id": [
+                "project_id"
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "app": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$"
+              },
+              "source_type": {
+                "const": "zip"
+              },
+              "archive": {
+                "type": "string",
+                "format": "binary",
+                "description": "ZIP; at most 100 MiB expanded and 2,000 files."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "revision_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "app",
+              "target_id",
+              "archive"
+            ],
+            "additionalProperties": false,
+            "dependentRequired": {
+              "project_id": [
+                "revision_id"
+              ],
+              "revision_id": [
+                "project_id"
+              ]
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "app": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{1,28}[a-z0-9]$"
+              },
+              "target_id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,62}$"
+              },
+              "source_type": {
+                "const": "folder"
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "maxItems": 2000
+              },
+              "paths": {
+                "type": "string",
+                "description": "JSON string array, one safe relative path per files entry."
+              },
+              "plan_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,128}$",
+                "description": "Optional only for POST /api/v1/deployments. The plan name and runtime_target_id must match app and target_id, and its profile must support deployment registration."
+              },
+              "project_id": {
+                "type": "string"
+              },
+              "revision_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "app",
+              "target_id",
+              "files",
+              "paths"
+            ],
+            "additionalProperties": false,
+            "dependentRequired": {
+              "project_id": [
+                "revision_id"
+              ],
+              "revision_id": [
+                "project_id"
+              ]
+            }
+          }
+        ],
+        "description": "Exactly one source. source_type is optional and must match if supplied. Reject unknown fields and duplicate singleton fields; only files may repeat. Credentials, provider URLs and SSH paths are not accepted. Optional plan_id is accepted only by deployments, not builds or legacy deploy."
+      },
+      "ProjectObserveInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "observe"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "ConfigurationReference": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "revision_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "configmap_name": {
+            "type": "string"
+          },
+          "secret_name": {
+            "type": "string"
+          },
+          "external_secret_name": {
+            "type": "string"
+          },
+          "plain_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "secret_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "project_id",
+          "binding_id",
+          "revision_id",
+          "namespace",
+          "configmap_name",
+          "secret_name",
+          "external_secret_name",
+          "plain_names",
+          "secret_names"
+        ]
       }
     },
     "responses": {

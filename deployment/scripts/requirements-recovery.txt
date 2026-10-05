@@ -1,0 +1,2 @@
+# Audited AEAD implementation; keep updated through dependency review.
+cryptography==50.0.2

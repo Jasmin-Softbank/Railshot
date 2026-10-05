@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -49,6 +51,42 @@ class AdapterTests(unittest.TestCase):
             'stage': stage, stage + '_ready': True}))
         return 0
 
+    def secrets_config(self):
+        root = Path(self.temp.name) / 'secrets'; root.mkdir()
+        files = {}
+        for name, value, mode in (
+                ('storage.yaml', 'storage', 0o600), ('eso.yaml', 'eso', 0o600),
+                ('tls.crt', 'cert', 0o600), ('tls.key', 'key', 0o600), ('ca.crt', 'ca', 0o600),
+                ('seal.json', '{"AWS_REGION":"ap-northeast-2","VAULT_AWSKMS_SEAL_KEY_ID":"key"}', 0o600),
+                ('escrow-ca.crt', 'ca', 0o600), ('escrow.crt', 'cert', 0o600), ('escrow.key', 'key', 0o600)):
+            path = root / name; path.write_text(value); path.chmod(mode); files[name] = path
+        config = {'version': 1, 'environment_id': self.request['target']['id'], 'provider_profile': {
+            'provider': 'aws', 'namespace': 'railshot-secrets',
+            'storage': {'class_name': 'vault-retain', 'capacity': '10Gi', 'manifest_file': str(files['storage.yaml']),
+                        'manifest_sha256': hashlib.sha256(files['storage.yaml'].read_bytes()).hexdigest()},
+            'vault': {'image': 'hashicorp/vault@sha256:' + 'a' * 64, 'tls_secret': 'vault-tls', 'seal_secret': 'vault-seal',
+                      'seal': {'type': 'awskms'}, 'tls': {'cert_file': str(files['tls.crt']), 'key_file': str(files['tls.key']),
+                      'ca_file': str(files['ca.crt'])}, 'seal_env_file': str(files['seal.json'])},
+            'external_secrets': {'manifest_file': str(files['eso.yaml']),
+                                 'manifest_sha256': hashlib.sha256(files['eso.yaml'].read_bytes()).hexdigest()},
+            'recovery': {'helper': '/usr/local/libexec/railshot-recovery-escrow', 'endpoint': 'https://escrow.private/v1/material',
+                         'ca_file': str(files['escrow-ca.crt']), 'client_cert_file': str(files['escrow.crt']),
+                         'client_key_file': str(files['escrow.key'])}}}
+        path = root / 'profile.json'; path.write_text(json.dumps(config)); path.chmod(0o600)
+        return path
+
+    def secrets_runner(self, argv, timeout, env):
+        self.commands.append(argv)
+        variables = json.loads(Path(argv[-1][1:]).read_text())
+        stem = Path(argv[3]).stem
+        stage = ('secrets-' + variables['railshot_secrets_phase']) if stem == 'secrets' else stem
+        ready = 'secrets_ready' if stem == 'secrets' else stage + '_ready'
+        Path(variables['railshot_receipt_path']).write_text(json.dumps({
+            'request_id': variables['railshot_request_id'], 'target_id': variables['railshot_target_id'],
+            'node_id': variables['k3s_node_name'], 'nonce': variables['railshot_nonce'], 'stage': stage,
+            ready: True, **({'checks': {'vault_unsealed': True}} if stem == 'secrets' else {})}))
+        return 0
+
     def test_openstack_uses_get_result_project_and_one_approved_private_address(self):
         server = json.loads((ROOT / 'examples/ansible/openstack-server.json').read_text())
         profile = {'request_id': 'os-001', 'operation': 'runtime.install', 'target_id': 'demo-openstack',
@@ -78,6 +116,63 @@ class AdapterTests(unittest.TestCase):
         self.assertFalse(result['application_ready']); self.assertFalse(result['public_http_verified'])
         self.assertEqual([Path(x[3]).name for x in self.commands], ['guest.yml', 'runtime.yml'])
         self.assertFalse(any('site.yml' in x for cmd in self.commands for x in cmd))
+
+    def test_runtime_with_trusted_profile_runs_configure_and_verify_after_runtime(self):
+        config = self.secrets_config()
+        with patch.object(adapter.shutil, 'which', return_value='/trusted/ansible-playbook'):
+            result = adapter.run(self.request, runner=self.secrets_runner, secrets_config_path=config, require_secrets=True)
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertTrue(result['runtime_ready']); self.assertTrue(result['secrets_ready'])
+        self.assertEqual([Path(command[3]).stem for command in self.commands],
+                         ['guest', 'runtime', 'secrets', 'secrets'])
+        self.assertEqual([step['stage'] for step in result['steps']],
+                         ['guest', 'runtime', 'secrets-configure', 'secrets-verify'])
+
+    def test_separate_secrets_operations_match_cli_orchestration_contract(self):
+        config = self.secrets_config()
+        configure = {**self.request, 'request_id': 'secrets-configure-1', 'operation': 'secrets.configure'}
+        with patch.object(adapter.shutil, 'which', return_value='/trusted/ansible-playbook'):
+            result = adapter.run(configure, runner=self.secrets_runner, secrets_config_path=config)
+        self.assertEqual(result['status'], 'succeeded'); self.assertTrue(result['secrets_ready'])
+        self.assertFalse(result['guest_ready']); self.assertFalse(result['runtime_ready'])
+        self.assertEqual([step['stage'] for step in result['steps']], ['secrets-configure', 'secrets-verify'])
+        self.commands.clear()
+        verify = {**self.request, 'request_id': 'secrets-verify-1', 'operation': 'secrets.verify'}
+        with patch.object(adapter.shutil, 'which', return_value='/trusted/ansible-playbook'):
+            result = adapter.run(verify, runner=self.secrets_runner, secrets_config_path=config)
+        self.assertEqual(result['status'], 'succeeded'); self.assertTrue(result['secrets_ready'])
+        self.assertEqual([step['stage'] for step in result['steps']], ['secrets-verify'])
+
+        request_path = Path(self.temp.name) / 'secrets-request.json'
+        request_path.write_text(json.dumps(configure)); request_path.chmod(0o600)
+        command = [sys.executable, str(HERE / 'run.py'), '--request', str(request_path), '--secrets-config-file',
+                   str(config), '--validate-only']
+        checked = subprocess.run(command, capture_output=True, text=True, timeout=5)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(json.loads(checked.stdout)['status'], 'validated')
+
+    def test_cli_serializes_unknown_secrets_outcome_with_nonzero_exit(self):
+        request_path = Path(self.temp.name) / 'unknown-request.json'
+        request_path.write_text(json.dumps(self.request)); request_path.chmod(0o600)
+        unknown = adapter.fail(adapter.base_result(self.request), 'unknown', 'RECOVERY_ESCROW_UNKNOWN',
+                               'fixture', unknown=True)
+        stdout = StringIO()
+        with patch.object(adapter, 'run', return_value=unknown), redirect_stdout(stdout):
+            code = adapter.main(['--request', str(request_path)])
+        self.assertEqual(code, 4)
+        self.assertEqual(json.loads(stdout.getvalue())['status'], 'unknown')
+
+    def test_malformed_secrets_failure_receipt_is_ignored_without_exception(self):
+        receipt = Path(self.temp.name) / 'malformed-receipt.json'
+        for value in ([], None, 'not-a-receipt'):
+            receipt.write_text(json.dumps(value))
+            self.assertIsNone(adapter.read_secrets_failure(receipt, self.request, 'secrets-configure', 'nonce'))
+
+    def test_required_secrets_profile_blocks_before_ssh_or_runtime(self):
+        result = adapter.run(self.request, runner=lambda *_: self.fail('must not run'), require_secrets=True)
+        self.assertEqual(result['status'], 'blocked')
+        self.assertEqual(result['error']['code'], 'SECRETS_CONFIGURATION_REQUIRED')
+        self.assertFalse(result['runtime_ready']); self.assertFalse(result['secrets_ready'])
 
     def test_exit_zero_without_readiness_receipt_is_not_success(self):
         with patch.object(adapter.shutil, 'which', return_value='/trusted/ansible-playbook'):
@@ -126,6 +221,52 @@ class AdapterTests(unittest.TestCase):
         result = adapter.run(self.request, validate_only=True, runner=lambda *_: self.fail('must not run'))
         self.assertEqual(result['status'], 'validated')
         self.assertFalse(result['guest_ready']); self.assertFalse(result['runtime_ready'])
+
+    def test_explicit_secrets_resume_reuses_exact_ledger_and_preserves_prior_attempt(self):
+        config = self.secrets_config(); self.request['operation'] = 'secrets.configure'
+        def uncertain(argv, timeout, env):
+            raise subprocess.TimeoutExpired(argv, timeout)
+        with patch.object(adapter.shutil, 'which', return_value='/trusted/ansible-playbook'):
+            first = adapter.run(self.request, runner=uncertain, secrets_config_path=config)
+            self.assertTrue(first['error']['outcome_unknown'])
+            replay = adapter.run(self.request, runner=lambda *_: self.fail('ordinary replay must not execute'), secrets_config_path=config)
+            self.assertTrue(replay['replayed'])
+            resumed = adapter.run(self.request, runner=self.secrets_runner, secrets_config_path=config, resume_secrets=True)
+        self.assertEqual(resumed['status'], 'succeeded')
+        self.assertEqual(len(list((adapter.STATE_DIR / 'history').glob('*.json'))), 1)
+
+    def test_central_static_validation_precedes_issuance_and_new_environments_receive_distinct_profiles(self):
+        path = self.secrets_config(); config = json.loads(path.read_text())
+        state = Path(self.temp.name) / 'issued'; state.mkdir(mode=0o700)
+        config['central_provisioning'] = {'helper': '/usr/local/libexec/railshot-provision-environment', 'state_dir': str(state)}
+        path.write_text(json.dumps(config))
+        work = Path(self.temp.name) / 'staging'; work.mkdir()
+        with patch.object(adapter.subprocess, 'run', side_effect=AssertionError('no mutation on validation')):
+            self.assertTrue(adapter.secrets_variables(path, self.request, work)['railshot_central_provisioning_pending'])
+            bad = copy.deepcopy(config); bad['provider_profile']['storage']['manifest_sha256'] = '0' * 64
+            path.write_text(json.dumps(bad))
+            with self.assertRaises(adapter.ContractError): adapter.secrets_variables(path, self.request, work, provision=True)
+        issued = []
+        def provision(argv, **kwargs):
+            self.assertEqual(argv[:3], ['sudo', '-n', '/usr/local/libexec/railshot-provision-environment'])
+            environment = argv[3]; issued.append(environment)
+            directory = state / environment; directory.mkdir(mode=0o700)
+            seal = directory / 'seal.json'; seal.write_text(json.dumps({'VAULT_TOKEN': 'token-' + environment})); seal.chmod(0o600)
+            vault = config['provider_profile']['vault']; recovery = dict(config['provider_profile']['recovery']); recovery.pop('helper')
+            profile = {'environment_id': environment, 'seal_env_file': str(seal), 'vault_tls': vault['tls'], 'recovery': recovery,
+                       'seal': {'type': 'transit', 'address': 'https://central.example.test', 'key_name': 'railshot-' + environment,
+                                'mount_path': 'transit/', 'ca_file': vault['tls']['ca_file']}}
+            generated = directory / 'transit-profile.json'; generated.write_text(json.dumps(profile)); generated.chmod(0o600)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({'environment_id': environment, 'status': 'issued', 'profile_path': str(generated)}), '')
+        for environment in ('new-env-a', 'new-env-b'):
+            config['environment_id'] = environment; path.write_text(json.dumps(config))
+            request = copy.deepcopy(self.request); request['target']['id'] = environment
+            with patch.object(adapter.subprocess, 'run', side_effect=provision):
+                variables = adapter.secrets_variables(path, request, work, provision=True)
+            staged = json.loads(Path(variables['railshot_profile_source']).read_text())
+            self.assertEqual(staged['provider_profile']['vault']['seal']['key_name'], 'railshot-' + environment)
+            self.assertTrue(variables['railshot_seal_env_source'].endswith(environment + '/seal.json'))
+        self.assertEqual(issued, ['new-env-a', 'new-env-b'])
 
     def test_arbitrary_playbook_extra_vars_and_shell_paths_are_rejected(self):
         for field in ('playbook', 'extra_vars', 'shell'):

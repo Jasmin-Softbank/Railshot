@@ -179,3 +179,34 @@ AWS 경로 사전 검사가 등록 시작 전에 `APPLICATION_AWS_ROUTE_PREFLIGH
 ### 앱 관리 접수 확인과 목록 순서
 
 앱 계획 GET은 해당 계획으로 접수된 작업이 있으면 `operation_id`를 반환한다. 대시보드는 삭제·중지·재개 응답을 잃어도 저장한 `plan_id`로 기존 작업을 찾아 조회하며 변경 요청을 다시 보내지 않는다. 앱 목록은 생성 시각 내림차순, 같은 시각에는 ID 내림차순이다. 실행 이력은 기존 생성 시각/ID 내림차순을 유지한다.
+
+## 프로젝트 환경변수·설정 전달·환경 이전 (2026-10-04)
+
+구현 경로는 `/api/v1/projects`이며 익명 쿠키 세션을 항상 적용합니다. 기존 앱 식별자를 유지하고 각 앱에 독립 프로젝트와 `binding_id`를 반복 실행 가능한 방식으로 연결합니다. 같은 이름의 앱을 프로젝트 하나로 합치지 않습니다. 최초 앱 배포 전에는 `POST /projects {name}`으로 프로젝트를 만듭니다.
+
+- `GET /projects`, `GET /projects/{id}`: 해당 세션의 프로젝트 목록·상세입니다.
+- `GET /projects/{id}/variables`: `project_id`, `revision_id`, `items`, `bindings`, `capabilities`, `blockers`를 반환합니다. `kind=plain`만 `value`를 반환하며 `kind=secret`은 `has_value`와 메타데이터만 반환합니다.
+- `POST /projects/{id}/revisions`: `{base_revision_id, operations:[{operation:"set"|"delete",name,kind?,scope?,environment_id?,required?,value?}]}`입니다. 추가·수정·삭제를 하나의 트랜잭션으로 저장합니다. 생략한 value는 유지하며 빈 문자열과 명시적 삭제를 구분합니다. 비밀값을 일반값으로 바꾸려면 값을 명시적으로 다시 입력해야 합니다. 현재 버전 불일치는 `409 REVISION_CONFLICT`입니다.
+- `POST /projects/{id}/deliveries`: `{binding_id,revision_id}`입니다. 검증된 소스가 있는 준비 앱만 접수합니다. 값을 준비한 뒤 기존 소스를 다시 게시하고 GitOps 배포 선언에 버전별 참조를 고정합니다. 앱·공개 응답·정확한 설정 버전까지 확인해야 성공입니다. 기존 앱이 실행하는 버전은 `bindings[].applied_revision_id`입니다.
+- `POST /projects/{id}/transfers`: `{source_binding_id,destination_environment_id,revision_id}`로 10분 유효 계획을 만듭니다. 출발 환경 전용 변수는 도착 환경의 명시적 override가 없으면 `ENVIRONMENT_VARIABLE_REVIEW_REQUIRED`로 차단합니다. 기존 도착 앱은 덮어쓰지 않습니다.
+- `POST /projects/{id}/transfers/{transfer}/actions`: `{action:"execute",plan_hash}`로 검토한 계획을 실행합니다. 기존 검증 소스를 새 대상에 다시 게시하고 설정 전달·앱 확인 후 활성 연결을 조건부로 바꿉니다. 원래 앱은 삭제하지 않습니다. `traffic_switch:"not_requested"`는 공개 트래픽 전환을 수행하지 않았다는 뜻입니다.
+- `GET /projects/{id}/deliveries/{delivery}`, `GET /projects/{id}/transfers/{transfer}`: 상태를 조회합니다.
+- `POST /projects/{id}/deliveries/{delivery}/actions` 또는 `.../transfers/{transfer}/actions`, `{action:"observe"}`: 결과 불명 작업을 읽기 전용으로 재확인합니다. 저장된 배포 식별자·게시 증거·설정 참조가 있어야 기존 CD 관측과 설정 검증만 수행하며 새 게시·배포·값 쓰기를 하지 않습니다. 증거가 부족하거나 검증 실패면 unknown과 전역 실행 제한을 유지하고 운영자 확인을 요구합니다.
+
+모든 POST에는 `Idempotency-Key`가 필요합니다. 세션·프로젝트·작업 종류에 한정하여 보존하며 값이 든 입력의 중복 비교는 키가 있는 HMAC을 사용합니다. 원문 비밀값이나 값의 공개 해시를 저장하지 않습니다. 프로젝트 생성·설정 버전·이전 계획은 `201`, 실행 접수는 `202 + Location + Retry-After: 2`, 종료 작업 재조회는 `200`입니다. 저장·수정도 실행 중인 동일 프로젝트 작업과 충돌하며 실제 전달·이전은 기존 workspace 전역 실행 제한을 공유합니다.
+
+`scope=common` 위에 `scope=environment`가 적용됩니다. 변수 이름은 영문 대문자·숫자·밑줄이고 첫 문자는 숫자가 될 수 없습니다. `PORT`, `DATABASE_URL`, `MIGRATION_DATABASE_URL`, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGSSLMODE`, `PGSSLROOTCERT`는 플랫폼 예약값입니다. 200개 변수, 값당 UTF-8 16 KiB, 1,000개 설정 버전을 상한으로 둡니다. 신규 배포 multipart 요청은 `project_id`와 `revision_id`를 함께 받습니다. 빌드 입력에는 비밀값을 보내지 않습니다.
+
+### 관리 저장·운영자 구성·검증 범위
+
+`RAILSHOT_PROJECT_KEY_FILE`은 환경·관리 데이터 디렉터리 밖에 운영자가 미리 둔 소유자 전용 JSON 파일입니다. 형식은 `{"version":1,"active_key_id":"key-v1","keys":{"key-v1":"<32-byte lowercase hex>"}}`입니다. 자동 키 생성·기본값은 없습니다. active key로 새 데이터 키를 감싸고 AES-256-GCM으로 값을 암호화합니다. 프로젝트·버전·변수 좌표를 인증 데이터로 결합합니다. 키 회전 시 과거 `key_id`를 보존해야 이전 버전을 읽을 수 있습니다. 키 파일·데이터베이스의 별도 백업·보존 책임은 운영자에게 있습니다. 현재 구현은 외부 마운트 키링이며 클라우드 KMS 서비스 직접 호출은 구현하지 않았습니다.
+
+원본 암호문과 메타데이터는 같은 SQLite 트랜잭션에 저장하므로 별도 객체 저장과의 부분 커밋이 없습니다. API 단일 호스트·프로세스의 기존 운영 경계를 유지합니다. 서버 재시작으로 중단된 작업은 unknown으로 복구하며 임의 재실행하지 않습니다. 세션 만료·앱 삭제가 중앙 원본 삭제를 발생시키지 않습니다. 계정 복구와 프로젝트 영구 삭제는 추가하지 않았습니다.
+
+`RAILSHOT_SECRETS_FILE`은 환경별 Vault/전달 실행기의 신뢰된 설정 파일이며 전달 중 비밀값은 권한 0600의 임시 파일로만 전달하고 정상·오류 종료 시 지웁니다. SIGKILL 직후 남은 임시 파일은 서버 시작 시 제거합니다. 공용 API는 Vault 주소·namespace·명령·로컬 경로를 받지 않습니다. 신규 환경 profile에는 `secrets_config_file`을 등록해야 하며 runtime 직후 `secrets.configure`를 실행하고 `secrets_ready=true` 확인 전에는 환경을 준비 완료로 표시하지 않습니다.
+
+격리 테스트는 암호화·세션 경계·저장/적용 구분·재시작·실행기 계약을 검증합니다. 실제 Provider의 Vault 초기화·재기동·스토리지 복원·배포·트래픽 전환 성공을 주장하지 않습니다. 운영 자격 사용과 실제 배포는 별도 명시적 승인이 필요합니다.
+
+새 환경 자동 연결에는 profile의 `secrets_delivery_file` 템플릿과 전달기 설정의 `environment_registry_dir`(API 환경 상태 디렉터리)를 등록합니다. API는 파생 환경 ID, `targets.json`의 신뢰된 접속, 성공한 `registration.json`·`cd.json`, secrets 단계 결과의 해시를 묶어 전달 등록을 자동 생성합니다. 템플릿의 `vault.token_file`에 있는 `{environment_id}`만 서버가 발급한 환경 ID로 치환합니다. 외부 보관 도구는 해당 경로에 전달 자격을 먼저 안전하게 저장해야 합니다. 새 환경의 ID를 정적 `environments` 목록에 수동 추가할 필요가 없습니다. 프로젝트와 새 환경 계획을 함께 배포하려면 이 템플릿이 없을 때 Provider 실행 전에 차단합니다.
+
+`vault.token_file`의 실제 내용은 `{"role_id":"…","secret_id":"…"}` 형식의 소유자 전용 AppRole 자격 파일입니다. 외부 복구자료 보관 서비스는 상호 TLS 인증 요청의 `vault-initialization` 자료를 보관하고, `vault-delivery-approle` 자료를 관리 호스트의 환경별 경로에 원자적으로 저장한 뒤 확인 응답을 보내야 합니다. 전달기는 이 자격으로 짧은 유효기간의 Vault 토큰을 발급받습니다. 외부 보관 서비스와 환경 인증서 발급 코드는 이제 저장소에 포함되며 [복구 API](recovery.md)를 따릅니다. 실제 비밀값과 토큰은 공개 응답이나 Git에 기록하지 않습니다. 환경별 중앙 발급·만료 자격 교체·운영자 전용 중단 복구 절차는 [Ansible 계약](ansible.md)의 중앙 발급 절을 따릅니다. 이 운영자 권한은 공개 제품 API에 노출하지 않습니다.

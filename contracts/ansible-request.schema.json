@@ -22,6 +22,8 @@
       "enum": [
         "guest.check",
         "runtime.install",
+        "secrets.configure",
+        "secrets.verify",
         "patroni.install"
       ]
     },

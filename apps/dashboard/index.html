@@ -13,6 +13,7 @@
         <a class="brand" href="#deploy" aria-label="RailShot 홈">RAILSHOT<span class="brand-dot">.</span></a>
         <nav class="navigation" aria-label="주 메뉴">
           <button class="nav-item active" type="button" data-view="deploy" aria-current="page">새 배포</button>
+          <button class="nav-item" type="button" data-view="projects">프로젝트 환경변수</button>
           <button class="nav-item" type="button" data-view="monitor">환경 모니터링</button>
           <button class="nav-item" type="button" data-view="history">배포 내역</button>
           <div class="nav-divider" role="separator"></div>
@@ -122,6 +123,17 @@
               <p class="field-note" id="connection-status" role="status">앱 배포 설정을 확인하고 있습니다.</p>
             </section>
 
+            <section class="form-section" aria-labelledby="deployment-project-title">
+              <div class="section-heading"><span class="section-number">03</span><h2 id="deployment-project-title">프로젝트 설정 (선택)</h2></div>
+              <p class="field-note">프로젝트를 선택하면 저장된 설정 버전을 새 환경에 함께 적용합니다. 선택하지 않으면 기존 배포 흐름으로 진행합니다.</p>
+              <div class="provider-field">
+                <label class="field-label" for="deployment-project">프로젝트</label>
+                <select id="deployment-project"><option value="">프로젝트 목록 불러오기</option></select>
+                <button id="deployment-project-load" class="text-button" type="button">프로젝트 선택 또는 새로 만들기</button>
+                <p id="deployment-project-note" class="field-note" role="status"></p>
+              </div>
+            </section>
+
             <div class="form-bottom">
               <p class="form-error" id="form-error" role="alert" hidden></p>
               <button class="primary-button" type="submit">선택 내용 확인 <span aria-hidden="true">→</span></button>
@@ -187,6 +199,29 @@
           </section>
         </section>
 
+        <section class="view" id="projects-view" aria-labelledby="projects-title" hidden>
+          <header class="page-header"><span class="eyebrow">PROJECT CONFIGURATION</span><h1 id="projects-title">프로젝트 환경변수</h1></header>
+          <section class="panel project-panel" aria-labelledby="project-list-title">
+            <div class="review-heading"><h2 id="project-list-title">이 세션의 프로젝트</h2><button id="projects-refresh" class="secondary-button" type="button">프로젝트 새로고침</button></div>
+            <p class="field-note">비밀값은 등록 여부만 표시하며 다시 조회하거나 내보내지 않습니다.</p>
+            <ul id="project-list" class="saved-list" aria-busy="false"></ul>
+            <form id="project-create-form" class="project-create-form"><label class="field-label" for="project-create-name">새 프로젝트 이름</label><div><input id="project-create-name" type="text" maxlength="80" required autocomplete="off" /><button class="primary-button" type="submit">프로젝트 만들기</button></div><p id="project-create-message" role="status"></p></form>
+          </section>
+          <section id="project-detail" class="panel project-panel" aria-labelledby="project-detail-title" hidden>
+            <div class="review-heading"><div><h2 id="project-detail-title" tabindex="-1">프로젝트 설정</h2><p id="project-detail-message" class="field-note" role="status"></p></div><button id="project-use-deployment" class="secondary-button" type="button">새 배포에 이 프로젝트 사용</button></div>
+            <div class="project-status"><p id="project-revision-state" role="status"></p><p id="project-capability" class="field-note"></p></div>
+            <div class="table-scroll" tabindex="0" role="region" aria-label="프로젝트 환경변수 표"><table class="environment-table"><caption class="sr-only">프로젝트 환경변수와 적용 상태</caption><thead><tr><th scope="col">이름</th><th scope="col">종류</th><th scope="col">범위</th><th scope="col">필수</th><th scope="col">등록</th><th scope="col">변경 시각</th><th scope="col">작업</th></tr></thead><tbody id="project-variable-list"></tbody></table></div>
+            <form id="variable-form" class="variable-form">
+              <h3 id="variable-form-title">환경변수 추가</h3>
+              <input id="variable-original-name" type="hidden" /><input id="variable-original-scope" type="hidden" /><input id="variable-original-environment" type="hidden" />
+              <div class="variable-grid"><label class="field-label">이름<input id="variable-name" type="text" maxlength="128" required autocomplete="off" /></label><label class="field-label">종류<select id="variable-kind"><option value="plain">일반</option><option value="secret">비밀</option></select></label><label class="field-label">범위<select id="variable-scope"><option value="common">공통</option><option value="environment">환경 전용</option></select></label><label class="field-label" id="variable-environment-field" hidden>환경<select id="variable-environment"></select></label><label class="field-label">값<input id="variable-value" type="text" autocomplete="off" /></label></div>
+              <label class="field-note"><input id="variable-required" type="checkbox" /> 필수값</label><div class="source-buttons"><button id="variable-save" class="primary-button" type="submit">저장</button><button id="variable-cancel" class="text-button" type="button" hidden>취소</button></div><p id="variable-message" class="form-error" role="alert" hidden></p>
+            </form>
+            <section class="project-actions" aria-labelledby="project-delivery-title"><h3 id="project-delivery-title">환경에 적용</h3><p class="field-note">대상 환경, 변경 변수 이름, 앱 재시작 여부를 확인한 뒤 접수합니다.</p><label class="field-label">대상 연결<select id="delivery-binding"></select></label><button id="delivery-review" class="secondary-button" type="button">적용 내용 확인</button><p id="delivery-status" role="status"></p><button id="delivery-observe" class="text-button" type="button" hidden>결과 다시 확인</button></section>
+            <section class="project-actions" aria-labelledby="project-transfer-title"><h3 id="project-transfer-title">다른 환경으로 이전</h3><p class="field-note">공통값은 복사하고, 환경 전용값과 플랫폼 생성값은 대상 환경에서 검토하거나 다시 생성합니다.</p><label class="field-label">대상 환경<select id="transfer-environment"></select></label><button id="transfer-review" class="secondary-button" type="button">이전 계획 확인</button><p id="transfer-status" role="status"></p><button id="transfer-observe" class="text-button" type="button" hidden>결과 다시 확인</button></section>
+          </section>
+        </section>
+
         <section class="view" id="history-view" aria-labelledby="history-title" hidden>
           <header class="page-header"><span class="eyebrow">DEPLOYMENTS</span><h1 id="history-title" tabindex="-1">배포 내역</h1></header>
           <div id="history-overview">
@@ -213,6 +248,7 @@
               <div id="detail-application-site"></div>
               <div id="application-versions"></div>
               <button id="application-update" class="primary-button" type="button">이 앱 업데이트</button>
+              <button id="application-project" class="secondary-button" type="button" hidden>프로젝트 환경변수</button>
               <div id="detail-application-actions" class="history-actions" aria-label="선택한 앱 관리"></div>
             </section>
           </section>
@@ -369,6 +405,9 @@
         <p id="environment-delete-error" class="form-error" role="alert" hidden></p>
         <div class="lifecycle-dialog-actions"><button id="environment-delete-cancel" class="secondary-button" type="button" autofocus>취소</button><button id="environment-delete-confirm" class="primary-button danger-button" type="submit" disabled>삭제 시작</button></div>
       </form>
+    </dialog>
+    <dialog id="project-confirm-dialog" aria-labelledby="project-confirm-title" aria-describedby="project-confirm-description">
+      <form id="project-confirm-form"><h2 id="project-confirm-title">적용 확인</h2><p id="project-confirm-description"></p><p id="project-confirm-detail" class="field-note"></p><p id="project-confirm-error" class="form-error" role="alert" hidden></p><div class="lifecycle-dialog-actions"><button id="project-confirm-cancel" class="secondary-button" type="button">취소</button><button id="project-confirm-submit" class="primary-button" type="submit">확인 후 접수</button></div></form>
     </dialog>
   </body>
 </html>
