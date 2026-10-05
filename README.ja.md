@@ -4,8 +4,6 @@
   </a>
 </p>
 
-# RAILSHOT
-
 [한국어](README.md) | **日本語**
 
 **One Action, Infinite Clouds**
@@ -28,25 +26,17 @@ Webからのデプロイは[railshot.io](https://railshot.io/)で始められま
 
 ### 実際のデプロイ・管理画面
 
-**デプロイ完了と公開URL。** チェックとデプロイが完了すると、結果を確認してアプリを開けます。
+**プロジェクトの送信と環境選択。** フォルダ・ZIP・公開GitHub URLを指定し、クラウドまたはオンプレミスの実行環境を選択します。
 
-[![AWSへのアプリデプロイ完了と接続リンクを示す画面](docs/assets/readme/aws-deployment-complete.jpg)](docs/assets/readme/aws-deployment-complete.jpg)
+[![プロジェクトの入力と実行環境を選ぶWeb画面](docs/assets/readme/new-deployment.png)](docs/assets/readme/new-deployment.png)
 
-**アプリ管理。** 検証済みのサービス状態と直近のデプロイ試行を区別して表示し、更新・停止・再開の操作につなげます。
-
-[![OpenStackアプリの検証済みURLと管理操作を示す画面](docs/assets/readme/application-management.png)](docs/assets/readme/application-management.png)
-
-<sub>2026年10月4日に撮影した実際のサービス画面です。画面内のUIは韓国語です。画像をクリックすると原寸で表示できます。[画像の出典](docs/assets/readme/README.md)</sub>
+<sub>発表資料の画面と図を使用しています。図中の説明は韓国語です。画像をクリックすると原寸で表示できます。[画像の出典](docs/assets/readme/README.md)</sub>
 
 ## AIが修正し、チェック結果で判定
 
-```text
-プロジェクト送信 → 基本チェック
-  合格 → 検証済みイメージを公開
-  失敗 → 原因の診断 → AIによる修正 → 再チェック
+基本チェックに失敗すると、許可された範囲でAIが修正し、同じチェックを再実行します。合格したイメージだけを公開し、範囲外の変更や試行上限に達した処理は停止します。
 
-検証済みイメージを公開 → クラスタへ反映 → 公開URLを確認
-```
+[![AIによる失敗分析・修正・再チェックの流れ](docs/assets/readme/agent-pipeline.png)](docs/assets/readme/agent-pipeline.png)
 
 デプロイの成否は、AIによる完了報告だけでは判断しません。修正が許可範囲に収まっていることと実際のチェック結果を確認し、合格したイメージのダイジェストをそのままデプロイに使用します。
 
@@ -65,22 +55,9 @@ AIには失敗の要点と関連ログをサイズ制限付きで渡し、追加
 
 運用API、CI実行環境、利用者のアプリを実行するクラスタを分離しています。Web画面とMCPは同じ製品APIを使用し、各クラウド・オンプレミスの接続機構が、登録された環境に合わせてデプロイを実行します。
 
-```text
-Webダッシュボード / CLI / MCP
-          │
-          ▼
-製品API: セッション・アプリの所有権 / リクエスト受付 / 状態・履歴
-          │
-          ▼
-CI実行環境: チェック / AI修正 / 再チェック / イメージ公開
-          │ 検証済みイメージのダイジェスト + 実行の根拠
-          ▼
-GitOps・Argo CD
-          │
-利用者のアプリクラスタ: AWS / GCP / OpenStack K3s
-          │
-          └ アプリの状態・ログ・公開HTTP → ダッシュボード / MCP
-```
+[![運用クラスタと利用者のアプリクラスタを分離したサービス構成](docs/assets/readme/service-serving.png)](docs/assets/readme/service-serving.png)
+
+AWSでのサービス提供構成を示しています。運用クラスタのAPI・ビルド・Argo CDと、利用者のアプリを実行するクラスタを分離し、公開アクセスとデプロイ制御の経路を区別します。
 
 イメージの公開（`published`）、クラスタへの反映、公開URLの検証は、それぞれ別の結果です。MCPがデプロイ要求を受け付けたり、AIの修正が成功したりしても、その時点でアプリのデプロイが完了したとは限りません。直近のデプロイ試行と、最後に検証されたサービス状態も区別して表示します。収集できていないメトリクスを正常値で埋めることはありません。
 

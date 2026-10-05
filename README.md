@@ -4,8 +4,6 @@
   </a>
 </p>
 
-# RAILSHOT
-
 **한국어** | [日本語](README.ja.md)
 
 **One Action, Infinite Clouds**
@@ -28,24 +26,17 @@ RAILSHOT은 웹이나 자신의 AI 에이전트에서 프로젝트를 제출하�
 
 ### 실제 배포·운영 화면
 
-**배포 완료와 공개 URL.** 검사와 배포가 끝나면 결과를 확인하고 앱을 열 수 있습니다.
+**프로젝트 제출과 환경 선택.** 폴더·ZIP·공개 GitHub URL을 입력하고, 클라우드 또는 온프레미스 실행 환경을 선택합니다.
 
-[![AWS 앱 배포 완료와 접속 링크 화면](docs/assets/readme/aws-deployment-complete.jpg)](docs/assets/readme/aws-deployment-complete.jpg)
+[![프로젝트 입력과 실행 환경 선택 화면](docs/assets/readme/new-deployment.png)](docs/assets/readme/new-deployment.png)
 
-**앱 관리.** 검증된 서비스 상태와 최근 배포 시도를 구분하고, 업데이트·중지·재개 작업으로 이어집니다.
-
-[![OpenStack 앱의 검증된 서비스 주소와 관리 화면](docs/assets/readme/application-management.png)](docs/assets/readme/application-management.png)
-
-<sub>2026-10-04 실제 서비스 화면입니다. 이미지를 클릭하면 원본을 볼 수 있습니다. [이미지 출처](docs/assets/readme/README.md)</sub>
+<sub>발표 자료의 화면과 구조도를 사용했습니다. 이미지를 클릭하면 원본을 볼 수 있습니다. [이미지 출처](docs/assets/readme/README.md)</sub>
 
 ## AI가 수정하고, 검사가 판단합니다
 
-```text
-프로젝트 제출 → 기본 검사 → 통과 ────────────────────┐
-                   └ 실패 → 진단 → AI 수정 → 재검사 ─┤
-                                                    ↓
-               공개 URL 확인 ← 클러스터 적용 ← 검증 이미지 게시
-```
+기본 검사에 실패하면 AI가 허용된 범위에서 수정하고 같은 검사를 다시 실행합니다. 통과한 이미지만 게시하며, 허용 범위를 벗어나거나 시도 한도에 도달하면 중단합니다.
+
+[![AI 실패 분석·수정·재검사 흐름](docs/assets/readme/agent-pipeline.png)](docs/assets/readme/agent-pipeline.png)
 
 RAILSHOT은 AI가 작성한 완료 설명으로 배포 성공을 판단하지 않습니다. 수정안의 허용 범위와 실제 검사 결과를 확인하고, 통과한 이미지의 digest를 그대로 배포에 사용합니다.
 
@@ -64,22 +55,9 @@ AI에는 핵심 실패 정보와 관련 로그를 제한된 크기로 전달하�
 
 운영 API, CI 실행 환경, 고객 앱 실행 클러스터를 분리합니다. 웹과 MCP는 같은 제품 API를 사용하고, 각 클라우드·온프레미스 연결부는 등록된 환경에 맞게 배포를 수행합니다.
 
-```text
-웹 대시보드 / CLI / MCP
-          │
-          ▼
-제품 API ── 세션·앱 소유권 / 요청 접수 / 배포 상태·이력
-          │
-          ▼
-CI 실행 환경 ── 검사 / AI 수정 / 재검사 / 이미지 게시
-          │ 검증 이미지 digest + 실행 근거
-          ▼
-GitOps · Argo CD
-          │
-고객 앱 클러스터: AWS / GCP / OpenStack K3s
-          │
-          └── 앱 상태·로그·공개 HTTP → 대시보드 / MCP
-```
+[![운영 클러스터와 고객 앱 실행 클러스터를 분리한 서비스 구조](docs/assets/readme/service-serving.png)](docs/assets/readme/service-serving.png)
+
+AWS의 서비스 제공 구성을 보여줍니다. 운영 클러스터의 API·빌드·Argo CD와 고객 앱 실행 클러스터를 분리하고, 공개 접속 경로와 배포 제어 경로를 구분합니다.
 
 이미지 게시(`published`), 클러스터 적용, 공개 URL 검증은 별도 결과입니다. MCP의 배포 요청이 접수됐거나 AI 수정이 성공했다고 해서 앱 배포까지 완료된 것은 아닙니다. 앱의 최근 시도와 마지막으로 검증된 서비스 상태도 구분해서 표시합니다. 수집되지 않은 지표는 정상값으로 대신 채우지 않습니다.
 
