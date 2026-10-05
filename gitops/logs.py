@@ -84,9 +84,19 @@ def customer_auth(config, review):
                  'registered credential owner or application scope differs')
     shared_cluster = (not re.fullmatch(credentials.APPLICATION_ID, target) and data['project'] == '' and
                       meta['labels']['argocd.argoproj.io/secret-type'] == 'cluster')
+    fixed_scope = False
+    if shared_cluster and data['namespaces'] == '':
+        policy = argo.kubectl(config['context'], app['metadata']['namespace'],
+                              'get', 'configmap', 'railshot-credentials', '-o', 'json')
+        rows = credentials.validate_policy(json.loads(policy['data']['policy.json']))['targets']
+        selected = next((row for row in rows if row['target_id'] == target), None)
+        argo.require(selected and selected.get('cluster_read') is True and 'previous_scope' not in selected
+                     and spec['destination']['namespace'] in selected['namespaces'], 'registered credential scope differs')
+        credentials.registration(secret, selected, datetime.now(timezone.utc).timestamp())
+        fixed_scope = True
     argo.require(data['name'] == target and data['server'] == spec['destination']['server'] and
                  (data['project'] == spec['project'] or shared_cluster) and data['clusterResources'] == 'false' and
-                 spec['destination']['namespace'] in data['namespaces'].split(','), 'registered credential scope differs')
+                 (fixed_scope or spec['destination']['namespace'] in data['namespaces'].split(',')), 'registered credential scope differs')
     server = argo.https_url(data['server']); url = urlsplit(server)
     argo.require(not url.path, 'explicit API origin required')
     auth = json.loads(data['config']); tls = auth['tlsClientConfig']

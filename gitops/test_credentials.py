@@ -212,6 +212,51 @@ class CredentialsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             credentials.registration(self.secret, self.target, self.now)
 
+    def test_fixed_reader_renews_only_anchor_and_preserves_cluster_scope(self):
+        self.target.update(project='', cluster_read=True)
+        self.secret['data'].update(project='', namespaces='')
+        credentials.validate_policy({'version': 1, 'targets': [self.target]})
+        before = copy.deepcopy(self.secret)
+        with patch('credentials.platform', side_effect=self.platform), patch('credentials.customer', side_effect=self.customer):
+            self.assertEqual(credentials.renew(self.target, self.now)['status'], 'renewed')
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(self.calls[-1], '/api/v1/namespaces/tenant-demo/pods?limit=1')
+        self.assertEqual({k: v for k, v in self.secret['data'].items() if k != 'config'},
+                         {k: v for k, v in before['data'].items() if k != 'config'})
+        # Empty namespaces is valid only for an explicitly migrated environment.
+        del self.target['cluster_read']
+        with self.assertRaisesRegex(ValueError, 'registration scope differs'):
+            credentials.registration(self.secret, self.target, self.now)
+
+    def test_fixed_reader_transition_accepts_exact_old_or_empty_new_scope(self):
+        previous = {key: copy.deepcopy(self.target[key]) for key in ('project', 'namespaces')}
+        self.target.update(project='', cluster_read=True, previous_scope=previous)
+        credentials.validate_policy({'version': 1, 'targets': [self.target]})
+        credentials.registration(self.secret, self.target, self.now)
+        self.secret['data'].update(project='', namespaces='')
+        credentials.registration(self.secret, self.target, self.now)
+        for project, namespaces in [('', ','.join(previous['namespaces'])), ('railshot', ''), ('', 'foreign')]:
+            changed = copy.deepcopy(self.secret)
+            changed['data'].update(project=base64.b64encode(project.encode()).decode(),
+                                   namespaces=base64.b64encode(namespaces.encode()).decode())
+            with self.subTest(project=project, namespaces=namespaces), self.assertRaises(ValueError):
+                credentials.registration(changed, self.target, self.now)
+        del self.target['previous_scope']
+        self.secret['data']['project'] = base64.b64encode(b'railshot').decode()
+        self.secret['data']['namespaces'] = base64.b64encode(','.join(previous['namespaces']).encode()).decode()
+        with self.assertRaises(ValueError):
+            credentials.registration(self.secret, self.target, self.now)
+
+    def test_fixed_reader_cannot_be_enabled_for_app_credentials_or_named_projects(self):
+        app_id = 'app-' + 'a' * 24
+        app = {**self.target, 'target_id': app_id, 'secret': 'railshot-' + app_id,
+               'project': app_id, 'namespaces': [app_id], 'cluster_read': True,
+               'service_account': {**self.target['service_account'], 'namespace': app_id}}
+        for target in [app, {**self.target, 'cluster_read': True},
+                       {**self.target, 'project': '', 'cluster_read': False}]:
+            with self.subTest(target=target['target_id']), self.assertRaises(ValueError):
+                credentials.validate_policy({'version': 1, 'targets': [target]})
+
     def test_transition_policy_renews_exact_old_or_new_scope_without_changing_scope(self):
         original = copy.deepcopy(self.secret); old_namespaces = list(self.target['namespaces'])
         expanded = old_namespaces + ['app-' + 'a' * 24]

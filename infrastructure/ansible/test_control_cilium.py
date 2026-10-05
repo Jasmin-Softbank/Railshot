@@ -145,6 +145,20 @@ class ControlCiliumTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', wait_seconds=0, profile='control')
 
+    def test_control_accepts_one_platform_agent_without_weakening_build_isolation(self):
+        server, build = server_node(), build_node()
+        platform = {'metadata': {'name': 'platform-worker-01', 'labels': {'railshot.io/node-role': 'platform-worker'}},
+                    'spec': {'podCIDR': '10.52.2.0/24'}}
+        for nodes in ([server, platform], [server, build, platform]):
+            with patch.object(guard, 'kube', side_effect=[{'items': nodes}, {'spec': {'clusterIP': '10.53.0.1'}}, None, None]):
+                self.assertEqual(guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', profile='control'), server)
+        bad_platform = copy.deepcopy(platform)
+        bad_platform['spec']['taints'] = build['spec']['taints']
+        for nodes in ([server, platform, copy.deepcopy(platform)], [server, bad_platform]):
+            with patch.object(guard, 'kube', return_value={'items': nodes}):
+                with self.assertRaises(ValueError):
+                    guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', wait_seconds=0, profile='control')
+
     def test_control_waits_for_server_role_patch_but_never_accepts_missing_identity(self):
         server = server_node()
         pending = copy.deepcopy(server)
@@ -159,7 +173,7 @@ class ControlCiliumTests(unittest.TestCase):
                 guard.check_cluster('10.52.0.0/16', '10.53.0.0/16', wait_seconds=0, profile='control')
             kube.assert_called_once_with('get', 'nodes', '-o', 'json')
             sleep.assert_not_called()
-        for nodes in ([server, server], [pending, pending, pending],
+        for nodes in ([server, server], [pending, pending, pending, pending],
                       [server, {**build_node(), 'spec': {'podCIDR': '10.52.1.0/24'}}]):
             with self.subTest(nodes=nodes), patch.object(guard, 'kube', return_value={'items': nodes}) as kube, \
                     patch.object(guard.time, 'sleep') as sleep:

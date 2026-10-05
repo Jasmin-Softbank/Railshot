@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, createCipheriv } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, createCipheriv, createDecipheriv } from 'node:crypto';
 import { lstat, open, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -31,11 +31,12 @@ export function cookieToken(header) {
 
 export async function createDashboardData(db, root) {
   const keyPath = join(root, 'connections.key');
-  // Keep the key separate from DB backups. A missing key with saved ciphertext is an error.
+  // Keep the key in its own private file; restore it with the DB that uses it.
   try { await lstat(keyPath); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    if (db.prepare('SELECT 1 FROM connections WHERE password_encrypted IS NOT NULL LIMIT 1').get()) throw new Error('Connection encryption key is missing');
+    if (db.prepare('SELECT 1 FROM connections WHERE password_encrypted IS NOT NULL LIMIT 1').get()
+        || db.prepare('SELECT 1 FROM mcp_tokens LIMIT 1').get()) throw new Error('Connection encryption key is missing');
     const file = await open(keyPath, 'wx', 0o600);
     try { await file.writeFile(randomBytes(32)); await file.sync(); } finally { await file.close(); }
     const directory = await open(root, 'r');
@@ -45,6 +46,27 @@ export async function createDashboardData(db, root) {
   if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077)) throw new Error('Invalid connection encryption key');
   const key = await readFile(keyPath);
   if (key.length !== 32) throw new Error('Invalid connection encryption key');
+  function encrypt(value, binding) {
+    const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, iv);
+    cipher.setAAD(Buffer.from(binding));
+    const ciphertext = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+    return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]);
+  }
+  const mcpBinding = (row) => JSON.stringify([row.token_hash, row.session_id, row.client_id, row.resource]);
+  function validateMcp(input, registering = false) {
+    const keys = registering ? 'client_id,resource,session,token_hash' : 'resource,token_hash';
+    if (!input || Object.keys(input).sort().join(',') !== keys || !/^[a-f0-9]{64}$/.test(input.token_hash || '')
+        || typeof input.resource !== 'string' || input.resource.length > 2048)
+      throw new DashboardError('MCP 연결 입력을 확인하세요.');
+    let url;
+    try { url = new URL(input.resource); } catch { throw new DashboardError('MCP 리소스 주소를 확인하세요.'); }
+    if (url.href !== input.resource || url.pathname !== '/mcp' || url.search || url.hash || url.username || url.password
+        || !(url.protocol === 'https:' || url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
+      throw new DashboardError('MCP 리소스 주소를 확인하세요.');
+    if (registering && (typeof input.session !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(input.session)
+        || typeof input.client_id !== 'string' || !input.client_id || input.client_id.length > 2048 || /[\x00-\x1f]/.test(input.client_id)))
+      throw new DashboardError('MCP 연결 소유 세션을 확인하세요.');
+  }
   function live(id) {
     const row = db.prepare('SELECT * FROM sessions WHERE id = ? AND expires_at > ?').get(id, Date.now());
     if (!row) throw new DashboardError('세션이 만료되었습니다. 화면을 새로고침하세요.', 409, 'SESSION_EXPIRED');
@@ -53,6 +75,35 @@ export async function createDashboardData(db, root) {
   const visible = (row) => ({ id: row.id, provider: row.provider, label: row.label, console_url: row.console_url,
     username: row.username, has_password: row.password_encrypted !== null, created_at: row.created_at, updated_at: row.updated_at });
   return {
+    saveMcpToken(input) {
+      validateMcp(input, true);
+      const session = live(hash(input.session)), now = Date.now();
+      const row = { ...input, session_id: session.id };
+      const previous = db.prepare('SELECT session_id, client_id, resource FROM mcp_tokens WHERE token_hash = ?').get(input.token_hash);
+      if (previous) {
+        if (['session_id', 'client_id', 'resource'].some(field => previous[field] !== row[field]))
+          throw new DashboardError('이미 발급된 MCP 연결을 다른 소유자에게 연결할 수 없습니다.', 409, 'CONFLICT');
+        return { registered: true };
+      }
+      db.prepare('DELETE FROM mcp_tokens WHERE expires_at <= ?').run(now);
+      if (db.prepare('SELECT count(*) AS count FROM mcp_tokens').get().count >= 10000)
+        throw new DashboardError('MCP 연결 보관 한도에 도달했습니다.', 429, 'CAPACITY_EXCEEDED');
+      db.prepare('INSERT INTO mcp_tokens VALUES (?, ?, ?, ?, ?, ?, ?)').run(input.token_hash, session.id,
+        input.client_id, input.resource, encrypt(input.session, mcpBinding(row)), session.expires_at, now);
+      return { registered: true };
+    },
+    mcpToken(input) {
+      validateMcp(input);
+      const row = db.prepare(`SELECT t.* FROM mcp_tokens t JOIN sessions s ON s.id = t.session_id
+        WHERE t.token_hash = ? AND t.resource = ? AND t.expires_at > ? AND s.expires_at > ?`)
+        .get(input.token_hash, input.resource, Date.now(), Date.now());
+      if (!row) throw new DashboardError('MCP 연결을 찾을 수 없습니다.', 404, 'NOT_FOUND');
+      const ciphertext = Buffer.from(row.session_encrypted), decipher = createDecipheriv('aes-256-gcm', key, ciphertext.subarray(0, 12));
+      decipher.setAAD(Buffer.from(mcpBinding(row))); decipher.setAuthTag(ciphertext.subarray(12, 28));
+      const session = Buffer.concat([decipher.update(ciphertext.subarray(28)), decipher.final()]).toString('utf8');
+      if (hash(session) !== row.session_id) throw new Error('MCP session binding differs');
+      return { session, client_id: row.client_id, resource: row.resource, expires_at: row.expires_at };
+    },
     isOwnerSession(id) { return Boolean(id && db.prepare('SELECT 1 FROM owners WHERE session_id = ?').get(id)); },
     owner(token) {
       if (!token) return null;
@@ -124,10 +175,7 @@ export async function createDashboardData(db, root) {
       let encrypted = previous?.password_encrypted ?? null;
       if (input.password === null) encrypted = null;
       else if (typeof input.password === 'string') {
-        const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, iv);
-        cipher.setAAD(Buffer.from(`${id}:${recordId}`));
-        const ciphertext = Buffer.concat([cipher.update(input.password, 'utf8'), cipher.final()]);
-        encrypted = Buffer.concat([iv, cipher.getAuthTag(), ciphertext]);
+        encrypted = encrypt(input.password, `${id}:${recordId}`);
       }
       db.prepare(`INSERT INTO connections VALUES (?, ?, 'openstack', ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET label=excluded.label, console_url=excluded.console_url, username=excluded.username,

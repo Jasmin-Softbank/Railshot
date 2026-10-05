@@ -25,12 +25,15 @@ BuildKit은 새로 만들지 않습니다. 먼저 `infrastructure/ansible/ci.yml
 ```yaml
 server: https://REPLACE_WITH_OPS_PRIVATE_ADDRESS:6443
 token-file: /etc/rancher/k3s/agent-token
+lb-server-port: 6443
 node-name: railshot-build-worker-aws-01
 node-label:
   - railshot.io/node-role=build
 node-taint:
   - railshot.io/dedicated=build:NoSchedule
 ```
+
+현재 Cilium은 각 노드의 `127.0.0.1:6443`으로 API에 연결합니다. agent의 local API 포트도 `lb-server-port: 6443`으로 맞춰야 Cilium 초기화가 완료됩니다.
 
 `k3s agent`로 가입하며 기본 containerd를 유지합니다. `--docker`로 K3s와 CI Docker를 합치지 않습니다. 운영자 context에서 해당 Node의 Ready·hostname·build label·taint와 기존 서비스/DNS가 정상인지 확인한 후, **build 노드에서만** 실행합니다.
 

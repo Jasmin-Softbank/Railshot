@@ -4,6 +4,15 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS mcp_tokens (
+  token_hash TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id),
+  client_id TEXT NOT NULL,
+  resource TEXT NOT NULL,
+  session_encrypted BLOB NOT NULL,
+  expires_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS preferences (
   session_id TEXT PRIMARY KEY REFERENCES sessions(id),
   data TEXT NOT NULL CHECK(json_valid(data))

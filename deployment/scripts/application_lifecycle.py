@@ -105,9 +105,10 @@ def control_inventory(binding, profile, *, allow_active=False):
     shared = None
     environment = next((item for item in policy['targets'] if item['target_id'] == binding['environment_id']), None)
     private = secret['metadata']['labels']['argocd.argoproj.io/secret-type'] == 'railshot-application'
-    require(not private or (environment and environment['project'] == '' and app_id in environment['namespaces']),
+    require(not private or (environment and environment['project'] == ''
+            and (environment.get('cluster_read') or app_id in environment['namespaces'])),
             'APPLICATION_SHARED_CREDENTIAL_CHANGED')
-    if environment and environment['project'] == '' and app_id in environment['namespaces']:
+    if environment and environment['project'] == '' and (environment.get('cluster_read') or app_id in environment['namespaces']):
         _, current_policy, selected, canonical, _, _ = runtime.shared_cluster_snapshot(
             binding['cd'], binding['registered'], binding['environment_id'])
         require(current_policy == policy and selected == environment
@@ -184,7 +185,14 @@ def remove_renewal(binding, expected, *, inspect=False):
     require(rows in ([], [selected]), 'RENEWAL_POLICY_CHANGED')
     policy = {**current, 'targets': [item for item in current['targets'] if item['target_id'] != binding['application_id']]}
     secret = None
-    if shared:
+    if shared and shared['renewal'].get('cluster_read'):
+        # The fixed reader still participates in plan identity checks, but an
+        # app deletion must never rewrite its environment-owned cache scope.
+        _, _, updated, canonical, _, _ = runtime.shared_cluster_snapshot(
+            binding['cd'], binding['registered'], binding['environment_id'])
+        require(updated == shared['renewal'] and identity(canonical) == shared['secret'],
+                'APPLICATION_SHARED_CREDENTIAL_CHANGED')
+    if shared and not shared['renewal'].get('cluster_read'):
         previous = shared['renewal']
         namespaces = [value for value in previous['namespaces'] if value != binding['application_id']]
         require(binding['application_id'] in previous['namespaces'] and previous['service_account']['namespace'] in namespaces,
@@ -210,7 +218,7 @@ def remove_renewal(binding, expected, *, inspect=False):
     runtime.credentials.validate_policy(policy)
     if inspect:
         return
-    if shared and observed_namespaces != namespaces:
+    if shared and not shared['renewal'].get('cluster_read') and observed_namespaces != namespaces:
         transition = {**current, 'targets': [transition_row if item['target_id'] == binding['environment_id'] else item for item in current['targets']]}
         runtime.credentials.validate_policy(transition)
         cm['data']['policy.json'] = json.dumps(transition)

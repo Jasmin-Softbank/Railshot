@@ -130,6 +130,28 @@ class LogsTest(unittest.TestCase):
             self.execute()
         self.last_read.assert_not_called()
 
+    def test_fixed_reader_legacy_diagnostics_require_exact_renewal_binding(self):
+        import test_credentials
+        credential = test_credentials.CredentialsTest(); credential.setUp()
+        row = {**credential.target, 'project': '', 'cluster_read': True}
+        secret = copy.deepcopy(credential.secret)
+        auth = json.loads(base64.b64decode(secret['data']['config']))
+        auth['bearerToken'] = credential.token(int(logs.datetime.now(logs.timezone.utc).timestamp()) - 60)
+        secret['data'].update(project='', namespaces='', config=base64.b64encode(json.dumps(auth).encode()).decode())
+        policy = {'data': {'policy.json': json.dumps({'version': 1, 'targets': [row]})}}
+        def control(context, namespace, *args):
+            return secret if args[1] == 'secret' else policy
+        with patch('argo.kubectl', side_effect=control):
+            actual, options = logs.customer_auth(self.config, self.review)
+        self.assertEqual(actual, (row['server'], credential.ca, auth['bearerToken']))
+        self.assertEqual(options, {})
+        for change in [{'cluster_read': False}, {'server': 'https://192.0.2.2:6443'}, {'ca_sha256': 'b' * 64},
+                       {'previous_scope': {'project': 'railshot', 'namespaces': row['namespaces']}},
+                       {'namespaces': ['tenant-atlas'], 'service_account': {**row['service_account'], 'namespace': 'tenant-atlas'}}]:
+            policy['data']['policy.json'] = json.dumps({'version': 1, 'targets': [{**row, **change}]})
+            with self.subTest(change=change), patch('argo.kubectl', side_effect=control), self.assertRaises(ValueError):
+                logs.customer_auth(self.config, self.review)
+
     def test_registered_private_tls_name_reaches_every_metadata_and_log_request(self):
         auth = json.loads(base64.b64decode(self.secret['data']['config']))
         auth['tlsClientConfig']['serverName'] = self.server_name = '10.66.0.2'

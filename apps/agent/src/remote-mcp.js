@@ -60,7 +60,7 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
   const origin = new URL(publicOrigin);
   if (!['http:', 'https:'].includes(origin.protocol) || origin.pathname !== '/' || origin.search || origin.hash) throw new Error('공개 원점 URL이 잘못되었습니다.');
   const resource = `${origin.origin}/mcp`;
-  const approvals = new Map(), codes = new Map(), tokens = new Map();
+  const approvals = new Map(), codes = new Map();
   async function apiSecret() {
     if (env.RAILSHOT_API_TOKEN && env.RAILSHOT_API_TOKEN_FILE) throw new Error('내부 API 토큰을 중복 설정했습니다.');
     const token = env.RAILSHOT_API_TOKEN || (env.RAILSHOT_API_TOKEN_FILE
@@ -80,13 +80,30 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
     } catch { return null; }
   }
   const clean = () => {
-    for (const map of [approvals, codes, tokens]) for (const [key, value] of map) if (value.expires <= now()) map.delete(key);
+    for (const map of [approvals, codes]) for (const [key, value] of map) if (value.expires <= now()) map.delete(key);
   };
   const mcp = createMcpHandler(({ authInfo }) => {
-    const bound = tokens.get(authInfo?.token);
-    if (!bound || bound.expires <= now()) throw new Error('AI 연결이 만료되었습니다.');
-    return createToolServer(createApiClient({ baseUrl: apiUrl, env, fetchImpl, session: bound.session }), { publicOrigin: origin.origin });
+    const session = authInfo?.extra?.session;
+    if (!session || !tokenPattern.test(session)) throw new Error('AI 연결이 만료되었습니다.');
+    return createToolServer(createApiClient({ baseUrl: apiUrl, env, fetchImpl, session }), { publicOrigin: origin.origin });
   }, { legacy: 'stateless' });
+
+  async function tokenBinding(token, binding) {
+    try {
+      const result = await fetchImpl(new URL(`/internal/mcp/tokens${binding ? '' : '/lookup'}`, apiUrl), { method: 'POST',
+        headers: { authorization: `Bearer ${await apiSecret()}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ token_hash: createHash('sha256').update(token).digest('hex'), resource, ...binding }),
+        redirect: 'error', signal: AbortSignal.timeout(10000) });
+      if (!binding && result.status === 404) return null;
+      if (!result.ok) throw Object.assign(new Error(), { status: result.status });
+      const value = await result.json();
+      if (binding ? value.registered !== true : !tokenPattern.test(value.session || '') || typeof value.client_id !== 'string'
+          || value.resource !== resource || !Number.isFinite(value.expires_at)) throw new Error();
+      return value;
+    } catch (error) {
+      throw Object.assign(new Error('AI 연결 저장소에 연결할 수 없습니다.'), { status: error.status === 429 ? 429 : 503 });
+    }
+  }
 
   async function ensureSession(request) {
     const existing = cookieToken(request.headers.cookie);
@@ -184,21 +201,20 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
         if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier)) { json(response, 400, { error: 'invalid_grant' }); return; }
         const digest = createHash('sha256').update(verifier).digest('base64url');
         if (!timingSafeEqual(Buffer.from(digest), Buffer.from(entry.challenge))) { json(response, 400, { error: 'invalid_grant' }); return; }
-        const accessToken = randomToken(), expires = Infinity;
-        if (tokens.size >= 10000) { json(response, 429, { error: 'temporarily_unavailable' }); return; }
-        tokens.set(accessToken, { session: entry.session, clientId: entry.clientId, resource: entry.resource, expires });
+        const accessToken = randomToken();
+        await tokenBinding(accessToken, { session: entry.session, client_id: entry.clientId });
         json(response, 200, { access_token: accessToken, token_type: 'Bearer' }); return;
       }
       if (url.pathname === '/mcp') {
         const match = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(request.headers.authorization || '');
-        const bound = match && tokens.get(match[1]);
-        if (!bound || bound.expires <= now() || bound.resource !== resource) {
+        const bound = match && await tokenBinding(match[1]);
+        if (!bound || bound.expires_at <= now() || bound.resource !== resource) {
           response.writeHead(401, { 'www-authenticate': `Bearer resource_metadata="${origin.origin}/.well-known/oauth-protected-resource/mcp"`,
             'cache-control': 'no-store' }).end(); return;
         }
         const webRequest = new Request(resource, { method: request.method, headers: request.headers,
           ...(request.method === 'POST' ? { body: Readable.toWeb(request), duplex: 'half' } : {}), signal: AbortSignal.timeout(30000) });
-        const result = await mcp.fetch(webRequest, { authInfo: { token: match[1], clientId: bound.clientId, scopes: [] } });
+        const result = await mcp.fetch(webRequest, { authInfo: { token: match[1], clientId: bound.client_id, scopes: [], extra: { session: bound.session } } });
         response.writeHead(result.status, Object.fromEntries(result.headers));
         if (result.body) Readable.fromWeb(result.body).on('error', () => response.destroy()).pipe(response);
         else response.end();
@@ -208,7 +224,7 @@ export function createRemoteMcpServer({ publicOrigin = process.env.RAILSHOT_PUBL
     } catch (error) {
       if (response.headersSent) response.destroy();
       else if (error instanceof SyntaxError) json(response, 400, { error: 'invalid_request' });
-      else json(response, 500, { error: 'server_error', message: error.message });
+      else json(response, error.status === 429 ? 429 : error.status === 503 ? 503 : 500, { error: error.status === 503 || error.status === 429 ? 'temporarily_unavailable' : 'server_error' });
     }
   });
   return { server, close: () => mcp.close() };

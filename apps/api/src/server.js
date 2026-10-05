@@ -120,6 +120,17 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
           && Boolean(product || service?.targetId || environmentAdapter || process.env.RAILSHOT_PROFILES_FILE);
         json(response, url.pathname === '/readyz' && !configured ? 503 : 200, { ok: true, configured, ...(!access.remote && { target_id: service?.targetId || null }) }); return;
       }
+      if (['/internal/mcp/tokens', '/internal/mcp/tokens/lookup'].includes(url.pathname)) {
+        versioned = true;
+        if (!access.token || !allowsToken(request.headers.authorization, access.token))
+          throw new ServiceError('API authentication required', 401);
+        if (request.method !== 'POST') { const error = new ServiceError('지원하지 않는 메서드입니다.', 405); error.allow = 'POST'; throw error; }
+        if (shuttingDown || release || draining) throw new ServiceError('Platform update in progress', 503);
+        if (url.search) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+        activeRequests++; counted = true;
+        const products = await productReady, input = await jsonInput(request);
+        json(response, 200, url.pathname.endsWith('/lookup') ? products.dashboard.mcpToken(input) : products.dashboard.saveMcpToken(input)); return;
+      }
       if (url.pathname === '/internal/deployments/resume' && request.method === 'POST') {
         versioned = true;
         if (!access.token || !allowsToken(request.headers.authorization, access.token))

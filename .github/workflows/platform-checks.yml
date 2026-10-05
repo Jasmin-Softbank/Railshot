@@ -2,7 +2,16 @@ name: Platform full checks
 
 on:
   workflow_call:
+    inputs:
+      selected:
+        type: string
+        default: '["contracts","openstack","database-ansible","api-browser","terraform","runtime-smoke","observability","containers"]'
   workflow_dispatch:
+    inputs:
+      selected:
+        description: JSON array of checks to run
+        type: string
+        default: '["contracts","openstack","database-ansible","api-browser","terraform","runtime-smoke","observability","containers"]'
 
 permissions: {contents: read}
 concurrency:
@@ -14,6 +23,7 @@ env:
 
 jobs:
   contracts:
+    if: contains(fromJSON(inputs.selected), 'contracts')
     name: Python contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -46,20 +56,26 @@ jobs:
         run: |
           for suite in ci/scripts ci/scripts/gate ci/scripts/loop ci/scripts/runner ci/scripts/poc ci/scripts/infra infrastructure/ansible deployment/scripts/tests deployment/cloudflared gitops infrastructure/providers/terraform_tools; do
             echo "::group::$suite"
-            python -m unittest discover -s "$suite" -p 'test_*.py' -v
+            if [[ "$suite" == deployment/scripts/tests ]]; then
+              python -m pytest "$suite" -v
+            else
+              python -m unittest discover -s "$suite" -p 'test_*.py' -v
+            fi
             echo "::endgroup::"
           done
       - name: OpenAPI structure
         run: |
           python - <<'PY'
           import json
+          from pathlib import Path
           from openapi_spec_validator import validate
           for path in ['docs/api/ansible.openapi.json', 'docs/api/product.openapi.json']:
               with open(path) as stream:
-                  validate(json.load(stream))
+                  validate(json.load(stream), base_uri=Path(path).resolve().as_uri())
           PY
 
   observability:
+    if: contains(fromJSON(inputs.selected), 'observability')
     name: Observability configuration and probes
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -91,6 +107,7 @@ jobs:
             python -m unittest discover -s observability -p 'test_*.py' -v
 
   openstack:
+    if: contains(fromJSON(inputs.selected), 'openstack')
     name: OpenStack contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -113,6 +130,7 @@ jobs:
         run: uv run --frozen --project infrastructure/providers/openstack --with-requirements deployment/bootstrap/requirements.lock bash ci/scripts/check-bootstrap.sh
 
   database-ansible:
+    if: contains(fromJSON(inputs.selected), 'database-ansible')
     name: Database Ansible contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -135,6 +153,7 @@ jobs:
           ansible-playbook -i inventory/hosts.example.yml runtime.yml --syntax-check
 
   api-browser:
+    if: contains(fromJSON(inputs.selected), 'api-browser')
     name: HTTP publication and browser E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -153,9 +172,11 @@ jobs:
         run: |
           python - <<'PY'
           import json
+          from pathlib import Path
           from openapi_spec_validator import validate
-          with open('docs/api/product.openapi.json') as stream:
-              validate(json.load(stream))
+          path = Path('docs/api/product.openapi.json').resolve()
+          with path.open() as stream:
+              validate(json.load(stream), base_uri=path.as_uri())
           PY
       - name: Install current workspace and build packaged dashboard
         run: |
@@ -182,6 +203,7 @@ jobs:
           retention-days: 7
 
   terraform:
+    if: contains(fromJSON(inputs.selected), 'terraform')
     name: Terraform validation
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -212,6 +234,7 @@ jobs:
           done
 
   runtime-smoke:
+    if: contains(fromJSON(inputs.selected), 'runtime-smoke')
     name: Linux amd64 runtime E2E and cleanup
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -253,6 +276,7 @@ jobs:
           retention-days: 7
 
   containers:
+    if: contains(fromJSON(inputs.selected), 'containers')
     name: Container build and smoke
     uses: ./.github/workflows/platform-containers.yml
     with:

@@ -70,7 +70,10 @@ class ApplicationsTest(unittest.TestCase):
         self.accesses = []
         def customer(server, ca, token, path, doc, **kw):
             item = doc['spec']['resourceAttributes']; self.accesses.append((server, item, kw))
-            return {'status': {'allowed': item['namespace'].startswith('app-') and item['resource'] == 'deployments'}}
+            reader = self.fixture.runtime.objects.get(('default', 'clusterrole', 'railshot-argocd-cache'), {})
+            cluster_read = any(item['resource'] in rule['resources'] and item['group'] in rule['apiGroups']
+                               and item['verb'] in rule['verbs'] for rule in reader.get('rules', []))
+            return {'status': {'allowed': cluster_read or item['namespace'].startswith('app-') and item['resource'] == 'deployments'}}
         self.enterContext(patch.object(env.credentials, 'customer', customer))
         self.native = self.enterContext(patch.object(env.argo, 'native', side_effect=AssertionError('no native cloud command permitted')))
         self.execute = self.enterContext(patch.object(env.ansible, 'execute', side_effect=AssertionError('no install/provision permitted')))
@@ -89,8 +92,16 @@ class ApplicationsTest(unittest.TestCase):
     def home(self, app='first-app'):
         return Path(self.config['state_dir']) / self.request(app)['application_id']
 
+    def enable_fixed_cache(self):
+        cm = self.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']
+        shared = next(row for row in json.loads(cm['data']['policy.json'])['targets'] if row['target_id'] == self.env_id)
+        return env.enable_shared_cluster_cache(self.fixture.runtime, {'context': 'control'},
+            {'target': {'cluster_server': shared['server']}}, self.env_id)
+
     def test_same_environment_two_apps_have_separate_rbac_and_replay_without_writes(self):
+        self.enable_fixed_cache()
         first = self.register(); self.assertEqual(first['status'], 'succeeded', first)
+        shared_before = copy.deepcopy(self.fixture.control.objects['argocd', 'secret', 'railshot-' + self.env_id])
         second = self.register('second-app'); self.assertEqual(second['status'], 'succeeded', second)
         self.assertNotEqual(first['namespace'], second['namespace'])
         self.assertNotEqual(first['node_port'], second['node_port'])
@@ -114,13 +125,82 @@ class ApplicationsTest(unittest.TestCase):
         clusters = [value for value in self.fixture.control.objects.values()
                     if value.get('metadata', {}).get('labels', {}).get('argocd.argoproj.io/secret-type') == 'cluster']
         self.assertEqual(len(clusters), 1)
-        self.assertEqual(set(base64.b64decode(clusters[0]['data']['namespaces']).decode().split(',')),
-                         {'old-app', first['namespace'], second['namespace']})
+        self.assertEqual(base64.b64decode(clusters[0]['data']['namespaces']), b'')
+        self.assertEqual(clusters[0], shared_before, 'adding another app must not invalidate the shared Argo cache')
         self.assertEqual(base64.b64decode(clusters[0]['data']['project']), b'')
         policy = json.loads(self.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']['data']['policy.json'])
         shared = next(row for row in policy['targets'] if row['target_id'] == self.env_id)
-        self.assertEqual(set(shared['namespaces']), {'old-app', first['namespace'], second['namespace']})
+        self.assertEqual(shared['namespaces'], ['old-app'])
+        self.assertTrue(shared['cluster_read'])
         self.native.assert_not_called(); self.execute.assert_not_called()
+
+    def test_fixed_cache_reader_is_list_watch_only_and_foreign_binding_is_not_adopted(self):
+        self.enable_fixed_cache()
+        first = self.register(); self.assertEqual(first['status'], 'succeeded', first)
+        role = self.fixture.runtime.objects['default', 'clusterrole', 'railshot-argocd-cache']
+        resources = {resource for rule in role['rules'] for resource in rule['resources']}
+        self.assertEqual(resources, {'pods', 'services', 'persistentvolumeclaims', 'deployments',
+                                    'replicasets', 'jobs', 'networkpolicies'})
+        self.assertTrue(all(rule['verbs'] == ['list', 'watch'] for rule in role['rules']))
+        binding = self.fixture.runtime.objects['default', 'clusterrolebinding', 'railshot-argocd-cache']
+        self.assertEqual(binding['subjects'], [{'kind': 'ServiceAccount', 'name': env.SA, 'namespace': 'old-app'}])
+        shared_secret = copy.deepcopy(self.fixture.control.objects['argocd', 'secret', 'railshot-' + self.env_id])
+        policy = json.loads(self.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']['data']['policy.json'])
+        shared = next(row for row in policy['targets'] if row['target_id'] == self.env_id)
+        registered = {'target': {'cluster_server': shared['server']}}
+        binding['metadata']['labels']['railshot.io/registration'] = 'foreign'
+        with self.assertRaisesRegex(ValueError, 'cache reader owner differs'):
+            env.enable_shared_cluster_cache(self.fixture.runtime, {'context': 'control'}, registered, self.env_id)
+        self.assertEqual(shared_secret, self.fixture.control.objects['argocd', 'secret', shared_secret['metadata']['name']])
+
+    def test_fixed_cache_migration_resumes_both_sides_of_secret_cas_without_repatching(self):
+        for phase in ('transition', 'scope', 'final'):
+            with self.subTest(phase=phase):
+                case = ApplicationsTest(methodName='runTest'); case.setUp()
+                try:
+                    original = case.fixture.control.__call__
+                    patches = []
+                    def control(namespace, *args, document=None):
+                        result = original(namespace, *args, document=document)
+                        stage = None
+                        if args[:3] == ('patch', 'secret', 'railshot-' + case.env_id):
+                            patches.append(True); stage = 'scope'
+                        elif args[0] == 'replace' and document.get('kind') == 'ConfigMap':
+                            selected = next(row for row in json.loads(document['data']['policy.json'])['targets']
+                                            if row['target_id'] == case.env_id)
+                            stage = 'transition' if 'previous_scope' in selected else 'final'
+                        if stage == phase:
+                            raise OSError('write committed but reply lost')
+                        return result
+                    with patch.object(env.argo, 'kubectl', lambda context, *a, **kw: control(*a, **kw)), self.assertRaises(OSError):
+                        case.enable_fixed_cache()
+                    migrated = case.enable_fixed_cache()
+                    self.assertTrue(migrated['cluster_read'])
+                    self.assertNotIn('previous_scope', migrated)
+                    cm = copy.deepcopy(case.fixture.control.objects['argocd', 'configmap', 'railshot-credentials'])
+                    secret = copy.deepcopy(case.fixture.control.objects['argocd', 'secret', migrated['secret']])
+                    self.assertEqual(secret['data']['namespaces'], '')
+                    counters = case.fixture.runtime.applications, case.fixture.control.applications
+                    self.assertEqual(case.enable_fixed_cache(), migrated)
+                    self.assertEqual((case.fixture.runtime.applications, case.fixture.control.applications), counters)
+                    self.assertEqual(cm, case.fixture.control.objects['argocd', 'configmap', 'railshot-credentials'])
+                    self.assertEqual(secret, case.fixture.control.objects['argocd', 'secret', migrated['secret']])
+                finally:
+                    case.doCleanups()
+
+    def test_customer_inclusions_preserve_full_control_and_exclude_secrets(self):
+        customer = 'https://192.0.2.10:6443'
+        control = 'https://kubernetes.default.svc'
+        entries = env.customer_cache_inclusions([customer], [control, customer])
+        self.assertEqual(entries[0], {'apiGroups': ['*'], 'kinds': ['*'], 'clusters': [control]})
+        self.assertTrue(all(row['clusters'] == [customer] for row in entries[1:]))
+        kinds = {kind for row in entries[1:] for kind in row['kinds']}
+        self.assertEqual(kinds, {'Pod', 'Service', 'PersistentVolumeClaim', 'Deployment', 'ReplicaSet', 'Job', 'NetworkPolicy'})
+        supported = {row['kind'] for row in env.argo.KINDS + [env.argo.PVC_KIND, env.argo.JOB_KIND]}
+        self.assertTrue(supported <= kinds)
+        for customers, others in [([], [control]), ([customer], []), ([customer], [customer]), (['*'], [control])]:
+            with self.subTest(customers=customers, others=others), self.assertRaises(ValueError):
+                env.customer_cache_inclusions(customers, others)
 
     def test_completed_legacy_app_migrates_only_cluster_scope_and_preserves_binding(self):
         first = self.register(); app_id = first['application_id']

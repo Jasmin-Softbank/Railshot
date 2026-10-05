@@ -27,7 +27,7 @@ class ScopeTests(unittest.TestCase):
             self.assertFalse(ci_scope.release_required(paths))
         self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
 
-    def test_normal_runs_build_only_images_and_manual_runs_keep_full_checks(self):
+    def test_normal_runs_keep_affected_tests_and_build_images_once(self):
         cases = [(['apps/api/src/server.js'], ['api']), (['apps/dashboard/app.js'], ['dashboard']),
                  (['apps/agent/src/remote-mcp.js'], ['mcp']),
                  (['ci/scripts/ci_scope.py'], ['dashboard', 'api', 'mcp', 'personal-gateway', 'ci-runner']),
@@ -53,11 +53,13 @@ class ScopeTests(unittest.TestCase):
                     if event == 'push':
                         self.assertEqual(components, automatic_components)
                         self.assertEqual(values['release'], str(bool(components)).lower())
-                    expected = (set(ci_scope.JOBS) if paths is None else ci_scope.select(paths)) \
-                        if event == 'workflow_dispatch' else ({'containers'} if components else set())
+                    expected = set(ci_scope.JOBS) if paths is None else ci_scope.select(paths)
+                    if components:
+                        expected.add('containers')
                     self.assertEqual(set(json.loads(values['selected'])), expected)
-                    checks = {job: {'result': 'success' if job in expected else 'skipped'}
-                              for job in (ci_scope.JOBS if event == 'workflow_dispatch' else ['containers'])}
+                    self.assertEqual(set(json.loads(values['checks'])), expected - {'containers'})
+                    checks = {'containers': {'result': 'success' if components else 'skipped'},
+                              'full-checks': {'result': 'success' if expected - {'containers'} else 'skipped'}}
                     checks['changes'] = {'result': 'success', 'outputs': values}
                     ci_scope.validate_gate(checks)
                     if components:
@@ -81,7 +83,10 @@ class ScopeTests(unittest.TestCase):
                 release = ci_scope.release_required(paths)
                 self.assertEqual(json.loads(values['container_components']), list(ci_scope.COMPONENTS) if release else [])
                 self.assertEqual(values['release'], str(release).lower())
-                self.assertEqual(json.loads(values['selected']), ['containers'] if release else [])
+                expected = set(ci_scope.JOBS) if paths is None else ci_scope.select(paths)
+                if release:
+                    expected.add('containers')
+                self.assertEqual(set(json.loads(values['selected'])), expected)
                 self.assertEqual(previous.call_count, int(release))
 
     def test_previous_green_but_skipped_deploy_is_not_a_completed_release(self):
@@ -237,6 +242,7 @@ class ScopeTests(unittest.TestCase):
             bad['changes']['result'] = state
             with self.assertRaises(ValueError):
                 ci_scope.validate_gate(bad)
+
             bad = copy.deepcopy(checks)
             bad['api-browser']['result'] = state
             with self.assertRaises(ValueError):
@@ -256,6 +262,20 @@ class ScopeTests(unittest.TestCase):
                 bad['terraform']['result'] = 'success'
             with self.assertRaises(ValueError):
                 ci_scope.validate_gate(bad)
+
+    def test_reusable_checks_cannot_be_omitted_failed_or_skipped_for_api_changes(self):
+        for selected in (['api-browser'], ['api-browser', 'containers']):
+            checks = {'changes': {'result': 'success', 'outputs': {'selected': json.dumps(selected)}},
+                      'containers': {'result': 'success' if 'containers' in selected else 'skipped'},
+                      'full-checks': {'result': 'success'}}
+            ci_scope.validate_gate(checks)
+            for result in ('failure', 'cancelled', 'skipped'):
+                bad = copy.deepcopy(checks); bad['full-checks']['result'] = result
+                with self.assertRaises(ValueError):
+                    ci_scope.validate_gate(bad)
+            del checks['full-checks']
+            with self.assertRaises(ValueError):
+                ci_scope.validate_gate(checks)
 
 
 class GitBoundaryTests(unittest.TestCase):

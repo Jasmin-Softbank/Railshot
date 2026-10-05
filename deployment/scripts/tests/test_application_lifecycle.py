@@ -20,6 +20,7 @@ class LifecycleTest(unittest.TestCase):
     def setUp(self):
         self.fixture = test_applications.ApplicationsTest(methodName='runTest')
         self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
+        self.fixture.enable_fixed_cache()
         self.assertEqual(self.fixture.register()['status'], 'succeeded')
         self.app = self.fixture.request(); self.home = self.fixture.home()
         self.binding = runtime.read_private(self.home / 'binding.json')
@@ -85,6 +86,18 @@ class LifecycleTest(unittest.TestCase):
         shared = next(row for row in policy['targets'] if row['target_id'] == self.app['environment_id'])
         return shared, self.control.objects['argocd', 'secret', shared['secret']]
 
+    def legacy_shared_registration(self):
+        """Keep explicit coverage for deployments registered before fixed watches."""
+        shared, secret = self.shared_registration()
+        shared.pop('cluster_read')
+        shared['namespaces'].append(self.app['application_id'])
+        secret['data']['namespaces'] = base64.b64encode(','.join(shared['namespaces']).encode()).decode()
+        cm = self.control.objects['argocd', 'configmap', 'railshot-credentials']
+        policy = json.loads(cm['data']['policy.json'])
+        policy['targets'] = [shared if row['target_id'] == shared['target_id'] else row for row in policy['targets']]
+        cm['data']['policy.json'] = json.dumps(policy)
+        return shared, secret
+
     def test_partial_delete_reconciles_and_resumes_remaining_original_resources(self):
         self.edge_execute.side_effect = RuntimeError('route transport unavailable before dispatch')
         request, result = self.apply(self.plan())
@@ -132,11 +145,11 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(live['metadata']['uid'], before['metadata']['uid'])
         self.assertEqual({k: v for k, v in live['data'].items() if k != 'namespaces'},
                          {k: v for k, v in before['data'].items() if k != 'namespaces'})
-        expected = [ns for ns in original['namespaces'] if ns != self.app['application_id']]
-        self.assertEqual(base64.b64decode(live['data']['namespaces']).decode().split(','), expected)
+        self.assertEqual(live, before)
+        self.assertEqual(base64.b64decode(live['data']['namespaces']).decode(), '')
         policy = json.loads(self.control.objects['argocd', 'configmap', 'railshot-credentials']['data']['policy.json'])
         self.assertEqual(next(row for row in policy['targets'] if row['target_id'] == self.app['environment_id']),
-                         {**original, 'namespaces': expected})
+                         original)
         for rule in self.control.objects['argocd', 'role', 'railshot-product-registrations']['rules']:
             if 'delete' in rule['verbs']:
                 self.assertNotIn(shared['secret'], rule['resourceNames'])
@@ -173,7 +186,7 @@ class LifecycleTest(unittest.TestCase):
         _, result = self.apply(plan)
         self.assertEqual(result['status'], 'succeeded', result)
         live = self.control.objects['argocd', 'secret', 'railshot-' + self.app['environment_id']]
-        self.assertEqual(base64.b64decode(live['data']['namespaces']).decode(), 'old-app')
+        self.assertEqual(base64.b64decode(live['data']['namespaces']).decode(), '')
 
     def test_cleanup_grants_never_add_shared_delete_and_allow_other_registration(self):
         selected = lifecycle.control_inventory(self.binding, self.fixture.config['environments'][self.app['environment_id']])
@@ -191,7 +204,7 @@ class LifecycleTest(unittest.TestCase):
             lifecycle.grant_cleanup(self.binding, selected)
 
     def test_private_credential_without_shared_membership_is_blocked(self):
-        shared, secret = self.shared_registration()
+        shared, secret = self.legacy_shared_registration()
         cm = self.control.objects['argocd', 'configmap', 'railshot-credentials']
         policy = json.loads(cm['data']['policy.json'])
         for row in policy['targets']:
@@ -219,7 +232,7 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(self.calls, before)
 
     def interrupted_shared_scope(self, phase):
-        shared, _ = self.shared_registration(); plan = self.plan()
+        shared, _ = self.legacy_shared_registration(); plan = self.plan()
         native = runtime.argo.kubectl
         def interrupt(*args, document=None):
             if phase == 'secret' and args[2:5] == ('patch', 'secret', shared['secret']):

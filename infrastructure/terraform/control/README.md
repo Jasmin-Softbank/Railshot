@@ -68,6 +68,20 @@ terraform -chdir=infrastructure/terraform/control plan -input=false \
 
 출력은 기존 `instance_id`, `auth_parameter_name`, `connect`와 추가된 `private_ip`, `primary_network_interface_id`, `edge_security_group_id`, `source_dest_check`다. 이 값은 WireGuard handshake, route, Kubernetes/Argo 또는 외부 앱 준비 완료 증거가 아니다.
 
+## 플랫폼 agent 분리
+
+`platform_worker_enabled=true`는 기존 control state에서 `m6i.large`(2 vCPU, 8 GiB) agent 한 개를 추가한다. `platform_worker_stop_at`에 승인된 UTC 정지 기한을 반드시 지정한다. 2026-10-05 작업의 기존 control/build 기한은 `2026-10-05T14:59:00Z`다. API의 기존 local-path PVC와 전용 build taint는 유지한다. control의 CPU credit은 `unlimited`다. 2026-10-05에 standard 모드의 credit이 소진되어 CPU가 20% baseline에 제한됐으므로, 작업 분리 후 실제 사용량과 추가 credit 요금을 함께 확인한다.
+
+적용 순서는 다음과 같다. 기존 리소스의 교체·삭제가 없는 saved plan을 먼저 확인한다.
+
+1. 이 모듈을 적용하고 `operations_peer_security_group_id`를 기존 CI 모듈의 동명 입력에 전달한다. CI plan에서도 기존 VM 교체 없이 SG 부착만 발생하는지 확인한다. 공통 SG는 운영 노드끼리의 TCP 6443·4240, UDP 8472, ICMP만 인바운드 허용한다.
+2. 새 worker의 public IPv4 `/32`를 `platform-release` 모듈의 `platform_worker_api_source_cidr`에 지정한다. 기존 GCP control API rule은 유지하고 worker 전용 TCP6443 rule 하나만 추가한다. 이 모듈의 `platform_worker_external_api_cidrs`에는 GCP API 주소의 `/32`를 지정해 반대편 egress도 허용한다. AWS 고객 API egress는 기존 고객 SG를 대상으로 선언한다. OpenStack 구성은 변경하지 않는다.
+3. SSM의 private 관리 세션으로 새 worker에 root 소유 `0600` `/etc/rancher/k3s/agent-token`을 준비한 뒤 `bash infrastructure/ansible/platform-worker.sh <control-private-ip>`를 실행한다. 토큰을 Terraform·user-data·명령 인수·로그에 넣지 않는다. K3s agent와 기존 Cilium DaemonSet을 사용하고 CNI를 다시 설치하지 않는다. Cilium의 기존 localhost API 경로와 일치하도록 agent의 `lb-server-port`도 `6443`으로 설정한다.
+4. node Ready, Cilium node 연결, DNS와 실제 AWS/GCP API 연결을 확인한 뒤 Argo workload의 selector를 `railshot.io/node-role=platform-worker`로 옮긴다. `gitops/argo/kustomization.yaml`은 이 배치와 네 구성 요소의 CPU·메모리 requests, 메모리 limits를 선언한다. 미사용 Dex·ApplicationSet·notifications는 replica 0이며, 사용 설정을 추가할 때 다시 켠다. 기존 Argo에 upstream 전체 manifest를 덮어쓰지 말고 배치·replica·resources 변경만 적용한다.
+5. dashboard/MCP가 worker로 이동하기 전에 dashboard Service를 `externalTrafficPolicy=Cluster`로 적용한다. 기존 ALB가 control의 NodePort 31080을 바라보므로 이 설정이 없으면 public 경로가 끊긴다. 렌더러가 같은 값을 유지한다. API와 준비 Job은 기존 control/PVC에 남는다.
+
+이 단계는 노드 부하 분리다. 제어면 HA나 API 다중 writer를 제공하지 않는다. 장애 시 stateless selector와 Service를 이전 선언으로 되돌리고, 기존 API 데이터와 build 노드는 그대로 유지한다. 새 worker로 API를 옮기려면 별도로 일관 백업·복원 검증, 데이터 볼륨 배치, 단일 writer 확인이 필요하다. root EBS `delete_on_termination=false`는 PVC 삭제 보호나 백업을 대신하지 않는다.
+
 ## 기존 앱 노드의 실행 권한
 
 `registered_runtime_instance_ids`는 앱 등록에 인계된 기존 runtime EC2 ID 목록이다. 기본값은 빈 목록이며 `enable_product_executor=true`일 때만 이 목록에 SSM StartSession 권한을 부여한다. 기존 노드에 `ProjectOwner` 태그를 덧씌워 신규 생성 자원으로 취급하지 않는다. Session document 권한은 기존 고정 port-forwarding 문서 정책을 재사용하며 SSH host key와 전용 사용자 검증을 유지한다.
@@ -75,3 +89,33 @@ terraform -chdir=infrastructure/terraform/control plan -input=false \
 2026-10-03 운영 점검에서 API의 IMDSv2 자격 조회가 실패했고 실행자 opt-in이 적용되지 않았음을 확인했다. metadata 사전 검사에서는 `crictl inspectp` 옵션을 Pod ID 앞에 전달해야 했다. 수정 뒤 Argo·dashboard·CoreDNS·local-path의 실제 Cilium policy drop을 확인했다. 이 사전 검사만으로 IAM 활성화 또는 앱 E2E 완료를 주장하지 않는다.
 
 2026-10-03 실제 API 역할로 SSM 연결과 AWS edge 무변경 plan을 확인했다. SSM document 조건은 AWS 공식 예시의 `BoolIfExists`를 사용한다. `Bool`은 EC2 resource 평가에 키가 없는 요청을 거부했다. AWS provider가 사용하는 `DescribeListenerAttributes` 읽기도 추가했다. 변경 정책은 Access Analyzer findings 0, 권한 허용·거부 시뮬레이션 12개를 통과했다. 기존 VM·문서·리전 범위는 그대로다.
+
+## API 데이터와 복구
+
+API는 메모리 DB가 아닌 `railshot-api` PVC의 `state/dashboard.sqlite3`를 사용한다. 단일 API writer와 `Recreate` 배포를 유지하고, DB와 `connections.key`, 배포 소스·환경 설정을 같은 복구 단위로 다룬다. MCP bearer의 세션 연결도 같은 SQLite에 저장한다. 기존 메모리에만 남아 있던 bearer는 최초 업데이트 후 한 번 다시 연결해야 한다.
+
+현재 local-path PV는 control 노드에 묶인다. 기존 PV의 reclaim policy는 운영자가 `Retain`으로 변경했으며, root EBS도 종료 시 보존한다. 이것만으로 노드 자동 복구나 HA가 되지는 않는다. 새 PVC를 만들 때도 연결된 PV의 reclaim policy를 확인한다. PVC root는 `1000:1000`, `2770`으로 유지하고 내부 private 디렉터리·파일은 `0700`·`0600`을 사용한다. root를 `0700`으로 바꾸면 kubelet의 `fsGroup: 1000` 보정이 하위 파일까지 바꾸어 API가 private state를 거부할 수 있다.
+
+`recovery.tf`는 비공개·AES256 암호화·versioning S3 bucket을 관리한다. 현재 object는 14일 뒤 만료하고, 비현재 버전은 비현재 상태가 된 뒤 14일 후 정리한다([S3 lifecycle 동작](https://docs.aws.amazon.com/AmazonS3/latest/userguide/intro-lifecycle-rules.html)). control 역할은 업로드만 가능하고 복원은 운영자 역할이 수행한다. 검토한 소스를 control에 복사한 후 아래 installer에 실제 PVC 경로와 `recovery_bucket` 출력을 전달한다.
+
+```sh
+sudo bash infrastructure/ansible/platform-backup.sh "$PVC_PATH" "$RECOVERY_BUCKET"
+sudo systemctl start railshot-state-backup.service
+sudo systemctl status railshot-state-backup.timer
+sudo journalctl -u railshot-state-backup.service --no-pager -n 15
+```
+
+30분 간격 작업은 SQLite native backup API로 committed WAL을 포함하고, key·source·config를 함께 업로드한다. 온라인 백업은 DB별 일관성을 제공한다. 동시에 바뀌는 여러 파일·외부 클라우드 작업 전체의 원자적 시점을 보장하지 않으므로, 계획된 이전에서는 신규 요청과 background executor를 멈춘 뒤 최종 복구본을 만든다. 서비스 활성 상태뿐 아니라 업로드 결과와 최근 S3 object 시각도 확인한다. CI runner의 별도 상태와 클라우드의 실제 리소스 상태는 이 API 복구본의 범위가 아니다.
+
+runner는 매 실행 전 PVC root가 `1000:1000`, `2770`인지 확인한다. `PVC_ROOT_PERMISSIONS_INVALID`가 나오면 운영자가 이 root와 API Pod의 `OnRootMismatch` 설정을 확인한다. runner는 원본 권한을 자동으로 수정하지 않는다.
+
+복원은 원본 PVC를 덮어쓰지 않고 검증용 새 디렉터리에서 먼저 수행한다. 운영자 전용 `0700` 작업 디렉터리에 백업을 다운로드·압축 해제하고 다음 명령으로 모든 파일 checksum과 SQLite integrity/foreign key를 확인한다.
+
+```sh
+python3 deployment/scripts/backup-platform-state.py restore-drill \
+  --source "$EXTRACTED_BACKUP" --destination "$NEW_RESTORE_DIRECTORY"
+```
+
+실제 노드 복구에서는 API와 관련 writer를 정지하고, 검증한 복구본을 새 볼륨으로 옮긴다. 검증본은 helper 실행자 소유이므로 운영 데이터의 UID/GID를 `1000:1000`으로 설정하고 내부 디렉터리는 `0700`, 파일은 `0600`, PVC root만 `2770`으로 맞춘다. PVC binding과 node affinity를 새 배치에 맞춘 후 API 하나만 시작한다. 세션 조회·key 복호화·기존 배포 조회를 확인하고, 진행 중이던 작업은 CI run·image digest·Argo revision·실제 endpoint와 대조한 뒤 재개한다. DB만 복원하거나 이미 실행된 배포를 새 요청으로 중복 제출하지 않는다. 기존 볼륨과 직전 API 이미지는 검증이 끝날 때까지 보존한다.
+
+PostgreSQL과 추가 operator는 이번 단계에 도입하지 않는다. 현재 측정 범위는 최대 500개 operation record이며 동시 500개 배포의 보장은 아니다. 여러 API writer나 노드 간 자동 failover가 필요해지면 외부 PostgreSQL로 상태 저장을 이전하고, 소스·key·config의 외부 보관도 함께 전환한다.

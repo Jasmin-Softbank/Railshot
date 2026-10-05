@@ -23,6 +23,15 @@ variable "instance_name" {
     error_message = "Use a lowercase EC2 display name."
   }
 }
+variable "operations_peer_security_group_id" {
+  description = "Existing operations peer group, attached when a platform agent joins the cluster."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.operations_peer_security_group_id == null ? true : can(regex("^sg-[0-9a-f]{17}$", var.operations_peer_security_group_id))
+    error_message = "Use an exact operations peer security group ID."
+  }
+}
 variable "account_id" {
   type = string
   validation {
@@ -200,7 +209,7 @@ resource "aws_instance" "ci" {
   instance_type                        = "t3.xlarge"
   subnet_id                            = sort(data.aws_subnets.default.ids)[0]
   associate_public_ip_address          = true
-  vpc_security_group_ids               = [aws_security_group.ci.id]
+  vpc_security_group_ids               = compact([aws_security_group.ci.id, var.operations_peer_security_group_id])
   iam_instance_profile                 = aws_iam_instance_profile.ci.name
   instance_initiated_shutdown_behavior = "stop"
   credit_specification { cpu_credits = "standard" }
