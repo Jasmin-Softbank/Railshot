@@ -1,21 +1,19 @@
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import yauzl from 'yauzl';
-import { archiveLimits, validateFiles } from './archive.js';
+import { archiveLimits, privateSourcePath, validateFiles } from './archive.js';
 
 const openZip = promisify(yauzl.fromBuffer);
 export const sourceSnapshotLimit = 140 * 1024 * 1024;
 const require = (ok) => { if (!ok) throw new Error('Final source snapshot verification failed'); };
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-const secret = /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16}|apikey_[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{16,})\b/;
 function safePath(path) {
   require(typeof path === 'string' && path.length > 0 && path.length <= 1024 && Buffer.from(path).toString('utf8') === path
     && !/[\x00-\x1f\x7f\\]/.test(path));
   const parts = path.split('/');
-  require(parts.length <= 32 && parts.every((part) => part && !['.', '..', '.git', 'node_modules', '__MACOSX', '.DS_Store',
-    '.ssh', '.aws', '.kube', '.codex', '.npmrc', '.pypirc', '.netrc'].includes(part)
-    && !/^\.env(?:\.|$)|\.(?:pem|key|p12|pfx)$|^id_(?:rsa|ed25519|ecdsa)$/i.test(part)));
+  require(parts.length <= 32 && !privateSourcePath(path)
+    && parts.every((part) => part && !['.', '..', '.git', 'node_modules', '__MACOSX', '.DS_Store'].includes(part)));
 }
 
 export function readSourceSnapshot(bytes, publication, sourceSha256) {
@@ -55,7 +53,7 @@ export function readSourceSnapshot(bytes, publication, sourceSha256) {
       const size = Buffer.alloc(8); size.writeBigUInt64BE(BigInt(header.length)); digest.update(size).update(header);
       if (entry.type === 'f') {
         const content = Buffer.from(entry.content, 'base64');
-        require(content.length === entry.size && content.toString('base64') === entry.content && !secret.test(content.toString('latin1')));
+        require(content.length === entry.size && content.toString('base64') === entry.content);
         digest.update(content); files.push({ path: entry.path, content });
       } else visit(entry.path);
     }

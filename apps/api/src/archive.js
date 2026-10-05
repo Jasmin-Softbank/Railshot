@@ -5,6 +5,13 @@ const openZip = promisify(yauzl.fromBuffer);
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 const MAX_FILES = 2000;
 
+// Reject known credentials before source persistence or any public Git write.
+const sourceSecret = /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|(?<![A-Za-z0-9_-])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,}|(?:AKIA|ASIA)[A-Z0-9]{16}|apikey_[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{35}|xox[baprs]-[A-Za-z0-9-]{20,})\b/;
+export function privateSourcePath(path) {
+  return path.split('/').some((part) => ['.ssh', '.aws', '.kube', '.codex', '.npmrc', '.pypirc', '.netrc'].includes(part)
+    || /\.env(?:\.|$)|\.(?:pem|key|p12|pfx)$|^id_(?:rsa|ed25519|ecdsa)$/i.test(part));
+}
+
 // The deployment service consumes this file tree regardless of upload format.
 export function validateFiles(files) {
   if (!Array.isArray(files)) throw new Error('파일 목록이 잘못되었습니다.');
@@ -21,13 +28,14 @@ export function validateFiles(files) {
       throw new Error(`안전하지 않은 파일 경로: ${path}`);
     }
     if (parts.some((part) => ['.git', 'node_modules', '__MACOSX', '.DS_Store'].includes(part))) continue;
-    if (parts.some((part) => /^\.env(?:\.|$)/i.test(part) || /\.(?:pem|key|p12|pfx)$/i.test(part) || /^id_(rsa|ed25519|ecdsa)$/i.test(part))) {
+    if (privateSourcePath(path)) {
       throw new Error(`비밀키로 보이는 파일을 제거하세요: ${path}`);
     }
     if (paths.has(path)) throw new Error(`같은 경로의 파일이 중복되어 있습니다: ${path}`);
     paths.add(path);
     totalSize += file.content.length;
     if (totalSize > MAX_ARCHIVE_BYTES) throw new Error('파일 총 크기는 100 MB 이하여야 합니다.');
+    if (sourceSecret.test(file.content.toString('latin1'))) throw new Error(`비밀키로 보이는 내용을 제거하세요: ${path}`);
     accepted.push(file);
   }
   if (!accepted.length) throw new Error('배포할 파일이 없습니다.');
@@ -84,7 +92,7 @@ export async function inspectArchive(bytes, { stripRoot = false } = {}) {
         // Excluded dependencies are never opened; their executable symlinks are not application files.
         if (mode === 0o120000) throw new Error(`안전하지 않은 ZIP 경로: ${name}`);
         if (name.endsWith('/')) { zip.readEntry(); return; }
-        if (parts.some((part) => /^\.env(?:\.|$)/i.test(part) || /\.(?:pem|key|p12|pfx)$/i.test(part))) {
+        if (privateSourcePath(name)) {
           throw new Error(`비밀키로 보이는 파일을 ZIP에서 제거하세요: ${name}`);
         }
         totalSize += entry.uncompressedSize;
