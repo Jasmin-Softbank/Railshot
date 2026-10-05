@@ -137,7 +137,7 @@ def tail(auth, path, *, server_name=None):
         connection = credentials.RegisteredHTTPSConnection(url.hostname, url.port, server_name=server_name,
                                                            context=context, timeout=10)
         try:
-            connection.request('GET', path, headers={'Authorization': 'Bearer ' + token, 'Accept': 'text/plain'})
+            connection.request('GET', path, headers={'Authorization': 'Bearer ' + token, 'Accept': '*/*'})
             response = connection.getresponse()
             argo.require(response.status == 200, 'log read failed')
             raw = response.read(LIMIT + 1)
@@ -145,7 +145,7 @@ def tail(auth, path, *, server_name=None):
             connection.close()
     else:
         opener = request.build_opener(request.ProxyHandler({}), request.HTTPSHandler(context=context), credentials.NoRedirect())
-        req = request.Request(server + path, headers={'Authorization': 'Bearer ' + token, 'Accept': 'text/plain'})
+        req = request.Request(server + path, headers={'Authorization': 'Bearer ' + token, 'Accept': '*/*'})
         with opener.open(req, timeout=10) as response:
             argo.require(response.status == 200, 'log read failed')
             raw = response.read(LIMIT + 1)

@@ -74,7 +74,7 @@ terraform -chdir=infrastructure/terraform/control plan -input=false \
 
 적용 순서는 다음과 같다. 기존 리소스의 교체·삭제가 없는 saved plan을 먼저 확인한다.
 
-1. 이 모듈을 적용하고 `operations_peer_security_group_id`를 기존 CI 모듈의 동명 입력에 전달한다. CI plan에서도 기존 VM 교체 없이 SG 부착만 발생하는지 확인한다. 공통 SG는 운영 노드끼리의 TCP 6443·4240, UDP 8472, ICMP만 인바운드 허용한다.
+1. 이 모듈을 적용하고 `operations_peer_security_group_id`를 기존 CI 모듈의 동명 입력에 전달한다. CI plan에서도 기존 VM 교체 없이 SG 부착만 발생하는지 확인한다. 공통 SG는 운영 노드끼리의 TCP 6443·4240, UDP 8472, ICMP를 허용한다. 기존 control 관측기용 TCP 31490·31491은 control SG를 송신원으로만 추가 허용한다.
 2. 새 worker의 public IPv4 `/32`를 `platform-release` 모듈의 `platform_worker_api_source_cidr`에 지정한다. 기존 GCP control API rule은 유지하고 worker 전용 TCP6443 rule 하나만 추가한다. 이 모듈의 `platform_worker_external_api_cidrs`에는 GCP API 주소의 `/32`를 지정해 반대편 egress도 허용한다. AWS 고객 API egress는 기존 고객 SG를 대상으로 선언한다. OpenStack 구성은 변경하지 않는다.
 3. SSM의 private 관리 세션으로 새 worker에 root 소유 `0600` `/etc/rancher/k3s/agent-token`을 준비한 뒤 `bash infrastructure/ansible/platform-worker.sh <control-private-ip>`를 실행한다. 토큰을 Terraform·user-data·명령 인수·로그에 넣지 않는다. K3s agent와 기존 Cilium DaemonSet을 사용하고 CNI를 다시 설치하지 않는다. Cilium의 기존 localhost API 경로와 일치하도록 agent의 `lb-server-port`도 `6443`으로 설정한다.
 4. node Ready, Cilium node 연결, DNS와 실제 AWS/GCP API 연결을 확인한 뒤 Argo workload의 selector를 `railshot.io/node-role=platform-worker`로 옮긴다. `gitops/argo/kustomization.yaml`은 이 배치와 네 구성 요소의 CPU·메모리 requests, 메모리 limits를 선언한다. 미사용 Dex·ApplicationSet·notifications는 replica 0이며, 사용 설정을 추가할 때 다시 켠다. 기존 Argo에 upstream 전체 manifest를 덮어쓰지 말고 배치·replica·resources 변경만 적용한다.

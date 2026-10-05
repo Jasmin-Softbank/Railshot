@@ -28,11 +28,15 @@ class ScopeTests(unittest.TestCase):
         self.assertTrue(ci_scope.release_required(None))  # Unknown diff fails toward validation.
 
     def test_normal_runs_keep_affected_tests_and_build_images_once(self):
-        cases = [(['apps/api/src/server.js'], ['api']), (['apps/dashboard/app.js'], ['dashboard']),
+        cases = [(['apps/api/src/server.js'], ['dashboard', 'api', 'ci-runner']),
+                 (['gitops/credentials.py'], ['dashboard', 'api', 'ci-runner']),
+                 (['observability/render.py'], ['dashboard', 'api', 'ci-runner']),
+                 (['apps/dashboard/app.js'], ['dashboard']),
                  (['apps/agent/src/remote-mcp.js'], ['mcp']),
                  (['ci/scripts/ci_scope.py'], ['dashboard', 'api', 'mcp', 'personal-gateway', 'ci-runner']),
                  (['ci/workflows/railshot-deploy.yml'], ['dashboard', 'api', 'ci-runner']),
-                 (['deployment/scripts/platform_workers.py'], []),
+                 (['deployment/scripts/platform_workers.py'], ['dashboard', 'api', 'ci-runner']),
+                 (['deployment/scripts/multicloud_release.py'], ['dashboard', 'api', 'ci-runner']),
                  (['docs/operations/release.md'], []), (['apps/api/test/product.test.js'], []),
                  (['ci/scripts/loop/test_native_packaging.py'], []), ([], []),
                  (None, ['dashboard', 'api', 'mcp', 'personal-gateway', 'ci-runner'])]
@@ -97,13 +101,15 @@ class ScopeTests(unittest.TestCase):
             with patch.dict(os.environ, {'GITHUB_REF_NAME': 'integration/test'}), \
                     patch.object(subprocess, 'check_output', side_effect=[json.dumps(runs), json.dumps(jobs)]):
                 self.assertEqual(ci_scope.previous_release_complete('a' * 40), expected)
-        jobs = {'total_count': 2, 'jobs': [
-            {'name': 'Build, smoke and publish images / publish (ci-runner)', 'conclusion': 'success'},
-            {'steps': [{'name': 'Verify the exact Argo revision, running digests and public edge', 'conclusion': 'success'},
-                       {'name': 'Promote the tested CI controller runner and workflow source', 'conclusion': 'skipped'}]}]}
-        with patch.dict(os.environ, {'GITHUB_REF_NAME': 'integration/test'}), \
-                patch.object(subprocess, 'check_output', side_effect=[json.dumps(runs), json.dumps(jobs)]):
-            self.assertFalse(ci_scope.previous_release_complete('a' * 40))
+        for component in ('api', 'ci-runner'):
+            for promotion, expected in [('success', True), ('skipped', False), ('failure', False)]:
+                jobs = {'total_count': 2, 'jobs': [
+                    {'name': 'Build, smoke and publish images / publish (' + component + ')', 'conclusion': 'success'},
+                    {'steps': [{'name': 'Verify the exact Argo revision, running digests and public edge', 'conclusion': 'success'},
+                               {'name': 'Promote the tested CI controller runner and workflow source', 'conclusion': promotion}]}]}
+                with self.subTest(component=component, promotion=promotion), patch.dict(os.environ, {'GITHUB_REF_NAME': 'integration/test'}), \
+                        patch.object(subprocess, 'check_output', side_effect=[json.dumps(runs), json.dumps(jobs)]):
+                    self.assertEqual(ci_scope.previous_release_complete('a' * 40), expected)
         with patch.object(subprocess, 'check_output', side_effect=subprocess.TimeoutExpired('gh', 20)):
             self.assertFalse(ci_scope.previous_release_complete('a' * 40))
 
@@ -179,6 +185,8 @@ class ScopeTests(unittest.TestCase):
             'ci/runner-compose.yml': {'ci-runner'},
             'deployment/manifests/platform.yaml': {'dashboard', 'api', 'mcp', 'personal-gateway'},
             'deployment/manifests/build-runner.yaml': {'ci-runner'},
+            'deployment/scripts/platform_workers.py': {'ci-runner'},
+            'deployment/scripts/multicloud_release.py': {'ci-runner'},
             'deployment/manifests/build-controller.yaml': set(ci_scope.COMPONENTS),
             'infrastructure/ansible/ci.yml': {'ci-runner'},
             'deployment/scripts/render-platform.py': set(ci_scope.COMPONENTS),

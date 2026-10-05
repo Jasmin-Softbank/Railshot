@@ -36,6 +36,17 @@ class WorkloadDiagnosticsTest(unittest.TestCase):
             result=workload_diagnostics.workload(self.f.config,self.f.review)
         self.assertEqual(result['state'],'unavailable'); self.assertNotIn('private-secret',json.dumps(result))
 
+    def test_typed_deployment_list_items_may_omit_kind_but_cannot_change_identity(self):
+        self.f.deployment.pop('kind')
+        self.f.deployment.pop('apiVersion', None)
+        self.assertEqual(self.observe()['state'], 'ready')
+        for kind in ('Pod', '', None):
+            self.f.deployment['kind'] = kind
+            self.assertEqual(self.observe()['state'], 'unavailable')
+        self.f.deployment.pop('kind')
+        self.f.deployment['metadata']['namespace'] = 'foreign'
+        self.assertEqual(self.observe()['state'], 'unavailable')
+
     def test_authorized_empty_deployment_list_is_missing_not_transport_failure(self):
         with patch('logs.customer_auth', return_value=(('server', b'CA', 'token'), {})), \
                 patch('credentials.customer', return_value={'kind':'DeploymentList','items':[]}) as read:

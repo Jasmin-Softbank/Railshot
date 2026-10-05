@@ -60,8 +60,8 @@ class PlatformReleaseTests(unittest.TestCase):
                "GITHUB_OUTPUT": str(self.home / "github-output"), "VERIFY_REF": "refs/heads/develop",
                "VERIFY_ROLE": "arn:aws:iam::721622471953:role/railshot-platform-verifier",
                "VERIFY_VERSION": "1", "VERIFY_HASH": "e" * 64,
-               "RELEASE_VERSION": "", "RELEASE_HASH": "",
-               "COMPONENTS": '["dashboard","api"]', "PLATFORM_TARGET": "k3s-aws", "PLATFORM_PORT": "31080",
+               "RELEASE_VERSION": "1", "RELEASE_HASH": "f" * 64,
+               "COMPONENTS": '["dashboard","api","ci-runner"]', "PLATFORM_TARGET": "k3s-aws", "PLATFORM_PORT": "31080",
                "PROVIDER_TARGETS": "{}", "PERSONAL_ENABLED": "false",
                **(overrides or {})}
         return subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], cwd=self.repo,
@@ -78,6 +78,8 @@ class PlatformReleaseTests(unittest.TestCase):
         name = 'Validate publication and deployment inputs'
         self.assertEqual(self.run_step('deploy', name).returncode, 0)
         for overrides in ({'PUBLISH': 'false'}, {'COMPONENTS': '["ci-runner"]'},
+                          {'COMPONENTS': '["api"]'}, {'COMPONENTS': '["dashboard","api"]'},
+                          {'RELEASE_VERSION': ''}, {'RELEASE_HASH': ''},
                           {'PLATFORM_TARGET': ''}, {'PLATFORM_PORT': '443'},
                           {'GITHUB_REF': 'refs/heads/feature/unreviewed'},
                           {'GITHUB_REF': 'refs/heads/integration/unreviewed', 'VERIFY_REF': 'refs/heads/integration/unreviewed'},
@@ -87,7 +89,7 @@ class PlatformReleaseTests(unittest.TestCase):
                           {'PROVIDER_TARGETS': '{"openstack":"k3s-aws"}'}):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.run_step('deploy', name, overrides).returncode, 0)
-        for component in ('dashboard', 'api', 'mcp'):
+        for component in ('dashboard', 'mcp'):
             self.assertEqual(self.run_step('deploy', name, {'COMPONENTS': json.dumps([component])}).returncode, 0)
         automatic = {'SKIP_BUILD': 'true', 'AUTO_RELEASE': 'true', 'GITHUB_EVENT_NAME': 'push'}
         self.assertEqual(self.run_step('deploy', name, automatic).returncode, 0)

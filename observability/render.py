@@ -156,6 +156,26 @@ def cluster(config):
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
 
 
+def platform_cluster(config):
+    """Reuse the customer exporters on all operations nodes; keep the existing collector."""
+    validate(config)
+    document = cluster(config)
+    for item in document['items']:
+        if item['kind'] == 'DaemonSet':
+            item['spec']['template']['spec']['tolerations'] = [
+                {'key': 'railshot.io/dedicated', 'operator': 'Equal', 'value': 'build', 'effect': 'NoSchedule'}]
+        elif item['kind'] == 'Deployment':
+            item['spec']['template']['spec']['nodeSelector']['railshot.io/node-role'] = 'platform-worker'
+    # The existing collector runs on the control host. Cilium identifies that
+    # host as kube-apiserver, so the external observer CIDR rule does not match.
+    document['items'].append({'apiVersion': 'cilium.io/v2', 'kind': 'CiliumNetworkPolicy',
+        'metadata': {'name': 'platform-collector', 'namespace': NAMESPACE},
+        'spec': {'endpointSelector': {'matchLabels': {'app': 'cluster-metrics'}},
+                 'ingress': [{'fromEntities': ['kube-apiserver'],
+                              'toPorts': [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]}]}})
+    return document
+
+
 def dashboard(config):
     def from_job(expr, job):
         # Do not leave a previous good sample visible when its collector is down.
@@ -268,9 +288,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('target', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--platform-cluster', action='store_true', help='write only existing exporter manifests for the operations cluster')
     args = parser.parse_args()
     try:
-        render(json.loads(args.target.read_text(encoding='utf-8')), args.output)
+        config = json.loads(args.target.read_text(encoding='utf-8'))
+        if args.platform_cluster:
+            if args.output.exists():
+                raise ValueError('Output already exists')
+            write_json(args.output, platform_cluster(config))
+        else:
+            render(config, args.output)
     except (ValueError, TypeError, OSError, KeyError) as exc:
         parser.exit(2, f'Render failed: {exc}\n')
     print(f'Rendered configuration in {args.output}. Nothing was installed or deployed.')

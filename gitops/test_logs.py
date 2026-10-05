@@ -238,6 +238,37 @@ class LogsTest(unittest.TestCase):
         output, read = self.execute(tail=replaced)
         self.assertEqual(output['state'], 'unavailable'); self.assertEqual(output['entries'], [])
 
+    def test_log_transport_accepts_streaming_api_negotiation_for_both_tls_paths(self):
+        # Kubernetes negotiates its API response before serving the text stream.
+        # A text/plain-only Accept can be rejected with 406 before logs are read.
+        from urllib.error import HTTPError
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.status = 200
+        response.read.return_value = b'listening\nTOKEN=private-value\n'
+        response.__enter__.return_value = response
+
+        def negotiate(headers):
+            if headers.get('Accept') != '*/*':
+                raise HTTPError('https://registered.example', 406, 'Not Acceptable', {}, None)
+
+        def open_stream(req, timeout):
+            negotiate(dict(req.header_items()))
+            self.assertEqual(timeout, 10)
+            return response
+
+        with patch('logs.ssl.create_default_context'), patch('logs.request.build_opener') as opener, \
+                patch('credentials.RegisteredHTTPSConnection') as connection:
+            opener.return_value.open.side_effect = open_stream
+            connection.return_value.request.side_effect = lambda method, path, headers: negotiate(headers)
+            connection.return_value.getresponse.return_value = response
+            for server_name in (None, '10.66.0.2'):
+                result = logs.tail(('https://registered.example:6443', b'CA', 'private-token'),
+                                   '/api/v1/namespaces/demo/pods/app/log', server_name=server_name)
+                self.assertIn('listening', result)
+                self.assertNotIn('private-value', result)
+                response.read.assert_called_with(logs.LIMIT + 1)
+
     def test_redacts_credentials_and_tls_transport_rejects_redirect_and_oversize(self):
         raw = ('normal application output\npassword="hello world" DB_PASSWORD=shh\nAuthorization: Bearer bearer-secret\n'
                'postgresql://user:db-secret@db/app\n{"api_key":"key-secret"}\n'
