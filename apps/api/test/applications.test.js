@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createApplicationAdapter } from '../src/applications.js';
@@ -144,6 +144,30 @@ test('unknown registration is preserved and published source binding reaches the
   assert.equal(observed.cd.deployed, true); assert.equal(f.calls.length, 1, 'recovery must not finalize routes again');
   const read = JSON.parse(await readFile(join(dirname(f.calls[0].requestPath), 'cd.json.observed.json'), 'utf8'));
   assert.equal(read.action, 'observe');
+});
+
+test('CD recovery reports an absent journal without hiding invalid existing configuration', async (t) => {
+  const f = await fixture(t), application = f.adapter.describe('runtime-aws', 'calculator');
+  const args = { deploymentId: '10000000-0000-4000-8000-000000000003', app: application.app,
+    targetId: application.target_id };
+  const missing = await f.adapter.observePublished(application, args);
+  assert.equal(missing.error.code, 'DEPLOYMENT_NOT_FOUND');
+  assert.equal(missing.cd.state, 'blocked');
+  assert.equal(missing.cd.deployed, false);
+  assert.equal(missing.cd.revision, null);
+  assert.equal(missing.public_http.state, 'not_run');
+  assert.equal(f.calls.length, 0, 'observation must not finalize or apply');
+  assert.equal(f.loads.length, 0, 'missing configuration must not load artifacts');
+  const configPath = join(f.config.state_dir, application.id, 'deployments', args.deploymentId, 'cd.json');
+  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
+  await writeFile(configPath, '{invalid', { mode: 0o600 });
+  await assert.rejects(f.adapter.observePublished(application, args), { code: 'ENVIRONMENT_CONFIGURATION_INVALID' });
+  await writeFile(configPath, '{}');
+  await chmod(configPath, 0o644);
+  await assert.rejects(f.adapter.observePublished(application, args), { code: 'ENVIRONMENT_CONFIGURATION_INVALID' });
+  await rm(configPath);
+  await rm(f.configPath);
+  await assert.rejects(f.adapter.observePublished(application, args), { code: 'ENVIRONMENT_CONFIGURATION_INVALID' });
 });
 
 test('publication above the operator-config limit replays unchanged and still rejects changed bytes', async (t) => {
