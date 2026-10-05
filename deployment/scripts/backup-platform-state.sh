@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run on the control host: one online snapshot, encrypted off-node, hourly.
+# Run on the control host: one online snapshot, encrypted off-node, every 30 minutes.
 set -euo pipefail
 [[ $(id -u) == 0 && $# == 2 && $1 == /* && $2 =~ ^[a-z0-9.-]+$ ]] || exit 2
 # A 0700 PVC root makes OnRootMismatch recursively widen private state next mount.

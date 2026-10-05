@@ -24,10 +24,10 @@ IOSchedulingClass=idle
 UNIT
 cat > /etc/systemd/system/railshot-state-backup.timer <<'UNIT'
 [Unit]
-Description=Hourly Railshot off-node recovery point
+Description=Railshot off-node recovery point every 30 minutes
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=1h
+OnUnitActiveSec=30min
 RandomizedDelaySec=60
 Persistent=true
 [Install]

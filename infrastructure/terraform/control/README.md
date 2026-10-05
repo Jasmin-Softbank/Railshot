@@ -105,7 +105,7 @@ sudo systemctl status railshot-state-backup.timer
 sudo journalctl -u railshot-state-backup.service --no-pager -n 15
 ```
 
-시간별 작업은 SQLite native backup API로 committed WAL을 포함하고, key·source·config를 함께 업로드한다. 온라인 백업은 DB별 일관성을 제공한다. 동시에 바뀌는 여러 파일·외부 클라우드 작업 전체의 원자적 시점을 보장하지 않으므로, 계획된 이전에서는 신규 요청과 background executor를 멈춘 뒤 최종 복구본을 만든다. 서비스 활성 상태뿐 아니라 업로드 결과와 최근 S3 object 시각도 확인한다. CI runner의 별도 상태와 클라우드의 실제 리소스 상태는 이 API 복구본의 범위가 아니다.
+30분 간격 작업은 SQLite native backup API로 committed WAL을 포함하고, key·source·config를 함께 업로드한다. 온라인 백업은 DB별 일관성을 제공한다. 동시에 바뀌는 여러 파일·외부 클라우드 작업 전체의 원자적 시점을 보장하지 않으므로, 계획된 이전에서는 신규 요청과 background executor를 멈춘 뒤 최종 복구본을 만든다. 서비스 활성 상태뿐 아니라 업로드 결과와 최근 S3 object 시각도 확인한다. CI runner의 별도 상태와 클라우드의 실제 리소스 상태는 이 API 복구본의 범위가 아니다.
 
 runner는 매 실행 전 PVC root가 `1000:1000`, `2770`인지 확인한다. `PVC_ROOT_PERMISSIONS_INVALID`가 나오면 운영자가 이 root와 API Pod의 `OnRootMismatch` 설정을 확인한다. runner는 원본 권한을 자동으로 수정하지 않는다.
 
