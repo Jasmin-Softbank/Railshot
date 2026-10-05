@@ -471,6 +471,19 @@ def enable_shared_observer(kube, cd, registered, environment_id):
     _, _, anchor, _, anchor_config, ca = shared_cluster_snapshot(cd, registered, environment_id)
     argo.require(environment_id in ('k3s-aws', 'k3s-gcp') and anchor.get('cluster_read') is True,
                  'fixed AWS/GCP environment required')
+    control = lambda ns, *args, **kwargs: argo.kubectl(cd['context'], ns, *args, **kwargs)
+    secret_name = 'railshot-observer-' + environment_id
+    # Grant only this fixed name before any observer Secret read, including resume.
+    role = control('argocd', 'get', 'role', 'railshot-product-registrations', '-o', 'json')
+    rules = role.get('rules') or []
+    read = next((rule for rule in rules if rule['apiGroups'] == [''] and rule['resources'] == ['secrets'] and rule['verbs'] == ['get']), None)
+    if read is None:
+        read = {'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get'], 'resourceNames': []}; rules.append(read)
+    argo.require(all(name in ('railshot-observer-k3s-aws', 'railshot-observer-k3s-gcp') for name in read['resourceNames']),
+                 'observer read role differs')
+    if secret_name not in read['resourceNames']:
+        read['resourceNames'].append(secret_name); role['rules'] = rules
+        control('argocd', 'replace', '-f', '-', '-o', 'json', document=role)
     existing = observer_snapshot(cd, registered, environment_id, allow_missing=True)
     namespace = anchor['service_account']['namespace']
     labels = {'app.kubernetes.io/managed-by': 'railshot', 'railshot.io/registration': environment_id}
@@ -492,7 +505,6 @@ def enable_shared_observer(kube, cd, registered, environment_id):
         'metadata': {'name': OBSERVER + '-renewal', 'namespace': namespace, 'labels': labels},
         'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': OBSERVER + '-renewal'},
         'subjects': [{'kind': 'ServiceAccount', 'name': OBSERVER, 'namespace': namespace}]})
-    control = lambda ns, *args, **kwargs: argo.kubectl(cd['context'], ns, *args, **kwargs)
     secret = control('argocd', 'get', 'secret', row['secret'], '--ignore-not-found', '-o', 'json')
     if not secret:
         token = kube(namespace, 'create', '--raw', '/api/v1/namespaces/' + namespace + '/serviceaccounts/' + OBSERVER + '/token',
@@ -502,9 +514,17 @@ def enable_shared_observer(kube, cd, registered, environment_id):
         config = {'bearerToken': token, 'tlsClientConfig': copy.deepcopy(anchor_config['tlsClientConfig'])}
         values = {'name': row['target_id'], 'server': row['server'], 'project': '', 'namespaces': '',
                   'clusterResources': 'false', 'config': json.dumps(config)}
-        secret = owned_apply(control, {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {
+        document = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {
             'namespace': 'argocd', 'name': row['secret'], 'labels': {**labels, 'argocd.argoproj.io/secret-type': 'railshot-observer'}},
-            'type': 'Opaque', 'data': {key: base64.b64encode(value.encode()).decode() for key, value in values.items()}})
+            'type': 'Opaque', 'data': {key: base64.b64encode(value.encode()).decode() for key, value in values.items()}}
+        # Bootstrap authorizes native create; server-side apply would require patch.
+        created = control('argocd', 'create', '-f', '-', '-o', 'json', document=document)
+        secret = control('argocd', 'get', 'secret', row['secret'], '-o', 'json')
+        argo.require(secret['metadata']['uid'] == created['metadata']['uid'] and secret['data'] == document['data'],
+                     'registered object readback differs')
+    argo.require(not secret['metadata'].get('ownerReferences') and not secret['metadata'].get('deletionTimestamp')
+        and all(secret['metadata'].get('labels', {}).get(key) == value for key, value in labels.items()),
+        'existing object belongs to another registration')
     config, ca = credentials.registration(secret, row, time.time())
     tls = {'server_name': row['tls_server_name']} if 'tls_server_name' in row else {}
     for resource, group, verb, allowed in [('pods', '', 'list', True), ('pods/log', '', 'get', True),
@@ -521,16 +541,6 @@ def enable_shared_observer(kube, cd, registered, environment_id):
             argo.require(item['metadata'].get('labels', {}).get('railshot.io/registration') == name
                 and not item['metadata'].get('ownerReferences'), 'observer app namespace owner differs')
             bind_application_observer(kube, row, name, name)
-    role = control('argocd', 'get', 'role', 'railshot-product-registrations', '-o', 'json')
-    rules = role.get('rules') or []
-    read = next((rule for rule in rules if rule['apiGroups'] == [''] and rule['resources'] == ['secrets'] and rule['verbs'] == ['get']), None)
-    if read is None:
-        read = {'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get'], 'resourceNames': []}; rules.append(read)
-    argo.require(all(name in ('railshot-observer-k3s-aws', 'railshot-observer-k3s-gcp') for name in read['resourceNames']),
-                 'observer read role differs')
-    if row['secret'] not in read['resourceNames']:
-        read['resourceNames'].append(row['secret']); role['rules'] = rules
-        control('argocd', 'replace', '-f', '-', '-o', 'json', document=role)
     install_renewal(cd, row)
     return observer_snapshot(cd, registered, environment_id)[2]
 

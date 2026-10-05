@@ -148,6 +148,15 @@ def test_registration_role_allows_only_exact_dynamic_names():
     role['rules'][0]['verbs'] = ['*']
     with pytest.raises(ValueError):
         bootstrap.validate_registration_role(role)
+    observer = {'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get'],
+                'resourceNames': ['railshot-observer-k3s-aws', 'railshot-observer-k3s-gcp']}
+    role['rules'] = [observer]
+    bootstrap.validate_registration_role(role)
+    for invalid in ({**observer, 'resourceNames': ['railshot-k3s-aws']},
+                    {**observer, 'apiGroups': ['argoproj.io'], 'resources': ['applications']}):
+        role['rules'] = [invalid]
+        with pytest.raises(ValueError):
+            bootstrap.validate_registration_role(role)
     role['rules'] = ''
     with pytest.raises(ValueError):
         bootstrap.validate_registration_role(role)

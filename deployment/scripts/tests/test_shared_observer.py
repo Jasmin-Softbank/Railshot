@@ -40,6 +40,15 @@ class SharedObserverTest(unittest.TestCase):
                 result['status']['token']='.'.join(parts)
             return result
         self.kube = kube
+        # This fixture's native POST must fail on conflict instead of acting as apply.
+        def control(context, namespace, *args, document=None):
+            if args[:2] == ('create', '-f'):
+                key = (namespace, document['kind'].lower(), document['metadata']['name'])
+                if key in f.control.objects:
+                    raise ValueError('AlreadyExists')
+                return f.control(namespace, 'apply', '-f', '-', document=document)
+            return f.control(namespace, *args, document=document)
+        self.enterContext(patch.object(env.argo, 'kubectl', control))
         old_customer = env.credentials.customer
         def customer(server, ca, token, path, document, **options):
             parts=token.split('.'); payload=json.loads(base64.urlsafe_b64decode(parts[1]+'='*(-len(parts[1])%4)))
@@ -77,6 +86,39 @@ class SharedObserverTest(unittest.TestCase):
         self.assertEqual(objects['argocd','secret',row['secret']]['metadata']['labels']['argocd.argoproj.io/secret-type'],'railshot-observer')
         read=next(rule for rule in objects['argocd','role','railshot-product-registrations']['rules'] if rule['verbs']==['get'])
         self.assertEqual(read,{'apiGroups':[''],'resources':['secrets'],'verbs':['get'],'resourceNames':[row['secret']]})
+
+    def test_bootstrap_grants_named_read_before_get_and_uses_authorized_create(self):
+        objects = self.case.fixture.control.objects
+        bootstrap = objects['argocd', 'role', 'railshot-product-registration-bootstrap']['rules']
+        self.assertEqual([rule['verbs'] for rule in bootstrap if rule['resources'] == ['secrets']], [['create']])
+        original = env.argo.kubectl
+        seen = []
+        def authorized(context, namespace, *args, document=None):
+            resource = document.get('kind', '').lower() if document else (args[1].lower() if len(args) > 1 else '')
+            name = document['metadata']['name'] if document else (args[2] if len(args) > 2 else '')
+            if resource in ('secret', 'secrets') and name.startswith('railshot-observer-'):
+                verb = {'apply': 'patch', 'replace': 'update'}.get(args[0], args[0])
+                rules = bootstrap + objects['argocd', 'role', 'railshot-product-registrations'].get('rules', [])
+                if not any(rule['apiGroups'] == [''] and 'secrets' in rule['resources'] and verb in rule['verbs']
+                           and ('resourceNames' not in rule or name in rule['resourceNames']) for rule in rules):
+                    raise PermissionError('Forbidden: ' + verb + ' ' + name)
+                seen.append((verb, name))
+            return original(context, namespace, *args, document=document)
+        name = 'railshot-observer-k3s-aws'
+        with patch.object(env.argo, 'kubectl', authorized):
+            with self.assertRaises(PermissionError):
+                env.argo.kubectl('control', 'argocd', 'get', 'secret', name)
+            with self.assertRaises(PermissionError):
+                env.argo.kubectl('control', 'argocd', 'apply', '-f', '-', document={
+                    'kind': 'Secret', 'metadata': {'name': name}})
+            row = self.enable()
+            self.assertEqual(self.enable(), row)
+        self.assertEqual(self.token_requests, 1)
+        self.assertEqual(seen.count(('create', name)), 1)
+        self.assertNotIn(('patch', name), seen)
+        rule = next(rule for rule in objects['argocd', 'role', 'railshot-product-registrations']['rules']
+                    if rule['verbs'] == ['get'])
+        self.assertEqual(rule['resourceNames'], [name])
 
     def test_invalid_observer_blocks_new_app_before_any_mutation_and_does_not_fall_back(self):
         row=self.enable(); secret=self.case.fixture.control.objects['argocd','secret',row['secret']]

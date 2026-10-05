@@ -279,7 +279,7 @@ def ensure_object(document, uids, preserve_existing=False, claim=None):
         for rule in rules:
             require(isinstance(rule, dict) and set(rule) == {'apiGroups', 'resources', 'verbs', 'resourceNames'} and
                     isinstance(rule['apiGroups'], list) and isinstance(rule['resources'], list) and
-                    len(rule['apiGroups']) == len(rule['resources']) == 1 and rule['verbs'] in (['get', 'patch'], ['delete']) and
+                    len(rule['apiGroups']) == len(rule['resources']) == 1 and rule['verbs'] in (['get', 'patch'], ['delete'], ['get']) and
                     isinstance(rule['resourceNames'], list) and rule['resourceNames'] and all(
                         isinstance(value, str) and re.fullmatch(r'[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?', value)
                         for value in rule['resourceNames']), 'REGISTRATION_ROLE_DIFFERS')
@@ -288,6 +288,9 @@ def ensure_object(document, uids, preserve_existing=False, claim=None):
             require(kind in {('argoproj.io', 'appprojects'), ('argoproj.io', 'applications'), ('', 'secrets')}
                     and grant not in seen, 'REGISTRATION_ROLE_DIFFERS')
             seen.add(grant)
+            if rule['verbs'] == ['get']:
+                require(kind == ('', 'secrets') and set(rule['resourceNames']) <= {
+                    'railshot-observer-k3s-aws', 'railshot-observer-k3s-gcp'}, 'REGISTRATION_ROLE_DIFFERS')
             if rule['verbs'] == ['delete']:
                 pattern = {'applications': r'app-[a-f0-9]{24}-[a-z0-9-]+', 'appprojects': r'app-[a-f0-9]{24}',
                            'secrets': r'railshot-app-[a-f0-9]{24}'}[kind[1]]

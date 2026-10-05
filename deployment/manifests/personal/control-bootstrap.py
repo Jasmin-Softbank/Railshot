@@ -219,7 +219,9 @@ def validate_registration_role(role):
                 and all(labels(name) for name in rule['resourceNames']))
         group, resource = rule['apiGroups'][0], rule['resources'][0]
         require((group, resource) in {('argoproj.io', 'appprojects'), ('argoproj.io', 'applications'), ('', 'secrets')}
-                and rule['verbs'] in (['get', 'patch'], ['delete']))
+                and (rule['verbs'] in (['get', 'patch'], ['delete']) or
+                     (rule['verbs'] == ['get'] and (group, resource) == ('', 'secrets') and
+                      set(rule['resourceNames']) <= {'railshot-observer-k3s-aws', 'railshot-observer-k3s-gcp'})))
 
 
 def stable(value):
