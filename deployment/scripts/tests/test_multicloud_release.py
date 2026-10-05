@@ -364,6 +364,23 @@ class ReleaseTests(unittest.TestCase):
 
 
 class AdmissionTests(unittest.TestCase):
+    def test_develop_admission_requires_current_source_and_successful_gate(self):
+        sha = 'a' * 40
+        responses = {
+            'git/ref/heads/develop': {'object': {'sha': sha}},
+            'actions/runs/12': {'id': 12, 'run_attempt': 1, 'head_sha': sha, 'head_branch': 'develop',
+                'head_repository': {'full_name': admission.REPOSITORY},
+                'path': '.github/workflows/railshot-ci.yml', 'event': 'push', 'conclusion': None},
+            'actions/runs/12/attempts/1/jobs?per_page=100': {'total_count': 1, 'jobs': [
+                {'name': 'Railshot CI gate', 'status': 'completed', 'conclusion': 'success'}]},
+        }
+        self.assertEqual(admission.admit(sha, 'refs/heads/develop', 12, read=responses.__getitem__)['ref'], 'refs/heads/develop')
+        responses['git/ref/heads/develop']['object']['sha'] = 'b' * 40
+        with self.assertRaisesRegex(ValueError, 'SUPERSEDED_RELEASE_SOURCE'):
+            admission.admit(sha, 'refs/heads/develop', 12, read=responses.__getitem__)
+        with self.assertRaisesRegex(ValueError, 'TRUSTED_RELEASE_SOURCE_REQUIRED'):
+            admission.admit(sha, 'refs/heads/feature/unreviewed', 12, read=responses.__getitem__)
+
     def test_actions_skip_only_superseded_and_keep_other_failures_blocked(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / 'output'

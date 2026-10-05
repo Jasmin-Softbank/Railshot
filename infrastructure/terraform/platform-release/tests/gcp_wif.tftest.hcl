@@ -34,6 +34,15 @@ run "exact_instance_and_application_lifecycle_authority" {
 
   assert {
     condition = (
+      var.trusted_ref == "refs/heads/develop" &&
+      jsondecode(aws_iam_role.release.assume_role_policy).Statement[0].Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repo:Jasmin-Softbank@335003159/Railshot@1400202256:ref:refs/heads/develop" &&
+      contains(jsondecode(aws_ssm_document.release.content).mainSteps[0].inputs.runCommand, "python3 - 'refs/heads/develop' <<'RAILSHOT_RELEASE_PY'")
+    )
+    error_message = "Release trust and the pinned SSM source must name the same exact develop ref."
+  }
+
+  assert {
+    condition = (
       jsondecode(aws_ssm_document.release.content).parameters.Scope.default == "multicloud" &&
       toset(jsondecode(aws_ssm_document.release.content).parameters.Scope.allowedValues) == toset(["ci-runtime", "multicloud"]) &&
       !contains(jsondecode(aws_ssm_document.release.content).mainSteps[0].inputs.runCommand, "test -f /etc/railshot/release.json")

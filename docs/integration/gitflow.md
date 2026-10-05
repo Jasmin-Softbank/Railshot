@@ -1,23 +1,26 @@
-# 통합 브랜치와 PR 병합 규칙
+# 개발 브랜치와 PR 병합 규칙
 
-2026-10-02 합의: 현재 `integration/team-assembly-20261002`를 Gitflow의 `develop` 역할로 사용한다. 별도 `develop` 브랜치를 만들거나 `main`에 바로 구현을 모으지 않는다.
+2026-10-05부터 `develop`을 개발 통합 기준으로 사용한다. 기존 `integration/team-assembly-20261002`와 `dev`는 새 기능의 병합 대상이 아니다.
 
 | 브랜치 | 역할 |
 |---|---|
-| `main` | 검증된 릴리스 반영. 이번 feature 통합 대상이 아님 |
-| `integration/team-assembly-20261002` | 팀 구현을 모으고 연결부를 검증하는 개발 기준 |
-| `feature/*` | 담당 구현의 원본. 담당 범위의 변경을 유지 |
-| `codex/integrate-*` | 충돌 해결·연결부 보완이 필요한 경우 사용하는 임시 PR 브랜치 |
+| `feature/*` | 최신 `develop`에서 분기한 담당 기능 구현 |
+| `develop` | 로컬 검증을 마친 feature PR을 모으는 개발 기준 |
+| `main` | `develop`에서 검증된 변경을 PR로 반영하는 릴리스 기준 |
+| `deployment/platform` | 릴리스 workflow가 게시한 이미지 digest와 렌더링된 플랫폼 선언 |
 
-## 병합 절차
+## 병합과 배포
 
-1. 원격 feature의 최신 SHA와 담당 범위를 확인한다. 팀원의 구현 의도를 유지하고 충돌·입출력 계약·실행 의존성을 점검한다.
-2. 충돌이 없는 feature PR은 integration으로 merge commit을 만든다. 충돌이나 연결부 수정이 필요하면 최신 integration에서 임시 브랜치를 만들고 `git merge --no-ff <feature SHA>`로 원본 이력을 포함한다.
-3. 임시 브랜치에서 충돌과 필요한 공통 연결부만 해결한다. 기존의 담당 코드만 담은 개인 feature에 통합본 전체를 역병합하지 않는다.
-4. 바뀐 연결부의 테스트와 빌드를 실행하고 PR 본문에 원본 SHA·해결 내용·검증 범위를 적는다. 기존 클라우드 배포 결과를 새 merge commit의 배포 결과로 취급하지 않는다.
-5. PR을 integration으로 merge한다. squash·rebase·force push 없이 feature 이력을 보존하고, 원격 HEAD와 포함된 feature SHA를 다시 확인한다.
+1. 최신 `develop`에서 feature 브랜치를 만들고 담당 범위만 변경한다.
+2. 해당 경로의 테스트와 빌드를 로컬에서 실행한 뒤 `develop` 대상 PR을 연다. PR에는 변경 이유와 실행한 검증을 기록한다.
+3. PR의 `Railshot CI gate`를 확인하고 merge commit으로 병합한다. 충돌이 있으면 feature 브랜치에서 해결하고 바뀐 경로를 다시 검증한다.
+4. 운영 반영은 `RAILSHOT_PLATFORM_VERIFY_REF`의 정확한 브랜치와 IAM OIDC trust가 일치할 때만 실행한다. 기본 ref는 `refs/heads/develop`이다. `main` 반영은 별도 PR로 진행한다.
 
-Vercel Preview는 별도 웹 배포 연동이다. 런타임·Ansible·CI 검증과 구분하며, 프로젝트 설정·로그가 확인되지 않은 Vercel 실패를 팀 런타임 테스트 실패로 기록하지 않는다. 2026-10-02 후속 통합부터 GitHub branch protection으로 `Railshot CI gate` 성공과 최신 integration 반영을 강제한다. 관리자도 적용 대상이며 force push와 브랜치 삭제를 허용하지 않는다. feature 원본은 병합 후에도 보존한다.
+Argo CD는 `develop`을 직접 읽지 않는다. 기존 `deployment/platform` 브랜치의 `gitops/applications/railshot-platform/workload.json`만 읽는다. CI가 검사한 이미지 digest를 이 선언에 기록한 뒤 Argo revision, 실행 Pod digest, 공개 HTTPS를 확인해야 배포 완료다. 문서만 바뀐 PR은 이미지 게시나 운영 배포를 시작하지 않는다.
+
+개발 기준을 옮길 때는 기존 Terraform backend를 유지하면서 `platform-verification`과 `platform-release`의 `trusted_ref`를 함께 변경한다. 검토한 plan 적용 후 저장소의 trusted ref와 SSM 문서 version/hash 변수를 같은 출력으로 갱신한다. 정확한 기존 integration ref는 전환 복구를 위해 코드에서만 허용하며, IAM trust에 여러 ref나 wildcard를 추가하지 않는다.
+
+Vercel Preview, 로컬 테스트, GitHub CI, 클라우드 배포 결과는 각각 구분해 기록한다. 아래 내용은 이전 통합 작업의 이력이며 현재 병합 규칙을 대신하지 않는다.
 
 ## 2026-10-02 전체 팀 브랜치 대조
 

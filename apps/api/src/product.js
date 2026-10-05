@@ -101,8 +101,8 @@ export async function createProductService({ service, directory, target, provide
     const runId = String(record.ci.run_id);
     const task = (async () => {
       const envelope = await service.events(runId, { source_commit: record.source_commit, app: record.app, target_id: record.target_id });
-      await store.transaction((state) => {
-        const row = state.operations[record.id], bound = state.bindings[runId];
+      await store.updateOperation(record.id, (row) => {
+        const bound = store.read('bindings', runId);
         if (bound?.operation_id === record.id && row.source_commit === record.source_commit && String(row.ci?.run_id) === runId
             && row.session_id === record.session_id && bound.app === row.app && bound.target_id === row.target_id
             && bound.source_commit === row.source_commit) ingestCiEvents(row, envelope);
@@ -162,7 +162,7 @@ export async function createProductService({ service, directory, target, provide
     return action === 'delete' && pending.length === 1 && pending[0].kind === 'deployments'
       && pending[0].application_id === applicationId && ['queued', 'running'].includes(pending[0].status) ? pending[0].id : null;
   }
-  const deletionRequested = (id) => Boolean(store.read().operations[id]?.deletion_requested);
+  const deletionRequested = (id) => Boolean(store.read('operations', id)?.deletion_requested);
   async function quiesceDeployment(deploymentId, operationId) {
     await update(operationId, { stage: 'quiescing' });
     const worker = deploymentWorkers.get(deploymentId);
@@ -228,8 +228,8 @@ export async function createProductService({ service, directory, target, provide
   }
   async function update(id, patch) {
     let newFailure = false;
-    await store.transaction((state) => {
-      const record = state.operations[id], now = new Date().toISOString();
+    await store.updateOperation(id, (record) => {
+      const now = new Date().toISOString();
       const before = structuredClone(record);
       newFailure = ['failed', 'blocked', 'unknown'].includes(patch.status)
         && !['failed', 'blocked', 'unknown'].includes(before.status);
@@ -239,7 +239,7 @@ export async function createProductService({ service, directory, target, provide
       try { observeOperation(record, patch, before); }
       catch { record.telemetry = { ...record.telemetry, state: 'unavailable', reason: 'projection_failed' }; }
     });
-    const row = store.read().operations[id];
+    const row = store.read('operations', id);
     if (patch.ci) refreshCiJournal(row);
     if (newFailure && row.kind === 'deployments' && row.ci?.state === 'failed') diagnostics.schedule(id);
   }
@@ -302,7 +302,7 @@ export async function createProductService({ service, directory, target, provide
       && other.application_id === row.application_id && other.app === row.app && other.target_id === row.target_id
       && other.created_at > row.created_at && !(other.status === 'queued' && !other.queue?.started_at));
   }
-  const cdRecoveries = new Set(Object.values(store.read().operations).filter(row =>
+  const cdRecoveries = new Set(Object.values(store.read('operations')).filter(row =>
     (row.status === 'unknown' || row.status === 'blocked' && row.error?.code === 'INTERRUPTED')
       && ['cd', 'http'].includes(row.stage)).map(row => row.id));
   function recoveringCD(state, row) {
@@ -320,9 +320,10 @@ export async function createProductService({ service, directory, target, provide
     // a queue of 100 requests would dispatch 100 builds despite the configured limit.
     const admitted = (row) => row.status === 'running'
       || row.status === 'unknown' && !row.queue?.released_at;
-    const snapshot = store.read(), rows = Object.values(snapshot.operations);
+    const snapshot = store.schedulingState(), rows = Object.values(snapshot.operations);
     if (!rows.some(row => waiting(row) || interruptedCI(snapshot, row) || recoveringCD(snapshot, row)
-        || row.status === 'unknown' && !row.queue?.released_at)) return;
+        || row.status === 'unknown' && !row.queue?.released_at && !deploymentWorkers.has(row.id)
+          && (!Number.isFinite(Date.parse(row.unknown_since)) || Date.now() - Date.parse(row.unknown_since) >= unknownGraceMs))) return;
     const visited = new Set();
     pumping = (async () => {
       while (!abort.signal.aborted && !releasePaused && deploymentWorkers.size < maxConcurrentDeployments) {
@@ -378,7 +379,7 @@ export async function createProductService({ service, directory, target, provide
     return pumping;
   }
   function find(kind, id, sessionId = null) {
-    const operation = store.read().operations[id];
+    const operation = store.read('operations', id);
     if (!owns(operation, sessionId) || operation.kind !== kind) throw new ProductError(404, 'NOT_FOUND', '자원을 찾을 수 없습니다.');
     return operation;
   }
@@ -446,9 +447,9 @@ export async function createProductService({ service, directory, target, provide
     authorizeTarget(store.read());
     validateInput(input);
     const fingerprint = inputFingerprint(input);
-    const existingId = key && store.read().keys[scopeKey(kind, key, sessionId)];
+    const existingId = key && store.read('keys', scopeKey(kind, key, sessionId));
     if (existingId) {
-      const existing = store.read().operations[existingId];
+      const existing = store.read('operations', existingId);
       if (existing.fingerprint !== fingerprint) throw new ProductError(409, 'IDEMPOTENCY_CONFLICT', '같은 키로 다른 입력을 보낼 수 없습니다.');
       return { record: existing, replay: true };
     }
@@ -544,7 +545,7 @@ export async function createProductService({ service, directory, target, provide
     try {
       if (deletionRequested(record.id)) return null;
       if (!(service.targetIds || [targetId]).includes(record.target_id)) {
-        const application = record.application_id && store.read().applications[record.application_id];
+        const application = record.application_id && store.read('applications', record.application_id);
         const registered = registeredEnvironment(store.read(), record.target_id);
         const admitted = application?.status === 'ready' && application.app === record.app && application.target_id === record.target_id
           || registered?.applicationName === record.app;
@@ -580,7 +581,7 @@ export async function createProductService({ service, directory, target, provide
   }
   async function observationRetry(record, error) {
     const now = Date.now();
-    const ci = store.read().operations[record.id].ci;
+    const ci = store.read('operations', record.id).ci;
     const failures = (ci.observation?.consecutive_failures || 0) + 1;
     const delay = Math.max(Math.min(30_000, pollInterval * 2 ** Math.min(failures, 8)),
       Number.isFinite(error.retryAt) ? Math.max(0, error.retryAt - now) : 0);
@@ -594,7 +595,7 @@ export async function createProductService({ service, directory, target, provide
       while (!abort.signal.aborted && !deletionRequested(record.id)) {
         let result;
         try {
-          const saved = store.read().operations[record.id];
+          const saved = store.read('operations', record.id);
           const binding = { operation_id: record.id, source_commit: saved.source_commit, app: record.app, target_id: record.target_id };
           if (saved.dispatch?.state === 'source_prepared') {
             service.allowTarget?.(record.target_id);
@@ -633,8 +634,8 @@ export async function createProductService({ service, directory, target, provide
     }
   }
   async function readBuild(runId, sessionId = null) {
-    const state = store.read(), binding = /^\d+$/.test(runId) && Object.hasOwn(state.bindings, runId) ? state.bindings[runId] : null;
-    if (!binding || !owns(state.operations[binding.operation_id], sessionId)) throw new ProductError(404, 'NOT_FOUND', '이 workspace에서 접수한 빌드를 찾을 수 없습니다.');
+    const binding = /^\d+$/.test(runId) ? store.read('bindings', runId) : null;
+    if (!binding || !owns(store.read('operations', binding.operation_id), sessionId)) throw new ProductError(404, 'NOT_FOUND', '이 workspace에서 접수한 빌드를 찾을 수 없습니다.');
     let observed;
     try { observed = await service.status(runId, binding.target_id); }
     catch (error) { throw Object.assign(new ProductError(502, error.retryable === false ? 'CI_OBSERVATION_REJECTED' : 'CI_OBSERVATION_UNAVAILABLE',
@@ -650,7 +651,7 @@ export async function createProductService({ service, directory, target, provide
   async function observeDelivery(record) {
     const now = new Date().toISOString();
     try {
-      const result = await writeInfrastructure(() => applicationAdapter.observePublished(store.read().applications[record.application_id], {
+      const result = await writeInfrastructure(() => applicationAdapter.observePublished(store.read('applications', record.application_id), {
         deploymentId: record.id, app: record.app, targetId: record.target_id, sourceCommit: record.source_commit,
         publication: record.publication, signal: abort.signal }));
       if (abort.signal.aborted || deletionRequested(record.id)) return;
@@ -658,9 +659,9 @@ export async function createProductService({ service, directory, target, provide
         && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
       const stopped = ['blocked', 'failed'].includes(result.cd?.state);
       const unknown = result.cd?.state === 'unknown';
-      const cd = unknown ? store.read().operations[record.id].cd : result.cd;
+      const cd = unknown ? store.read('operations', record.id).cd : result.cd;
       const missing = result.error?.code === 'DEPLOYMENT_NOT_FOUND';
-      const originalError = missing && store.read().operations[record.id].error;
+      const originalError = missing && store.read('operations', record.id).error;
       if (missing && originalError?.code === 'INTERRUPTED' && !record.cd?.deployed && !record.cd?.revision) {
         // A platform restart can interrupt route preparation before CD records a
         // revision. Resume the same publication through the idempotent adapter.
@@ -678,11 +679,11 @@ export async function createProductService({ service, directory, target, provide
         ...(unknown ? {} : { public_http: result.public_http }),
         url: succeeded ? result.public_http.site_url || result.public_http.url : null,
         error: stopped ? originalError || { ...operationError(result.error?.code || 'CD_OBSERVATION_REJECTED', true), message: '기존 배포 기록으로 클러스터 결과를 확인하지 못했습니다. 이 앱의 배포 기록을 확인해야 합니다.' }
-          : unknown ? store.read().operations[record.id].error : null });
+          : unknown ? store.read('operations', record.id).error : null });
       if (succeeded || stopped) cdRecoveries.delete(record.id);
     } catch (error) {
       if (abort.signal.aborted) return;
-      const cd = store.read().operations[record.id].cd;
+      const cd = store.read('operations', record.id).cd;
       const stopped = error instanceof EnvironmentError || error.retryable === false;
       await update(record.id, { status: stopped ? 'blocked' : 'running', cd: { ...cd, observation: {
         checked_at: now, last_success_at: cd.observation?.last_success_at || null,
@@ -717,9 +718,9 @@ export async function createProductService({ service, directory, target, provide
             throw new EnvironmentError('RESUME_PUBLICATION_CHANGED', 409, true);
           }
         }
-        const ci = ciObservation(build, store.read().operations[record.id].ci);
+        const ci = ciObservation(build, store.read('operations', record.id).ci);
         if (!['published', 'failed', 'publication_unverified'].includes(build.status))
-          ci.observation.next_retry_at = new Date(Date.now() + pollInterval * Math.max(1, Object.values(store.read().operations)
+          ci.observation.next_retry_at = new Date(Date.now() + pollInterval * Math.max(1, Object.values(store.schedulingState().operations)
             .filter(row => row.status === 'running' && row.stage === 'ci').length)).toISOString();
         await update(record.id, { ci, ...(build.publication ? { publication: build.publication } : {}) });
         if (build.status === 'published') {
@@ -727,7 +728,7 @@ export async function createProductService({ service, directory, target, provide
           if (!resume || !record.cd?.deployed) await update(record.id, { stage: 'cd', cd: { state: 'running', revision: null, deployed: false } });
           if (deletionRequested(record.id)) return;
           personal.writable(store.read(), record.environment_target_id || record.target_id, record.session_id);
-          const deploy = record.application_id ? (args) => applicationAdapter.deployPublished(store.read().applications[record.application_id], args)
+          const deploy = record.application_id ? (args) => applicationAdapter.deployPublished(store.read('applications', record.application_id), args)
             : record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
           const result = await writeInfrastructure(() => deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
             sourceCommit: build.source_commit, publication: build.publication, signal: abort.signal,
@@ -752,12 +753,12 @@ export async function createProductService({ service, directory, target, provide
     } catch (error) {
       const known = error instanceof EnvironmentError || error instanceof ProductError;
       const unknown = resume || !known || error.outcomeUnknown;
-      const status = error instanceof ProductError ? 'blocked' : unknown ? 'unknown' : 'blocked', saved = store.read().operations[record.id], cd = saved?.cd;
+      const status = error instanceof ProductError ? 'blocked' : unknown ? 'unknown' : 'blocked', saved = store.read('operations', record.id), cd = saved?.cd;
       if (!abort.signal.aborted) await update(record.id, { status, ...(cd?.state === 'running' ? { cd: { ...cd, state: status } } : {}),
         ...(saved.stage === 'ci' && error.code === 'CI_OBSERVATION_REJECTED' ? { ci: { ...saved.ci, observation: {
           ...saved.ci.observation, checked_at: new Date().toISOString(), last_success_at: saved.ci.observation?.last_success_at || null,
           error: { code: error.code, message: error.message, retryable: false, ...(error.upstream_status ? { upstream_status: error.upstream_status } : {}) }, next_retry_at: null } } } : {}),
-        error: { ...operationError(known ? error.code : store.read().operations[record.id]?.stage === 'ci' ? 'CI_OBSERVATION_FAILED' : 'CD_OUTCOME_UNKNOWN', unknown),
+        error: { ...operationError(known ? error.code : store.read('operations', record.id)?.stage === 'ci' ? 'CI_OBSERVATION_FAILED' : 'CD_OUTCOME_UNKNOWN', unknown),
           ...(error instanceof ProductError ? { message: error.message } : {}) } });
       if (status === 'unknown' && record.application_id && ['cd', 'http'].includes(saved.stage)) cdRecoveries.add(record.id);
     }
@@ -911,9 +912,9 @@ export async function createProductService({ service, directory, target, provide
           throw new ProductError(409, 'UPDATE_BASE_CHANGED', '기준 배포가 변경되었습니다. 미리보기를 다시 만드세요.');
       }
       if (plan) await environmentAdapter.verifyPlan(plan);
-      if (record.application_id && store.read().applications[record.application_id]?.status !== 'ready') {
+      if (record.application_id && store.read('applications', record.application_id)?.status !== 'ready') {
         const appId = record.application_id;
-        const application = store.read().applications[appId];
+        const application = store.read('applications', appId);
         if (application?.status !== 'queued') throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '앱 상태가 변경되어 대기 중인 배포를 실행하지 않았습니다.');
         await update(record.id, { status: 'running', stage: 'registration' });
         await store.transaction((state) => { if (!state.operations[record.id].deletion_requested) state.applications[appId].status = 'registering'; });
@@ -945,7 +946,7 @@ export async function createProductService({ service, directory, target, provide
       const result = await submit(record, input);
       if (result && !deletionRequested(record.id)) await observe(record, String(result.run_id));
     } catch (error) {
-      if (store.read().operations[record.id]?.error) return; // Keep precise CI submission diagnostics.
+      if (store.read('operations', record.id)?.error) return; // Keep precise CI submission diagnostics.
       const known = error instanceof ProductError && !error.outcomeUnknown || error.outcomeUnknown === false;
       await update(record.id, { status: known ? 'blocked' : 'unknown', error: operationError(known ? error.code || 'DEPLOYMENT_PRECHECK_FAILED' : 'STACK_OUTCOME_UNKNOWN', !known) });
     }
@@ -987,7 +988,7 @@ export async function createProductService({ service, directory, target, provide
   }
   // Recover only read-only plans. Applying an operation still requires its original
   // confirmation and idempotency key; uncertain mutations are never replayed here.
-  for (const record of Object.values(store.read().plans)) {
+  for (const record of Object.values(store.read('plans'))) {
     if (record.kind === 'application-lifecycle' && record.public?.status === 'planning')
       launch(() => generateApplicationPlan(record));
   }
@@ -1157,12 +1158,12 @@ export async function createProductService({ service, directory, target, provide
       return publicRecord(accepted.record);
     },
     getOperation(id, sessionId = null) {
-      const record = store.read().operations[id];
+      const record = store.read('operations', id);
       if (!owns(record, sessionId) || !['application-lifecycle', 'target-lifecycle'].includes(record.kind)) throw new ProductError(404, 'NOT_FOUND', '작업을 찾을 수 없습니다.');
       return publicRecord(record);
     },
     list(kind, sessionId, pagination) {
-      if (kind === 'plans') return Object.values(store.read().plans).filter((row) => owns(row, sessionId) && !['application-lifecycle', 'target-lifecycle'].includes(row.kind)).reverse().map((row) => structuredClone(row.public));
+      if (kind === 'plans') return Object.values(store.read('plans')).filter((row) => owns(row, sessionId) && !['application-lifecycle', 'target-lifecycle'].includes(row.kind)).reverse().map((row) => structuredClone(row.public));
       const { records, hasMore, total } = store.operationPage(kind, sessionId, pagination);
       const items = records.map((row) => ({ id: kind === 'builds' ? String(row.ci.run_id) : row.id, kind, status: row.status,
         ...Object.fromEntries(['app', 'application_id', 'environment_target_id', 'target_id', 'stage', 'created_at', 'updated_at'].filter((key) => row[key] !== undefined).map((key) => [key, row[key]])) }));
@@ -1210,9 +1211,8 @@ export async function createProductService({ service, directory, target, provide
     },
     getBuild: readBuild,
     async legacyStatus(id, sessionId = null) {
-      const state = store.read();
-      const binding = Object.hasOwn(state.bindings, id) ? state.bindings[id] : null;
-      if (!binding || !owns(state.operations[binding.operation_id], sessionId)) {
+      const binding = store.read('bindings', id);
+      if (!binding || !owns(store.read('operations', binding.operation_id), sessionId)) {
         throw new ProductError(404, 'NOT_FOUND', '접수한 실행을 찾을 수 없습니다.');
       }
       return service.status(id, binding.target_id);
@@ -1251,7 +1251,7 @@ export async function createProductService({ service, directory, target, provide
         `source-replay.${record.id}.${digest([environmentTargetId, sourceDigest(files)]).slice(0, 32)}`, undefined, record.session_id);
     },
     async resumePublishedOperation({ operation_id: id, source_commit: source, run_id: run }) {
-      const record = store.read().operations[id];
+      const record = store.read('operations', id);
       if (!record?.session_id || record.source_commit !== source || record.ci?.run_id !== run)
         throw new ProductError(409, 'RESUME_BINDING_MISMATCH', '재개 요청의 소스와 CI 실행이 원래 배포와 일치하지 않습니다.');
       return this.resumeDeployment(id, record.session_id, 'operator');
@@ -1337,8 +1337,7 @@ export async function createProductService({ service, directory, target, provide
       const empty = (state, reason) => response(emptyAgentEvents(identity, state, reason), record);
       if (!identity.runId) return empty('not_started', 'not_dispatched');
       const bound = () => {
-        const current = find('deployments', id, sessionId), state = store.read();
-        const binding = Object.hasOwn(state.bindings, identity.runId) ? state.bindings[identity.runId] : null;
+        const current = find('deployments', id, sessionId), binding = store.read('bindings', identity.runId);
         return binding?.operation_id === id && binding.app === identity.app && binding.target_id === identity.target_id
           && binding.source_commit === identity.source_commit && current.source_commit === identity.source_commit
           && String(current.ci?.run_id) === identity.runId && current.app === identity.app && current.target_id === identity.target_id;
@@ -1348,7 +1347,7 @@ export async function createProductService({ service, directory, target, provide
       try {
         const observed = await service.events(identity.runId, { source_commit: identity.source_commit, app: identity.app, target_id: identity.target_id });
         if (!bound()) return empty('unavailable', 'binding_mismatch');
-        await store.transaction((state) => ingestCiEvents(state.operations[id], observed));
+        await store.updateOperation(id, (row) => ingestCiEvents(row, observed));
         return bound() ? response(observed, find('deployments', id, sessionId)) : empty('unavailable', 'binding_mismatch');
       } catch { return empty('unavailable', 'upstream_unavailable'); }
     },
@@ -1359,10 +1358,10 @@ export async function createProductService({ service, directory, target, provide
       if (!record.cd?.deployed) return empty('not_deployed');
       // A shared target can be reused even when its image/revision does not change.
       // Only the most recently admitted CD operation may expose its runtime logs.
-      const current = () => Object.values(store.read().operations).reverse().find((row) => row.kind === 'deployments'
+      const current = () => Object.values(store.read('operations')).reverse().find((row) => row.kind === 'deployments'
         && row.target_id === record.target_id && row.app === record.app && row.cd?.state !== 'not_started')?.id === id;
       if (!current()) return empty('superseded');
-      const observer = record.application_id ? (value) => applicationAdapter?.observeLogs(store.read().applications[record.application_id], value)
+      const observer = record.application_id ? (value) => applicationAdapter?.observeLogs(store.read('applications', record.application_id), value)
         : record.environment_id ? environmentAdapter?.observeLogs : observeLogs;
       if (!observer) return empty('not_configured');
       try {
@@ -1384,7 +1383,7 @@ export async function createProductService({ service, directory, target, provide
       });
     },
     getPlan(id, sessionId = null) {
-      const plans = store.read().plans;
+      const plans = store.read('plans');
       const plan = Object.hasOwn(plans, id) ? plans[id] : null;
       if (!owns(plan, sessionId) || plan.kind === 'application-lifecycle') {
         throw new ProductError(404, 'NOT_FOUND', '계획을 찾을 수 없습니다.');

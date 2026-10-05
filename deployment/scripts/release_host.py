@@ -35,7 +35,7 @@ def execute(trusted_ref):
         raise ValueError('RELEASE_SCOPE_INVALID')
     names = ('SourceSha', 'Revision', 'DashboardDigest', 'ApiDigest', 'RunnerDigest')
     values = {name: os.environ.get('SSM_' + name, '') for name in names}
-    if trusted_ref not in ('refs/heads/main', 'refs/heads/integration/team-assembly-20261002'):
+    if trusted_ref not in ('refs/heads/main', 'refs/heads/develop', 'refs/heads/integration/team-assembly-20261002'):
         raise ValueError('TRUSTED_REF_INVALID')
     if any(not re.fullmatch('[a-f0-9]{' + ('40' if n in ('SourceSha', 'Revision') else '64') + '}', v) for n, v in values.items()):
         raise ValueError('RELEASE_INPUT_INVALID')

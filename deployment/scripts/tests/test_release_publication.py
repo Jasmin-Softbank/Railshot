@@ -88,6 +88,16 @@ class PublicationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'RUN_BINDING_MISMATCH'): self.verify()
                 self.run = original
 
+    def test_develop_publication_requires_matching_branch_and_rejects_feature_refs(self):
+        self.ref = 'refs/heads/develop'
+        self.run['head_branch'] = 'develop'
+        for artifact in self.artifacts:
+            artifact['workflow_run']['head_branch'] = 'develop'
+        self.assertEqual(self.verify()['status'], 'verified')
+        self.ref = 'refs/heads/feature/unreviewed'
+        with self.assertRaisesRegex(ValueError, 'TRUSTED_RELEASE_SOURCE_REQUIRED'):
+            self.verify()
+
     def test_all_publishers_must_be_successful_in_the_requested_attempt(self):
         for change in ({'status': 'in_progress'}, {'conclusion': 'failure'}, {'head_sha': 'c' * 40},
                        {'run_id': 456}, {'name': 'build / images (dashboard)'}):
@@ -216,9 +226,9 @@ class HostPublicationGateTests(unittest.TestCase):
                     mock.patch.dict(sys.modules, {'release_admission': checked, 'multicloud_release': release,
                                                  'edge_update': mock.Mock(), 'platform_workers': tokens}):
                 with self.assertRaisesRegex(ValueError, 'PUBLICATION_IMAGE_PIN_MISMATCH'):
-                    host.execute('refs/heads/main')
+                    host.execute('refs/heads/develop')
                 self.assertNotIn('GITHUB_TOKEN', os.environ)
-            checked.admit.assert_called_once_with(sha, 'refs/heads/main')
+            checked.admit.assert_called_once_with(sha, 'refs/heads/develop')
             checked.publication.assert_called_once()
             tokens.github_token.assert_called_once_with('gho_unit_test_token\n')
             release.private.assert_not_called(); release.execute.assert_not_called()

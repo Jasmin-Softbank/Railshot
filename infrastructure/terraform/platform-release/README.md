@@ -6,6 +6,8 @@ AWS-to-GCP federation and observer ingress for the existing machines. It does
 not create a VM, security group, load balancer, service-account key or customer
 application. Keep its local state separate from the provider edge states.
 
+기본 배포 소스는 `refs/heads/develop`이다. 브랜치 전환 시 기존 state에서 이 모듈과 `../platform-verification`의 `trusted_ref`를 함께 변경한다. 이 모듈은 IAM trust뿐 아니라 SSM 문서 안의 fetch ref도 고정하므로, 적용 후 `RAILSHOT_RELEASE_DOCUMENT_VERSION`과 `RAILSHOT_RELEASE_DOCUMENT_SHA256`을 출력값으로 갱신해야 한다. Argo CD는 계속 `deployment/platform`의 렌더링된 선언을 읽는다.
+
 ## CI runtime promotion
 
 A trusted automatic platform release runs `ci-runtime` only when CI runner or

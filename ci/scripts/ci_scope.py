@@ -96,7 +96,7 @@ def personal_release_dependency(path):
 def documentation(path):
     return (path.startswith('docs/') and PurePosixPath(path).suffix in
             {'.md', '.txt', '.svg', '.png', '.jpg', '.jpeg', '.pdf', '.drawio', '.mmd'}
-            or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
+            or PurePosixPath(path).name in {'README.md', 'README.ko.md', 'README.ja.md', 'AGENT.md', 'AGENTS.md', 'LICENSE'})
 
 
 def test_only(path):
@@ -314,7 +314,7 @@ def main():
     components = set(COMPONENTS) if paths is None else container_components(paths)
     release = release_required(paths)
     if os.environ.get('AUTO_RELEASE') == 'true':
-        if not previous_release_complete(event.get('before')):
+        if release and not previous_release_complete(event.get('before')):
             print('Previous release incomplete or unconfirmed; include platform and CI runner updates.')
             components = set(COMPONENTS)
         if 'ci-runner' in components:

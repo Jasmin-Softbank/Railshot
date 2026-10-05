@@ -1,7 +1,7 @@
 import { open, mkdir, readFile, rename, unlink, lstat, realpath, readdir, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { promisify, isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { DashboardError, createDashboardData } from './sessions.js';
@@ -141,31 +141,75 @@ export async function createProductStore(directory) {
     dashboard = await createDashboardData(db, root);
     registrations = createRegistrations(db);
   } catch (error) { db?.close(); await unlink(lockPath); throw error; }
-  function persist(next) {
-    // ponytail: rewrite the existing bounded 100-operation snapshot in one transaction;
-    // use row-level updates when the workspace retention limit grows.
-    db.exec('BEGIN IMMEDIATE');
+  function persist(next, previous) {
+    const tables = [
+      ['operations', 'operations', 'id', ['id', 'session_id', 'kind', 'status', 'created_at', 'record'],
+        (id, value) => [id, value.session_id ?? null, value.kind, value.status, value.created_at ?? null, JSON.stringify(value)]],
+      ['plans', 'plans', 'id', ['id', 'session_id', 'record'], (id, value) => [id, value.session_id ?? null, JSON.stringify(value)]],
+      ['applications', 'applications', 'id', ['id', 'session_id', 'environment_target_id', 'app', 'record'],
+        (id, value) => [id, value.session_id ?? null, value.environment_target_id, value.app, JSON.stringify(value)]],
+      ['bindings', 'bindings', 'run_id', ['run_id', 'operation_id', 'record'], (id, value) => [id, value.operation_id, JSON.stringify(value)]],
+      ['keys', 'idempotency', 'key', ['key', 'operation_id'], (id, value) => [id, value]],
+    ].map(([name, table, key, columns, values]) => ({ table, key, columns, values,
+      removed: Object.keys(previous?.[name] || {}).filter(id => !Object.hasOwn(next[name], id)),
+      changed: Object.entries(next[name]).filter(([id, value]) => !isDeepStrictEqual(value, previous?.[name]?.[id])),
+    }));
+    const personalChanged = !isDeepStrictEqual(next.personal, previous?.personal);
+    if (!personalChanged && tables.every(table => !table.removed.length && !table.changed.length)) return;
+    db.exec('BEGIN IMMEDIATE; PRAGMA defer_foreign_keys=ON;');
     try {
-      db.exec('DELETE FROM bindings; DELETE FROM idempotency; DELETE FROM operations; DELETE FROM plans; DELETE FROM applications;');
-      const operation = db.prepare('INSERT INTO operations VALUES (?, ?, ?, ?, ?, ?)');
-      for (const [id, value] of Object.entries(next.operations)) operation.run(id, value.session_id ?? null, value.kind, value.status, value.created_at ?? null, JSON.stringify(value));
-      const plan = db.prepare('INSERT INTO plans VALUES (?, ?, ?)');
-      for (const [id, value] of Object.entries(next.plans)) plan.run(id, value.session_id ?? null, JSON.stringify(value));
-      const application = db.prepare('INSERT INTO applications VALUES (?, ?, ?, ?, ?)');
-      for (const [id, value] of Object.entries(next.applications || {})) application.run(id, value.session_id ?? null, value.environment_target_id, value.app, JSON.stringify(value));
-      const binding = db.prepare('INSERT INTO bindings VALUES (?, ?, ?)');
-      for (const [id, value] of Object.entries(next.bindings)) binding.run(id, value.operation_id, JSON.stringify(value));
-      const key = db.prepare('INSERT INTO idempotency VALUES (?, ?)');
-      for (const [id, value] of Object.entries(next.keys)) key.run(id, value);
-      db.prepare("INSERT INTO personal_state VALUES ('personal', ?) ON CONFLICT(id) DO UPDATE SET record=excluded.record").run(JSON.stringify(next.personal || { targets: {}, enrollments: {} }));
+      for (const { table, key, removed, changed } of tables) {
+        const remove = db.prepare(`DELETE FROM ${table} WHERE ${key} = ?`);
+        // App names are unique per target. Remove changed names together so a valid
+        // transaction can exchange them without depending on object iteration order.
+        for (const id of table === 'applications' ? new Set([...removed, ...changed.map(([id]) => id)]) : removed) remove.run(id);
+      }
+      for (const { table, key, columns, values, changed } of tables) {
+        if (!changed.length) continue;
+        const save = db.prepare(`INSERT INTO ${table} (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})
+          ON CONFLICT(${key}) DO UPDATE SET ${columns.filter(column => column !== key).map(column => `${column}=excluded.${column}`).join(',')}`);
+        for (const [id, value] of changed) save.run(...values(id, value));
+      }
+      if (personalChanged) db.prepare("INSERT INTO personal_state VALUES ('personal', ?) ON CONFLICT(id) DO UPDATE SET record=excluded.record")
+        .run(JSON.stringify(next.personal || { targets: {}, enrollments: {} }));
       db.exec('PRAGMA user_version=2; COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
   let tail = Promise.resolve();
+  function transact(update, operationId) {
+    const pending = tail.then(async () => {
+      if (closed || poisoned) throw new Error('Workspace requires recovery');
+      const scoped = operationId !== undefined;
+      if (scoped && !Object.hasOwn(state.operations, operationId)) throw new Error('Operation not found');
+      const next = scoped ? { ...state, operations: { ...state.operations, [operationId]: structuredClone(state.operations[operationId]) } }
+        : structuredClone(state);
+      const result = await update(scoped ? next.operations[operationId] : next);
+      try { persist(next, state); } catch (error) { poisoned = true; throw error; }
+      state = next;
+      return result;
+    });
+    tail = pending.catch(() => {});
+    return pending;
+  }
   return {
     dashboard,
     registrations,
-    read: () => structuredClone(state),
+    read(table, id) {
+      const value = table === undefined ? state : Object.hasOwn(state, table) ? state[table] : undefined;
+      return structuredClone(id === undefined ? value : value && Object.hasOwn(value, id) ? value[id] : undefined);
+    },
+    schedulingState() {
+      // Queue admission needs identities and phase markers, never CI logs or telemetry.
+      return structuredClone({ applications: state.applications, bindings: state.bindings,
+        operations: Object.fromEntries(Object.entries(state.operations).map(([id, row]) => [id, {
+          ...Object.fromEntries(['id', 'kind', 'status', 'stage', 'app', 'application_id', 'environment_target_id', 'target_id',
+            'session_id', 'source_commit', 'created_at', 'updated_at', 'unknown_since', 'deletion_requested', 'queue', 'dispatch']
+            .map(key => [key, row[key]])),
+          error: row.error && { code: row.error.code }, publication: Boolean(row.publication),
+          ci: row.ci && { state: row.ci.state, run_id: row.ci.run_id, observation: row.ci.observation },
+          cd: row.cd && { state: row.cd.state, deployed: row.cd.deployed, revision: row.cd.revision, observation: row.cd.observation },
+        }])) });
+    },
     operationPage(kind, sessionId, { limit, marker }) {
       if (!['builds', 'deployments', 'environments'].includes(kind)) throw new Error('Invalid operation kind');
       const where = `kind = ?${sessionId ? ' AND session_id = ?' : ' AND (session_id IS NULL OR session_id NOT IN (SELECT session_id FROM owners))'}${kind === 'builds' ? " AND json_extract(record, '$.ci.run_id') IS NOT NULL" : ''}`;
@@ -192,18 +236,8 @@ export async function createProductStore(directory) {
         return { path: file.path, content };
       }));
     },
-    transaction(update) {
-      const pending = tail.then(async () => {
-        if (closed || poisoned) throw new Error('Workspace requires recovery');
-        const next = structuredClone(state);
-        const result = await update(next);
-        try { persist(next); } catch (error) { poisoned = true; throw error; }
-        state = next;
-        return result;
-      });
-      tail = pending.catch(() => {});
-      return pending;
-    },
+    transaction: (update) => transact(update),
+    updateOperation: (id, update) => transact(update, id),
     async snapshot(id, files) {
       if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('Invalid snapshot identifier');
       try {
