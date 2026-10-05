@@ -5,7 +5,7 @@ import tempfile
 import subprocess
 import unittest
 
-from render import HERE, NAMESPACE, cluster, dashboard, prometheus, render, validate
+from render import HERE, NAMESPACE, cluster, dashboard, platform_cluster, prometheus, render, validate
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -62,6 +62,22 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(rule['verbs'], ['list', 'watch'])
             self.assertNotIn('secrets', rule['resources'])
             self.assertNotIn('*', rule['resources'])
+
+    def test_platform_exporters_cover_tainted_build_and_place_cluster_reader_on_worker(self):
+        customer = cluster(self.config)
+        document = platform_cluster(self.config)
+        ds = next(o for o in document['items'] if o['kind'] == 'DaemonSet')['spec']['template']['spec']
+        self.assertEqual(ds['tolerations'], [{'key': 'railshot.io/dedicated', 'operator': 'Equal', 'value': 'build', 'effect': 'NoSchedule'}])
+        reader = next(o for o in document['items'] if o['kind'] == 'Deployment')['spec']['template']['spec']
+        self.assertEqual(reader['nodeSelector']['railshot.io/node-role'], 'platform-worker')
+        self.assertEqual([o for o in document['items'] if o['kind'] not in ['DaemonSet', 'Deployment', 'CiliumNetworkPolicy']],
+                         [o for o in customer['items'] if o['kind'] not in ['DaemonSet', 'Deployment']])
+        self.assertNotIn('tolerations', next(o for o in customer['items'] if o['kind'] == 'DaemonSet')['spec']['template']['spec'])
+        policy = next(o for o in document['items'] if o['kind'] == 'CiliumNetworkPolicy')
+        self.assertEqual(policy['spec'], {
+            'endpointSelector': {'matchLabels': {'app': 'cluster-metrics'}},
+            'ingress': [{'fromEntities': ['kube-apiserver'],
+                         'toPorts': [{'ports': [{'port': '8080', 'protocol': 'TCP'}]}]}]})
 
     def test_ports_and_ingress_match_target(self):
         objects = cluster(self.config)['items']

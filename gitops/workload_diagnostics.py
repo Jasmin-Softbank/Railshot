@@ -35,7 +35,7 @@ def workload(config, review):
         if not listing['items']:
             return {'state': 'missing', 'checked_at': checked, 'pods': [], 'code': 'WORKLOAD_MISSING'}
         live = listing['items'][0]
-        argo.require(live['kind'] == 'Deployment' and live['metadata']['namespace'] == namespace
+        argo.require(live.get('kind', 'Deployment') == 'Deployment' and live['metadata']['namespace'] == namespace
                      and live['metadata']['name'] == expected['metadata']['name'] and not live['metadata'].get('deletionTimestamp')
                      and live['spec']['selector'] == expected['spec']['selector']
                      and logs.template_matches(live['spec']['template'], template), 'deployment binding differs')

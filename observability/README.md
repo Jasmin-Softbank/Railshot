@@ -33,6 +33,45 @@ Grafana: 기본 상태와 HTTP 검사 결과 (이 모듈)
 - Loki, Hubble, tracing, Alertmanager, 중앙 집계, 컨테이너별 CPU/메모리는 넣지 않습니다.
   run/tenant/commit/digest 라벨을 추가하지 않습니다.
 
+## 운영 클러스터의 노드 관측
+
+운영 control·build·platform 노드는 기존 shared Prometheus에 명시적으로 등록합니다.
+자동 노드 발견이나 별도 관측 스택을 추가하지 않습니다. 고객 환경의 기존 등록도 유지합니다.
+아래 모드는 기존 exporter만 렌더링하며, Grafana 비밀번호나 Compose 디렉터리를 만들지 않습니다.
+
+```sh
+python3 observability/render.py observability/.local/platform-target.json \
+  observability/.local/platform-cluster.json --platform-cluster
+```
+
+`node_ip`는 `railshot.io/node-role=platform-worker` 라벨이 붙은 노드의 사설 IP입니다.
+node-exporter DaemonSet은 전용 build taint만 허용해 세 운영 노드에 배치되고,
+kube-state-metrics 하나는 platform worker에서 운영 클러스터 전체 객체 상태를 읽습니다.
+NodePort는 `externalTrafficPolicy=Local`이므로 각 node-exporter는 해당 노드 IP로,
+cluster scrape는 platform worker IP로 등록합니다. 기본 포트를 덮어쓰는 운영 구성은
+TCP 31490·31491이며 control Terraform의 기존 peer SG가 control SG에서만 허용합니다.
+Native exporter TCP 9100은 외부 방화벽에 추가하지 않습니다.
+
+control 호스트에서 실행 중인 shared collector는 Cilium에서 `kube-apiserver` identity로
+관측됩니다. 일반 `ipBlock` 규칙은 이 노드 identity와 일치하지 않으므로, 운영 모드에만
+`cluster-metrics`의 TCP 8080에 대한 해당 identity 허용 정책을 추가합니다.
+다른 Pod나 전체 `cluster`·`remote-node` entity를 허용하지 않습니다.
+[동일 클러스터 노드와 CIDR 정책의 차이](https://docs.cilium.io/en/stable/security/policy/layer3/)를
+적용 전 실제 Cilium drop과 대조합니다.
+
+적용 후 세 DaemonSet Pod와 KSM의 Ready, control에서 각 metrics 응답을 확인합니다.
+기존 observer 설정의 owner marker·등록 identity·유효 기한을 확인한 뒤,
+`state_dir/registration.lock` 안에서 `desired.json`과 `product.json`을 함께 갱신하고
+기존 `register.scrape_config`·`sync_observer`로 검증 및 reload합니다.
+node 행마다 정확한 EC2 resource ID와 사설 IP를 기록하고, cluster 주소는 platform 행에만
+둡니다. 이 운영 행들은 사용자 앱의 배포 대상이 아닙니다. 기존 AWS/GCP 앱 행과 health CA는
+보존합니다. 제외한 환경의 IP를 운영 노드와 재사용해 정상으로 표시하지 않습니다.
+
+Prometheus의 `up`, 샘플 시각, Node Ready를 확인한 다음 CPU·메모리·재시작을 해석합니다.
+새로 등록한 노드의 과거 30분 데이터는 소급 생성되지 않습니다. 제품 API가 선택하는 파일은
+`RAILSHOT_OBSERVER_PRODUCT_FILE`이며, 이 값이 있으면 과거 `RAILSHOT_OBSERVER_CONFIG`
+파일의 만료 여부를 현재 수집기 상태로 해석하지 않습니다.
+
 ## 무엇을 보여주는가
 
 Grafana 대시보드 하나, 기본 8개 패널:

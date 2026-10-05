@@ -138,7 +138,8 @@ def container_components(paths):
             components.add('api')
         elif path.startswith(('ci/scripts/', 'ci/workflows/')) or path == 'ci/runner-compose.yml':
             components.add('ci-runner')  # The runner image COPYs all CI scripts.
-        elif path == 'deployment/manifests/build-runner.yaml' or path == 'infrastructure/ansible/ci.yml':
+        elif path in {'deployment/manifests/build-runner.yaml', 'infrastructure/ansible/ci.yml',
+                      'deployment/scripts/platform_workers.py', 'deployment/scripts/multicloud_release.py'}:
             components.add('ci-runner')
         elif path in {'deployment/scripts/render-platform.py', 'deployment/scripts/tests/test_platform.py', 'deployment/manifests/build-controller.yaml'}:
             components.update(COMPONENTS)
@@ -265,11 +266,11 @@ def previous_release_complete(before):
             # actual successful verification step, not the aggregate job status.
             successful = {step.get('name') for job in jobs['jobs'] for step in job.get('steps', [])
                           if step.get('conclusion') == 'success'}
-            runner_published = any(job.get('name', '').endswith('publish (ci-runner)')
-                                   and job.get('conclusion') == 'success' for job in jobs['jobs'])
+            worker_image_published = any(job.get('name', '').endswith(('publish (api)', 'publish (ci-runner)'))
+                                         and job.get('conclusion') == 'success' for job in jobs['jobs'])
             return (jobs['total_count'] <= 100
                     and 'Verify the exact Argo revision, running digests and public edge' in successful
-                    and (not runner_published or
+                    and (not worker_image_published or
                          'Promote the tested CI controller runner and workflow source' in successful))
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
         pass
@@ -320,8 +321,10 @@ def main():
         if release and not previous_release_complete(event.get('before')):
             print('Previous release incomplete or unconfirmed; include platform and CI runner updates.')
             components = set(COMPONENTS)
-        if 'ci-runner' in components:
-            components.update(('dashboard', 'api'))
+        # The API image also runs both platform CronJobs. The existing worker
+        # release requires all three artifacts from this same admitted CI run.
+        if components & {'api', 'ci-runner'}:
+            components.update(('dashboard', 'api', 'ci-runner'))
         release = bool(components)
     if components:
         selected.add('containers')

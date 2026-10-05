@@ -37,6 +37,16 @@ resource "aws_security_group" "operations_peer" {
       self      = true
     }
   }
+  dynamic "ingress" {
+    for_each = toset([31490, 31491])
+    content {
+      protocol        = "tcp"
+      from_port       = ingress.value
+      to_port         = ingress.value
+      security_groups = [aws_security_group.control.id]
+      description     = "Existing control observer node and cluster metrics"
+    }
+  }
   ingress {
     protocol  = "icmp"
     from_port = 8

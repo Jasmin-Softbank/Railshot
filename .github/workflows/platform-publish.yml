@@ -115,8 +115,8 @@ jobs:
               assert providers.get('aws', os.environ['PLATFORM_TARGET']) == os.environ['PLATFORM_TARGET'], 'provider targets must preserve the default AWS target'
               selections = {'aws': os.environ['PLATFORM_TARGET'], **providers}
               assert len(set(selections.values())) == len(selections), 'provider target IDs must be distinct'
-              if 'ci-runner' in components:
-                  assert {'dashboard', 'api'} <= set(components), 'worker rollout requires the platform images'
+              if {'api', 'ci-runner'} & set(components):
+                  assert {'dashboard', 'api', 'ci-runner'} <= set(components), 'API and worker rollout require dashboard, api and ci-runner from the same run'
                   assert re.fullmatch(r'[1-9][0-9]*', os.environ['RELEASE_VERSION']) and re.fullmatch(r'[a-f0-9]{64}', os.environ['RELEASE_HASH']), 'release document version and hash are required'
               if os.environ.get('MULTICLOUD') == 'true':
                   assert {'dashboard', 'api', 'ci-runner'} <= set(components), 'multicloud release requires the central worker images'
