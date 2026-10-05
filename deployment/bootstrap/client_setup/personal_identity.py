@@ -29,6 +29,19 @@ def validate_endpoint(value, *, test_allow_http=False):
     return value.rstrip('/')
 
 
+def validate_auth_policy(endpoint, policy, *, test_allow_http=False):
+    """An HTTP exception is bound to one customer-local Keystone endpoint."""
+    approved = policy.get('test_openstack_http_url')
+    if 'test_openstack_http_url' in policy:
+        if (not isinstance(approved, str) or not approved.startswith('http://')
+                or validate_endpoint(approved, test_allow_http=True) != approved
+                or endpoint != approved):
+            raise ProviderError('identity_http_binding_changed')
+    allowed = test_allow_http is True or approved is not None
+    validate_endpoint(endpoint, test_allow_http=allowed)
+    return allowed
+
+
 def discover_auth_urls(*, environ=None, paths=None, test_allow_http=False):
     """Return unique validated endpoints, with no configuration secrets attached."""
     environ = os.environ if environ is None else environ
@@ -150,7 +163,7 @@ def prepare_personal_identity(config_dir, state_dir, *, project_id=None, test_al
 
     if vault.path.exists() or vault.path.is_symlink():
         auth = vault.load()
-        validate_endpoint(auth['auth_url'], test_allow_http=test_allow_http)
+        validate_auth_policy(auth['auth_url'], ownership, test_allow_http=test_allow_http)
         if ownership.get('auth_url') and ownership['auth_url'] != auth['auth_url']:
             raise ProviderError('identity_binding_changed')
         recorded_credentials = [r['id'] for r in ownership['resources']
@@ -160,7 +173,18 @@ def prepare_personal_identity(config_dir, state_dir, *, project_id=None, test_al
     else:
         if any(r.get('created') for r in ownership['resources']):
             raise ProviderError('identity_partial_creation_requires_reconciliation')
-        endpoint = select_auth_url(input_fn=input_fn, test_allow_http=test_allow_http)
+        ownership.pop('test_openstack_http_url', None)
+        # Discover HTTP endpoints without authenticating. Approval happens before
+        # asking for credentials and is saved only for the exact selected URL.
+        endpoint = select_auth_url(input_fn=input_fn, test_allow_http=True)
+        identity_http = test_allow_http is True
+        if endpoint.startswith('http://') and not identity_http:
+            answer = input_fn('시험용 OpenStack 인증 주소 ' + endpoint
+                + ' 는 암호화되지 않습니다. 이 주소에만 HTTP 인증을 허용하려면 "허용"을 입력하십시오: ').strip()
+            if answer != '허용':
+                raise ProviderError('identity_http_not_approved')
+            ownership['test_openstack_http_url'] = endpoint
+            identity_http = True
         admin_username = input_fn('OpenStack 관리자 ID: ').strip()
         user_domain = input_fn('관리자 사용자 도메인 이름 [Default]: ').strip() or 'Default'
         admin_project = input_fn('관리자 인증 프로젝트 이름 [admin]: ').strip() or 'admin'
@@ -172,7 +196,7 @@ def prepare_personal_identity(config_dir, state_dir, *, project_id=None, test_al
         config = {'auth_url': endpoint, 'admin_username': admin_username,
                   'user_domain_name': user_domain, 'project_name': 'railshot',
                   'project_domain_name': project_domain, 'service_username': service_username,
-                  'role_name': role_name, 'test_allow_http': test_allow_http,
+                  'role_name': role_name, 'test_allow_http': identity_http,
                   'admin_scope': {'project': {'name': admin_project, 'domain': {'name': admin_project_domain}}}}
         if project_id:
             config['project_id'] = project_id
@@ -263,12 +287,15 @@ def revoke_personal_identity(config_dir, state_dir, *, test_allow_http=False, ke
         return {'application_credential': 'revoked', 'retained': ['service_user', 'role_assignment', 'shared_project']}
     auth = CredentialStore(config_dir).load()
     owner = CredentialStore(config_dir / 'identity-owner').load()
+    installed = _load(config_dir / 'client.json', None)
+    if installed is not None and installed.get('test_openstack_http_url') != ownership.get('test_openstack_http_url'):
+        raise ProviderError('identity_http_binding_changed')
     if (auth.get('application_credential_id') != credential['id']
             or auth.get('auth_url') != binding['auth_url']
             or any(owner.get(key) != binding[key] for key in ('user_id', 'project_id', 'auth_url'))):
         raise ProviderError('identity_revocation_binding_changed')
-    validate_endpoint(owner['auth_url'], test_allow_http=test_allow_http)
-    client = (keystone_factory(owner['auth_url'], test_allow_http=True) if test_allow_http is True
+    identity_http = validate_auth_policy(owner['auth_url'], ownership, test_allow_http=test_allow_http)
+    client = (keystone_factory(owner['auth_url'], test_allow_http=True) if identity_http
               else keystone_factory(owner['auth_url']))
     response, token = client.request('POST', '/auth/tokens', {'auth': {'identity': {'methods': ['password'],
         'password': {'user': {'id': owner['user_id'], 'password': owner['password']}}},

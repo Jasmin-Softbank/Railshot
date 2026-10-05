@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'deployment/bootstrap'))
 from client_setup.state import atomic_private_write, private_directory, read_private
 from client_setup.credentials import CredentialStore
+from client_setup.personal_identity import validate_auth_policy
 from infrastructure.providers.openstack.cli import OpenStackCLI
 
 VERSION = '1.0.0'
@@ -127,6 +128,12 @@ def install_tunnel(config, runner=run):
     runner(['systemctl', 'enable', '--now', 'wg-quick@railshot0'])
 
 
+def local_auth(config):
+    auth = CredentialStore(CONFIG).load()
+    validate_auth_policy(auth['auth_url'], config, test_allow_http=config.get('test_allow_http') is True)
+    return auth
+
+
 def checks(config, runner=run, cli_factory=OpenStackCLI):
     result = {'tunnel': False, 'openstack': False, 'runtime': False}
     try:
@@ -137,7 +144,7 @@ def checks(config, runner=run, cli_factory=OpenStackCLI):
     except Exception:
         pass
     try:
-        cli_factory(CredentialStore(CONFIG).load()).run(['server', 'list'])
+        cli_factory(local_auth(config)).run(['server', 'list'])
         result['openstack'] = True
     except Exception:
         pass
@@ -163,6 +170,7 @@ def enroll(args):
         config = json.loads(read_private(existing))
         require(config['api_url'] == api_url and config['enrollment_id'] == args.enrollment_id
                 and config.get('test_allow_http', False) is test_allow_http, 'INSTALLATION_BINDING_CHANGED')
+        local_auth(config)
         install_tunnel(config)
         install_runtime_access(config)
         install_service()
@@ -176,7 +184,7 @@ def enroll(args):
     require(isinstance(identity, dict) and set(identity) == {'auth', 'project_id', 'ownership'},
             'OPENSTACK_IDENTITY_INVALID')
     auth = identity['auth']
-    https_url(auth['auth_url'], test_allow_http=test_allow_http)
+    validate_auth_policy(auth['auth_url'], identity['ownership'], test_allow_http=test_allow_http)
     project_id = identity['project_id']
     require(IDENT.fullmatch(project_id))
     token_info = OpenStackCLI(auth).run(['token', 'issue'])
@@ -203,6 +211,8 @@ def enroll(args):
     if response.get('runtime_access'):
         config['runtime_access'] = response['runtime_access']
     config.update(api_url=api_url, enrollment_id=args.enrollment_id, project_id=project_id, test_allow_http=test_allow_http)
+    if 'test_openstack_http_url' in identity['ownership']:
+        config['test_openstack_http_url'] = identity['ownership']['test_openstack_http_url']
     # Save the issued credential before any OS configuration. A subsequent local
     # failure is resumable without replaying the consumed enrollment credential.
     save_config(config)
@@ -257,7 +267,7 @@ def prepare_runtime(config, args):
             api(config['api_url'], path, config['client_token'], {'generation': config['generation'],
                 'progress': {'stage': value, 'status': 'running'}}, **options)
         try:
-            runtime = prepare(config, OpenStackCLI(CredentialStore(CONFIG).load()), CONFIG, STATE,
+            runtime = prepare(config, OpenStackCLI(local_auth(config)), CONFIG, STATE,
                               plan_path=getattr(args, 'runtime_config', None), progress=progress)
             access = install(config, runtime)
             evidence = {k: runtime[k] for k in ('resource_id', 'private_ipv4', 'management_network', 'placement', 'architecture', 'initialization')}
@@ -300,6 +310,10 @@ def install_cli_account(config):
     require(owned == {'user': CLI_USER, 'uid': account.pw_uid, 'gid': account.pw_gid}
             and account.pw_uid != 0 and account.pw_dir == str(CLI_HOME) and account.pw_shell == '/bin/sh', 'CLI_ACCOUNT_NOT_OWNED')
     control = {key: config[key] for key in ('project_id', 'target_id', 'generation')}
+    if 'test_openstack_http_url' in config:
+        control['test_openstack_http_url'] = config['test_openstack_http_url']
+    if config.get('test_allow_http') is True:
+        control['test_allow_http'] = True
     if CLI_HOME.exists():
         require(not CLI_HOME.is_symlink() and CLI_HOME.stat().st_uid == account.pw_uid
                 and not CLI_HOME.stat().st_mode & 0o077, 'CLI_HOME_UNSAFE')
@@ -307,7 +321,7 @@ def install_cli_account(config):
         return
     staging = Path(tempfile.mkdtemp(prefix='.railshot-cli-', dir=CLI_HOME.parent))
     try:
-        CredentialStore(staging).save(CredentialStore(CONFIG).load())
+        CredentialStore(staging).save(local_auth(config))
         atomic_private_write(staging / 'control.json', json.dumps(control).encode())
         for path in staging.iterdir():
             os.chown(path, account.pw_uid, account.pw_gid)

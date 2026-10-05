@@ -203,8 +203,13 @@ class PlatformTests(unittest.TestCase):
         self.assertNotIn('personal-gateway-key', {item['name'] for item in application['volumeMounts']})
         private_config = next(item for item in pod['initContainers'] if item['name'] == 'private-config')
         self.assertIn('personal-gateway-ipc', {item['name'] for item in private_config['volumeMounts']})
-        self.assertIn('railshot-personal-gateway', {item['metadata']['name'] for item in output['items']
-                                                    if item['kind'] == 'PersistentVolumeClaim'})
+        personal_claims = {item['metadata']['name']: item for item in output['items']
+                           if item['kind'] == 'PersistentVolumeClaim'
+                           and item['metadata']['name'].startswith('railshot-personal-')}
+        self.assertEqual(set(personal_claims), {'railshot-personal-gateway', 'railshot-personal-wireguard'})
+        for claim in personal_claims.values():
+            self.assertEqual(claim['metadata']['annotations'],
+                             {'argocd.argoproj.io/sync-options': 'Prune=false'})
         policy = next(item for item in output['items'] if item['kind'] == 'NetworkPolicy'
                       and item['metadata']['name'] == 'railshot-api-private')
         self.assertTrue(any({'port': 51820, 'protocol': 'UDP'} in row.get('ports', [])
