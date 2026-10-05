@@ -50,6 +50,26 @@ run "wrong_vm_ip_rejected" {
   expect_failures = [google_compute_network_endpoint_group.app]
 }
 
+run "shared_certificate_also_serves_legacy_routes_without_deleting_their_certificates" {
+  command = plan
+  variables {
+    application_certificate = {
+      id = "projects/railshot-poc-20261001/locations/global/certificates/railshot-apps-wildcard", domain = "railshot.io"
+    }
+    routes = {
+      app-legacy = { hostname = "legacy.railshot.io", node_port = 31001, health_path = "/health" }
+      app-new = { hostname = "new.railshot.io", node_port = 31002, health_path = "/health",
+      certificate_id = "projects/railshot-poc-20261001/locations/global/certificates/railshot-apps-wildcard" }
+    }
+  }
+  assert {
+    condition = (keys(google_certificate_manager_certificate.routes) == ["app-legacy"] &&
+      keys(google_certificate_manager_dns_authorization.routes) == ["app-legacy"] &&
+    google_certificate_manager_certificate_map_entry.routes["app-new"].certificates == tolist([var.application_certificate.id]))
+    error_message = "Keep legacy certificate and DNS ownership; new routes reuse one shared certificate."
+  }
+}
+
 run "stopped_app_keeps_identity_and_certificate_without_unhealthy_backend" {
   command = plan
   variables {

@@ -74,6 +74,30 @@ test('same-name resolution uses the exact environment and owner without dispatch
   assert.equal(f.submissions.length, 1); assert.equal(f.sourceReads(), 0);
 });
 
+test('fresh runtime observations preserve registration and past receipts and authorize before external reads', async (t) => {
+  const f = await fixture(t);
+  let reads = 0;
+  f.adapter.observeRuntime = async (application, record) => {
+    reads++;
+    assert.equal(application.id, f.app); assert.equal(record.id, f.base.id);
+    return { state: 'ready', checked_at: new Date().toISOString(), reason: 'WORKLOAD_MISSING',
+      workload: { state: 'missing', code: 'WORKLOAD_MISSING', pods: [] }, public_http: { state: 'unverified', verified_at: null, url: null } };
+  };
+  await assert.rejects(f.product.getApplicationObservation(f.app, f.other), { status: 404 });
+  assert.equal(reads, 0);
+  const before = f.product.getApplication(f.app, f.owner);
+  const current = await f.product.getApplicationObservation(f.app, f.owner);
+  assert.equal(current.application_id, f.app); assert.equal(current.deployment_id, f.base.id);
+  assert.equal(current.state, 'ready'); assert.equal(current.workload.state, 'missing');
+  assert.deepEqual(f.product.getApplication(f.app, f.owner), before);
+  assert.equal(before.status, 'ready'); assert.equal(before.current_deployment.status, 'succeeded');
+  f.adapter.observeRuntime = async () => { throw new Error('private token'); };
+  const failed = await f.product.getApplicationObservation(f.app, f.owner);
+  assert.equal(failed.state, 'collection_failed'); assert.equal(failed.workload, null);
+  assert.ok(!JSON.stringify(failed).includes('private token'));
+  assert.equal(f.submissions.length, 1);
+});
+
 test('preview uses verified deployed source, persists exact GitHub snapshot, and starts once after restart', async (t) => {
   const f = await fixture(t);
   f.service.deployedSource = [file('app.js', 'agent-fixed'), file('remove.txt', 'old'), file('agent-test.js', 'assert app')];

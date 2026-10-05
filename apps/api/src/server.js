@@ -430,6 +430,12 @@ export function createAppServer({ sourceLoader = fetchPublicGithubSource, access
                 || Object.keys(input).length !== 1 || input.action !== 'resume') throw new ServiceError('action=resume만 입력하세요.', 422);
             accepted(response, 'deployments', await products.resumeDeployment(actionRoute[1], sessionId), requestId, 'resume'); return;
           }
+          const appObservation = /^\/api\/v1\/applications\/([A-Za-z0-9._-]+)\/observations$/.exec(url.pathname);
+          if (appObservation) {
+            method(['GET']);
+            if ([...url.searchParams].length) throw new ServiceError('지원하지 않는 조회 조건입니다.', 422);
+            json(response, 200, await products.getApplicationObservation(appObservation[1], sessionId)); return;
+          }
           const routes = /^(?:\/api\/v1\/(targets|applications|builds|deployments|profiles|plans|environments))(?:\/([A-Za-z0-9._-]+))?$/.exec(url.pathname);
           if (!routes) throw new ServiceError('API 경로를 찾을 수 없습니다.', 404);
           const [, kind, id] = routes;

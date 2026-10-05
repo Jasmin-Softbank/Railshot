@@ -1,12 +1,12 @@
 import { request } from './api.js';
 
-export const applicationStates = { ready: '실행 중', stopped: '중지됨', deleted: '삭제됨', unknown: '확인 필요',
+export const applicationStates = { ready: '등록 완료', stopped: '중지됨', deleted: '삭제됨', unknown: '확인 필요',
   stopping: '중지 중', starting: '재개 중', deleting: '삭제 중', queued: '배포 대기', registering: '배포 준비 중' };
 
 export function applicationLabel(app) {
   if (app.status !== 'ready') return applicationStates[app.status] || '상태 확인 필요';
   if (app.current_deployment_state === 'unverified') return '배포 결과 확인 필요';
-  if (app.current_deployment) return '배포 확인됨';
+  if (app.current_deployment) return '배포 기록 확인됨';
   if (['queued', 'running'].includes(app.latest_deployment?.status)) return '배포 중';
   if (['failed', 'blocked', 'cancelled'].includes(app.latest_deployment?.status)) return '배포 실패';
   return '미배포';

@@ -151,7 +151,11 @@ def config(path):
             'FIXED_SECRET_REFERENCES_REQUIRED')
     for p in value['secrets'].values():
         private(p, raw=True)
-    require(set(value['registration']) == {'documents', 'credentials_policy'}, 'REGISTRATION_INPUT_REQUIRED')
+    require({'documents', 'credentials_policy'} <= set(value['registration']) <= {'documents', 'credentials_policy', 'credentials_environments'}, 'REGISTRATION_INPUT_REQUIRED')
+    environments = value['registration'].get('credentials_environments', [])
+    require(isinstance(environments, list) and all(isinstance(env, str) and re.fullmatch(r'[a-z][a-z0-9-]{0,61}', env) for env in environments)
+            and len(set(environments)) == len(environments),
+            'CREDENTIALS_ENVIRONMENTS_INVALID')
     private(value['registration']['documents']); private(value['registration']['credentials_policy'])
     require(isinstance(value['adopted_uids'], dict), 'ADOPTION_UIDS_REQUIRED')
     return value
@@ -1277,14 +1281,16 @@ class Bootstrap:
         sys.path.insert(0, str(self.root / 'gitops'))
         import credentials
         policy = private(self.config['registration']['credentials_policy'])
-        renewal = credentials.render(policy, images['api'])
+        environments = self.config['registration'].get('credentials_environments', [])
+        renewal = credentials.render(policy, images['api'], environments=environments)
+        selected_policy = credentials.select_policy(policy, environments)
         for manifest in (controller, renewal):
             for document in manifest['items']:
                 if document['kind'] == 'CronJob':
                     document['spec']['suspend'] = True
             self.objects(manifest['items'])
         self.remote('control', 'cron-test', {'namespace': 'argocd', 'name': 'railshot-credentials', 'run': self.binding,
-                    'uid': self.record['uids']['CronJob/argocd/railshot-credentials'], 'secrets': [t['secret'] for t in policy['targets']]})
+                    'uid': self.record['uids']['CronJob/argocd/railshot-credentials'], 'secrets': [t['secret'] for t in selected_policy['targets']]})
         # Controller RBAC is scoped to the build namespace, not its platform namespace.
         self.remote('control', 'cron-test', {'namespace': 'railshot-system', 'name': 'railshot-build-controller', 'run': self.binding,
                     'uid': self.record['uids']['CronJob/railshot-system/railshot-build-controller'], 'secrets': ['railshot-build-runner-registration']})

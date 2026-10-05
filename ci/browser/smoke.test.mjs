@@ -63,6 +63,151 @@ test('dashboard loads without credentials, offers no login and blocks unconfigur
   assert.deepEqual(errors, []);
 });
 
+test('application detail separates registration and deployment history from current runtime observations', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors, requests } = await start(t, { service: null });
+  const deployment = { id: 'runtime-deploy', app: 'runtime-app', application_id: 'runtime-app-id', target_id: 'gcp-app', status: 'succeeded',
+    source_commit: 'a'.repeat(40), cd: { deployed: true, revision: 'b'.repeat(40) },
+    public_http: { state: 'succeeded', verified_at: '2026-10-03T06:00:00Z', url: 'https://runtime.example/' } };
+  const app = { id: 'runtime-app-id', app: 'runtime-app', target_id: 'gcp-app', environment_target_id: 'gcp-shared', status: 'ready',
+    current_deployment_state: 'verified', current_deployment: deployment, latest_deployment: deployment };
+  const snapshot = (state, workload, http, reason = null, age = 0) => {
+    const at = new Date(Date.now() - age).toISOString();
+    return { application_id: app.id, deployment_id: deployment.id, state, checked_at: at, reason,
+      workload: workload ? { state: workload, checked_at: at } : null,
+      public_http: http ? { state: http, verified_at: http === 'succeeded' ? at : null } : null };
+  };
+  let observation = snapshot('ready', 'missing', 'unverified', 'WORKLOAD_MISSING'), reads = 0, fail = false;
+  let releaseObservation;
+  const firstObservation = new Promise(resolve => { releaseObservation = resolve; });
+  await page.route('**/api/v1/applications?*', route => route.fulfill({ json: { items: [app], next_marker: null } }));
+  await page.route('**/api/v1/applications/runtime-app-id', route => route.fulfill({ json: app }));
+  await page.route('**/api/v1/applications/runtime-app-id/observations', async route => {
+    reads++;
+    await firstObservation;
+    return route.fulfill({ status: fail ? 503 : 200, json: fail ? { error: { message: 'Fixture observation unavailable' } } : observation });
+  });
+  await page.route('**/api/v1/deployments/runtime-deploy**', route => route.fulfill({ json: route.request().url().includes('/logs')
+    ? { deployment_id: deployment.id, target_id: deployment.target_id, app: deployment.app, source_commit: deployment.source_commit,
+      checked_at: new Date().toISOString(), state: 'ready', entries: [{ pod: 'runtime-pod', container: 'web', text: 'runtime fixture log' }] }
+    : deployment }));
+  await page.goto(origin); await page.locator('[data-view="history"]').click();
+  await page.getByRole('button', { name: 'runtime-app 앱 상세·업데이트' }).waitFor();
+  assert.equal(reads, 0, 'inventory does not add per-app observation requests');
+  assert.match(await page.locator('#applications-list').innerText(), /등록 상태: 등록 완료/);
+  assert.match(await page.locator('#applications-list').innerText(), /마지막 검증 배포: runtime-deploy/);
+  await page.getByRole('button', { name: 'runtime-app 앱 상세·업데이트' }).click();
+  const panel = page.locator('#application-observation');
+  await panel.getByText('운영 상태 확인 중', { exact: true }).waitFor();
+  assert.equal(await page.locator('#detail-application-actions').getByRole('button', { name: 'runtime-app 중지', exact: true }).isEnabled(), true,
+    'a pending observation does not delay the existing owned app controls');
+  releaseObservation();
+  await panel.getByText('실행 리소스 없음', { exact: true }).waitFor();
+  assert.match(await panel.innerText(), /등록된 앱의 실행 리소스를 찾지 못했습니다/);
+  assert.doesNotMatch(await panel.innerText(), /현재 정상 응답/);
+  assert.equal(reads, 1);
+  if (process.env.CI_OUTPUT_DIR) {
+    await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'application-runtime-missing-desktop.png'), fullPage: true });
+  }
+  for (const [next, expected] of [
+    [snapshot('collection_failed', null, null, 'runtime_observation_unavailable'), '운영 상태 수집 실패'],
+    [snapshot('unsupported', null, null, 'runtime_observation_not_configured'), '운영 관측 미지원'],
+    [snapshot('no_data', null, null, 'deployment_not_started'), '운영 관측 없음'],
+    [snapshot('ready', 'ready', 'succeeded', null, 120000), '오래된 운영 관측'],
+    [snapshot('ready', 'ready', 'unverified', 'PUBLIC_HTTP_UNVERIFIED'), '공개 응답 확인 필요'],
+    [snapshot('ready', 'ready', 'succeeded'), '현재 정상 응답'],
+  ]) {
+    observation = next;
+    await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
+    await panel.getByText(expected, { exact: true }).waitFor();
+  }
+  assert.match(await panel.innerText(), /관측 시각:/);
+  fail = true;
+  await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
+  await panel.getByText('운영 상태 수집 실패', { exact: true }).waitFor();
+  assert.doesNotMatch(await panel.innerText(), /현재 정상 응답/);
+  fail = false;
+  observation = { ...snapshot('ready', 'ready', 'succeeded'), application_id: 'another-app' };
+  await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
+  await panel.getByText('운영 상태 수집 실패', { exact: true }).waitFor();
+  assert.doesNotMatch(await panel.innerText(), /현재 정상 응답/, 'another app observation is never shown as this app health');
+  observation = snapshot('ready', 'ready', 'succeeded');
+  await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
+  await panel.getByText('현재 정상 응답', { exact: true }).waitFor();
+  app.status = 'stopped';
+  await page.locator('#applications-refresh').click();
+  await panel.getByText('오래된 운영 관측', { exact: true }).waitFor();
+  assert.doesNotMatch(await panel.innerText(), /현재 정상 응답/, 'a newly observed lifecycle change invalidates previous runtime health');
+  app.status = 'ready';
+  await page.locator('#applications-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
+  assert.doesNotMatch(await panel.innerText(), /현재 정상 응답/, 'restored registration does not revive the invalidated health sample');
+  await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
+  await panel.getByText('현재 정상 응답', { exact: true }).waitFor();
+  if (process.env.CI_OUTPUT_DIR) {
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'application-runtime-ready-mobile.png'), fullPage: true });
+  }
+  await panel.getByRole('button', { name: '이 앱의 실행 로그' }).click();
+  await page.waitForFunction(() => document.querySelector('#console-output').textContent.includes('runtime fixture log'));
+  assert.equal(requests.some(row => row.method === 'POST' && row.path !== '/api/v1/sessions'), false);
+  assert.deepEqual(errors, []);
+});
+
+test('environment credential health is observed separately and never inferred from initial registration or stale credentials', { timeout: 45000 }, async (t) => {
+  const { page, origin, errors, requests } = await start(t, { service: null });
+  const targets = [{ id: 'shared-aws', provider: 'aws', label: 'AWS 운영 환경' }, { id: 'shared-gcp', provider: 'gcp', label: 'GCP 운영 환경' }];
+  let credentials = null;
+  const current = (patch = {}) => ({ state: 'ready', checked_at: new Date().toISOString(),
+    last_success_at: new Date(Date.now() - 3600000).toISOString(), expires_at: new Date(Date.now() + 7200000).toISOString(), ...patch });
+  await page.route('**/api/v1/targets?*', route => route.fulfill({ json: { items: targets } }));
+  await page.route('**/api/v1/targets/*/observations', route => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-2), at = new Date().toISOString();
+    return route.fulfill({ json: { target_id: id, checked_at: at, credentials,
+      metrics: { runtime_healthz: { state: 'ready', observed_at: at, value: 1 } } } });
+  });
+  await page.goto(origin); await page.locator('[data-view="monitor"]').click();
+  await page.waitForFunction(() => document.querySelectorAll('#environment-list tr').length === 2
+    && document.querySelector('#environment-message').textContent.includes('마지막 조회'));
+  const rows = page.locator('#environment-list'), details = page.locator('#environment-detail');
+  assert.equal(await rows.locator('tr').count(), 2, 'credentials stay on existing environment rows');
+  assert.match(await rows.innerText(), /자격 갱신 관측 없음/);
+  for (const [next, label] of [
+    [{ renewal: 'configured', expires_at: '2099-01-01T00:00:00Z' }, '자격 갱신 관측 없음'],
+    [current(), '자격 확인 완료 · 만료까지'],
+    [current({ expires_at: new Date(Date.now() - 1000).toISOString() }), '자격 만료됨'],
+    [current({ checked_at: new Date(Date.now() - 120000).toISOString() }), '오래된 자격 갱신 관측'],
+    [current({ state: 'collection_failed', reason: 'CREDENTIAL-SECRET-MUST-NOT-RENDER' }), '자격 갱신 상태 수집 실패'],
+    [current(), '자격 확인 완료 · 만료까지'],
+  ]) {
+    credentials = next;
+    await page.locator('#monitor-refresh').click();
+    await page.waitForFunction(expected => document.querySelector('#environment-list').textContent.includes(expected), label);
+    assert.equal(await rows.locator('[data-state="ready"]').count(), 2, 'credential observation does not replace independent runtime health');
+    if (next.state !== 'ready') assert.doesNotMatch(await details.textContent(), /최근 검증한 자격 발급:/);
+    assert.doesNotMatch(await page.locator('body').textContent(), /CREDENTIAL-SECRET-MUST-NOT-RENDER/);
+  }
+  credentials = current({ state: 'collection_failed', reason: 'CUSTOMER_AUTH_REJECTED', last_success_at: null, expires_at: null });
+  await page.locator('#monitor-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#environment-detail').textContent.includes('실행 환경에서 자격 인증을 거부했습니다.'));
+  assert.doesNotMatch(await details.textContent(), /최근 검증한 자격 발급:/);
+  credentials = current();
+  await page.locator('#monitor-refresh').click();
+  await page.waitForFunction(() => document.querySelector('#environment-list').textContent.includes('자격 확인 완료 · 만료까지'));
+  await details.locator('summary').first().click();
+  assert.match(await details.innerText(), /환경 공통 배포·관측 자격.*최근 검증한 자격 발급:.*가장 빠른 만료:.*자격 관측 시각:/s);
+  if (process.env.CI_OUTPUT_DIR) {
+    await mkdir(process.env.CI_OUTPUT_DIR, { recursive: true });
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'environment-credentials-desktop.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'environment-credentials-mobile.png'), fullPage: true });
+  }
+  assert.equal(requests.some(row => row.path.includes('/credentials') || row.method === 'POST' && row.path !== '/api/v1/sessions'), false);
+  assert.deepEqual(errors, []);
+});
+
 test('verified app URL is visible in inventory and detail, survives a failed update and disappears after stop or uncertain rollout', { timeout: 45000 }, async (t) => {
   const { page, origin, errors } = await start(t, { service: null });
   const deployed = { id: 'deployed-v1', status: 'succeeded', cd: { deployed: true, revision: 'a'.repeat(40) },
@@ -294,7 +439,7 @@ test('application updates keep app and environment fixed across all source forma
   };
   await page.locator('[data-view="history"]').click();
   await page.waitForFunction(() => document.querySelector('#applications-list').getAttribute('aria-busy') === 'false');
-  assert.match(await page.locator('#applications-list').innerText(), /현재 서비스: deployed-v1/);
+  assert.match(await page.locator('#applications-list').innerText(), /마지막 검증 배포: deployed-v1/);
   assert.match(await page.locator('#applications-list').innerText(), /환경 aws-environment/);
   assert.doesNotMatch(await page.locator('#applications-list').innerText(), /환경 same-target/);
   assert.match(await page.locator('#applications-list').innerText(), /최근 시도: 실행 실패 · failed-v2/);

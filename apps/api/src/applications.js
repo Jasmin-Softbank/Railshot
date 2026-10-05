@@ -11,6 +11,8 @@ import { lifecycleActions, lifecycleId, lifecycleHash, lifecycleResources, lifec
 const REGISTER = fileURLToPath(new URL('../../../deployment/scripts/applications.py', import.meta.url));
 const FINALIZE = fileURLToPath(new URL('../../../deployment/scripts/application_routes.py', import.meta.url));
 const LIFECYCLE = fileURLToPath(new URL('../../../deployment/scripts/application_lifecycle.py', import.meta.url));
+const OBSERVATION = fileURLToPath(new URL('../../../gitops/workload_diagnostics.py', import.meta.url));
+const CREDENTIALS = fileURLToPath(new URL('../../../gitops/credentials.py', import.meta.url));
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = (code, status = 409, unknown = false) => new EnvironmentError(code, status, unknown);
 
@@ -22,6 +24,7 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       || typeof loadPublished !== 'function') throw fail('APPLICATION_CONFIGURATION_INVALID', 503);
   await privateDirectory(config.state_dir);
   const fingerprint = hash(config);
+  const credentialObservations = new Map();
   const targets = Object.fromEntries(Object.entries(config.environments).map(([id, value]) => {
     if (!TARGET_ID.test(id) || !['aws', 'gcp', 'openstack'].includes(value.provider)
         || !TENANT_NAME.test(value.tenant || '')) throw fail('APPLICATION_CONFIGURATION_INVALID', 503);
@@ -78,6 +81,30 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
   }
   return {
     targets: Object.freeze(targets), describe,
+    async observeCredentials(environmentId) {
+      const empty = (state, reason) => ({ state, reason, checked_at: new Date().toISOString(), last_success_at: null, expires_at: null });
+      if (!['k3s-aws', 'k3s-gcp'].includes(environmentId) || !['aws', 'gcp'].includes(targets[environmentId]?.provider)
+          || !config.cd?.context) return empty('no_data', 'ENVIRONMENT_OBSERVER_NOT_REGISTERED');
+      const previous = credentialObservations.get(environmentId);
+      if (previous && (previous.pending || previous.expires > Date.now())) return previous.promise;
+      const entry = { pending: true, expires: 0 };
+      entry.promise = (async () => {
+        try {
+          if (hash(await privateJson(configPath)) !== fingerprint) throw fail('APPLICATION_POLICY_CHANGED');
+          const result = await runner(python, [CREDENTIALS, 'observe', '--context', config.cd.context, '--environment', environmentId], { mutation: false, timeout: 12000 });
+          const reasons = [null, 'ENVIRONMENT_OBSERVER_NOT_REGISTERED', 'RENEWAL_TIMEOUT', 'CUSTOMER_TLS_FAILED',
+            'CUSTOMER_AUTH_REJECTED', 'CUSTOMER_API_FAILED', 'CUSTOMER_API_UNREACHABLE', 'RENEWAL_FAILED'];
+          if (!['ready', 'no_data', 'collection_failed'].includes(result?.state) || !Number.isFinite(Date.parse(result.checked_at))
+              || !reasons.includes(result.reason) || ['last_success_at', 'expires_at'].some(key => result[key] !== null && !Number.isFinite(Date.parse(result[key])))
+              || result.state === 'ready' && (!result.last_success_at || !result.expires_at)) throw fail('CREDENTIAL_OBSERVATION_INVALID');
+          return { state: result.state, reason: result.reason, checked_at: result.checked_at,
+            last_success_at: result.last_success_at, expires_at: result.expires_at };
+        } catch { return empty('collection_failed', 'RENEWAL_FAILED'); }
+        finally { entry.pending = false; entry.expires = Date.now() + 60000; }
+      })();
+      credentialObservations.set(environmentId, entry);
+      return entry.promise;
+    },
     async planPendingDeletion(application, { id, deploymentId }) {
       await current(application);
       if (!lifecycleId.test(id || '') || !lifecycleId.test(deploymentId || '')) throw fail('APPLICATION_INPUT_INVALID', 422);
@@ -204,6 +231,23 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       const home = await current(application);
       if (!/^[a-f0-9-]{36}$/.test(record.id)) throw fail('APPLICATION_BINDING_MISMATCH');
       return createAppLogsObserver({ configPath: join(home, 'deployments', record.id, 'cd.json'), python })(record);
+    },
+    async observeRuntime(application, record) {
+      const home = await current(application);
+      if (record.application_id !== application.id || record.app !== application.app || record.target_id !== application.target_id)
+        throw fail('APPLICATION_BINDING_MISMATCH');
+      if (!/^[a-f0-9-]{36}$/.test(record.id) || !/^[a-f0-9]{40}$/.test(record.cd?.revision || '')
+          || !/^[a-f0-9]{40}$/.test(record.source_commit || '') || !/^[1-9][0-9]{0,19}$/.test(String(record.ci?.run_id || '')))
+        return { state: 'no_data', checked_at: new Date().toISOString(), reason: 'deployment_not_started', workload: null, public_http: null };
+      const result = await runner(python, [OBSERVATION, '--config', join(home, 'deployments', record.id, 'cd.json'),
+        '--identity', JSON.stringify({ deployment_id: record.id, app: record.app, target_id: record.target_id,
+          source_commit: record.source_commit, run_id: String(record.ci.run_id), revision: record.cd.revision })],
+      { mutation: false, timeout: 12_000 });
+      if (!['ready', 'collection_failed'].includes(result?.state) || !Number.isFinite(Date.parse(result.checked_at))
+          || ![null, 'runtime_observation_unavailable', 'WORKLOAD_MISSING', 'WORKLOAD_NOT_READY', 'PUBLIC_HTTP_UNVERIFIED'].includes(result.reason))
+        throw fail('APPLICATION_OBSERVATION_INVALID', 502);
+      return { state: result.state, checked_at: result.checked_at, reason: result.reason,
+        workload: result.workload, public_http: result.public_http };
     },
   };
 }

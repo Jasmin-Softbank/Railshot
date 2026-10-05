@@ -974,10 +974,13 @@ test('agent events are not fabricated before dispatch and require the persisted 
 });
 
 test('HTTP target observations authorize IDs before collecting and need no deployment history', async (t) => {
-  const calls = [];
+  const calls = [], credentialCalls = [];
+  const credentials = { state: 'ready', reason: null, checked_at: new Date().toISOString(),
+    last_success_at: '2026-10-05T00:00:00Z', expires_at: '2026-10-06T00:00:00Z' };
   const deployPublished = async () => assert.fail('read-only observation dispatched CD');
   deployPublished.targets = { demo: { applicationName: 'demo-app' }, 'stack-gcp': { applicationName: 'gcp-app' }, 'stack-openstack': { applicationName: 'openstack-app' } };
   const { base } = await httpFixture(t, { target: { provider: 'aws' }, providerTargets: { gcp: 'stack-gcp', openstack: 'stack-openstack' }, deployPublished,
+    applicationAdapter: { targets: {}, observeCredentials: async (id) => { credentialCalls.push(id); return credentials; } },
     service: { targetId: 'demo', targetIds: ['demo', 'stack-gcp', 'stack-openstack'], deploy: async () => assert.fail('read-only observation dispatched CI') },
     observeMetrics: async (record) => {
       calls.push(record);
@@ -993,11 +996,13 @@ test('HTTP target observations authorize IDs before collecting and need no deplo
     assert.equal(body.target_id, id); assert.equal(body.app, app); assert.equal(body.environment_id, null); assert.equal(body.deployment_id, null);
     assert.deepEqual(body.runtime, { status: id === 'demo' ? 'healthy' : id === 'stack-gcp' ? 'unhealthy' : 'unknown',
       observation_state: body.metrics.runtime_healthz.state, observed_at: body.metrics.runtime_healthz.observed_at });
+    assert.deepEqual(body.credentials, id === 'stack-openstack' ? undefined : credentials);
   }
   for (const id of ['unknown', '__proto__', 'BAD-ID']) assert.equal((await fetch(`${base}/api/v1/targets/${id}/observations`)).status, 404);
   assert.equal((await fetch(`${base}/api/v1/targets/demo/observations?app=another-app`)).status, 422);
   const method = await fetch(`${base}/api/v1/targets/demo/observations`, { method: 'POST' });
   assert.equal(method.status, 405); assert.equal(method.headers.get('allow'), 'GET'); assert.equal(calls.length, 3);
+  assert.deepEqual(credentialCalls, ['demo', 'stack-gcp'], 'unknown and excluded targets cannot inspect shared credentials');
 });
 
 async function applicationFixture(t, { registrationStatus = 'succeeded', publicationChange = {}, openstackIngress, unknownGraceMs = 60000 } = {}) {

@@ -232,6 +232,9 @@ def register(config_path, request):
                 registered = {'app': app, 'tenant': profile['tenant'], 'target': target}
                 cd = {**config['cd'], 'targets': {app_id: registered}}
                 runtime.preflight_renewal(cd, registered, app_id)
+                observer = (runtime.observer_snapshot(cd, registered, env_id, allow_missing=True)
+                            if profile['provider'] in ('aws', 'gcp') else None)
+                common_credentials = observer is not None
                 runtime.shared_cluster_policy(cd, registered, env_id)
                 binding = {'version': 1, 'environment_id': env_id, 'application_id': app_id, 'provider': profile['provider'],
                            'cd': copy.deepcopy(config['cd']), 'registered': registered, 'ingress': copy.deepcopy(profile['ingress']),
@@ -241,7 +244,7 @@ def register(config_path, request):
                           'environment_sha256': digest(authority), 'target': target, 'stage': 'reserved', 'steps': [],
                           'deployment_supported': False}
                 # Read-only ownership check precedes the mutation intent and any permission grants.
-                documents = runtime.runtime_documents(target, app_id, pull, None)
+                documents = runtime.runtime_documents(target, app_id, pull, None, shared_credentials=common_credentials)
                 existing = kube(app_id, 'get', 'Namespace', app_id, '--ignore-not-found', '-o', 'json')
                 require(not existing or (not existing['metadata'].get('ownerReferences') and all(
                     existing['metadata'].get('labels', {}).get(key) == value for key, value in documents[0]['metadata']['labels'].items())), 'APPLICATION_NAMESPACE_CONFLICT')
@@ -256,16 +259,23 @@ def register(config_path, request):
                 mutation_started = True
                 try:
                     step('namespace', lambda: [runtime.owned_apply(kube, document) for document in documents])
-                    step('permissions', lambda: runtime.grant_control_objects(cd, registered, app_id, environment_id=env_id))
+                    step('permissions', lambda: runtime.grant_control_objects(cd, registered, app_id, environment_id=env_id, shared_credentials=common_credentials))
                     tls = {'tls_server_name': descriptor['addresses']['private']} if (
                         profile['provider'] == 'openstack' and native['inventory']['control_plane'][0]['ssh'].get('connect_host')
                         or profile['provider'] == 'gcp' and descriptor.get('management_endpoint')) else {}
-                    renewal, expiry = step('argo', lambda: runtime.register_argo(kube, cd, registered, app_id, app_id, None, **tls))
-                    step('credentials', lambda: runtime.install_renewal(cd, renewal))
-                    record['cluster_registration'] = step('cluster', lambda: runtime.share_application_cluster(kube, cd, registered, env_id))
+                    if common_credentials:
+                        control = lambda ns, *args, **kwargs: runtime.argo.kubectl(cd['context'], ns, *args, **kwargs)
+                        step('argo', lambda: runtime.owned_apply(control, runtime.application_project(registered, app_id)))
+                        expiry = runtime.datetime.fromtimestamp(runtime.credentials.claims(
+                            observer[4]['bearerToken'], observer[2], runtime.time.time())['exp'], runtime.timezone.utc).isoformat()
+                    else:
+                        renewal, expiry = step('argo', lambda: runtime.register_argo(kube, cd, registered, app_id, app_id, None, **tls))
+                        step('credentials', lambda: runtime.install_renewal(cd, renewal))
+                    record['cluster_registration'] = step('cluster', lambda: runtime.share_application_cluster(
+                        kube, cd, registered, env_id, shared_credentials=common_credentials))
                     step('ci', lambda: runtime.bind_ci(profile, registered, app_id))
                     runtime.save(home / 'binding.json', binding)
-                    record.update(status='succeeded', stage='registered', runtime_permissions_version=2, credentials={'renewal': 'configured', 'expires_at': expiry},
+                    record.update(status='succeeded', stage='registered', runtime_permissions_version=2, credentials={'renewal': 'environment' if common_credentials else 'configured', 'expires_at': expiry},
                                   binding_sha256=hashlib.sha256(runtime.read_private(home / 'binding.json', raw=True)).hexdigest())
                     runtime.save(receipt, record)
                 except Exception:

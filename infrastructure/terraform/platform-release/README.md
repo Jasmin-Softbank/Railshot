@@ -63,9 +63,10 @@ and Actions-variable update permissions; it is never returned in a receipt.
 Promotion suspends replenishment and waits for the current controller tick to
 finish. It updates the controller image and future runner template, reads them
 back, pins the apps workflow and `PLATFORM_REF` to the same admitted source, then
-resumes replenishment and verifies controller execution. CI reads and updates
-only the build controller CronJob and its ConfigMap; credential renewal belongs
-to the provider rollout and cannot block CI promotion. Existing runner Jobs keep
+resumes replenishment and verifies controller execution. The normal release also
+updates the credential renewal CronJob to the same API image and verifies one
+AWS/GCP renewal run. An active renewal finishes before verification starts;
+OpenStack registrations stay stored but are excluded from this run. Existing runner Jobs keep
 their original images and running workflows. Requests dispatched after promotion
 use the newly pinned workflow; previously dispatched runs retain their original
 GitHub workflow revision. A failed or uncertain promotion keeps a private receipt

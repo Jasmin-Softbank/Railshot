@@ -315,7 +315,7 @@ def execute(config, manifest, *, scope='multicloud', workers=None, target_runner
             home = home / 'ci-runtime'; home.mkdir(mode=0o700, exist_ok=True)
             # Node configuration changes must not invalidate a completed CI rollout.
             config = {key: config[key] for key in ('version', 'state_dir', 'workers', 'apps')}
-            config['workers'] = worker_module.scoped_config(config['workers'], 'ci')
+            config['workers'] = worker_module.scoped_config(config['workers'], 'all')
         state = home / manifest['source_sha']; state.mkdir(mode=0o700, exist_ok=True)
         receipt_path = state / 'receipt.json'
         identity = digest({'manifest': manifest, 'config': config})
@@ -326,8 +326,9 @@ def execute(config, manifest, *, scope='multicloud', workers=None, target_runner
             ci_manifest = {key: manifest[key] for key in ('version', 'source_sha', 'platform_revision', 'images')}
             ci_config = {key: config[key] for key in ('version', 'state_dir', 'workers', 'apps')}
             ci_config['workers'] = worker_module.scoped_config(ci_config['workers'], 'ci')
-            require(ci_receipt.get('status') == 'verified' and ci_receipt.get('input_sha256') ==
-                    digest({'manifest': ci_manifest, 'config': ci_config}), 'CI_RELEASE_NOT_VERIFIED')
+            ci_configs = [ci_config, {**ci_config, 'workers': worker_module.scoped_config(config['workers'], 'all')}]
+            require(ci_receipt.get('status') == 'verified' and ci_receipt.get('input_sha256') in
+                    [digest({'manifest': ci_manifest, 'config': candidate}) for candidate in ci_configs], 'CI_RELEASE_NOT_VERIFIED')
             ci_proof = worker_module.verify_workers(ci_state / 'workers.json')
             require(ci_proof.get('status') == 'verified' and ci_proof.get('executable_verification') is True,
                     'CI_RELEASE_NOT_VERIFIED')
@@ -377,9 +378,10 @@ def execute(config, manifest, *, scope='multicloud', workers=None, target_runner
                 receipt['apps'] = promotion(config['apps'], manifest['source_sha'],
                     {**receipt, 'status': 'prepared', 'workers': prepared}, apps_state)
                 receipt['stage'] = 'worker-verification'; save(receipt_path, receipt)
-            # CI owns only build replenishment; provider credential renewal remains in the full release.
+            # Normal platform releases own both workers. Cloud-only renewal leaves the
+            # stored policy intact and cannot contact excluded provider endpoints.
             receipt['workers'] = worker_module.apply_workers(config['workers'], manifest['images'], manifest['source_sha'], worker_state,
-                **({'before_resume': before_resume, 'scope': 'ci'} if scope == 'ci-runtime' else
+                **({'before_resume': before_resume, 'scope': 'all', 'credentials_environments': ['k3s-aws', 'k3s-gcp']} if scope == 'ci-runtime' else
                    {'scope': 'credentials'} if reuse_ci else {}))
             require(receipt['workers'].get('status') == 'verified' and receipt['workers'].get('executable_verification') is True, 'WORKER_EXECUTION_NOT_VERIFIED')
             receipt['stage'] = 'targets'; save(receipt_path, receipt)

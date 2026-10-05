@@ -156,7 +156,7 @@ def pod_template(item):
     return spec.get('template', {})
 
 
-def ownership(objects, binding, *, shared_renewal=None):
+def ownership(objects, binding, *, shared_renewal=None, observer_renewal=None):
     app = binding['application_id']
     by_uid = {item['metadata']['uid']: item for _, item in objects}
     require(len(by_uid) == len(objects))
@@ -203,10 +203,12 @@ def ownership(objects, binding, *, shared_renewal=None):
             require(ref.get('kind') == 'Role' and ref.get('apiGroup') == 'rbac.authorization.k8s.io' and
                     any(p['kind'] == 'Role' and p['metadata']['name'] == ref.get('name') for _, p in objects),
                     'APPLICATION_RUNTIME_FOREIGN_OWNER')
-            if meta['name'] == 'railshot-environment-argocd':
-                shared = (shared_renewal or {}).get('service_account', {})
-                require(labelled(item, app) and ref == {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': SA}
-                        and shared.get('name') == SA and
+            if meta['name'] in ('railshot-environment-argocd', 'railshot-environment-observer'):
+                observer = meta['name'] == 'railshot-environment-observer'
+                account_name = 'railshot-observer' if observer else SA
+                shared = ((observer_renewal if observer else shared_renewal) or {}).get('service_account', {})
+                require(labelled(item, app) and ref == {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': account_name}
+                        and shared.get('name') == account_name and
                         name(shared.get('namespace')) and shared['namespace'] != app and shared.get('uid') and
                         item.get('subjects') == [{'kind': 'ServiceAccount', 'name': shared['name'],
                                                   'namespace': shared['namespace']}],
@@ -310,24 +312,28 @@ def storage(kube, ns, objects):
     return result
 
 
-def inventory(kube, binding, renewal, action, *, shared_renewal=None):
+def inventory(kube, binding, renewal, action, *, shared_renewal=None, observer_renewal=None):
     """Read a complete owned namespace and return a secret-free PRIVATE snapshot."""
     try:
-        return _inventory(kube, binding, renewal, action, shared_renewal=shared_renewal)
+        return _inventory(kube, binding, renewal, action, shared_renewal=shared_renewal, observer_renewal=observer_renewal)
     except LifecycleRuntimeError:
         raise
     except Exception:
         raise LifecycleRuntimeError('APPLICATION_RUNTIME_INVALID_INVENTORY') from None
 
 
-def _inventory(kube, binding, renewal, action, *, shared_renewal=None):
+def _inventory(kube, binding, renewal, action, *, shared_renewal=None, observer_renewal=None):
     require(action in ('stop', 'start', 'delete'))
     app = binding.get('application_id', '')
     require(binding.get('version') == 1 and re.fullmatch(r'app-[a-f0-9]{24}', app))
     target = binding['registered']['target']
     require(target.get('id') == target.get('namespace') == app)
-    anchor = renewal.get('service_account', {})
-    require(anchor.get('name') == SA and anchor.get('namespace') == app and anchor.get('uid'))
+    anchor = renewal.get('service_account', {}) if renewal else None
+    if anchor is not None:
+        require(anchor.get('name') == SA and anchor.get('namespace') == app and anchor.get('uid'))
+    else:
+        require(shared_renewal is not None and observer_renewal is not None,
+                'APPLICATION_RUNTIME_SERVICE_ACCOUNT_MISMATCH')
     if action == 'delete':
         require(not target.get('database'), 'APPLICATION_RUNTIME_EXTERNAL_DATABASE')
     namespace = get(kube, app, 'namespace', app)
@@ -340,16 +346,20 @@ def _inventory(kube, binding, renewal, action, *, shared_renewal=None):
         require(not item['metadata'].get('deletionTimestamp') or item['kind'] in TRANSIENT,
                 'APPLICATION_RUNTIME_RESOURCE_TERMINATING')
     sas = [item for _, item in objects if item['kind'] == 'ServiceAccount' and item['metadata']['name'] == SA]
-    require(len(sas) == 1 and sas[0]['metadata']['uid'] == anchor['uid'] and labelled(sas[0], app),
-            'APPLICATION_RUNTIME_SERVICE_ACCOUNT_MISMATCH')
-    ownership(objects, binding, shared_renewal=shared_renewal)
-    shared = None
-    if shared_renewal is not None:
-        shared = shared_renewal.get('service_account', {})
-        require(set(shared) == {'name', 'namespace', 'uid'} and shared['name'] == SA and
+    require((len(sas) == 1 and sas[0]['metadata']['uid'] == anchor['uid'] and labelled(sas[0], app))
+            if anchor is not None else not sas, 'APPLICATION_RUNTIME_SERVICE_ACCOUNT_MISMATCH')
+    ownership(objects, binding, shared_renewal=shared_renewal, observer_renewal=observer_renewal)
+    external_accounts = {}
+    for field, selected, account_name in [('shared_service_account', shared_renewal, SA),
+                                           ('observer_service_account', observer_renewal, 'railshot-observer')]:
+        if selected is None:
+            continue
+        shared = selected.get('service_account', {})
+        require(set(shared) == {'name', 'namespace', 'uid'} and shared['name'] == account_name and
                 name(shared['namespace']) and shared['namespace'] != app and isinstance(shared['uid'], str) and
                 re.fullmatch(r'[A-Za-z0-9-]{1,128}', shared['uid']),
                 'APPLICATION_RUNTIME_SHARED_SERVICE_ACCOUNT_MISMATCH')
+        external_accounts[field] = copy.deepcopy(shared)
         # The canonical credential was checked by the caller. Read its exact SA
         # here as well; it is never included in this app's mutation inventory.
         live = get(kube, shared['namespace'], 'serviceaccount', shared['name'])
@@ -370,8 +380,8 @@ def _inventory(kube, binding, renewal, action, *, shared_renewal=None):
         retained.extend(r for r in public if r['kind'] not in ('Pod', 'ReplicaSet', 'ControllerRevision', 'EndpointSlice', 'Endpoints'))
     resources = [namespace_id, *public] if action == 'delete' else [r for r in public if r['kind'] in CONTROLS or r['kind'] == 'Pod']
     return {'version': 1, 'application_id': app, 'namespace': {**namespace_id, 'uid': namespace['metadata']['uid']},
-            'service_account': {key: anchor[key] for key in ('name', 'namespace', 'uid')}, 'records': records, 'storage': volumes,
-            **({'shared_service_account': copy.deepcopy(shared)} if shared is not None else {}),
+            'service_account': {key: anchor[key] for key in ('name', 'namespace', 'uid')} if anchor is not None else None,
+            'records': records, 'storage': volumes, **external_accounts,
             'resources': sorted(resources, key=lambda r: (r['kind'], r['name'])), 'retained': retained}
 
 
@@ -384,6 +394,7 @@ def comparable(snapshot, *, controls=True):
     volumes = [{k: v for k, v in row.items() if k != 'attachments'} for row in snapshot['storage']]
     return {k: snapshot[k] for k in ('version', 'application_id', 'namespace', 'service_account')} | {
         **({'shared_service_account': snapshot['shared_service_account']} if 'shared_service_account' in snapshot else {}),
+        **({'observer_service_account': snapshot['observer_service_account']} if 'observer_service_account' in snapshot else {}),
         'records': records, 'storage': volumes}
 
 
@@ -450,8 +461,10 @@ def execute(kube, binding, action, expected_inventory, stopped_inventory=None):
     try:
         shared = ({'service_account': expected_inventory['shared_service_account']}
                   if 'shared_service_account' in expected_inventory else None)
-        current = inventory(kube, binding, {'service_account': expected_inventory['service_account']}, action,
-                            shared_renewal=shared)
+        observer = ({'service_account': expected_inventory['observer_service_account']}
+                    if 'observer_service_account' in expected_inventory else None)
+        renewal = {'service_account': expected_inventory['service_account']} if expected_inventory['service_account'] else None
+        current = inventory(kube, binding, renewal, action, shared_renewal=shared, observer_renewal=observer)
         require(comparable(current) == comparable(expected_inventory), 'APPLICATION_RUNTIME_PLAN_STALE')
         ns = binding['application_id']
         if action == 'start':
@@ -492,8 +505,7 @@ def execute(kube, binding, action, expected_inventory, stopped_inventory=None):
             if action == 'stop':
                 wait(lambda: not running_pods(kube, ns))
                 steps.append({'name': 'no-running-pods', 'status': 'succeeded'})
-            after = inventory(kube, binding, {'service_account': current['service_account']}, action,
-                              shared_renewal=shared)
+            after = inventory(kube, binding, renewal, action, shared_renewal=shared, observer_renewal=observer)
             expected = copy.deepcopy(current)
             for row in expected['records']:
                 if row.get('control'):

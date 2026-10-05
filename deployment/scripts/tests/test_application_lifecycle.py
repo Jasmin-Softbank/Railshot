@@ -20,6 +20,24 @@ class LifecycleTest(unittest.TestCase):
     def setUp(self):
         self.fixture = test_applications.ApplicationsTest(methodName='runTest')
         self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
+        # Common observers are registered only for the supported cloud environments.
+        fixture = self.fixture.fixture
+        old, target = self.fixture.env_id, 'k3s-aws'
+        self.fixture.config['environments'][target] = self.fixture.config['environments'].pop(old)
+        fixture.registry['targets'][target] = fixture.registry['targets'].pop(old)
+        fixture.descriptor['target_id'] = target
+        fixture.write('registry.json', fixture.registry); fixture.write('descriptor.json', fixture.descriptor)
+        self.fixture.env_id = fixture.target = target
+        self.fixture.write_config()
+        cm = fixture.control.objects['argocd', 'configmap', 'railshot-credentials']
+        policy = json.loads(cm['data']['policy.json'])
+        policy['targets'][0].update(target_id=target, secret='railshot-' + target)
+        cm['data']['policy.json'] = json.dumps(policy)
+        secret = fixture.control.objects.pop(('argocd', 'secret', 'railshot-' + old))
+        secret['metadata']['name'] = 'railshot-' + target
+        secret['data']['name'] = base64.b64encode(target.encode()).decode()
+        fixture.control.objects['argocd', 'secret', 'railshot-' + target] = secret
+        fixture.control.objects['argocd', 'role', 'railshot-credentials']['rules'][0]['resourceNames'] = ['railshot-' + target]
         self.fixture.enable_fixed_cache()
         self.assertEqual(self.fixture.register()['status'], 'succeeded')
         self.app = self.fixture.request(); self.home = self.fixture.home()
@@ -97,6 +115,64 @@ class LifecycleTest(unittest.TestCase):
         policy['targets'] = [shared if row['target_id'] == shared['target_id'] else row for row in policy['targets']]
         cm['data']['policy.json'] = json.dumps(policy)
         return shared, secret
+
+    def common_observer_registration(self):
+        shared, canonical = self.shared_registration()
+        row = copy.deepcopy(shared)
+        row.update(target_id='observer-' + self.app['environment_id'],
+                   secret='railshot-observer-' + self.app['environment_id'])
+        row['service_account'].update(name='railshot-observer', uid=str(uuid.uuid4()))
+        secret = copy.deepcopy(canonical)
+        secret['metadata'].update(name=row['secret'], uid=str(uuid.uuid4()))
+        secret['metadata']['labels']['argocd.argoproj.io/secret-type'] = 'railshot-observer'
+        secret['data']['name'] = base64.b64encode(row['target_id'].encode()).decode()
+        config = json.loads(base64.b64decode(secret['data']['config']))
+        parts = config['bearerToken'].split('.')
+        claims = json.loads(base64.urlsafe_b64decode(parts[1] + '=' * (-len(parts[1]) % 4)))
+        account = row['service_account']
+        claims['sub'] = 'system:serviceaccount:' + account['namespace'] + ':' + account['name']
+        claims['kubernetes.io']['serviceaccount'] = {key: account[key] for key in ('name', 'uid')}
+        parts[1] = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=')
+        config['bearerToken'] = '.'.join(parts)
+        secret['data']['config'] = base64.b64encode(json.dumps(config).encode()).decode()
+        self.control.objects['argocd', 'secret', row['secret']] = secret
+        del self.control.objects['argocd', 'secret', 'railshot-' + self.app['application_id']]
+        cm = self.control.objects['argocd', 'configmap', 'railshot-credentials']
+        policy = json.loads(cm['data']['policy.json'])
+        policy['targets'] = [item for item in policy['targets'] if item['target_id'] != self.app['application_id']] + [row]
+        cm['data']['policy.json'] = json.dumps(policy)
+        rules = self.control.objects['argocd', 'role', 'railshot-credentials']['rules']
+        rules[0]['resourceNames'] = [item['secret'] for item in policy['targets']]
+        self.control.objects['argocd', 'role', 'railshot-product-registrations']['rules'].append({
+            'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get'], 'resourceNames': [row['secret']]})
+        self.inventory['service_account'] = None
+        return row, secret
+
+    def test_common_credentials_remain_unchanged_after_last_app_deletion(self):
+        observer, secret = self.common_observer_registration()
+        policy = copy.deepcopy(self.control.objects['argocd', 'configmap', 'railshot-credentials'])
+        renewal_role = copy.deepcopy(self.control.objects['argocd', 'role', 'railshot-credentials'])
+        plan = self.plan()
+        retained = {item['name'] for item in plan['retained'] if item['kind'] == 'Credential'}
+        self.assertEqual(retained, {observer['secret'], 'railshot-' + self.app['environment_id']})
+        self.assertFalse(any(item['kind'] == 'Credential' for item in plan['resources']))
+        _, result = self.apply(plan)
+        self.assertEqual(result['status'], 'succeeded', result)
+        self.assertEqual(self.control.objects['argocd', 'configmap', 'railshot-credentials'], policy)
+        self.assertEqual(self.control.objects['argocd', 'role', 'railshot-credentials'], renewal_role)
+        self.assertEqual(self.control.objects['argocd', 'secret', observer['secret']], secret)
+        rules = self.control.objects['argocd', 'role', 'railshot-product-registrations']['rules']
+        self.assertTrue(any(rule['verbs'] == ['get'] and rule['resourceNames'] == [observer['secret']] for rule in rules))
+        self.assertFalse(any(rule['verbs'] == ['delete'] and observer['secret'] in rule['resourceNames'] for rule in rules))
+
+    def test_common_observer_identity_change_invalidates_deletion_plan(self):
+        _, secret = self.common_observer_registration()
+        plan = self.plan()
+        secret['metadata']['uid'] = str(uuid.uuid4())
+        self.calls.clear()
+        with self.assertRaisesRegex(ValueError, 'LIFECYCLE_PLAN_CHANGED'):
+            self.apply(plan)
+        self.assertTrue(all(verb == 'get' for verb, _ in self.calls))
 
     def test_partial_delete_reconciles_and_resumes_remaining_original_resources(self):
         self.edge_execute.side_effect = RuntimeError('route transport unavailable before dispatch')

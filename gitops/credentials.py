@@ -12,9 +12,12 @@ import json
 from pathlib import Path
 import re
 import ssl
+import subprocess
 import sys
 import time
+import threading
 from urllib import request
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
 from argo import LABEL, native, require
@@ -32,6 +35,10 @@ class PolicyCapacityError(ValueError):
 
 def credential_labels_match(labels, target_id, project, namespaces):
     """An app credential may leave Argo discovery, but never widen its app scope."""
+    if isinstance(target_id, str) and target_id.startswith('observer-'):
+        return (project == '' and namespaces in ([], ['']) and isinstance(labels, dict)
+                and labels.get('argocd.argoproj.io/secret-type') == 'railshot-observer'
+                and labels.get('app.kubernetes.io/managed-by') == 'railshot')
     application = isinstance(target_id, str) and re.fullmatch(APPLICATION_ID, target_id)
     if application and (project != target_id or namespaces != [target_id]):
         return False
@@ -88,6 +95,10 @@ def validate_policy(policy):
         if 'cluster_read' in target:
             require(target['cluster_read'] is True and not re.fullmatch(APPLICATION_ID, target['target_id'])
                     and target['project'] == '', 'cluster read scope requires an environment credential')
+        if target['target_id'].startswith('observer-'):
+            require(target['target_id'] in ('observer-k3s-aws', 'observer-k3s-gcp') and target.get('cluster_read') is True
+                    and target['project'] == '' and namespaces == [sa['namespace']] and sa['name'] == 'railshot-observer'
+                    and 'previous_scope' not in target, 'fixed observer registration required')
         if 'previous_scope' in target:
             previous = target['previous_scope']
             require(not re.fullmatch(APPLICATION_ID, target['target_id']) and target['project'] == ''
@@ -142,7 +153,7 @@ class RegisteredHTTPSConnection(HTTPSConnection):
         self.sock = self._context.wrap_socket(self.sock, server_hostname=self.server_name)
 
 
-def customer(server, ca, token, path, document=None, *, server_name=None):
+def customer(server, ca, token, path, document=None, *, server_name=None, timeout=15):
     context = ssl.create_default_context(cadata=ca.decode('ascii'))
     headers = {'Authorization': 'Bearer ' + token, 'Accept': 'application/json'}
     body = None if document is None else json.dumps(document).encode()
@@ -152,10 +163,12 @@ def customer(server, ca, token, path, document=None, *, server_name=None):
         endpoint = urlsplit(server)
         require(endpoint.scheme == 'https' and endpoint.hostname and endpoint.port and not endpoint.username and
                 not endpoint.password and not endpoint.path and not endpoint.query and not endpoint.fragment, 'explicit TLS API required')
-        connection = RegisteredHTTPSConnection(endpoint.hostname, endpoint.port, server_name=server_name, context=context, timeout=15)
+        connection = RegisteredHTTPSConnection(endpoint.hostname, endpoint.port, server_name=server_name, context=context, timeout=timeout)
         try:
             connection.request('GET' if body is None else 'POST', path, body=body, headers=headers)
             response = connection.getresponse()
+            if response.status >= 400:
+                raise HTTPError(server + path, response.status, 'customer API request failed', {}, None)
             require(response.status in (200, 201), 'customer API request failed')
             raw = response.read(2_000_001)
         finally:
@@ -163,7 +176,7 @@ def customer(server, ca, token, path, document=None, *, server_name=None):
     else:
         opener = request.build_opener(request.ProxyHandler({}), request.HTTPSHandler(context=context), NoRedirect())
         req = request.Request(server + path, data=body, headers=headers)
-        with opener.open(req, timeout=15) as response:
+        with opener.open(req, timeout=timeout) as response:
             require(response.status in (200, 201), 'customer API request failed')
             raw = response.read(2_000_001)
     require(len(raw) <= 2_000_000, 'customer response too large')
@@ -204,10 +217,17 @@ def registration(secret, target, now):
     return config, ca
 
 
-def renew(target, now=None):
+def renew(target, now=None, *, on_phase=None):
+    def phase(name, **metadata):
+        if on_phase:
+            on_phase(name, **metadata)
+
+    phase('credential_read')
     now = time.time() if now is None else now
     old = platform('get', 'secret', target['secret'], '-o', 'json')
     config, ca = registration(old, target, now)
+    phase('token_request', expires_at=datetime.fromtimestamp(
+        claims(config['bearerToken'], target, now)['exp'], timezone.utc).isoformat())
     tls = {'server_name': target['tls_server_name']} if 'tls_server_name' in target else {}
     sa = target['service_account']
     path = f"/api/v1/namespaces/{sa['namespace']}/serviceaccounts/{sa['name']}/token"
@@ -222,11 +242,13 @@ def renew(target, now=None):
             0 < new_claims['exp'] - new_claims['iat'] <= LIFETIME + 120, 'bounded six-hour renewal required')
     # Decoding JWT claims is only a binding check. The API authenticates the new
     # token against the original CA and proves the exact principal and scope.
+    phase('token_authentication')
     who = customer(target['server'], ca, token, '/apis/authentication.k8s.io/v1/selfsubjectreviews',
                    {'apiVersion': 'authentication.k8s.io/v1', 'kind': 'SelfSubjectReview'}, **tls)['status']['userInfo']
     require(who['username'] == new_claims['sub'] and who['uid'] == sa['uid'], 'new token authentication differs')
     # A fixed environment reader no longer enumerates per-app cache scopes.
     # Its original SA namespace remains the token renewal authority.
+    phase('scope_verification')
     for namespace in ([sa['namespace']] if target.get('cluster_read') else target['namespaces']):
         pods = customer(target['server'], ca, token, f'/api/v1/namespaces/{namespace}/pods?limit=1', **tls)
         require(pods['kind'] == 'PodList' and isinstance(pods['items'], list), 'namespace read verification failed')
@@ -234,11 +256,13 @@ def renew(target, now=None):
     encoded = base64.b64encode(json.dumps(updated, separators=(',', ':')).encode()).decode()
     patch = [{'op': 'test', 'path': '/metadata/resourceVersion', 'value': old['metadata']['resourceVersion']},
              {'op': 'replace', 'path': '/data/config', 'value': encoded}]
+    phase('credential_patch')
     try:
         platform('patch', 'secret', target['secret'], '--type=json', '--patch-file=/dev/stdin', '-o', 'json', document=patch)
     except Exception:
         # The write may already have arrived. Read back once; never replay it.
         pass
+    phase('credential_readback')
     try:
         observed = platform('get', 'secret', target['secret'], '-o', 'json')
         expected = {**old['data'], 'config': encoded}
@@ -253,8 +277,19 @@ def renew(target, now=None):
     return {'secret': target['secret'], 'status': 'unknown', 'code': 'RENEWAL_READBACK_UNKNOWN'}
 
 
-def render(policy, image, *, platform_arch='amd64', local_provenance=None):
-    validate_policy(policy)
+def command_environments(command):
+    prefix = ['python3', '/app/gitops/credentials.py', 'renew', '--policy', '/etc/railshot/credentials/policy.json']
+    require(isinstance(command, list) and command[:len(prefix)] == prefix, 'renewal command differs')
+    suffix = command[len(prefix):]
+    require(len(suffix) % 2 == 0 and all(suffix[i] == '--environment' for i in range(0, len(suffix), 2)), 'renewal scope arguments differ')
+    values = suffix[1::2]
+    require(all(isinstance(v, str) and re.fullmatch(LABEL, v) and not v.startswith('app-') for v in values)
+            and len(set(values)) == len(values), 'renewal environments differ')
+    return values
+
+
+def render(policy, image, *, platform_arch='amd64', local_provenance=None, environments=()):
+    select_policy(policy, environments)
     require(platform_arch in ('amd64', 'arm64'), 'supported platform architecture required')
     local = local_provenance is not None
     if local:
@@ -294,7 +329,8 @@ def render(policy, image, *, platform_arch='amd64', local_provenance=None):
            'securityContext': {'runAsNonRoot': True, 'runAsUser': 1000, 'runAsGroup': 1000,
                                'seccompProfile': {'type': 'RuntimeDefault'}},
            'containers': [{'name': 'renew', 'image': image,
-                           'command': ['python3', '/app/gitops/credentials.py', 'renew', '--policy', '/etc/railshot/credentials/policy.json'],
+                           'command': ['python3', '/app/gitops/credentials.py', 'renew', '--policy', '/etc/railshot/credentials/policy.json']
+                                      + [value for environment in environments for value in ('--environment', environment)],
                            'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                                                'capabilities': {'drop': ['ALL']}},
                            'resources': {'requests': {'cpu': '10m', 'memory': '64Mi'}, 'limits': {'cpu': '200m', 'memory': '128Mi'}},
@@ -322,15 +358,62 @@ def render(policy, image, *, platform_arch='amd64', local_provenance=None):
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
 
 
-def renew_policy(policy):
+def select_policy(policy, environments):
+    """Select registered environment servers, including their private app credentials."""
+    validate_policy(policy)
+    if not environments:
+        return policy
+    require(len(environments) == len(set(environments)), 'duplicate renewal environment')
+    servers = set()
+    for environment in environments:
+        rows = [row for row in policy['targets'] if row['target_id'] == environment]
+        require(len(rows) == 1 and not re.fullmatch(APPLICATION_ID, environment),
+                'registered renewal environment required')
+        servers.add(rows[0]['server'])
+    return {**policy, 'targets': [row for row in policy['targets'] if row['server'] in servers]}
+
+
+def renewal_error(exc):
+    """Stable codes only; native diagnostics and HTTP response bodies are private."""
+    reason = exc.reason if isinstance(exc, URLError) else exc.__cause__ or exc
+    if isinstance(reason, (TimeoutError, subprocess.TimeoutExpired)):
+        return 'RENEWAL_TIMEOUT'
+    if isinstance(reason, ssl.SSLError):
+        return 'CUSTOMER_TLS_FAILED'
+    if isinstance(exc, HTTPError):
+        return 'CUSTOMER_AUTH_REJECTED' if exc.code in (401, 403) else 'CUSTOMER_API_FAILED'
+    if isinstance(exc, URLError):
+        return 'CUSTOMER_API_UNREACHABLE'
+    return 'RENEWAL_FAILED'
+
+
+def renew_policy(policy, *, report=None):
     """Renew independent Secrets with bounded concurrency; keep failures isolated."""
     validate_policy(policy)
+    report_lock = threading.Lock()
 
     def attempt(target):
+        started = time.monotonic()
+        current = {'phase': 'credential_read'}
+
+        def emit(event, **values):
+            if report:
+                with report_lock:
+                    report({'event': event, 'checked_at': datetime.now(timezone.utc).isoformat(),
+                        'target_id': target['target_id'], 'secret': target['secret'],
+                        'duration_ms': round((time.monotonic() - started) * 1000), **current, **values})
+
+        def phase(name, **metadata):
+            current.update(phase=name, **metadata)
+            emit('renewal_phase')
+
+        emit('renewal_started')
         try:
-            return renew(target)
-        except Exception:
-            return {'secret': target['secret'], 'status': 'unchanged', 'code': 'RENEWAL_FAILED'}
+            result = renew(target, on_phase=phase) if report else renew(target)
+        except Exception as exc:
+            result = {'secret': target['secret'], 'status': 'unchanged', 'code': renewal_error(exc)}
+        emit('renewal_finished', **{k: v for k, v in result.items() if k != 'secret'})
+        return result
 
     # Policy validation rejects duplicate Secrets. Each worker retains the
     # existing resourceVersion check and readback; it never retries a write.
@@ -338,22 +421,70 @@ def renew_policy(policy):
         return list(executor.map(attempt, policy['targets']))
 
 
+def observe_environment(environment, context, *, now=None):
+    """Read two environment credentials and authenticate them; never issue a token."""
+    now = time.time() if now is None else now
+    result = {'state': 'collection_failed', 'last_success_at': None, 'expires_at': None,
+              'checked_at': datetime.fromtimestamp(now, timezone.utc).isoformat(), 'reason': None}
+    try:
+        require(environment in ('k3s-aws', 'k3s-gcp') and isinstance(context, str)
+                and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/@-]{0,200}', context), 'registered observation environment required')
+        def read(kind, name):
+            return json.loads(native(['kubectl', '--context', context, '--request-timeout=4s', '-n', 'argocd',
+                                     'get', kind, name, '-o', 'json'], timeout=5))
+        policy = validate_policy(json.loads(read('configmap', 'railshot-credentials')['data']['policy.json']))
+        rows = [row for row in policy['targets'] if row['target_id'] in (environment, 'observer-' + environment)]
+        if len(rows) != 2:
+            return {**result, 'state': 'no_data', 'reason': 'ENVIRONMENT_OBSERVER_NOT_REGISTERED'}
+        require(len({row['server'] for row in rows}) == 1, 'credential environment differs')
+        def inspect(row):
+            config, ca = registration(read('secret', row['secret']), row, now)
+            issued = claims(config['bearerToken'], row, now)
+            tls = {'server_name': row['tls_server_name']} if 'tls_server_name' in row else {}
+            who = customer(row['server'], ca, config['bearerToken'], '/apis/authentication.k8s.io/v1/selfsubjectreviews',
+                {'apiVersion': 'authentication.k8s.io/v1', 'kind': 'SelfSubjectReview'}, timeout=4, **tls)['status']['userInfo']
+            require(who['username'] == issued['sub'] and who['uid'] == row['service_account']['uid'], 'credential authentication differs')
+            return issued
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            verified = list(executor.map(inspect, rows))
+        return {**result, 'state': 'ready',
+                'last_success_at': datetime.fromtimestamp(min(row['iat'] for row in verified), timezone.utc).isoformat(),
+                'expires_at': datetime.fromtimestamp(min(row['exp'] for row in verified), timezone.utc).isoformat()}
+    except Exception as exc:
+        return {**result, 'reason': renewal_error(exc)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('renew', 'render'))
-    parser.add_argument('--policy', required=True, type=Path)
+    parser.add_argument('command', choices=('renew', 'render', 'observe'))
+    parser.add_argument('--policy', type=Path)
+    parser.add_argument('--context', help='operator kube context for read-only observation')
+    parser.add_argument('--environment', action='append', default=[], help='renew only this registered environment and its apps; repeat for each environment')
     parser.add_argument('--image', help='published existing API image digest, for render only')
     args = parser.parse_args()
     try:
+        if args.command == 'observe':
+            require(len(args.environment) == 1, 'one observation environment required')
+            print(json.dumps(observe_environment(args.environment[0], args.context)), flush=True); return 0
+        require(args.policy is not None, 'renewal policy required')
         require(args.policy.stat().st_size < MAX_POLICY_BYTES, 'small operator policy required')
         policy = validate_policy(json.loads(args.policy.read_bytes()))
         if args.command == 'render':
-            print(json.dumps(render(policy, args.image or ''), indent=2)); return 0
-        results = renew_policy(policy)
-        print(json.dumps({'results': results}))
-        return 0 if all(r['status'] == 'renewed' for r in results) else 1
+            print(json.dumps(render(policy, args.image or '', environments=args.environment), indent=2)); return 0
+        selected = select_policy(policy, args.environment)
+        started = time.monotonic()
+        results = renew_policy(selected, report=lambda event: print(json.dumps(event), flush=True))
+        renewed = sum(row['status'] == 'renewed' for row in results)
+        print(json.dumps({'event': 'renewal_summary', 'checked_at': datetime.now(timezone.utc).isoformat(),
+                          'status': 'succeeded' if renewed == len(results) else 'failed',
+                          'environments': args.environment, 'selected_count': len(results),
+                          'excluded_count': len(policy['targets']) - len(results),
+                          'renewed_count': renewed, 'failed_count': len(results) - renewed,
+                          'duration_ms': round((time.monotonic() - started) * 1000),
+                          'results': results}), flush=True)
+        return 0 if renewed == len(results) else 1
     except Exception:
-        print(json.dumps({'status': 'blocked', 'code': 'INVALID_RENEWAL_POLICY'})); return 2
+        print(json.dumps({'status': 'blocked', 'code': 'INVALID_RENEWAL_POLICY'}), flush=True); return 2
 
 
 if __name__ == '__main__':

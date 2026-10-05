@@ -227,11 +227,14 @@ resource "google_certificate_manager_certificate" "routes" {
 }
 
 resource "google_certificate_manager_certificate_map_entry" "routes" {
-  for_each     = var.routes
-  name         = local.route_names[each.key]
-  map          = google_certificate_manager_certificate_map.app.name
-  hostname     = each.value.hostname
-  certificates = [each.value.certificate_id != null ? each.value.certificate_id : google_certificate_manager_certificate.routes[each.key].id]
+  for_each = var.routes
+  name     = local.route_names[each.key]
+  map      = google_certificate_manager_certificate_map.app.name
+  hostname = each.value.hostname
+  certificates = distinct(concat(
+    [each.value.certificate_id != null ? each.value.certificate_id : google_certificate_manager_certificate.routes[each.key].id],
+    var.application_certificate == null ? [] : [var.application_certificate.id]
+  ))
 }
 
 resource "google_compute_target_https_proxy" "app" {

@@ -59,6 +59,7 @@ let selectedSource = null;
 let updateApplication = null, updatePreviewRequest = null, applicationDetail = null;
 let updateStage = 'source', updateRunId = null, previewExpiryTimer;
 let applications = [], applicationPageEnds = [], applicationPage = 0, applicationsController, applicationController;
+let applicationObservation = null, applicationObservationError = false;
 let reviewed = null;
 let deploymentOptions = [];
 let profiles = [];
@@ -1072,7 +1073,7 @@ function renderMetrics() {
     : '수집기 수명 정보 미제공';
 }
 // Even after polling is stopped, expire old samples on screen.
-const freshnessTimer = setInterval(() => { renderMetrics(); renderConsole(); renderEnvironments(); }, 15000);
+const freshnessTimer = setInterval(() => { renderMetrics(); renderConsole(); renderEnvironments(); renderApplicationObservation(); }, 15000);
 window.addEventListener('pagehide', () => clearInterval(freshnessTimer));
 document.querySelectorAll('[data-console]').forEach((button) => button.addEventListener('click', () => {
   consoleTab = button.dataset.console;
@@ -1173,7 +1174,8 @@ function renderApplications() {
     title.append(element('strong', application.app), element('span', applicationLabel(application), 'state-badge'));
     content.append(title,
       element('small', `${environmentLabel(application)} · 앱 ID ${application.id}`, 'history-meta'),
-      element('small', `${application.current_deployment_state === 'unverified' ? '마지막 검증 성공 (현재 상태 확인 필요)' : '현재 서비스'}: ${application.current_deployment ? application.current_deployment.id : '검증된 배포 없음'}`, 'history-meta'),
+      element('small', `등록 상태: ${application.status === 'ready' ? '등록 완료' : applicationLabel(application)}`, 'history-meta'),
+      element('small', `${application.current_deployment_state === 'unverified' ? '마지막 검증 배포 (이후 적용 확인 필요)' : '마지막 검증 배포'}: ${application.current_deployment ? application.current_deployment.id : '검증된 배포 없음'}`, 'history-meta'),
       element('small', `최근 시도: ${application.latest_deployment ? `${executionLabel(application.latest_deployment)} · ${application.latest_deployment.id}` : '없음'}`, 'history-meta'));
     const detail = element('button', '앱 상세·업데이트', 'secondary-button'); detail.type = 'button';
     detail.setAttribute('aria-label', `${application.app} 앱 상세·업데이트`);
@@ -1182,7 +1184,7 @@ function renderApplications() {
   }));
   document.querySelector('#applications-more').hidden = applicationPage >= applicationPageEnds.length - 1;
   document.querySelector('#applications-more').disabled = Boolean(applicationsController);
-  renderApplicationActions(); renderHistory(); renderRunSite(); renderUpdateContext();
+  renderApplicationActions(); renderApplicationObservation(); renderHistory(); renderRunSite(); renderUpdateContext();
 }
 async function loadApplications(more = false) {
   if (more) {
@@ -1209,7 +1211,7 @@ async function loadApplications(more = false) {
     if (applicationsController !== controller) return false;
     if (new Set(rows.map((row) => row.id)).size !== rows.length) throw new Error('앱 ID가 중복된 응답입니다.');
     applications = rows; applicationPageEnds = pageEnds;
-    message.textContent = applications.length ? `${rows.length}개 앱 · 최근 등록순 · 이 세션의 현재 서비스와 최근 배포 시도를 구분해 표시합니다.` : '아직 이 세션에 등록된 앱이 없습니다.';
+    message.textContent = applications.length ? `${rows.length}개 앱 · 최근 등록순 · 현재 운영 상태는 앱 상세에서 확인하세요.` : '아직 이 세션에 등록된 앱이 없습니다.';
     return true;
   } catch (cause) {
     if (applicationsController === controller) message.textContent = `앱 목록 조회 실패: ${cause.message} 앱 새로고침을 눌러 다시 확인하세요.`;
@@ -1223,26 +1225,80 @@ async function loadApplications(more = false) {
 async function loadApplication(id) {
   applicationController?.abort();
   const controller = new AbortController(); applicationController = controller; applicationDetail = null;
+  applicationObservation = null; applicationObservationError = false;
   const panel = document.querySelector('#application-detail'), message = document.querySelector('#application-detail-message');
   panel.hidden = false; document.querySelector('#application-detail-title').textContent = '앱 상세';
   document.querySelector('#application-versions').replaceChildren(); document.querySelector('#application-update').disabled = true;
+  document.querySelector('#application-observation').replaceChildren();
+  document.querySelector('#detail-application-site').replaceChildren(); document.querySelector('#detail-application-actions').replaceChildren();
   message.textContent = '앱 상세를 조회하고 있습니다.';
   try {
     const { data } = await request(`/api/v1/applications/${encodeURIComponent(id)}`, {}, controller);
     if (applicationController !== controller) return;
     if (data.id !== id || typeof data.app !== 'string' || typeof data.target_id !== 'string') throw new Error('앱 상세가 요청한 앱과 일치하지 않습니다.');
     applicationDetail = data;
+    applications = applications.map(row => row.id === id ? data : row);
     document.querySelector('#application-detail-title').textContent = data.app;
     const blocked = updateBlocked(data);
     message.textContent = `${environmentLabel(data)} · 앱 ID ${data.id}${blocked ? ` · ${blocked}` : ''}`;
     document.querySelector('#application-versions').replaceChildren(
-      applicationVersion(data.current_deployment_state === 'unverified' ? '마지막 검증 성공 · 현재 상태 확인 필요' : '현재 서비스 버전', data.current_deployment, data.current_deployment_state === 'unverified'),
+      applicationVersion(data.current_deployment_state === 'unverified' ? '마지막 검증 배포 · 이후 적용 확인 필요' : '마지막 검증 배포', data.current_deployment, data.current_deployment_state === 'unverified'),
       applicationVersion('최근 배포 시도', data.latest_deployment));
     document.querySelector('#application-update').disabled = Boolean(blocked);
+    renderApplications(); renderApplicationObservation();
     document.querySelector('#application-detail-title').focus({ preventScroll: true }); panel.scrollIntoView({ block: 'nearest' });
+    try {
+      const { data: observed } = await request(`/api/v1/applications/${encodeURIComponent(id)}/observations`, {}, controller);
+      if (applicationController !== controller) return;
+      if (observed.application_id !== id || !['ready', 'no_data', 'collection_failed', 'unsupported', 'stale'].includes(observed.state)) throw new Error('관측 대상 불일치');
+      applicationObservation = observed;
+    } catch {
+      if (applicationController !== controller) return;
+      applicationObservationError = true;
+    }
+    renderApplicationObservation();
   } catch (cause) {
     if (applicationController === controller) message.textContent = `앱 상세 조회 실패: ${cause.message}`;
-  } finally { if (applicationController === controller) { applicationController = null; renderApplicationActions(); } }
+  } finally { if (applicationController === controller) { applicationController = null; renderApplicationActions(); renderApplicationObservation(); } }
+}
+function renderApplicationObservation() {
+  if (!applicationDetail) return;
+  const host = document.querySelector('#application-observation');
+  let observed = applicationObservation;
+  const owned = applications.find(row => row.id === applicationDetail.id), focused = host.contains(document.activeElement) ? document.activeElement.textContent : null;
+  const changed = owned && (owned.status !== applicationDetail.status || owned.current_deployment?.id !== applicationDetail.current_deployment?.id
+    || owned.latest_deployment?.id !== applicationDetail.latest_deployment?.id);
+  if (changed && observed) applicationObservation = observed = { ...observed, state: 'stale', reason: 'deployment_superseded' };
+  const fresh = (value) => Number.isFinite(Date.parse(value)) && Date.now() - Date.parse(value) <= 90000 && Date.parse(value) <= Date.now() + 5000;
+  const outdated = observed && (changed || observed.state === 'stale' || observed.state === 'ready' && (!fresh(observed.checked_at)
+    || observed.workload?.state === 'ready' && !fresh(observed.workload.checked_at)
+    || observed.public_http?.state === 'succeeded' && !fresh(observed.public_http.verified_at)));
+  const normal = observed?.state === 'ready' && !outdated && observed.workload?.state === 'ready' && observed.public_http?.state === 'succeeded';
+  const label = applicationObservationError ? '운영 상태 수집 실패' : !observed ? '운영 상태 확인 중'
+    : outdated ? '오래된 운영 관측' : observed.state === 'collection_failed' ? '운영 상태 수집 실패'
+    : observed.state === 'unsupported' ? '운영 관측 미지원' : observed.state === 'no_data' ? '운영 관측 없음'
+    : normal ? '현재 정상 응답' : observed.workload?.state === 'missing' ? '실행 리소스 없음'
+    : observed.workload?.state === 'progressing' ? '앱 준비 중' : observed.public_http?.state === 'unverified' ? '공개 응답 확인 필요' : '실행 상태 확인 필요';
+  const reasons = { runtime_observation_not_configured: '이 환경의 운영 관측이 아직 연결되지 않았습니다.',
+    deployment_not_started: '실행 상태를 확인할 배포가 아직 없습니다.', deployment_superseded: '관측 중 배포가 변경됐습니다. 다시 확인해 주세요.',
+    runtime_observation_unavailable: '현재 실행 환경의 상태를 수집하지 못했습니다.', WORKLOAD_MISSING: '등록된 앱의 실행 리소스를 찾지 못했습니다.',
+    WORKLOAD_NOT_READY: '앱 실행 리소스가 아직 준비되지 않았습니다.', PUBLIC_HTTP_UNVERIFIED: '공개 주소의 정상 응답을 확인하지 못했습니다.' };
+  const badge = element('span', label, 'state-badge'); badge.dataset.state = normal ? 'ready' : outdated ? 'stale' : 'missing';
+  host.replaceChildren(element('h4', '현재 운영 상태'), badge,
+    element('p', observed?.checked_at ? `관측 시각: ${formatTime(observed.checked_at)}` : '관측 시각 없음', 'field-note'));
+  const reason = applicationObservationError ? '현재 상태를 다시 조회해 주세요. 등록·배포 기록은 유지됩니다.'
+    : changed ? '앱 상태나 배포가 변경됐습니다. 현재 상태를 다시 확인해 주세요.'
+    : outdated ? '마지막 관측이 오래됐습니다. 현재 상태를 다시 확인해 주세요.' : reasons[observed?.reason];
+  if (reason) host.append(element('p', reason, 'field-note'));
+  const actions = element('div', '', 'history-actions'), refresh = element('button', '현재 상태 다시 확인', 'text-button');
+  refresh.type = 'button'; refresh.disabled = Boolean(applicationController); refresh.onclick = () => loadApplication(applicationDetail.id); actions.append(refresh);
+  const deployment = [applicationDetail.current_deployment, applicationDetail.latest_deployment].find(row => row?.id && row.id === observed?.deployment_id);
+  if (deployment) {
+    const logs = element('button', '이 앱의 실행 로그', 'text-button'); logs.type = 'button';
+    logs.onclick = () => openExecution({ ...deployment, kind: 'deployments' }, 'app'); actions.append(logs);
+  }
+  host.append(actions);
+  if (focused) [...actions.querySelectorAll('button')].find(button => button.textContent === focused)?.focus({ preventScroll: true });
 }
 async function openUpdatePreview(record) {
   if (submitting) return;
@@ -1382,6 +1438,20 @@ function environmentState(observation) {
   if (state === 'ready' && [0, 1].includes(health.value)) return health.value === 1 ? 'ready' : 'failed';
   return 'missing';
 }
+function credentialStatus(observation) {
+  const value = observation?.credentials;
+  if (observation?.failed || value?.state === 'collection_failed') return { label: '자격 갱신 상태 수집 실패' };
+  if (!value || value.state === 'no_data') return { label: '자격 갱신 관측 없음' };
+  if (value.state !== 'ready') return { label: '자격 갱신 관측 없음' };
+  const checked = Date.parse(value.checked_at), now = Date.now();
+  if (!Number.isFinite(checked) || now - checked > 90000 || checked > now + 5000)
+    return { label: '오래된 자격 갱신 관측' };
+  const expiry = Date.parse(value.expires_at), issued = Date.parse(value.last_success_at);
+  if (!Number.isFinite(expiry) || !Number.isFinite(issued) || issued > checked + 5000 || issued >= expiry) return { label: '자격 갱신 관측 없음' };
+  const minutes = Math.ceil((expiry - now) / 60000);
+  if (minutes <= 0) return { label: '자격 만료됨' };
+  return { label: `자격 확인 완료 · 만료까지 ${Math.floor(minutes / 60)}시간 ${minutes % 60}분`, ready: true };
+}
 function renderRuntimeConnection() {
   const rows = targets.filter((item) => item.provider === deploymentSelection().provider);
   document.querySelector('#runtime-connection-status').textContent = rows.length ? rows.map((row) => {
@@ -1408,6 +1478,7 @@ function renderEnvironments() {
     const name = element('td', row.label || row.id);
     name.append(element('small', `${providerNames[row.provider] || row.provider || '종류 미제공'} · ${row.application_name || '앱 미지정'}`));
     const status = document.createElement('td'), badge = element('span', stateNames[state], 'state-badge'); badge.dataset.state = state; status.append(badge);
+    status.append(element('small', credentialStatus(observation).label));
     tr.append(name, status, ...['cpu_percent', 'memory_percent', 'disk_percent', 'http'].map((metric) => element('td', observation?.failed ? '조회 실패' : metricText(metric, observation))));
     tr.append(element('td', observation?.metrics?.runtime_healthz?.observed_at ? formatTime(observation.metrics.runtime_healthz.observed_at) : '확인 시각 없음'));
     return tr;
@@ -1421,6 +1492,18 @@ function renderEnvironments() {
       const cell = document.createElement('div'), value = element('dd', observation?.failed ? '조회 실패' : metricText(key, observation));
       value.append(element('small', formatTime(observation?.metrics?.[key]?.observed_at))); cell.append(element('dt', label), value); list.append(cell);
     }
+    const credentials = credentialStatus(observation), cell = document.createElement('div'), value = element('dd', credentials.label);
+    const reasons = { ENVIRONMENT_OBSERVER_NOT_REGISTERED: '환경 공통 자격 관측이 아직 등록되지 않았습니다.',
+      RENEWAL_TIMEOUT: '자격 상태 확인 시간이 초과됐습니다.', CUSTOMER_TLS_FAILED: '실행 환경의 TLS 연결을 검증하지 못했습니다.',
+      CUSTOMER_AUTH_REJECTED: '실행 환경에서 자격 인증을 거부했습니다.', CUSTOMER_API_FAILED: '실행 환경 API가 자격 확인에 실패했습니다.',
+      CUSTOMER_API_UNREACHABLE: '실행 환경 API에 연결할 수 없습니다.', RENEWAL_FAILED: '자격 상태를 확인하지 못했습니다.' };
+    if (reasons[observation?.credentials?.reason]) value.append(element('small', reasons[observation.credentials.reason]));
+    if (credentials.ready) {
+      value.append(element('small', `최근 검증한 자격 발급: ${formatTime(observation.credentials.last_success_at)}`),
+        element('small', `가장 빠른 만료: ${formatTime(observation.credentials.expires_at)}`));
+    }
+    value.append(element('small', observation?.credentials?.checked_at ? `자격 관측 시각: ${formatTime(observation.credentials.checked_at)}` : '자격 관측 시각 없음'));
+    cell.append(element('dt', '환경 공통 배포·관측 자격'), value); list.append(cell);
     details.append(list); return details;
   }));
   if (focused) [...document.querySelectorAll('#environment-detail details')].find((item) => item.dataset.target === focused)?.querySelector('summary').focus();

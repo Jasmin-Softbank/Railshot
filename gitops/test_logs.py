@@ -47,12 +47,16 @@ class LogsTest(unittest.TestCase):
         self.assertEqual(context, 'control'); self.assertEqual(namespace, 'argocd')
         self.calls.append(args)
         self.assertEqual(args[0], 'get')
+        if args[1] == 'configmap':
+            return {'data': {'policy.json': json.dumps({'version': 1, 'targets': []})}}
         return self.secret if args[1] == 'secret' else self.live
 
     def customer(self, server, ca, token, path, *, server_name=None):
         self.assertEqual(server_name, self.server_name)
         self.assertEqual((server, ca, token), ('https://192.0.2.1:6443', b'CA', 'synthetic-sensitive-token'))
         self.calls.append(path)
+        if '/deployments?' in path:
+            return {'kind': 'DeploymentList', 'items': [self.deployment]}
         if '/deployments/' in path:
             return self.deployment
         if '/replicasets?' in path:
@@ -151,6 +155,50 @@ class LogsTest(unittest.TestCase):
             policy['data']['policy.json'] = json.dumps({'version': 1, 'targets': [{**row, **change}]})
             with self.subTest(change=change), patch('argo.kubectl', side_effect=control), self.assertRaises(ValueError):
                 logs.customer_auth(self.config, self.review)
+
+    def test_app_diagnostics_select_one_read_only_environment_credential_and_fail_closed(self):
+        import test_credentials
+        credential = test_credentials.CredentialsTest(); credential.setUp()
+        app_id = 'app-' + 'a' * 24
+        review = copy.deepcopy(self.review)
+        review['receipt']['target_id'] = review['application']['spec']['project'] = app_id
+        review['application']['spec']['destination']['namespace'] = app_id
+        row = {**credential.target, 'secret': 'railshot-observer-k3s-aws', 'target_id': 'observer-k3s-aws',
+               'project': '', 'cluster_read': True, 'namespaces': ['tenant-demo'],
+               'service_account': {**credential.target['service_account'], 'name': 'railshot-observer'}}
+        now = int(logs.datetime.now(logs.timezone.utc).timestamp())
+        payload = {'sub': 'system:serviceaccount:tenant-demo:railshot-observer', 'iat': now - 60,
+                   'exp': now + 3600, 'aud': ['k3s'], 'kubernetes.io': {'namespace': 'tenant-demo',
+                   'serviceaccount': {'name': 'railshot-observer', 'uid': row['service_account']['uid']}}}
+        token = 'e30.' + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=') + '.signature'
+        secret = copy.deepcopy(credential.secret)
+        secret['metadata'].update(name=row['secret'], labels={**logs.credentials.LABELS, 'argocd.argoproj.io/secret-type': 'railshot-observer'})
+        auth = json.loads(base64.b64decode(secret['data']['config'])); auth['bearerToken'] = token
+        secret['data'].update(name=base64.b64encode(row['target_id'].encode()).decode(), project='', namespaces='',
+                              config=base64.b64encode(json.dumps(auth).encode()).decode())
+        policy = {'data': {'policy.json': json.dumps({'version': 1, 'targets': [row]})}}
+        def control(context, namespace, *args):
+            self.assertEqual(args[0], 'get')
+            if args[1] == 'secret':
+                self.assertEqual(args[2], row['secret'])  # Never silently fall back to a write credential.
+                return secret
+            return policy
+        with patch('argo.kubectl', side_effect=control):
+            actual, options = logs.customer_auth(self.config, review)
+        self.assertEqual(actual, (row['server'], credential.ca, token)); self.assertEqual(options, {})
+        for change in [{'cluster_read': False}, {'ca_sha256': 'b' * 64},
+                       {'service_account': {**row['service_account'], 'name': 'railshot-argocd'}}]:
+            policy['data']['policy.json'] = json.dumps({'version': 1, 'targets': [{**row, **change}]})
+            with self.subTest(change=change), patch('argo.kubectl', side_effect=control), self.assertRaises(ValueError):
+                logs.customer_auth(self.config, review)
+        policy['data']['policy.json'] = json.dumps({'version': 1, 'targets': [row,
+            {**row, 'target_id': 'observer-k3s-gcp', 'secret': 'railshot-observer-k3s-gcp'}]})
+        with patch('argo.kubectl', side_effect=control), self.assertRaises(ValueError):
+            logs.customer_auth(self.config, review)
+        policy['data']['policy.json'] = json.dumps({'version': 1, 'targets': [row]})
+        secret['metadata']['labels'] = logs.credentials.LABELS
+        with patch('argo.kubectl', side_effect=control), self.assertRaises(ValueError):
+            logs.customer_auth(self.config, review)
 
     def test_registered_private_tls_name_reaches_every_metadata_and_log_request(self):
         auth = json.loads(base64.b64decode(self.secret['data']['config']))

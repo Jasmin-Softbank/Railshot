@@ -75,6 +75,28 @@ def load_bound_review(config, value):
 
 def customer_auth(config, review):
     app = review['application']; spec = app['spec']; target = review['receipt']['target_id']
+    if re.fullmatch(credentials.APPLICATION_ID, target):
+        argo.require(spec['project'] == target and spec['destination']['namespace'] == target,
+                     'registered application scope differs')
+        policy = argo.kubectl(config['context'], app['metadata']['namespace'],
+                              'get', 'configmap', 'railshot-credentials', '-o', 'json')
+        rows = credentials.validate_policy(json.loads(policy['data']['policy.json']))['targets']
+        observers = [row for row in rows if row['target_id'] in ('observer-k3s-aws', 'observer-k3s-gcp')
+                     and row['server'] == spec['destination']['server']]
+        argo.require(len(observers) <= 1, 'one registered environment observer required')
+        if observers:
+            selected = observers[0]
+            argo.require(selected['project'] == '' and selected.get('cluster_read') is True
+                         and 'previous_scope' not in selected and selected['service_account']['name'] == 'railshot-observer',
+                         'read-only environment observer required')
+            secret = argo.kubectl(config['context'], app['metadata']['namespace'],
+                                  'get', 'secret', selected['secret'], '-o', 'json')
+            argo.require(secret['metadata'].get('labels', {}).get('argocd.argoproj.io/secret-type') == 'railshot-observer',
+                         'observer must not use an Argo write credential')
+            auth, ca = credentials.registration(secret, selected, datetime.now(timezone.utc).timestamp())
+            options = {'server_name': credentials.tls_name(selected['tls_server_name'])} if 'tls_server_name' in selected else {}
+            return (selected['server'], ca, auth['bearerToken']), options
+        # Keep the original app credential only until its environment observer is registered.
     secret = argo.kubectl(config['context'], app['metadata']['namespace'], 'get', 'secret', 'railshot-' + target, '-o', 'json')
     meta = secret['metadata']
     argo.require(secret['kind'] == 'Secret' and meta['name'] == 'railshot-' + target and

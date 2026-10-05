@@ -70,8 +70,9 @@ class Kube:
     def __call__(self, ns, *args, document=None):
         if ns != APP:
             self.shared_calls.append((ns, args, document))
-            assert args == ('get', 'serviceaccount', runtime.SA, '--ignore-not-found', '-o', 'json') and document is None
-            return copy.deepcopy(self.shared_accounts.get(ns))
+            assert args[:2] == ('get', 'serviceaccount') and args[2] in (runtime.SA, 'railshot-observer')
+            assert args[3:] == ('--ignore-not-found', '-o', 'json') and document is None
+            return copy.deepcopy(self.shared_accounts.get((ns, args[2]), self.shared_accounts.get(ns)))
         assert ns == APP
         if args[0] in ('patch', 'delete'):
             self.writes.append((args, copy.deepcopy(document)))
@@ -224,6 +225,44 @@ class LifecycleRuntimeTest(unittest.TestCase):
                 self.blocked('APPLICATION_RUNTIME_FOREIGN_OWNER', lambda: self.inventory(shared_renewal=shared))
                 self.assertEqual(self.kube.writes, [])
                 self.assertEqual(self.kube.shared_calls, [])
+
+    def test_common_observer_stop_start_delete_preserves_both_environment_accounts(self):
+        shared, _ = self.shared_scope()
+        namespace = shared['service_account']['namespace']
+        observer = obj('ServiceAccount', 'railshot-observer')
+        observer['metadata'].update(namespace=namespace, uid='observer-uid')
+        self.kube.shared_accounts[namespace, 'railshot-observer'] = observer
+        observer_renewal = {'service_account': {key: observer['metadata'][key] for key in ('name', 'namespace', 'uid')}}
+        self.kube.objects = [item for item in self.kube.objects if not (
+            item['kind'] in ('ServiceAccount', 'RoleBinding') and item['metadata']['name'] == runtime.SA)]
+        self.kube.objects.extend([
+            obj('Role', 'railshot-observer', rules=[]),
+            obj('RoleBinding', 'railshot-environment-observer',
+                roleRef={'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'railshot-observer'},
+                subjects=[{'kind': 'ServiceAccount', 'name': 'railshot-observer', 'namespace': namespace}])])
+        def snapshot(action):
+            return runtime.inventory(self.kube, self.binding, None, action,
+                                     shared_renewal=shared, observer_renewal=observer_renewal)
+        original = snapshot('stop')
+        self.assertIsNone(original['service_account'])
+        self.assertEqual(original['observer_service_account'], observer_renewal['service_account'])
+        anchors = copy.deepcopy(self.kube.shared_accounts)
+        for changed in ('uid', 'subject'):
+            if changed == 'uid':
+                observer['metadata']['uid'] = 'replacement'
+            else:
+                self.kube.find('RoleBinding', 'railshot-environment-observer')['subjects'][0]['namespace'] = 'foreign'
+            self.blocked('APPLICATION_RUNTIME_SHARED_SERVICE_ACCOUNT_MISMATCH' if changed == 'uid'
+                         else 'APPLICATION_RUNTIME_FOREIGN_OWNER', lambda: snapshot('delete'))
+            observer['metadata']['uid'] = 'observer-uid'
+            self.kube.find('RoleBinding', 'railshot-environment-observer')['subjects'][0]['namespace'] = namespace
+        self.assertFalse(self.kube.writes)
+        self.assertEqual(runtime.execute(self.kube, self.binding, 'stop', original)['status'], 'succeeded')
+        self.assertEqual(runtime.execute(self.kube, self.binding, 'start', snapshot('start'),
+                                        stopped_inventory=original)['status'], 'succeeded')
+        self.assertEqual(runtime.execute(self.kube, self.binding, 'delete', snapshot('delete'))['status'], 'succeeded')
+        self.assertEqual(self.kube.shared_accounts, anchors)
+        self.assertTrue(all(args[0] == 'get' and body is None for _, args, body in self.kube.shared_calls))
 
     def test_environment_anchor_missing_replaced_or_terminating_blocks_before_writes(self):
         for change in ('missing', 'uid', 'namespace', 'terminating', 'owner'):
