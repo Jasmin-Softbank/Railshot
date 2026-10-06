@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -46,6 +47,9 @@ class CredentialTest(unittest.TestCase):
         return base64.b64encode(encrypted.read_bytes()).decode()
 
     def test_encrypted_install_and_runtime_binding(self):
+        config = self.home / 'config.toml'
+        config.write_text('forced_login_method = "chatgpt"\nforced_chatgpt_workspace_id = "previous-account"\n')
+        config.chmod(0o600)
         encrypted = self.envelope()
         self.assertNotIn('SECRET_CANARY', encrypted)
         result = self.receive('apply', self.nonce, encrypted)
@@ -55,6 +59,13 @@ class CredentialTest(unittest.TestCase):
         self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
         route = effective_auth_route(env={'RAILSHOT_CODEX_HOME': str(self.home)})
         self.assertEqual((route['model'], route['credential_rotation']), ('gpt-5.5', self.nonce))
+        self.assertEqual(tomllib.loads(config.read_text())['forced_chatgpt_workspace_id'], 'platform-test')
+        self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+        self.assertIn('previous-account', (self.root / 'credential-rotation' / ('previous-' + self.nonce) / 'config.toml').read_text())
+        config.write_text('forced_chatgpt_workspace_id = "wrong-account"\n')
+        with self.assertRaisesRegex(ValueError, 'configuration mismatch'):
+            effective_auth_route(env={'RAILSHOT_CODEX_HOME': str(self.home)})
+        config.unlink()
         self.auth['tokens']['account_id'] = 'different-account'; self.file.write_text(json.dumps(self.auth))
         with self.assertRaisesRegex(ValueError, 'binding mismatch'):
             effective_auth_route(env={'RAILSHOT_CODEX_HOME': str(self.home)})
