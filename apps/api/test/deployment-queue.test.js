@@ -350,6 +350,41 @@ test('verified deletion recreates the same app identity as a new generation with
   assert.equal(f.submissions.length, 2);
 });
 
+test('a verified deletion settles unfinished deliveries so the recreated app is neither stalled nor fenced', async (t) => {
+  // polling: CD recovery left the row running between polls; uncertain: recovery stopped with an unknown outcome.
+  const cases = { polling: { cd: { state: 'running', deployed: false, revision: null }, public_http: { state: 'not_run' } },
+    uncertain: { cd: { state: 'blocked', deployed: false, revision: null }, public_http: { state: 'not_run' }, error: { code: 'CD_RECONCILE_REQUIRED' } } };
+  for (const [name, observed] of Object.entries(cases)) await t.test(name, async (t) => {
+    const f = await fixture(t), deliver = f.adapter.deployPublished;
+    f.adapter.deployPublished = async () => ({ cd: { state: 'unknown', deployed: false }, public_http: { state: 'not_run' }, error: { outcome_unknown: true } });
+    f.adapter.observePublished = async () => structuredClone(observed);
+    f.adapter.planLifecycle = async (application, { id, action }) => ({ public: { id, application_id: application.id, action,
+      plan_hash: 'e'.repeat(64), resources: [{ kind: 'Deployment', name: application.app }], retained: [],
+      expires_at: new Date(Date.now() + 60000).toISOString() }, private: {} });
+    f.adapter.verifyLifecyclePlan = async () => {};
+    f.adapter.applyLifecycle = async (application, plan) => ({ application_id: application.id, action: plan.public.action,
+      status: 'succeeded', steps: [], residuals: [] });
+    const first = await f.create('gamma');
+    const stale = await until(() => f.read(first.id), (row) => name === 'polling'
+      ? row.status === 'running' && row.cd?.observation?.next_retry_at : row.status === 'blocked' && row.error?.outcome_unknown);
+    const id = stale.application_id;
+    const plan = await f.product.createApplicationPlan(id, { action: 'delete' }, f.owner);
+    const operation = await f.product.createApplicationOperation(id, { action: 'delete', plan_id: plan.id,
+      plan_hash: plan.plan_hash, confirmation: 'gamma', delete_data: true }, 'delete-gamma', f.owner);
+    assert.equal((await until(() => f.product.getOperation(operation.id, f.owner))).status, 'succeeded');
+    const settled = await f.read(first.id);
+    assert.equal(settled.status, 'blocked');
+    assert.deepEqual([settled.error.code, settled.error.outcome_unknown], ['APPLICATION_DELETED', false]);
+
+    f.adapter.deployPublished = deliver;
+    const second = await f.create('gamma', 'gamma-again');
+    assert.equal(second.application_id, id);
+    assert.equal((await until(() => f.read(second.id))).status, 'succeeded');
+    assert.equal(f.product.getApplication(id, f.owner).current_deployment.id, second.id);
+    assert.equal((await f.read(first.id)).status, 'blocked');
+  });
+});
+
 test('restart completes the original GCP deployment only when native registration never started', async t => {
   for (const started of [false, true]) await t.test(`native request exists: ${started}`, async t => {
     const f = await fixture(t);

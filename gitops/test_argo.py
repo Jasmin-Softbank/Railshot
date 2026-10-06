@@ -100,6 +100,14 @@ class ArgoTest(unittest.TestCase):
         live = self.healthy()
         live['status']['health']['status'] = 'Degraded'
         self.assertEqual(argo.observe(self.review, live)['status'], 'failed')
+        self.assertTrue(argo.observe(self.review, live)['rollout_failed'])
+        # A condition error (e.g. a transient repo-server ComparisonError) fails closed but is not a verified rollout outcome.
+        for health in ('Healthy', 'Progressing'):
+            transient = self.healthy()
+            transient['status']['health']['status'] = health
+            transient['status']['conditions'] = [{'type': 'ComparisonError', 'message': 'repo server unavailable'}]
+            observed = argo.observe(self.review, transient)
+            self.assertEqual((observed['status'], observed['rollout_failed']), ('failed', False))
         for mutation in ('revision', 'operation', 'sync'):
             candidate = copy.deepcopy(live)
             if mutation == 'revision': candidate['status']['sync']['revision'] = 'f' * 40

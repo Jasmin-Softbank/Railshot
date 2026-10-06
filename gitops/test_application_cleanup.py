@@ -196,6 +196,32 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(calls, len(self.calls))
         self.assertEqual(cleanup.read_private(self.config['variables_file']), self.values)
 
+    def test_gcp_lifecycle_accepts_only_equivalent_provider_routing_representations(self):
+        document = self.document({**self.values, 'routes': {}})
+        for row in document['resource_changes']:
+            address = row['address']
+            if not address.startswith('google_compute_url_map.'):
+                continue
+            before, after = copy.deepcopy(row['change']['before']), copy.deepcopy(row['change']['after'])
+            foreign = {'hosts': ['another.railshot.io'], 'path_matcher': 'another'}
+            backend = 'projects/fixture-project/global/backendServices/another'
+            for value in (before, after):
+                value['host_rule'].append(copy.deepcopy(foreign))
+                value['path_matcher'].append({'name': 'another', 'default_service': backend})
+                for block in value['host_rule'] + value['path_matcher']:
+                    block['description'] = '' if value is before else None
+            before['path_matcher'][-1]['default_service'] = 'https://www.googleapis.com/compute/v1/' + backend
+            for action in ('delete', 'stop', 'start'):
+                left, right = (after, before) if action == 'start' else (before, after)
+                with self.subTest(address=address, action=action):
+                    cleanup.validate_shared('gcp', address, left, right, {},
+                        self.values['routes'][self.request['application_id']], self.request['application_id'], self.values, action)
+            changed = copy.deepcopy(after)
+            changed['host_rule'][-1]['hosts'] = ['different.railshot.io']
+            with self.assertRaises(ValueError):
+                cleanup.validate_shared('gcp', address, before, changed, {},
+                    self.values['routes'][self.request['application_id']], self.request['application_id'], self.values, 'delete')
+
     def test_stale_serial_source_plan_and_foreign_dns_fail_before_apply(self):
         plan = cleanup.plan(self.binding, 'delete')
         for mutation in ('serial', 'saved', 'dns'):

@@ -25,6 +25,7 @@ const occupiesSlot = (record) => active(record) && !(record.status === 'unknown'
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const deliveryMessages = {
   CD_ROLLOUT_FAILED: '새 버전이 준비되지 않아 배포에 실패했습니다. 앱 상세에서 기존 서비스 상태를 확인하고, 수정한 소스나 이전 소스로 업데이트할 수 있습니다.',
+  APPLICATION_DELETED: '앱 삭제가 확인되어 이 배포는 더 진행하지 않습니다. 같은 이름으로 다시 배포할 수 있습니다.',
   CD_STORAGE_MODE_CHANGE_UNSUPPORTED: '업데이트 중 영구 저장소 사용 여부를 바꿀 수 없습니다. 기존 저장소 설정을 유지하거나 별도 앱으로 배포해 주세요.',
   APPLICATION_ROUTE_RESERVATION_UNAVAILABLE: '배포 포트의 기존 사용 내역을 확인하지 못했습니다. 클러스터 변경 전에 중단했으며 운영 확인이 필요합니다.',
   GCP_ROUTE_PREPARATION_FAILED: 'GCP 로드밸런서 경로 준비에 실패했습니다. 앱 적용 전에 환경 설정과 실행 권한을 확인해야 합니다.',
@@ -1087,7 +1088,8 @@ export async function createProductService({ service, directory, target, provide
       if (typeof applicationAdapter?.observeRuntime !== 'function') return empty('unsupported', 'runtime_observation_not_configured');
       try {
         const observation = await applicationAdapter.observeRuntime(application, record);
-        if (latest()?.id !== record.id || store.read('applications', id)?.status !== application.status)
+        const current = store.read('applications', id);
+        if (latest()?.id !== record.id || current?.status !== application.status || !sameGeneration(record, current || {}))
           return empty('stale', 'deployment_superseded');
         return { ...observation, application_id: id, deployment_id: record.id };
       } catch { return empty('collection_failed', 'runtime_observation_unavailable'); }
@@ -1207,6 +1209,17 @@ export async function createProductService({ service, directory, target, provide
             error: result.status === 'succeeded' ? null : operationError(failureCode || 'APPLICATION_LIFECYCLE_UNVERIFIED', result.status === 'unknown'), updated_at: new Date().toISOString() });
           Object.assign(state.applications[applicationId], { status: result.status === 'succeeded'
             ? { stop: 'stopped', start: 'ready', delete: 'deleted' }[record.action] : 'unknown', updated_at: new Date().toISOString() });
+          if (record.action !== 'delete' || result.status !== 'succeeded') return;
+          // A verified residual-free delete settles this generation's unfinished deliveries.
+          // Otherwise a stale running/unknown row would block or stall a same-name recreation.
+          for (const row of Object.values(state.operations)) {
+            if (row.kind !== 'deployments' || row.application_id !== applicationId || deploymentWorkers.has(row.id)
+                || !sameGeneration(row, state.applications[applicationId])
+                || !(['running', 'unknown'].includes(row.status) || row.status === 'blocked' && row.error?.outcome_unknown)) continue;
+            Object.assign(row, { status: 'blocked', error: operationError('APPLICATION_DELETED', false), updated_at: new Date().toISOString() });
+            for (const phase of [row.ci, row.cd]) if (phase?.observation) phase.observation.next_retry_at = null;
+            cdRecoveries.delete(row.id);
+          }
         });
       });
       return publicRecord(accepted.record);

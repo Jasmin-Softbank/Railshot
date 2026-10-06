@@ -281,9 +281,12 @@ def observe(review, live):
     degraded = (not live.get('operation') and binding and sync.get('revision') == revision
                 and sync.get('status') == 'Synced' and operation.get('phase') == 'Succeeded'
                 and sync_result.get('revision') == revision and status.get('health', {}).get('status') == 'Degraded')
-    failed = degraded or errors or (not live.get('operation') and operation.get('phase') in {'Failed', 'Error'} and
-                        operation.get('syncResult', {}).get('revision') == revision)
+    sync_failed = (not live.get('operation') and operation.get('phase') in {'Failed', 'Error'} and
+                   operation.get('syncResult', {}).get('revision') == revision)
+    failed = degraded or errors or sync_failed
     return {'status': 'deployed' if complete else 'failed' if failed else 'progressing', 'deployed': bool(complete),
+            # Condition errors (e.g. a transient ComparisonError) fail closed but are not a verified rollout outcome.
+            'rollout_failed': bool(not complete and (degraded or sync_failed)),
             'application': app['metadata']['name'], 'target_id': receipt['target_id'],
             'namespace': app['spec']['destination']['namespace'], 'git_revision': revision,
             'observed_revision': sync.get('revision'), 'sync': sync.get('status'),

@@ -701,7 +701,9 @@ test('published delivery with a missing CD journal can be deleted only through a
         assert.equal((await product.createApplicationOperation(app.id, f.input(plan), 'delete-missing-cd', f.owner.id)).id, op.id);
         assert.equal(f.calls.apply, 1);
       }
-      assert.equal(disk(f.directory, 'operations', 'missing-cd').error.code, 'DEPLOYMENT_NOT_FOUND');
+      // Only a verified residual-free delete settles the uncertain row; otherwise it stays fenced.
+      const { code, outcome_unknown } = disk(f.directory, 'operations', 'missing-cd').error;
+      assert.deepEqual([code, outcome_unknown], rejected ? ['DEPLOYMENT_NOT_FOUND', true] : ['APPLICATION_DELETED', false]);
       assert.equal(f.calls.dispatch, 0);
     } finally { await product.close(); }
   });

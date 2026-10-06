@@ -182,7 +182,9 @@ def observe(config, registered, directory, state):
                 public = {**public, 'site_url': site_url} if site_probe(site_url) else {
                     'state': 'unverified', 'verified_at': None, 'url': None}
     value = output(observed['status'], revision=observed['git_revision'], deployed=observed['deployed'], public=public,
-                   code='CD_ROLLOUT_FAILED' if observed['status'] == 'failed' else None,
+                   code=('CD_ROLLOUT_FAILED' if observed.get('rollout_failed') else 'CD_OBSERVATION_REJECTED')
+                   if observed['status'] == 'failed' else None,
+                   unknown=observed['status'] == 'failed' and not observed.get('rollout_failed'),
                    migration=observed.get('migration'))
     from workload_diagnostics import workload
     value['cd']['evidence'] = {'observed_at': datetime.now(timezone.utc).isoformat(),
@@ -300,7 +302,10 @@ def execute(config, request):
                                 'existing Git workload target differs')
                 prior_storage = any(item['kind'] == 'PersistentVolumeClaim' for item in prior['items'])
                 next_storage = any(item['kind'] == 'PersistentVolumeClaim' for item in rendered['workload']['items'])
-                if prior_storage != next_storage:
+                # A verified delete removes the Argo Application and PVC but leaves the deterministic Git
+                # path. Without a managing Application nothing live can be pruned or changed in place.
+                if prior_storage != next_storage and argo.kubectl(config['context'], app['metadata']['namespace'], 'get', 'application',
+                                                                  app['metadata']['name'], '--ignore-not-found', '-o', 'json'):
                     state['error_code'] = 'CD_STORAGE_MODE_CHANGE_UNSUPPORTED'
                     save('blocked')
                     return output(code=state['error_code'])
