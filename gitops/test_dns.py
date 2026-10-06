@@ -283,6 +283,33 @@ class DNSTest(unittest.TestCase):
         self.assert_error('DNS_INTENT_BINDING_CONFLICT', {**self.request, 'content': '192.0.2.9'})
         self.assertEqual(self.calls, [])
 
+    def test_verified_deleted_hostname_is_reused_only_by_same_application(self):
+        path = Path(self.ensure()['receipt_path'])
+        row = json.loads(path.read_bytes())
+        self.records.clear()
+        for phase in ('deleting', 'creating'):
+            dns.save(path, {**row, 'phase': phase})
+            self.calls.clear()
+            self.assert_error('DNS_INTENT_BINDING_CONFLICT', {**self.request, 'content': '192.0.2.9'},
+                              'UNKNOWN' if phase == 'creating' else 'BLOCKED')
+            self.assertNotIn('POST', [c[0] for c in self.calls])
+        deleted = {**row, 'phase': 'deleted'}
+        dns.save(path, deleted)
+        self.calls.clear()
+        self.assert_error('DNS_INTENT_BINDING_CONFLICT', {**self.request, 'application_id': 'another-app'})
+        self.assertEqual(self.calls, [])
+        self.records = [self.record()]
+        self.assert_error('DNS_DELETED_RECORD_REAPPEARED')
+        self.assertEqual(json.loads(path.read_bytes()), deleted)
+        self.records.clear()
+        self.calls.clear()
+        receipt = self.ensure({**self.request, 'content': '192.0.2.9'})
+        self.assertEqual((receipt['status'], receipt['content']), ('verified', '192.0.2.9'))
+        self.assertEqual([c[0] for c in self.calls], ['GET', 'GET', 'POST', 'GET'])
+        archived = list((self.root / 'state').glob(path.stem + '.deleted-*.json'))
+        self.assertEqual([json.loads(p.read_bytes()) for p in archived], [deleted])
+        self.assertEqual(json.loads(path.read_bytes())['phase'], 'verified')
+
     def test_private_file_symlink_modes_and_state_lock(self):
         self.config_path.chmod(0o644)
         self.assert_error('DNS_PRIVATE_FILE_REQUIRED')

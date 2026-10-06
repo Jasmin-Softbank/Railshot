@@ -56,7 +56,8 @@ export function idempotencyKey(value) {
   return value;
 }
 function publicRecord(record) {
-  const { fingerprint, key, source, source_bytes, legacy, session_id, publication, refreshed_plan, diagnostic_evidence, classifications, telemetry, ...visible } = record;
+  const { fingerprint, key, source, source_bytes, legacy, session_id, publication, refreshed_plan, diagnostic_evidence, classifications, telemetry,
+    generation, application_generation, ...visible } = record;
   const timeline = publicTelemetry(record);
   const activity = agentActivity(record, timeline);
   return { ...structuredClone(visible), ...(telemetry ? { telemetry: timeline } : {}),
@@ -140,6 +141,16 @@ export async function createProductService({ service, directory, target, provide
       throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
     return application;
   }
+  // Generation 0 is every app created before same-name recreation existed.
+  const sameGeneration = (row, application) => (row.application_generation || 0) === (application.generation || 0);
+  // Only the app's own completed, residual-free delete operation releases its deterministic identity.
+  function verifiedDeletion(state, application) {
+    const id = application.lifecycle_operation_id;
+    const operation = id && Object.hasOwn(state.operations, id) ? state.operations[id] : null;
+    return Boolean(application.status === 'deleted' && operation?.kind === 'application-lifecycle' && operation.action === 'delete'
+      && operation.status === 'succeeded' && !operation.residuals?.length && operation.application_id === application.id
+      && operation.session_id === application.session_id && operation.app === application.app && operation.target_id === application.target_id);
+  }
   function lifecycleAvailable(state, application, action, cancelling = null) {
     checkUncertainResource(state, application, cancelling, action === 'delete');
     personal.writable(state, application.environment_target_id, application.session_id);
@@ -155,7 +166,7 @@ export async function createProductService({ service, directory, target, provide
         || action === 'stop' && application.status !== 'ready') throw new ProductError(409, 'APPLICATION_STATE_CONFLICT', '앱의 현재 상태에서는 이 작업을 실행할 수 없습니다.');
   }
   function applicationSnapshot(state, application, deferred = false) {
-    const deployments = Object.values(state.operations).filter((row) => row.kind === 'deployments' && row.application_id === application.id);
+    const deployments = Object.values(state.operations).filter((row) => row.kind === 'deployments' && row.application_id === application.id && sameGeneration(row, application));
     const latest = deployments.at(-1);
     return digest({ application: deferred ? Object.fromEntries(['id', 'app', 'target_id', 'environment_target_id', 'provider', 'session_id', 'created_at'].map((key) => [key, application[key]])) : application,
       deployment: latest ? { id: latest.id, ...(deferred ? {} : { source_commit: latest.source_commit || null }) } : null });
@@ -297,7 +308,7 @@ export async function createProductService({ service, directory, target, provide
     } else if (!Number.isFinite(Date.parse(row.dispatch?.prepared_at)) || typeof service.findDeployment !== 'function') return false;
     if (row.application_id) {
       const app = state.applications[row.application_id];
-      if (!app || app.status !== 'ready' || app.deletion_requested || app.session_id !== row.session_id
+      if (!app || app.status !== 'ready' || app.deletion_requested || app.session_id !== row.session_id || !sameGeneration(row, app)
           || app.app !== row.app || app.target_id !== row.target_id
           || app.environment_target_id !== row.environment_target_id) return false;
     }
@@ -420,7 +431,7 @@ export async function createProductService({ service, directory, target, provide
   for (const operation of Object.values(restored.operations)) {
     const application = restored.applications[operation.application_id];
     if (operation.kind !== 'deployments' || operation.status !== 'unknown' || operation.stage !== 'registration'
-        || !application || !['unknown', 'queued'].includes(application.status)
+        || !application || !['unknown', 'queued'].includes(application.status) || !sameGeneration(operation, application)
         || operation.deletion_requested || application.deletion_requested || application.lifecycle_operation_id
         || operation.ci?.run_id || operation.source_commit || operation.dispatch
         || !operation.queue?.enqueued_at || typeof applicationAdapter?.registrationStarted !== 'function') continue;
@@ -464,8 +475,10 @@ export async function createProductService({ service, directory, target, provide
       const previousApplication = application && state.applications[application.id];
       if (application && applicationAdapter.targets[application.environment_target_id]?.automaticDelivery === false) throw unavailable();
       if (previousApplication && previousApplication.session_id !== sessionId) throw new ProductError(409, 'APPLICATION_OWNERSHIP_CONFLICT', '같은 환경의 이 앱 이름은 다른 세션에 등록되어 있습니다. 다른 이름을 사용하세요.');
-      if (previousApplication && ['stopped', 'deleted'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_STATE_CONFLICT', '중지한 앱은 명시적으로 시작해야 하며 삭제한 앱은 다시 배포할 수 없습니다.');
-      if (previousApplication && !['queued', 'registering', 'ready'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 등록 결과를 운영자가 확인해야 합니다. 자동 재등록하지 않습니다.');
+      // A verified deletion starts a new generation under the same deterministic app identity.
+      const recreating = Boolean(previousApplication && verifiedDeletion(state, previousApplication));
+      if (previousApplication && !recreating && ['stopped', 'deleted'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_STATE_CONFLICT', '중지한 앱은 명시적으로 시작해야 하며 삭제 완료가 확인되지 않은 앱은 다시 배포할 수 없습니다.');
+      if (previousApplication && !recreating && !['queued', 'registering', 'ready'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 등록 결과를 운영자가 확인해야 합니다. 자동 재등록하지 않습니다.');
       const selectedCdAvailable = Boolean(deployPublished && (!deployPublished.targets || selectedCdTarget));
       const savedEnvironment = registeredEnvironment(state, input.target_id, sessionId);
       const registered = !selectedCdAvailable && !input.plan_id && kind === 'deployments' ? savedEnvironment : null;
@@ -486,7 +499,7 @@ export async function createProductService({ service, directory, target, provide
       checkCapacity(state);
       const applicationName = selectedCdTarget?.applicationName || savedEnvironment?.applicationName;
       if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid(`등록된 배포 앱 이름과 일치하지 않습니다. 이 대상은 ${applicationName} 전용입니다. ${input.app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
-      return { application, previousApplication, plan, registered };
+      return { application, previousApplication, recreating, plan, registered };
     }
     const admitted = admission(store.read());
     if (admitted.plan) await environmentAdapter.verifyPlan(admitted.plan);
@@ -504,13 +517,17 @@ export async function createProductService({ service, directory, target, provide
         if (existing.fingerprint !== fingerprint) throw new ProductError(409, 'IDEMPOTENCY_CONFLICT', '같은 키로 다른 입력을 보낼 수 없습니다.');
         return { record: existing, replay: true };
       }
-      const { application, previousApplication, plan, registered } = admission(state);
+      const { application, previousApplication, recreating, plan, registered } = admission(state);
       const sourceBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.path) + Math.ceil(file.content.length / 3) * 4 + 128, 0);
       checkCapacity(state, sourceBytes);
       const id = randomUUID(), now = new Date().toISOString();
       await store.snapshot(id, files);
-      if (application && !previousApplication) state.applications[application.id] = { ...application, session_id: sessionId, status: 'queued', created_at: now };
+      // Old operations keep their history and generation; none can act on the new generation.
+      if (application && (!previousApplication || recreating)) state.applications[application.id] = { ...application, session_id: sessionId, status: 'queued', created_at: now,
+        ...(recreating ? { generation: (previousApplication.generation || 0) + 1 } : {}) };
+      const generation = application && state.applications[application.id].generation;
       const record = { id, kind, session_id: sessionId, app: input.app, target_id: input.target_id,
+        ...(generation ? { application_generation: generation } : {}),
         ...(input.deployment_selection ? { deployment_selection: { ...input.deployment_selection } } : {}),
         ...(application ? { application_id: application.id, environment_target_id: application.environment_target_id } : {}),
         ...(plan ? { plan_id: input.plan_id, environment_id: `${id}.environment`, environment: { status: 'queued' } } : registered ? { environment_id: registered.environment_id } : {}), status: 'queued', stage: application ? 'registration' : plan ? 'environment' : 'ci',
@@ -793,7 +810,7 @@ export async function createProductService({ service, directory, target, provide
   function applicationVersions(state, application) {
     const rows = Object.values(state.operations).filter((row) => row.kind === 'deployments'
       && row.application_id === application.id && row.app === application.app && row.target_id === application.target_id
-      && row.session_id === application.session_id).reverse();
+      && row.session_id === application.session_id && sameGeneration(row, application)).reverse();
     const current = rows.find(successfulDeployment) || null;
     const newer = current ? rows.slice(0, rows.indexOf(current)) : rows;
     const uncertain = newer.some((row) => row.cd?.state === 'running' || row.cd?.state === 'unknown'
@@ -879,6 +896,7 @@ export async function createProductService({ service, directory, target, provide
       const id = randomUUID(), now = new Date().toISOString();
       await store.snapshot(id, files);
       const record = { id, kind: 'deployments', application_id: application.id, app: application.app, target_id: application.target_id,
+        ...(application.generation ? { application_generation: application.generation } : {}),
         environment_target_id: application.environment_target_id, session_id: sessionId, status: 'preview', stage: 'review',
         base_deployment_id: baseline.id, base_revision: baseline.cd.revision, baseline_kind: baselineKind,
         expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(), changes,
@@ -1062,7 +1080,7 @@ export async function createProductService({ service, directory, target, provide
       const application = applicationFor({ applications: { [id]: store.read('applications', id) } }, id, sessionId);
       const latest = () => store.latestDeployment({ application_id: id, app: application.app,
         target_id: application.target_id, session_id: application.session_id }, { requireCdState: true });
-      const record = latest();
+      const latestRow = latest(), record = latestRow && sameGeneration(latestRow, application) ? latestRow : null;
       const empty = (state, reason) => ({ application_id: id, deployment_id: record?.id || null, state,
         checked_at: new Date().toISOString(), reason, workload: null, public_http: null });
       if (!record) return empty('no_data', 'deployment_not_started');
@@ -1316,6 +1334,7 @@ export async function createProductService({ service, directory, target, provide
           && lifecycle.app === application.app && lifecycle.status === 'succeeded' && ['stop', 'start'].includes(lifecycle.action);
         if (!['unknown', 'blocked', 'failed'].includes(operation.status) || !['cd', 'http'].includes(operation.stage)
             || application.status !== 'ready' || application.deletion_requested || operation.deletion_requested || !completedLifecycle
+            || !sameGeneration(operation, application)
             || ci?.state !== 'published'
             || typeof applicationAdapter?.deployPublished !== 'function'
             || !/^\d+$/.test(ci.run_id) || !/^[a-f0-9]{40}$/.test(operation.source_commit || '')
