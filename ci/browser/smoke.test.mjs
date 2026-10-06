@@ -128,6 +128,7 @@ test('application detail separates registration and deployment history from curr
   await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
   await panel.getByText('롤링 업데이트 · 허용 중단 0, 추가 실행 1', { exact: true }).waitFor();
   assert.match(await panel.innerText(), /서비스 가능 확인 필요/);
+  if (process.env.CI_OUTPUT_DIR) await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'application-rolling-desktop.png'), fullPage: true });
   observation.workload.update_strategy = { type: 'Recreate' };
   await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
   await panel.getByText(/순차 교체 · 영구 저장소/).waitFor();
