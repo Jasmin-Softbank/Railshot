@@ -93,7 +93,7 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
           if (hash(await privateJson(configPath)) !== fingerprint) throw fail('APPLICATION_POLICY_CHANGED');
           const result = await runner(python, [CREDENTIALS, 'observe', '--context', config.cd.context, '--environment', environmentId], { mutation: false, timeout: 12000 });
           const reasons = [null, 'ENVIRONMENT_OBSERVER_NOT_REGISTERED', 'RENEWAL_TIMEOUT', 'CUSTOMER_TLS_FAILED',
-            'CUSTOMER_AUTH_REJECTED', 'CUSTOMER_API_FAILED', 'CUSTOMER_API_UNREACHABLE', 'RENEWAL_FAILED'];
+            'CREDENTIAL_EXPIRED', 'CUSTOMER_AUTH_REJECTED', 'CUSTOMER_API_FAILED', 'CUSTOMER_API_UNREACHABLE', 'RENEWAL_FAILED'];
           if (!['ready', 'no_data', 'collection_failed'].includes(result?.state) || !Number.isFinite(Date.parse(result.checked_at))
               || !reasons.includes(result.reason) || ['last_success_at', 'expires_at'].some(key => result[key] !== null && !Number.isFinite(Date.parse(result[key])))
               || result.state === 'ready' && (!result.last_success_at || !result.expires_at)) throw fail('CREDENTIAL_OBSERVATION_INVALID');
@@ -202,8 +202,9 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       if (exists) {
         if (hash(await privateJson(request, { maxBytes: 14_000_000 })) !== hash(payload)) throw fail('APPLICATION_PUBLICATION_MISMATCH');
       } else await savePrivate(request, payload);
-      const result = resultStatus(await runner(python, [FINALIZE, '--config', configPath, '--request', request],
-        { mutation: true, timeout: 1_800_000 }), application);
+      const withMutation = args.withMutation || ((fn) => fn());
+      const result = resultStatus(await withMutation(() => runner(python, [FINALIZE, '--config', configPath, '--request', request],
+        { mutation: true, timeout: 1_800_000 })), application);
       if (result.status !== 'succeeded') throw fail(result.error?.code || 'APPLICATION_PUBLIC_ROUTE_UNVERIFIED', 502, result.status === 'unknown');
       const deploy = createCdAdapter({ configPath: join(run, 'cd.json'), loadPublished, python });
       return deploy(args);

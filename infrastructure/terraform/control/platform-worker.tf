@@ -188,12 +188,21 @@ resource "aws_instance" "platform_worker" {
   }
 }
 
+# GCP trusts this exact egress address. Ephemeral public IPs change on stop/start.
+resource "aws_eip" "platform_worker" {
+  count    = var.platform_worker_enabled ? 1 : 0
+  domain   = "vpc"
+  instance = aws_instance.platform_worker[0].id
+  tags     = { Name = "railshot-platform-worker-aws-01", Component = "platform-worker" }
+  lifecycle { prevent_destroy = true }
+}
+
 output "operations_peer_security_group_id" { value = one(aws_security_group.operations_peer[*].id) }
 output "platform_worker" {
   value = var.platform_worker_enabled ? {
     instance_id = aws_instance.platform_worker[0].id
     private_ip  = aws_instance.platform_worker[0].private_ip
-    public_ip   = aws_instance.platform_worker[0].public_ip
+    public_ip   = aws_eip.platform_worker[0].public_ip
     node_name   = "railshot-platform-worker-aws-01"
     stop_at     = var.platform_worker_stop_at
   } : null

@@ -29,6 +29,10 @@ LABELS = {'argocd.argoproj.io/secret-type': 'cluster', 'app.kubernetes.io/manage
 APPLICATION_ID = r'app-[a-f0-9]{24}'
 
 
+class CredentialExpiredError(ValueError):
+    code = 'CREDENTIAL_EXPIRED'
+
+
 class PolicyCapacityError(ValueError):
     code = 'APPLICATION_CREDENTIAL_POLICY_CAPACITY_EXCEEDED'
 
@@ -132,8 +136,10 @@ def claims(token, target, now):
     require(value['sub'] == f"system:serviceaccount:{sa['namespace']}:{sa['name']}" and
             value['kubernetes.io']['namespace'] == sa['namespace'] and
             value['kubernetes.io']['serviceaccount'] == {'name': sa['name'], 'uid': sa['uid']} and
-            set(value['aud']) == set(target['audiences']) and value['exp'] > now + 60 and
+            set(value['aud']) == set(target['audiences']) and
             value.get('nbf', value['iat']) <= now + 60, 'credential identity or expiry differs')
+    if value['exp'] <= now + 60:
+        raise CredentialExpiredError('registered credential expired; operator recovery required')
     return value
 
 
@@ -375,6 +381,8 @@ def select_policy(policy, environments):
 
 def renewal_error(exc):
     """Stable codes only; native diagnostics and HTTP response bodies are private."""
+    if isinstance(exc, CredentialExpiredError):
+        return exc.code
     reason = exc.reason if isinstance(exc, URLError) else exc.__cause__ or exc
     if isinstance(reason, (TimeoutError, subprocess.TimeoutExpired)):
         return 'RENEWAL_TIMEOUT'

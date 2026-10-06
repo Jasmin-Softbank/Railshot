@@ -1,6 +1,7 @@
 import base64
 import copy
 import hashlib
+import fcntl
 import json
 from pathlib import Path
 import subprocess
@@ -165,6 +166,21 @@ class BridgeTest(unittest.TestCase):
             bad = copy.deepcopy(self.request); bad['publication']['artifact_id'] = 4
             with self.assertRaisesRegex(ValueError, 'binding conflict'):
                 bridge.execute(self.config, bad)
+
+    def test_readiness_probe_releases_writer_lock_and_observe_does_not_acquire_it(self):
+        def probe(*args):
+            with (self.root / 'state' / 'bridge.lock').open('a') as competing:
+                fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return {'state': 'unverified', 'verified_at': None, 'url': None}
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', side_effect=probe):
+            self.assertTrue(bridge.execute(self.config, self.request)['cd']['deployed'])
+            # A different app's writer cannot block this immutable-revision read.
+            with (self.root / 'state' / 'bridge.lock').open('a') as writer:
+                fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with patch('bridge.public_probe', return_value={'state': 'unverified'}):
+                    self.assertTrue(bridge.execute(self.config, {**self.request, 'action': 'observe'})['cd']['deployed'])
+                self.assertEqual(bridge.execute(self.config, self.request)['error']['code'], 'CD_EXECUTOR_BUSY')
 
     def test_clean_behind_checkout_fast_forwards_before_app_commit_without_losing_other_release(self):
         before = self.git('rev-parse', 'HEAD')

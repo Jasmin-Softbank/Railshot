@@ -1,15 +1,18 @@
 """Offline HTTP tests exercise the real controller clients, durable intent and reviewed renderer."""
 import base64
 import copy
+from contextlib import redirect_stdout
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
+import io
 import json
 from pathlib import Path
 import socket
 import threading
 import time
 import unittest
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 import replenish
@@ -264,6 +267,106 @@ class ReplenishTests(unittest.TestCase):
         with self.assertRaisesRegex(replenish.Blocked, '^HTTP_DEADLINE$'):
             client.request('GET', '/')
         self.assertEqual(self.api.calls, [])
+
+    def test_poll_catches_demand_after_first_tick_without_duplicate_creation(self):
+        self.api.queued_id = None
+        controller = self.api.controller(3)
+        clock, ticks, waits = [0], [], []
+        tick = controller.tick
+        def observed_tick():
+            ticks.append(clock[0])
+            return tick()
+        def pause(seconds):
+            self.assertGreater(seconds, 0)
+            waits.append(seconds)
+            clock[0] += seconds
+            self.api.queued_id = 1
+        controller.tick = observed_tick
+        result = replenish.poll(controller, 45, clock=lambda: clock[0], pause=pause)
+        self.assertEqual(ticks, [0, 15, 30])
+        self.assertEqual(waits, [15, 15])
+        self.assertEqual(result, {'state': 'created', 'job': self.api.created[0],
+                                  'jobs': self.api.created, 'capacity': 3})
+        self.assertEqual(len(self.api.created), 1)
+        self.assertEqual(self.api.issued, 1)
+
+    def test_poll_full_pool_never_registers_or_creates_again(self):
+        controller = self.api.controller()
+        controller.tick()
+        before = len(self.api.calls)
+        clock = [0]
+        result = replenish.poll(controller, 45, clock=lambda: clock[0],
+                                pause=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+        self.assertEqual(result, {'state': 'active'})
+        self.assertEqual(len(self.api.created), 1)
+        self.assertEqual(self.api.issued, 1)
+        self.assertTrue(all('/repos/' not in call[1] for call in self.api.calls[before:]))
+
+    def test_poll_stops_immediately_after_uncertain_create(self):
+        self.api.drop_create = self.api.lose_create = True
+        pause = Mock()
+        result = replenish.poll(self.api.controller(3), 45, clock=lambda: 0, pause=pause)
+        self.assertEqual(result, {'state': 'unknown', 'code': 'JOB_CREATE_UNCERTAIN'})
+        pause.assert_not_called()
+        self.assertEqual(len(self.api.created), 1)
+        state = json.loads(self.api.secret['metadata']['annotations'][replenish.ANNOTATION])
+        self.assertEqual(state['slots']['slot-0']['pending'], self.api.created[0])
+        self.assertIsNone(state['slots']['slot-1']['pending'])
+
+    def test_poll_stops_on_blocked_result_or_http_error(self):
+        for outcome in ({'state': 'blocked', 'code': 'CONSECUTIVE_RUNNER_FAILURES'},
+                        replenish.Blocked('HTTP_UNCERTAIN')):
+            with self.subTest(outcome=type(outcome).__name__):
+                controller, pause = Mock(), Mock()
+                if isinstance(outcome, Exception):
+                    controller.tick.side_effect = outcome
+                    with self.assertRaisesRegex(replenish.Blocked, '^HTTP_UNCERTAIN$'):
+                        replenish.poll(controller, 45, clock=lambda: 0, pause=pause)
+                else:
+                    controller.tick.return_value = outcome
+                    self.assertEqual(replenish.poll(controller, 45, clock=lambda: 0, pause=pause), outcome)
+                controller.tick.assert_called_once()
+                pause.assert_not_called()
+
+    def test_poll_respects_remaining_budget_and_never_sleeps_negative(self):
+        for duration, deadline, expected_ticks, expected_waits in (
+                (20, 45, [0, 20, 40], []), (45, 45, [0], []),
+                (0, 15, [0], []), (0, 0, [], [])):
+            with self.subTest(duration=duration, deadline=deadline):
+                clock, ticks, waits = [0], [], []
+                def tick():
+                    ticks.append(clock[0]); clock[0] += min(duration, deadline - clock[0])
+                    return {'state': 'idle'}
+                def pause(seconds):
+                    self.assertGreater(seconds, 0)
+                    waits.append(seconds); clock[0] += seconds
+                controller = Mock(tick=tick)
+                result = replenish.poll(controller, deadline, clock=lambda: clock[0], pause=pause)
+                self.assertEqual(ticks, expected_ticks)
+                self.assertEqual(waits, expected_waits)
+                self.assertLessEqual(clock[0], deadline)
+                self.assertEqual(result['state'], 'idle' if ticks else 'blocked')
+
+    def test_cli_preserves_one_json_document_and_shared_http_deadline(self):
+        controller, clock = self.api.controller(), [0]
+        original_poll = replenish.poll
+        def run_poll(actual, deadline):
+            self.assertIs(actual, controller)
+            self.assertEqual(deadline, client.call_args_list[0].kwargs['deadline'])
+            self.assertEqual(deadline, client.call_args_list[1].kwargs['deadline'])
+            return original_poll(actual, 45, clock=lambda: clock[0],
+                                 pause=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+        stdout = io.StringIO()
+        with patch('sys.argv', ['replenish.py']), patch.object(replenish, 'Client') as client, \
+                patch.object(replenish.Path, 'read_text', return_value='private-token'), \
+                patch.object(replenish, 'read_json', return_value={}), \
+                patch.object(replenish, 'Controller', return_value=controller), \
+                patch.object(replenish, 'poll', side_effect=run_poll), redirect_stdout(stdout):
+            code = replenish.main()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(stdout.getvalue().splitlines()), 1)
+        self.assertEqual(json.loads(stdout.getvalue()), {'state': 'created', 'job': self.api.created[0]})
+        self.assertNotIn('private-token', stdout.getvalue())
 
 
 if __name__ == '__main__':

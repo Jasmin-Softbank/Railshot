@@ -651,9 +651,9 @@ export async function createProductService({ service, directory, target, provide
   async function observeDelivery(record) {
     const now = new Date().toISOString();
     try {
-      const result = await writeInfrastructure(() => applicationAdapter.observePublished(store.read('applications', record.application_id), {
+      const result = await applicationAdapter.observePublished(store.read('applications', record.application_id), {
         deploymentId: record.id, app: record.app, targetId: record.target_id, sourceCommit: record.source_commit,
-        publication: record.publication, signal: abort.signal }));
+        publication: record.publication, signal: abort.signal });
       if (abort.signal.aborted || deletionRequested(record.id)) return;
       const succeeded = result.cd?.deployed === true && result.cd.revision && result.public_http?.state === 'succeeded'
         && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
@@ -731,9 +731,9 @@ export async function createProductService({ service, directory, target, provide
           personal.writable(store.read(), record.environment_target_id || record.target_id, record.session_id);
           const deploy = record.application_id ? (args) => applicationAdapter.deployPublished(store.read('applications', record.application_id), args)
             : record.environment_id ? (args) => environmentAdapter.deployPublished(record.environment_id, args) : deployPublished;
-          const result = await writeInfrastructure(() => deploy({ deploymentId: record.id, app: record.app, targetId: record.target_id,
+          const result = await deploy({ withMutation: writeInfrastructure, deploymentId: record.id, app: record.app, targetId: record.target_id,
             sourceCommit: build.source_commit, publication: build.publication, signal: abort.signal,
-            onProgress: (progress) => update(record.id, { stage: progress.cd?.deployed ? 'http' : 'cd', cd: progress.cd, public_http: progress.public_http }) }));
+            onProgress: (progress) => update(record.id, { stage: progress.cd?.deployed ? 'http' : 'cd', cd: progress.cd, public_http: progress.public_http }) });
           if (deletionRequested(record.id)) {
             if (!(result.cd?.deployed === true || ['blocked', 'failed'].includes(result.cd?.state) && !result.error?.outcome_unknown))
               await update(record.id, { status: 'unknown', error: operationError('CD_OUTCOME_UNKNOWN', true) });

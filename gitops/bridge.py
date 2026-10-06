@@ -192,7 +192,7 @@ def observe(config, registered, directory, state):
     return value
 
 
-def advance(config, registered, directory, state, save):
+def advance(config, registered, directory, state, save, release):
     """Continue only from durable completion; uncertain mutations stay read-only."""
     if state['phase'] == 'pushed':
         # A concurrent writer must not cause us to deploy a stale continuation.
@@ -212,18 +212,21 @@ def advance(config, registered, directory, state, save):
             save('routing')
             edge.ensure(registered['edge'])
         save('observing')
+    release()
     return observe(config, registered, directory, state)
 
 
 def execute(config, request):
     registered, files, binding = validate_request(config, request)
     root = private_directory(config['state_dir'])
-    # ponytail: one config-repo writer; use separate registered repos before adding parallel workers.
+    # Serialize the shared Git checkout; pinned-revision observations do not hold this lock.
     with os.fdopen(os.open(root / 'bridge.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'a') as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if request['action'] == 'apply':
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return output(code='CD_EXECUTOR_BUSY')
+        release = lambda: fcntl.flock(lock, fcntl.LOCK_UN)
         directory = root / request['deployment_id']
         state_path = directory / 'state.json'
         def save(phase):
@@ -239,7 +242,8 @@ def execute(config, request):
                 return output(code='CD_PREPARATION_FAILED')
             try:
                 if request['action'] == 'apply' and state.get('phase') in ('pushed', 'sync_requested'):
-                    return advance(config, registered, directory, state, save)
+                    return advance(config, registered, directory, state, save, release)
+                release()
                 return observe(config, registered, directory, state)
             except (ValueError, KeyError, TypeError, OSError, RuntimeError):
                 return output('unknown', revision=state.get('revision'), code='CD_RECONCILE_REQUIRED', unknown=True)
@@ -314,7 +318,7 @@ def execute(config, request):
             handoff.require(git(config, 'ls-remote', 'origin', 'refs/heads/' + config['branch']).split()[0] == state['revision'],
                             'remote revision readback differs')
             save('pushed')
-            return advance(config, registered, directory, state, save)
+            return advance(config, registered, directory, state, save, release)
         except (ValueError, KeyError, TypeError, OSError, RuntimeError, handoff.ValidationError):
             unknown = state['phase'] in ('pushing', 'pushed', 'syncing', 'sync_requested', 'routing', 'observing')
             if not unknown:

@@ -61,7 +61,7 @@ Job의 제한은 runner에 적용됩니다. 호스트 Docker가 실행하는 Bui
 
 ### 연속 요청을 위한 runner 보충
 
-[replenish.py](replenish.py)는 기존 API 이미지의 Python 표준 라이브러리만 사용합니다. [CronJob](../../../deployment/manifests/build-controller.yaml)은 platform 노드에서 매분 실행하며 `concurrencyPolicy: Forbid`, 재시도 0, 55초 deadline을 갖습니다. HTTP는 요청당 최대 5초·전체 45초로 제한합니다. 별도 daemon, 이미지, DB, controller용 PVC는 필요 없습니다.
+[replenish.py](replenish.py)는 기존 API 이미지의 Python 표준 라이브러리만 사용합니다. [CronJob](../../../deployment/manifests/build-controller.yaml)은 platform 노드에서 매분 실행하며 `concurrencyPolicy: Forbid`, 재시도 0, 55초 deadline을 갖습니다. 한 실행에서 시작 후 0·15·30초에 최대 세 번 수요를 확인하며, 모든 조회와 생성은 요청당 최대 5초·전체 45초의 HTTP 예산을 공유합니다. 불확실한 생성이나 차단 결과가 나오면 즉시 끝내고, 정상 실행은 해당 실행의 생성 결과를 보존한 최종 JSON 한 개를 출력합니다. 별도 daemon, 이미지, DB, controller용 PVC는 필요 없습니다.
 
 운영자는 `railshot-system`의 `railshot-runner-controller-github` Secret `token` 키에 해당 앱 저장소의 Actions 조회·runner 등록 권한을 가진 자격을 준비합니다. 이 자격은 controller Pod에만 마운트합니다. `railshot-build`의 `railshot-build-runner-registration` Secret도 운영자가 미리 만들며 `token` 키의 최초 값은 빈 문자열이어도 됩니다. controller는 이 이름의 Secret만 조회·수정할 수 있고 Secret 생성·목록 조회 권한은 없습니다. 앱 저장소의 세부 권한은 GitHub 공식 [job 조회](https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run)와 [registration token 발급](https://docs.github.com/en/rest/actions/self-hosted-runners#create-a-registration-token-for-a-repository) 계약을 따릅니다. 등록 token은 runner에만 전달되고 장기 GitHub 자격은 전달하지 않습니다.
 
