@@ -72,7 +72,7 @@ def reserved_ports(config_path, address):
     """Include legacy/unpublished routes while releasing verified deleted allocations."""
     config = config_at(config_path)
     with locked(config) as root:
-        values = base_values(config, writable=True)
+        values = base_values(config)
         ledger = read_private(root / 'allocations.json') if (root / 'allocations.json').exists() else {}
         routes = [*values['routes'].values(), *(row['route'] for row in ledger.values() if row['phase'] != 'deleted')]
         return {row['node_port'] for row in routes if row['target_private_ip'] == address}
@@ -133,7 +133,7 @@ def prepare(config_path, request):
         values = base_values(config, writable=True)
         ledger_path = root / 'allocations.json'
         ledger = read_private(ledger_path) if ledger_path.exists() else {}
-        if key in ledger:
+        if key in ledger and ledger[key]['phase'] != 'deleted':
             allocation = root / (key + '.json')
             if not allocation.exists():  # Recover a crash between reservation and writing its reference.
                 durable_write(allocation, encoded(ledger[key]))

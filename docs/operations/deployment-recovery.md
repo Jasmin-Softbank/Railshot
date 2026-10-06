@@ -27,3 +27,9 @@ Keep the API SQLite backup, source snapshots, configuration and encryption/sessi
 A deleted AWS edge allocation releases its NodePort, hostname and listener priority; stopped, reserved and uncertain allocations remain reserved. Application registration also checks native edge reservations, including routes that predate product registration. Keep route preparation and the initial GitOps apply in one mutation turn so a second preparation cannot overtake the first application's apply.
 
 Delivery requires repeated exact-origin health/site success over at least 15 seconds, resetting after failure or a revision/URL change. Redirects do not count as success. This settling check reduces premature completion while a global load balancer propagates a new route; it does not certify every global frontend. Verify application behavior independently from the controller and preserve any first-request failure in the operation evidence.
+
+## Update and delete verification
+
+AWS/GCP stateless applications use Kubernetes RollingUpdate with maxUnavailable=0, maxSurge=1, three seconds of readiness, and five seconds of preStop drain time. Updates retain the existing Service, NodePort and public hostname while Argo replaces the image. Verify old/new image identity, continuous external requests during the transition, and the final Pod digest. Failed readiness must leave the old replica serving. Single-writer PVC applications retain Recreate; sharing a local SQLite volume between old and new writers is unsafe.
+
+Deletion uses the existing identity-bound lifecycle plan and explicit data-delete acknowledgement. Verify workloads, Argo objects, provider route resources and owned DNS are removed, shared cloud nodes/LBs are retained, and the old allocation is released before recreating the same name. A stopped or uncertain allocation is not a deleted allocation.

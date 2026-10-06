@@ -42,6 +42,13 @@ test('CD adapter validates output and terminates the whole process group on abor
     loadPublished: async () => [{ path: 'handoff.json', content: Buffer.from('{}') }] });
   await writeFile(python, '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>process.stdout.write("sensitive-invalid-json"));\n', { mode: 0o700 });
   assert.equal((await adapter()(request)).cd.state, 'unknown');
+  const completed = join(directory, 'apply-completed');
+  await writeFile(python, `#!/usr/bin/env node
+process.stdin.resume();process.stdin.on('end',()=>{
+require('node:fs').writeFileSync(${JSON.stringify(completed)},'applied');
+process.stdout.write(JSON.stringify({cd:{state:'blocked',deployed:false},public_http:{state:'not_run'}}));
+});\n`, { mode: 0o700 });
+  await adapter()({ ...request, onProgress: async () => assert.equal(await readFile(completed, 'utf8'), 'applied') });
   for (const mode of ['abort', 'deadline']) {
     const heartbeat = join(directory, mode + '-heartbeat');
     const script = `#!/usr/bin/env node

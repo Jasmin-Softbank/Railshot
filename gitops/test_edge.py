@@ -57,6 +57,19 @@ class EdgeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'namespace already allocated'):
             edge.prepare(self.path, {**self.request, 'environment_id': 'other-env'})
 
+    def test_deleted_app_name_can_be_recreated_with_a_new_target(self):
+        first = self.prepared()
+        config, row = edge.load(first['reference'])
+        row['phase'] = 'deleted'
+        edge.save(config, row)
+        ledger_path = Path(config['state_dir']) / 'allocations.json'
+        edge.durable_write(ledger_path, edge.encoded({row['route_key']: row}))
+        replacement = edge.prepare(self.path, {**self.request, 'target_id': 'replacement-app',
+                                               'namespace': 'replacement-app'})
+        self.assertEqual(replacement['hostname'], first['hostname'])
+        self.assertEqual(replacement['phase'], 'reserved')
+        self.assertEqual(edge.load(replacement['reference'])[1]['request']['target_id'], 'replacement-app')
+
     def test_deleted_route_releases_port_but_reserved_and_stopped_routes_keep_it(self):
         first = self.prepared()
         config, row = edge.load(first['reference'])

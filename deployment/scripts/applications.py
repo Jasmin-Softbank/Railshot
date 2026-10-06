@@ -238,7 +238,10 @@ def register(config_path, request):
                     if prior.get('environment_id') == env_id:
                         require(type(prior.get('node_port')) is int, 'APPLICATION_STORAGE_INVALID')
                         used.add(prior['node_port'])
-                used.update(reserved_node_ports(profile, descriptor))
+                try:
+                    used.update(reserved_node_ports(profile, descriptor))
+                except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+                    raise RegistrationError('APPLICATION_ROUTE_RESERVATION_UNAVAILABLE') from exc
                 start = int(app_id[4:], 16) % 2768
                 port = next((30000 + (start + n) % 2768 for n in range(2768) if 30000 + (start + n) % 2768 not in used), None)
                 require(port is not None, 'NODEPORT_CAPACITY_EXCEEDED')

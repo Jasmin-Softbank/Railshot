@@ -45,6 +45,10 @@ class HandoffTest(unittest.TestCase):
             result = render(root, target)
             container = result['workload']['items'][0]['spec']['template']['spec']['containers'][0]
             self.assertFalse(container['securityContext']['readOnlyRootFilesystem'])
+            self.assertEqual(result['workload']['items'][0]['spec']['strategy'],
+                             {'type': 'RollingUpdate', 'rollingUpdate': {'maxUnavailable': 0, 'maxSurge': 1}})
+            self.assertEqual(result['workload']['items'][0]['spec']['minReadySeconds'], 3)
+            self.assertEqual(container['lifecycle'], {'preStop': {'sleep': {'seconds': 5}}})
             spec['services'][0]['storage'] = {'mountPath': '/var/opt/memos', 'sizeGi': 1}
             prepare()
             persistent = render(root, target)
