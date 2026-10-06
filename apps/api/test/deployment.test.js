@@ -5,7 +5,7 @@ import yazl from 'yazl';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspectArchive, documentationOnly } from '../src/archive.js';
+import { inspectArchive, documentationOnly, validateFiles } from '../src/archive.js';
 import { createDeploymentService } from '../src/github.js';
 import { createAppServer } from '../src/server.js';
 import { archiveFromPath, deploySource, inferredAppName } from '../src/client.js';
@@ -157,6 +157,29 @@ test('ZIP 경로 이동과 비밀키 파일을 거부한다', async () => {
   const unsafe = await zipOf({ 'aaa/outside': 'bad' });
   const text = unsafe.toString('latin1').replaceAll('aaa/outside', '../.outside');
   await assert.rejects(inspectArchive(Buffer.from(text, 'latin1')), /invalid relative path|안전하지 않은/);
+});
+
+test('source credentials are rejected before any GitHub call without echoing their values', async () => {
+  let calls = 0;
+  const service = createDeploymentService({ token: 'test', targetId: 'aws-demo' }, async () => { calls++; throw new Error('Unexpected GitHub request'); });
+  const secrets = ['ghp_' + 'a'.repeat(36), 'github_pat_' + 'a'.repeat(40), 'sk-' + 'a'.repeat(32),
+    'apikey_' + 'a'.repeat(24), 'AKIA' + 'A'.repeat(16), 'AIza' + 'a'.repeat(35),
+    'xoxb-' + '1'.repeat(24), '-----BEGIN ' + 'PRIVATE KEY-----'];
+  for (const secret of secrets) {
+    const content = Buffer.from(`export const credential = "${secret}";`);
+    const files = [{ path: 'index.html', content: Buffer.from('safe') }, { path: 'config.js', content }];
+    const rejected = (error) => /비밀키/.test(error.message) && !error.message.includes(secret);
+    assert.throws(() => validateFiles(files), rejected);
+    await assert.rejects(inspectArchive(await zipOf({ 'config.js': content })), rejected);
+    await assert.rejects(service.deploy({ app: 'safe-app', files }), rejected);
+  }
+  assert.equal(calls, 0);
+  for (const path of ['production.env', 'config/production.env.local', '.aws/credentials', '.kube/config', '.codex/auth.json', '.npmrc']) {
+    assert.throws(() => validateFiles([{ path, content: Buffer.from('private') }]), /비밀키/);
+    await assert.rejects(inspectArchive(await zipOf({ [path]: 'private' })), /비밀키/);
+  }
+  const safe = [{ path: 'env.js', content: Buffer.from('https://example.org/news/with-sk-telecom-and-arm-sovereign-ai') }];
+  assert.deepEqual(validateFiles(safe), safe, 'A public article slug is not an API key');
 });
 
 test('ignored dependency symlinks are skipped while application symlinks remain rejected', async () => {
