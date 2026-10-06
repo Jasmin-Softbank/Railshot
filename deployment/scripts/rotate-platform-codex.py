@@ -42,7 +42,7 @@ def private_auth(path):
 
 def receiver(action, nonce, encrypted=None):
     # This function is sent as trusted code to the fixed build host; only CMS ciphertext is input.
-    import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, stat, subprocess, time
+    import base64, contextlib, fcntl, hashlib, json, os, pathlib, re, shutil, stat, subprocess, time, tomllib
     def check(ok, code):
         if not ok:
             raise ValueError(code)
@@ -83,10 +83,17 @@ def receiver(action, nonce, encrypted=None):
         binding = home / 'railshot-account.json'
         if binding.exists() or binding.is_symlink():
             private(binding)
+        config = home / 'config.toml'
+        if config.exists() or config.is_symlink():
+            private(config)
+            check(set(tomllib.loads(config.read_text())) <= {'forced_login_method', 'forced_chatgpt_workspace_id',
+                  'cli_auth_credentials_store'}, 'AUTH_ONLY_CONFIG_REQUIRED')
+        config_text = ('forced_login_method = "chatgpt"\ncli_auth_credentials_store = "file"\n'
+                       'forced_chatgpt_workspace_id = ' + json.dumps(auth['tokens']['account_id']) + '\n')
         locks = pathlib.Path('/var/lib/railshot-runner/work/.capacity')
         locks.mkdir(mode=0o700, parents=True, exist_ok=True); private(locks, True)
         with contextlib.ExitStack() as stack:
-            # Existing agent capacity uses up to 16 slots. Hold every slot across the two-file replacement.
+            # Existing agent capacity uses up to 16 slots. Hold every slot across the credential and account configuration replacement.
             for index in range(16):
                 fd = os.open(locks / f'agent-{index}.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
                 stack.callback(os.close, fd)
@@ -98,18 +105,19 @@ def receiver(action, nonce, encrypted=None):
                 except BlockingIOError:
                     raise ValueError('AGENT_BUSY') from None
             backup = root / ('previous-' + nonce); backup.mkdir(mode=0o700)
-            for path in (destination, binding):
+            for path in (destination, binding, config):
                 if path.exists():
                     shutil.copyfile(path, backup / path.name); (backup / path.name).chmod(0o600)
             metadata = {'version': 1, 'owner': 'platform', 'account_sha256': fingerprint,
                         'model': model, 'rotation_id': nonce, 'rotated_at': int(time.time())}
             try:
-                for path, value in ((destination, auth), (binding, metadata)):
+                for path, value in ((destination, json.dumps(auth)), (config, config_text), (binding, json.dumps(metadata))):
                     pending = home / ('.' + path.name + '.' + nonce)
                     with pending.open('x') as stream:
-                        pending.chmod(0o600); json.dump(value, stream); stream.flush(); os.fsync(stream.fileno())
+                        pending.chmod(0o600); stream.write(value); stream.flush(); os.fsync(stream.fileno())
                     os.replace(pending, path)
-                check(json.loads(destination.read_text()) == auth and json.loads(binding.read_text()) == metadata,
+                check(json.loads(destination.read_text()) == auth and json.loads(binding.read_text()) == metadata
+                      and config.read_text() == config_text,
                       'READBACK_FAILED')
                 directory = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
                 try:
@@ -117,7 +125,7 @@ def receiver(action, nonce, encrypted=None):
                 finally:
                     os.close(directory)
             except BaseException:
-                for path in (destination, binding):
+                for path in (destination, binding, config):
                     saved = backup / path.name
                     if saved.exists():
                         os.replace(saved, path)

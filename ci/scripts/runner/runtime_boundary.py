@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 import stat
+import tomllib
 
 
 def private_directory(path):
@@ -48,6 +49,12 @@ def effective_auth_route(provider='codex', env=None):
                         or not re.fullmatch(r'[a-f0-9]{32}', policy.get('rotation_id', ''))
                         or hashlib.sha256(auth['tokens']['account_id'].encode()).hexdigest() != policy.get('account_sha256')):
                     raise ValueError('platform account binding mismatch')
+                config = Path(home) / 'config.toml'
+                if config.exists():
+                    settings = tomllib.loads(config.read_text())
+                    if (settings.get('forced_login_method', 'chatgpt') != 'chatgpt'
+                            or settings.get('forced_chatgpt_workspace_id', auth['tokens']['account_id']) != auth['tokens']['account_id']):
+                        raise ValueError('platform account configuration mismatch')
                 route.update(model=policy['model'], credential_rotation=policy['rotation_id'])
         return route
     return {'provider': provider, 'endpoint': env.get('ANTHROPIC_BASE_URL')}
