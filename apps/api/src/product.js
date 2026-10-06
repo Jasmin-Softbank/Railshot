@@ -24,6 +24,10 @@ const occupiesSlot = (record) => active(record) && !(record.status === 'unknown'
   && !(record.status === 'running' && (record.ci?.observation?.next_retry_at || record.cd?.observation?.next_retry_at));
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const deliveryMessages = {
+  CD_ROLLOUT_FAILED: '새 버전이 준비되지 않아 배포에 실패했습니다. 앱 상세에서 기존 서비스 상태를 확인하고, 수정한 소스나 이전 소스로 업데이트할 수 있습니다.',
+  APPLICATION_DELETED: '앱 삭제가 확인되어 이 배포는 더 진행하지 않습니다. 같은 이름으로 다시 배포할 수 있습니다.',
+  CD_STORAGE_MODE_CHANGE_UNSUPPORTED: '업데이트 중 영구 저장소 사용 여부를 바꿀 수 없습니다. 기존 저장소 설정을 유지하거나 별도 앱으로 배포해 주세요.',
+  APPLICATION_ROUTE_RESERVATION_UNAVAILABLE: '배포 포트의 기존 사용 내역을 확인하지 못했습니다. 클러스터 변경 전에 중단했으며 운영 확인이 필요합니다.',
   GCP_ROUTE_PREPARATION_FAILED: 'GCP 로드밸런서 경로 준비에 실패했습니다. 앱 적용 전에 환경 설정과 실행 권한을 확인해야 합니다.',
   GCP_ROUTE_APPLY_TIMEOUT: 'GCP 로드밸런서 구성 시간이 초과됐습니다. 일부 자원이 생성됐을 수 있으며 현재 상태 확인 후 게시된 이미지로 이어갈 수 있습니다.',
   GCP_ROUTE_APPLY_INCOMPLETE: 'GCP 로드밸런서 구성이 끝나지 않았습니다. 방화벽·경로·인증서 적용 결과를 확인해야 합니다.',
@@ -53,7 +57,8 @@ export function idempotencyKey(value) {
   return value;
 }
 function publicRecord(record) {
-  const { fingerprint, key, source, source_bytes, legacy, session_id, publication, refreshed_plan, diagnostic_evidence, classifications, telemetry, ...visible } = record;
+  const { fingerprint, key, source, source_bytes, legacy, session_id, publication, refreshed_plan, diagnostic_evidence, classifications, telemetry,
+    generation, application_generation, ...visible } = record;
   const timeline = publicTelemetry(record);
   const activity = agentActivity(record, timeline);
   return { ...structuredClone(visible), ...(telemetry ? { telemetry: timeline } : {}),
@@ -137,6 +142,16 @@ export async function createProductService({ service, directory, target, provide
       throw new ProductError(404, 'NOT_FOUND', '앱 등록을 찾을 수 없습니다.');
     return application;
   }
+  // Generation 0 is every app created before same-name recreation existed.
+  const sameGeneration = (row, application) => (row.application_generation || 0) === (application.generation || 0);
+  // Only the app's own completed, residual-free delete operation releases its deterministic identity.
+  function verifiedDeletion(state, application) {
+    const id = application.lifecycle_operation_id;
+    const operation = id && Object.hasOwn(state.operations, id) ? state.operations[id] : null;
+    return Boolean(application.status === 'deleted' && operation?.kind === 'application-lifecycle' && operation.action === 'delete'
+      && operation.status === 'succeeded' && !operation.residuals?.length && operation.application_id === application.id
+      && operation.session_id === application.session_id && operation.app === application.app && operation.target_id === application.target_id);
+  }
   function lifecycleAvailable(state, application, action, cancelling = null) {
     checkUncertainResource(state, application, cancelling, action === 'delete');
     personal.writable(state, application.environment_target_id, application.session_id);
@@ -152,7 +167,7 @@ export async function createProductService({ service, directory, target, provide
         || action === 'stop' && application.status !== 'ready') throw new ProductError(409, 'APPLICATION_STATE_CONFLICT', '앱의 현재 상태에서는 이 작업을 실행할 수 없습니다.');
   }
   function applicationSnapshot(state, application, deferred = false) {
-    const deployments = Object.values(state.operations).filter((row) => row.kind === 'deployments' && row.application_id === application.id);
+    const deployments = Object.values(state.operations).filter((row) => row.kind === 'deployments' && row.application_id === application.id && sameGeneration(row, application));
     const latest = deployments.at(-1);
     return digest({ application: deferred ? Object.fromEntries(['id', 'app', 'target_id', 'environment_target_id', 'provider', 'session_id', 'created_at'].map((key) => [key, application[key]])) : application,
       deployment: latest ? { id: latest.id, ...(deferred ? {} : { source_commit: latest.source_commit || null }) } : null });
@@ -294,7 +309,7 @@ export async function createProductService({ service, directory, target, provide
     } else if (!Number.isFinite(Date.parse(row.dispatch?.prepared_at)) || typeof service.findDeployment !== 'function') return false;
     if (row.application_id) {
       const app = state.applications[row.application_id];
-      if (!app || app.status !== 'ready' || app.deletion_requested || app.session_id !== row.session_id
+      if (!app || app.status !== 'ready' || app.deletion_requested || app.session_id !== row.session_id || !sameGeneration(row, app)
           || app.app !== row.app || app.target_id !== row.target_id
           || app.environment_target_id !== row.environment_target_id) return false;
     }
@@ -417,7 +432,7 @@ export async function createProductService({ service, directory, target, provide
   for (const operation of Object.values(restored.operations)) {
     const application = restored.applications[operation.application_id];
     if (operation.kind !== 'deployments' || operation.status !== 'unknown' || operation.stage !== 'registration'
-        || !application || !['unknown', 'queued'].includes(application.status)
+        || !application || !['unknown', 'queued'].includes(application.status) || !sameGeneration(operation, application)
         || operation.deletion_requested || application.deletion_requested || application.lifecycle_operation_id
         || operation.ci?.run_id || operation.source_commit || operation.dispatch
         || !operation.queue?.enqueued_at || typeof applicationAdapter?.registrationStarted !== 'function') continue;
@@ -461,8 +476,10 @@ export async function createProductService({ service, directory, target, provide
       const previousApplication = application && state.applications[application.id];
       if (application && applicationAdapter.targets[application.environment_target_id]?.automaticDelivery === false) throw unavailable();
       if (previousApplication && previousApplication.session_id !== sessionId) throw new ProductError(409, 'APPLICATION_OWNERSHIP_CONFLICT', '같은 환경의 이 앱 이름은 다른 세션에 등록되어 있습니다. 다른 이름을 사용하세요.');
-      if (previousApplication && ['stopped', 'deleted'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_STATE_CONFLICT', '중지한 앱은 명시적으로 시작해야 하며 삭제한 앱은 다시 배포할 수 없습니다.');
-      if (previousApplication && !['queued', 'registering', 'ready'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 등록 결과를 운영자가 확인해야 합니다. 자동 재등록하지 않습니다.');
+      // A verified deletion starts a new generation under the same deterministic app identity.
+      const recreating = Boolean(previousApplication && verifiedDeletion(state, previousApplication));
+      if (previousApplication && !recreating && ['stopped', 'deleted'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_STATE_CONFLICT', '중지한 앱은 명시적으로 시작해야 하며 삭제 완료가 확인되지 않은 앱은 다시 배포할 수 없습니다.');
+      if (previousApplication && !recreating && !['queued', 'registering', 'ready'].includes(previousApplication.status)) throw new ProductError(409, 'APPLICATION_RECONCILE_REQUIRED', '이 앱 등록 결과를 운영자가 확인해야 합니다. 자동 재등록하지 않습니다.');
       const selectedCdAvailable = Boolean(deployPublished && (!deployPublished.targets || selectedCdTarget));
       const savedEnvironment = registeredEnvironment(state, input.target_id, sessionId);
       const registered = !selectedCdAvailable && !input.plan_id && kind === 'deployments' ? savedEnvironment : null;
@@ -483,7 +500,7 @@ export async function createProductService({ service, directory, target, provide
       checkCapacity(state);
       const applicationName = selectedCdTarget?.applicationName || savedEnvironment?.applicationName;
       if (!input.plan_id && applicationName && (kind === 'deployments' || savedEnvironment) && input.app !== applicationName) throw invalid(`등록된 배포 앱 이름과 일치하지 않습니다. 이 대상은 ${applicationName} 전용입니다. ${input.app} 배포에는 새 앱용 환경 또는 같은 이름의 앱 등록이 필요합니다.`);
-      return { application, previousApplication, plan, registered };
+      return { application, previousApplication, recreating, plan, registered };
     }
     const admitted = admission(store.read());
     if (admitted.plan) await environmentAdapter.verifyPlan(admitted.plan);
@@ -501,13 +518,17 @@ export async function createProductService({ service, directory, target, provide
         if (existing.fingerprint !== fingerprint) throw new ProductError(409, 'IDEMPOTENCY_CONFLICT', '같은 키로 다른 입력을 보낼 수 없습니다.');
         return { record: existing, replay: true };
       }
-      const { application, previousApplication, plan, registered } = admission(state);
+      const { application, previousApplication, recreating, plan, registered } = admission(state);
       const sourceBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.path) + Math.ceil(file.content.length / 3) * 4 + 128, 0);
       checkCapacity(state, sourceBytes);
       const id = randomUUID(), now = new Date().toISOString();
       await store.snapshot(id, files);
-      if (application && !previousApplication) state.applications[application.id] = { ...application, session_id: sessionId, status: 'queued', created_at: now };
+      // Old operations keep their history and generation; none can act on the new generation.
+      if (application && (!previousApplication || recreating)) state.applications[application.id] = { ...application, session_id: sessionId, status: 'queued', created_at: now,
+        ...(recreating ? { generation: (previousApplication.generation || 0) + 1 } : {}) };
+      const generation = application && state.applications[application.id].generation;
       const record = { id, kind, session_id: sessionId, app: input.app, target_id: input.target_id,
+        ...(generation ? { application_generation: generation } : {}),
         ...(input.deployment_selection ? { deployment_selection: { ...input.deployment_selection } } : {}),
         ...(application ? { application_id: application.id, environment_target_id: application.environment_target_id } : {}),
         ...(plan ? { plan_id: input.plan_id, environment_id: `${id}.environment`, environment: { status: 'queued' } } : registered ? { environment_id: registered.environment_id } : {}), status: 'queued', stage: application ? 'registration' : plan ? 'environment' : 'ci',
@@ -679,7 +700,9 @@ export async function createProductService({ service, directory, target, provide
         stage: succeeded ? 'complete' : cd.deployed ? 'http' : 'cd', cd: { ...cd, observation },
         ...(unknown ? {} : { public_http: result.public_http }),
         url: succeeded ? result.public_http.site_url || result.public_http.url : null,
-        error: stopped ? originalError || { ...operationError(result.error?.code || 'CD_OBSERVATION_REJECTED', true), message: '기존 배포 기록으로 클러스터 결과를 확인하지 못했습니다. 이 앱의 배포 기록을 확인해야 합니다.' }
+        error: stopped ? originalError || (result.cd?.state !== 'failed' || result.error?.code !== 'CD_ROLLOUT_FAILED'
+          ? { ...operationError(result.error?.code || 'CD_OBSERVATION_REJECTED', true), message: '기존 배포 기록으로 클러스터 결과를 확인하지 못했습니다. 이 앱의 배포 기록을 확인해야 합니다.' }
+          : operationError(result.error?.code || 'CD_ROLLOUT_FAILED', false))
           : unknown ? store.read('operations', record.id).error : null });
       if (succeeded || stopped) cdRecoveries.delete(record.id);
     } catch (error) {
@@ -751,7 +774,10 @@ export async function createProductService({ service, directory, target, provide
             return;
           }
           const succeeded = result.cd?.deployed === true && typeof result.cd.revision === 'string' && result.cd.revision.length > 0 && result.public_http?.state === 'succeeded' && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
-          const status = succeeded ? 'succeeded' : resume || result.error?.outcome_unknown ? 'unknown' : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
+          const confirmedFailure = result.cd?.state === 'failed' && result.error?.code === 'CD_ROLLOUT_FAILED'
+            && /^[a-f0-9]{40}$/.test(result.cd.revision || '');
+          const status = succeeded ? 'succeeded' : result.error?.outcome_unknown || resume && !confirmedFailure ? 'unknown'
+            : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
           await update(record.id, { status, stage: succeeded ? 'complete' : result.cd?.deployed ? 'http' : 'cd', cd: result.cd, public_http: result.public_http,
             url: succeeded ? (result.public_http.site_url || result.public_http.url) : null, error: succeeded ? null : operationError(result.error?.code || 'CD_UNVERIFIED', status === 'unknown') });
           if (status === 'unknown' && record.application_id) cdRecoveries.add(record.id);
@@ -785,7 +811,7 @@ export async function createProductService({ service, directory, target, provide
   function applicationVersions(state, application) {
     const rows = Object.values(state.operations).filter((row) => row.kind === 'deployments'
       && row.application_id === application.id && row.app === application.app && row.target_id === application.target_id
-      && row.session_id === application.session_id).reverse();
+      && row.session_id === application.session_id && sameGeneration(row, application)).reverse();
     const current = rows.find(successfulDeployment) || null;
     const newer = current ? rows.slice(0, rows.indexOf(current)) : rows;
     const uncertain = newer.some((row) => row.cd?.state === 'running' || row.cd?.state === 'unknown'
@@ -871,6 +897,7 @@ export async function createProductService({ service, directory, target, provide
       const id = randomUUID(), now = new Date().toISOString();
       await store.snapshot(id, files);
       const record = { id, kind: 'deployments', application_id: application.id, app: application.app, target_id: application.target_id,
+        ...(application.generation ? { application_generation: application.generation } : {}),
         environment_target_id: application.environment_target_id, session_id: sessionId, status: 'preview', stage: 'review',
         base_deployment_id: baseline.id, base_revision: baseline.cd.revision, baseline_kind: baselineKind,
         expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(), changes,
@@ -1054,14 +1081,15 @@ export async function createProductService({ service, directory, target, provide
       const application = applicationFor({ applications: { [id]: store.read('applications', id) } }, id, sessionId);
       const latest = () => store.latestDeployment({ application_id: id, app: application.app,
         target_id: application.target_id, session_id: application.session_id }, { requireCdState: true });
-      const record = latest();
+      const latestRow = latest(), record = latestRow && sameGeneration(latestRow, application) ? latestRow : null;
       const empty = (state, reason) => ({ application_id: id, deployment_id: record?.id || null, state,
         checked_at: new Date().toISOString(), reason, workload: null, public_http: null });
       if (!record) return empty('no_data', 'deployment_not_started');
       if (typeof applicationAdapter?.observeRuntime !== 'function') return empty('unsupported', 'runtime_observation_not_configured');
       try {
         const observation = await applicationAdapter.observeRuntime(application, record);
-        if (latest()?.id !== record.id || store.read('applications', id)?.status !== application.status)
+        const current = store.read('applications', id);
+        if (latest()?.id !== record.id || current?.status !== application.status || !sameGeneration(record, current || {}))
           return empty('stale', 'deployment_superseded');
         return { ...observation, application_id: id, deployment_id: record.id };
       } catch { return empty('collection_failed', 'runtime_observation_unavailable'); }
@@ -1181,6 +1209,17 @@ export async function createProductService({ service, directory, target, provide
             error: result.status === 'succeeded' ? null : operationError(failureCode || 'APPLICATION_LIFECYCLE_UNVERIFIED', result.status === 'unknown'), updated_at: new Date().toISOString() });
           Object.assign(state.applications[applicationId], { status: result.status === 'succeeded'
             ? { stop: 'stopped', start: 'ready', delete: 'deleted' }[record.action] : 'unknown', updated_at: new Date().toISOString() });
+          if (record.action !== 'delete' || result.status !== 'succeeded') return;
+          // A verified residual-free delete settles this generation's unfinished deliveries.
+          // Otherwise a stale running/unknown row would block or stall a same-name recreation.
+          for (const row of Object.values(state.operations)) {
+            if (row.kind !== 'deployments' || row.application_id !== applicationId || deploymentWorkers.has(row.id)
+                || !sameGeneration(row, state.applications[applicationId])
+                || !(['running', 'unknown'].includes(row.status) || row.status === 'blocked' && row.error?.outcome_unknown)) continue;
+            Object.assign(row, { status: 'blocked', error: operationError('APPLICATION_DELETED', false), updated_at: new Date().toISOString() });
+            for (const phase of [row.ci, row.cd]) if (phase?.observation) phase.observation.next_retry_at = null;
+            cdRecoveries.delete(row.id);
+          }
         });
       });
       return publicRecord(accepted.record);
@@ -1308,6 +1347,7 @@ export async function createProductService({ service, directory, target, provide
           && lifecycle.app === application.app && lifecycle.status === 'succeeded' && ['stop', 'start'].includes(lifecycle.action);
         if (!['unknown', 'blocked', 'failed'].includes(operation.status) || !['cd', 'http'].includes(operation.stage)
             || application.status !== 'ready' || application.deletion_requested || operation.deletion_requested || !completedLifecycle
+            || !sameGeneration(operation, application)
             || ci?.state !== 'published'
             || typeof applicationAdapter?.deployPublished !== 'function'
             || !/^\d+$/.test(ci.run_id) || !/^[a-f0-9]{40}$/.test(operation.source_commit || '')

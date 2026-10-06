@@ -409,6 +409,75 @@ class ApplicationsTest(unittest.TestCase):
         self.assertFalse((self.home() / 'binding.json').exists())
         self.assertIsNone(self.fixture.variable)
 
+    def delete_verified(self, operation='11111111-2222-4333-8444-555555555555', **result):
+        home = self.home(); app_id = home.name
+        journal = home / 'lifecycle' / 'operations' / (operation + '.json')
+        apps.private_directory(journal.parent)
+        env.save(journal, {'request_sha256': 'a' * 64, 'result': {'status': 'succeeded', 'application_id': app_id,
+                 'action': 'delete', 'steps': [{'name': 'revoke-permissions', 'status': 'succeeded'}], 'residuals': [], **result}})
+        env.save(home / 'lifecycle.json', {'status': 'deleted', 'operation_id': operation})
+        return operation
+
+    def remove_cluster_objects(self, app_id):
+        # The fake equivalent of a verified delete: app-owned objects and its renewal row are gone.
+        for objects in (self.fixture.runtime.objects, self.fixture.control.objects):
+            for key in [key for key in objects if any(app_id in part for part in key)]:
+                del objects[key]
+        cm = self.fixture.control.objects['argocd', 'configmap', 'railshot-credentials']
+        policy = json.loads(cm['data']['policy.json'])
+        policy['targets'] = [row for row in policy['targets'] if row['target_id'] != app_id]
+        cm['data']['policy.json'] = json.dumps(policy)
+
+    def test_verified_deleted_registration_is_archived_and_recreated_with_same_identity(self):
+        first = self.register(); self.assertEqual(first['status'], 'succeeded', first)
+        old_receipt = (self.home() / 'registration.json').read_bytes()
+        operation = self.delete_verified(); self.remove_cluster_objects(first['application_id'])
+        second = self.register(); self.assertEqual(second['status'], 'succeeded', second)
+        self.assertEqual({k: second[k] for k in ('application_id', 'namespace', 'hostname')},
+                         {k: first[k] for k in ('application_id', 'namespace', 'hostname')})
+        archived = Path(self.config['state_dir']) / 'archive' / first['application_id'] / operation
+        # Old receipts, journals and lifecycle state stay intact for audit; the new home has none of them.
+        self.assertEqual((archived / 'registration.json').read_bytes(), old_receipt)
+        self.assertEqual(env.read_private(archived / 'lifecycle.json')['status'], 'deleted')
+        self.assertTrue((archived / 'lifecycle' / 'operations' / (operation + '.json')).exists())
+        self.assertFalse((self.home() / 'lifecycle.json').exists())
+        self.assertFalse((self.home() / 'lifecycle').exists())
+        counts = (self.fixture.runtime.applications, self.fixture.control.applications)
+        self.assertEqual(self.register(), second)  # The new generation replays read-only.
+        self.assertEqual(counts, (self.fixture.runtime.applications, self.fixture.control.applications))
+        # The archived delete operation and its plan cannot act on the new generation.
+        import application_lifecycle as lifecycle
+        stale = {**self.request(), 'version': 1, 'phase': 'apply', 'action': 'delete', 'operation_id': operation,
+                 'plan_id': operation, 'plan_hash': 'b' * 64, 'delete_data': True}
+        with self.assertRaises(FileNotFoundError):
+            lifecycle.lifecycle(self.config_path, stale)
+        self.assertFalse((self.home() / 'lifecycle.json').exists())
+        self.assertFalse((self.home() / 'lifecycle' / 'operations' / (operation + '.json')).exists())
+        self.assertEqual(counts, (self.fixture.runtime.applications, self.fixture.control.applications))
+
+    def test_uncertain_or_foreign_deletion_state_is_never_archived(self):
+        first = self.register(); self.assertEqual(first['status'], 'succeeded', first)
+        receipt = self.home() / 'registration.json'
+        cases = [{'status': 'unknown'}, {'status': 'running'}, {'action': 'stop'}, {'application_id': 'app-' + 'f' * 24},
+                 {'residuals': [{'kind': 'ApplicationNamespace', 'name': first['application_id']}]}]
+        for change in cases:
+            with self.subTest(change=change):
+                self.delete_verified(**change)
+                with self.assertRaisesRegex(apps.RegistrationError, 'APPLICATION_LIFECYCLE_BLOCKED'):
+                    self.register()
+                self.assertTrue(receipt.exists())
+        for state in ({'status': 'deleted', 'operation_id': '../../escape'}, {'status': 'deleted'},
+                      {'status': 'deleted', 'operation_id': '99999999-2222-4333-8444-555555555555'},
+                      {'status': 'deleting', 'operation_id': '11111111-2222-4333-8444-555555555555'},
+                      {'status': 'unknown', 'operation_id': '11111111-2222-4333-8444-555555555555'},
+                      {'status': 'stopped', 'operation_id': '11111111-2222-4333-8444-555555555555'}):
+            with self.subTest(state=state):
+                env.save(self.home() / 'lifecycle.json', state)
+                with self.assertRaisesRegex(apps.RegistrationError, 'APPLICATION_LIFECYCLE_BLOCKED'):
+                    self.register()
+                self.assertTrue(receipt.exists())
+        self.assertFalse((Path(self.config['state_dir']) / 'archive').exists())
+
     def test_live_ports_and_persisted_reservations_are_both_excluded(self):
         app_id = self.request()['application_id']; seeded = 30000 + int(app_id[4:], 16) % 2768
         self.fixture.runtime.objects['default', 'service', 'foreign'] = {'spec': {'ports': [{'nodePort': seeded}]}}

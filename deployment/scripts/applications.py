@@ -162,6 +162,36 @@ def assert_deployable(home):
         require(runtime.read_private(path).get('status') == 'ready', 'APPLICATION_LIFECYCLE_BLOCKED')
 
 
+def archive_deleted(root, home):
+    """Caller holds registration.lock. Move only a verified-deleted generation aside, intact.
+
+    The archived home keeps its receipts, plans and journals for audit; stale
+    operations addressing the deterministic home then find no plan or journal.
+    """
+    path = home / 'lifecycle.json'
+    state = runtime.read_private(path) if path.exists() else None
+    if not isinstance(state, dict) or state.get('status') != 'deleted':
+        return home
+    operation = state.get('operation_id')
+    require(isinstance(operation, str) and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', operation),
+            'APPLICATION_LIFECYCLE_BLOCKED')
+    journal = home / 'lifecycle' / 'operations' / (operation + '.json')
+    result = runtime.read_private(journal).get('result', {}) if journal.exists() else {}
+    require(result.get('status') == 'succeeded' and result.get('action') == 'delete' and not result.get('residuals')
+            and result.get('application_id') == home.name, 'APPLICATION_LIFECYCLE_BLOCKED')
+    target = private_directory(private_directory(root / 'archive') / home.name) / operation
+    require(not target.exists() and not target.is_symlink(), 'APPLICATION_LIFECYCLE_BLOCKED')
+    os.rename(home, target)
+    home = private_directory(home)
+    for directory in (target.parent, root):
+        fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    return home
+
+
 def register(config_path, request):
     config = load_config(config_path)
     profile, native, descriptor, endpoint, physical, authority, pull, fingerprint = _inputs(config, request)
@@ -182,7 +212,7 @@ def register(config_path, request):
             require(not path.exists() or runtime.read_private(path) == environment_claim, 'ENVIRONMENT_OWNERSHIP_CONFLICT')
         for path in claims:
             _claim(path, environment_claim)
-        home = private_directory(root / app_id)
+        home = archive_deleted(root, private_directory(root / app_id))
         assert_deployable(home)
         receipt = home / 'registration.json'
         if receipt.exists():

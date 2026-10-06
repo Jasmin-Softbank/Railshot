@@ -80,11 +80,23 @@ def workload(config, review):
                      and after['metadata']['generation'] == live['metadata']['generation'], 'deployment changed during observation')
         desired = live['spec'].get('replicas', 1)
         status = live.get('status', {})
+        strategy = live['spec'].get('strategy', {})
+        update_strategy = None
+        if strategy.get('type') in ('RollingUpdate', 'Recreate'):
+            update_strategy = {'type': strategy['type']}
+            for source, field in (('maxUnavailable', 'max_unavailable'), ('maxSurge', 'max_surge')):
+                value = strategy.get('rollingUpdate', {}).get(source)
+                update_strategy[field] = value if (type(value) is int and 0 <= value <= 10000
+                    or isinstance(value, str) and re.fullmatch(r'(?:100|[0-9]{1,2})%', value)) else None
         ready = (type(desired) is int and desired > 0 and len(rows) >= desired and all(p['ready'] for p in rows)
                  and status.get('observedGeneration', 0) >= live['metadata']['generation']
                  and status.get('availableReplicas', 0) >= desired)
         return {'state': 'ready' if ready else 'progressing', 'checked_at': checked, 'pods': rows,
-                'code': None, 'observed_generation': status.get('observedGeneration'), 'desired_replicas': desired}
+                'code': None, 'observed_generation': status.get('observedGeneration'), 'desired_replicas': desired,
+                'update_strategy': update_strategy,
+                'replicas': {key: status.get(field) if type(status.get(field)) is int and status[field] >= 0 else None
+                             for key, field in (('ready', 'readyReplicas'), ('updated', 'updatedReplicas'),
+                                                ('available', 'availableReplicas'))}}
     except Exception:
         return missing
 

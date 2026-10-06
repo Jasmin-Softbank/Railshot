@@ -58,6 +58,29 @@ async function fixture(t, { legacy = false } = {}) {
   return f;
 }
 
+test('a runtime observation spanning delete and recreation is stale even when the new generation is ready again', async (t) => {
+  const f = await fixture(t), status = f.service.status;
+  f.adapter.planLifecycle = async (application, { id, action }) => ({ public: { id, application_id: application.id, action,
+    plan_hash: 'e'.repeat(64), resources: [{ kind: 'Deployment', name: application.app }], retained: [],
+    expires_at: new Date(Date.now() + 60000).toISOString() }, private: {} });
+  f.adapter.verifyLifecyclePlan = async () => {};
+  f.adapter.applyLifecycle = async (application, plan) => ({ application_id: application.id, action: plan.public.action,
+    status: 'succeeded', steps: [], residuals: [] });
+  f.adapter.observeRuntime = async () => {
+    const plan = await f.product.createApplicationPlan(f.app, { action: 'delete' }, f.owner);
+    const operation = await f.product.createApplicationOperation(f.app, { action: 'delete', plan_id: plan.id,
+      plan_hash: plan.plan_hash, confirmation: 'demo-app', delete_data: true }, 'delete', f.owner);
+    while (['queued', 'running'].includes(f.product.getOperation(operation.id, f.owner).status)) await pause(5);
+    f.service.status = async () => ({ state: 'running' });  // The new generation stays in CI, so its row has no CD state yet.
+    await f.product.createDeployment({ ...upload(original), source_name: 'demo-app', deployment_selection: { environment: 'cloud', provider: 'aws' } }, 'recreate', undefined, f.owner);
+    while (f.product.getApplication(f.app, f.owner).status !== 'ready') await pause(5);
+    return { state: 'ready', checked_at: new Date().toISOString(), reason: null, workload: { state: 'ready', pods: [] }, public_http: null };
+  };
+  const observed = await f.product.getApplicationObservation(f.app, f.owner);
+  assert.deepEqual([observed.state, observed.reason, observed.workload], ['stale', 'deployment_superseded', null]);
+  f.service.status = status;
+});
+
 test('same-name resolution uses the exact environment and owner without dispatching or exposing another session', async (t) => {
   const f = await fixture(t);
   const selection = { environment: 'cloud', provider: 'aws', app: 'demo-app' };

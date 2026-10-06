@@ -161,7 +161,7 @@ def render(directory, target):
         container['volumeMounts'].append({'name': 'database-ca', 'mountPath': '/etc/railshot/db', 'readOnly': True})
     container['readinessProbe'] = {'httpGet': {'path': health, 'port': svc['port']}, 'periodSeconds': 5}
     workload = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': name, 'namespace': namespace},
-                'spec': {'replicas': svc.get('replicas', 1), 'minReadySeconds': 3,
+                'spec': {'replicas': svc.get('replicas', 1), 'minReadySeconds': 3, 'progressDeadlineSeconds': 300,
                          'strategy': {'type': 'RollingUpdate', 'rollingUpdate': {'maxUnavailable': 0, 'maxSurge': 1}},
                          'selector': {'matchLabels': runtime_labels},
                          'template': {'metadata': {'labels': runtime_labels}, 'spec': {

@@ -96,10 +96,36 @@ test('stop/start/delete consume private plans once, preserve data on stop, and r
     assert.equal(f.product.applications(f.owner.id).length, status === 'deleted' ? 0 : 1);
     assert.equal((await f.product.createApplicationOperation(app.id, body, action, f.owner.id)).id, first.id);
     await assert.rejects(f.product.createApplicationOperation(app.id, { ...body, confirmation: 'another' }, action, f.owner.id), { code: 'IDEMPOTENCY_CONFLICT' });
-    if (status !== 'ready') await assert.rejects(f.product.createDeployment(source, 'deploy-' + action, undefined, f.owner.id), { code: 'APPLICATION_STATE_CONFLICT' });
+    if (status === 'stopped') await assert.rejects(f.product.createDeployment(source, 'deploy-' + action, undefined, f.owner.id), { code: 'APPLICATION_STATE_CONFLICT' });
   }
   assert.equal(f.calls.apply, 3); assert.equal(f.calls.dispatch, 0);
   await assert.rejects(f.plan('start'), { code: 'APPLICATION_STATE_CONFLICT' });
+});
+
+test('a deleted app is never recreated by a foreign session or without its own verified, residual-free deletion', async (t) => {
+  const tampered = [
+    ['missing operation', (state, op) => { delete state.applications[app.id].lifecycle_operation_id; }],
+    ['unknown outcome', (state, op) => { op.status = 'unknown'; }],
+    ['residuals remain', (state, op) => { op.residuals = [{ kind: 'ApplicationNamespace', name: app.id }]; }],
+    ['other action', (state, op) => { op.action = 'stop'; }],
+    ['foreign operation', (state, op, f) => { op.session_id = f.stranger.id; }],
+    ['other app', (state, op) => { op.application_id = 'app-' + 'b'.repeat(24); }],
+  ];
+  for (const [name, change] of tampered) await t.test(name, async (t) => {
+    const f = await fixture(t), plan = await f.plan('delete');
+    const operation = await f.product.createApplicationOperation(app.id, f.input(plan), 'delete', f.owner.id);
+    assert.equal((await settled(f.product, operation.id, f.owner.id)).status, 'succeeded');
+    await assert.rejects(f.product.createDeployment(source, 'foreign', undefined, f.stranger.id), { code: 'APPLICATION_OWNERSHIP_CONFLICT' });
+    await f.product.close();
+    const store = await createProductStore(f.directory);
+    await store.transaction((state) => change(state, state.operations[operation.id], f));
+    await store.close();
+    const restarted = await createProductService(f.options);
+    try {
+      await assert.rejects(restarted.createDeployment(source, 'redeploy', undefined, f.owner.id), { code: 'APPLICATION_STATE_CONFLICT' });
+      assert.equal(restarted.getApplication(app.id, f.owner.id).status, 'deleted');
+    } finally { await restarted.close(); }
+  });
 });
 
 test('ownership, explicit data consent, strict inputs and stale snapshots fail before execution', async (t) => {
@@ -675,7 +701,9 @@ test('published delivery with a missing CD journal can be deleted only through a
         assert.equal((await product.createApplicationOperation(app.id, f.input(plan), 'delete-missing-cd', f.owner.id)).id, op.id);
         assert.equal(f.calls.apply, 1);
       }
-      assert.equal(disk(f.directory, 'operations', 'missing-cd').error.code, 'DEPLOYMENT_NOT_FOUND');
+      // Only a verified residual-free delete settles the uncertain row; otherwise it stays fenced.
+      const { code, outcome_unknown } = disk(f.directory, 'operations', 'missing-cd').error;
+      assert.deepEqual([code, outcome_unknown], rejected ? ['DEPLOYMENT_NOT_FOUND', true] : ['APPLICATION_DELETED', false]);
       assert.equal(f.calls.dispatch, 0);
     } finally { await product.close(); }
   });

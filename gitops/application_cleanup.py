@@ -247,6 +247,11 @@ def validate_shared(provider, address, before, after, unknown, route, key, value
                 'unowned ALB egress change')
         return
     require(address in gcp_routes.UPDATES, 'unowned shared GCP resource')
+    # Use the same representation rules as route creation; provider refresh
+    # changes empty descriptions and equivalent self-links without changing routing.
+    before = gcp_routes.comparable_resource(address, before)
+    after = gcp_routes.comparable_resource(address, after)
+    left, right = (before, after) if adding else (after, before)
     fields = {'allow', 'fingerprint'} if address.endswith('.gfe') else {'host_rule', 'path_matcher', 'fingerprint'}
     require({k: v for k, v in before.items() if k not in fields} ==
             {k: v for k, v in after.items() if k not in fields}, 'shared GCP behavior changed')

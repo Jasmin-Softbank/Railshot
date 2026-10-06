@@ -2,7 +2,7 @@ import { openInsights } from './src/insights.js';
 import { createHistoryDetail, filterHistory, stageLabel, stageTone, progressPollMs } from './src/deployment-history.js';
 import { APP_NAME, APP_NAME_MESSAGE, sourceAppName } from '../../contracts/application.mjs';
 import { request, requests } from './src/api.js';
-import { applicationLabel, createLifecycleController } from './src/lifecycle.js';
+import { applicationLabel, createLifecycleController, updateStrategyLabel } from './src/lifecycle.js';
 
 const views = {
   deploy: document.querySelector('#deploy-view'),
@@ -304,6 +304,8 @@ function renderUpdateContext() {
   document.querySelector('#update-service-state').textContent = url ? '현재 서비스 · 마지막 접속 확인 ' + formatTime(application.current_deployment.public_http.verified_at)
     : application.current_deployment_state === 'unverified' ? '현재 서비스 상태 확인 필요' : '마지막 성공 배포 기준으로 업데이트합니다.';
   safeLink('#update-site', url, Boolean(url));
+  document.querySelector('#update-strategy').textContent = updateStrategyLabel(application.current_deployment?.cd?.evidence?.workload?.update_strategy)
+    + ' 새 버전의 실제 전환 상태는 배포 진행과 앱 운영 상태에서 확인할 수 있습니다.';
   const latest = application.latest_deployment;
   const note = document.querySelector('#update-latest-note');
   note.hidden = !latest || !['failed', 'blocked', 'unknown'].includes(latest.status);
@@ -1290,6 +1292,12 @@ function renderApplicationObservation() {
     : changed ? '앱 상태나 배포가 변경됐습니다. 현재 상태를 다시 확인해 주세요.'
     : outdated ? '마지막 관측이 오래됐습니다. 현재 상태를 다시 확인해 주세요.' : reasons[observed?.reason];
   if (reason) host.append(element('p', reason, 'field-note'));
+  if (!applicationObservationError && !outdated && observed?.state === 'ready' && observed.workload
+      && ['ready', 'progressing'].includes(observed.workload.state)) {
+    host.append(element('p', updateStrategyLabel(observed.workload.update_strategy), 'field-note'));
+    const replicas = observed.workload.replicas;
+    if (replicas) host.append(element('p', `실행 수 · 준비 ${replicas.ready ?? '확인 필요'} / 새 버전 ${replicas.updated ?? '확인 필요'} / 서비스 가능 ${replicas.available ?? '확인 필요'}`, 'field-note'));
+  }
   const actions = element('div', '', 'history-actions'), refresh = element('button', '현재 상태 다시 확인', 'text-button');
   refresh.type = 'button'; refresh.disabled = Boolean(applicationController); refresh.onclick = () => loadApplication(applicationDetail.id); actions.append(refresh);
   const deployment = [applicationDetail.current_deployment, applicationDetail.latest_deployment].find(row => row?.id && row.id === observed?.deployment_id);

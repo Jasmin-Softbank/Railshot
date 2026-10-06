@@ -122,10 +122,21 @@ test('application detail separates registration and deployment history from curr
     await panel.getByText(expected, { exact: true }).waitFor();
   }
   assert.match(await panel.innerText(), /관측 시각:/);
+  observation = snapshot('ready', 'ready', 'succeeded');
+  Object.assign(observation.workload, { update_strategy: { type: 'RollingUpdate', max_unavailable: 0, max_surge: 1 },
+    replicas: { ready: 1, updated: 1, available: null } });
+  await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
+  await panel.getByText('롤링 업데이트 · 허용 중단 0, 추가 실행 1', { exact: true }).waitFor();
+  assert.match(await panel.innerText(), /서비스 가능 확인 필요/);
+  if (process.env.CI_OUTPUT_DIR) await page.screenshot({ path: join(process.env.CI_OUTPUT_DIR, 'application-rolling-desktop.png'), fullPage: true });
+  observation.workload.update_strategy = { type: 'Recreate' };
+  await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
+  await panel.getByText(/순차 교체 · 영구 저장소/).waitFor();
   fail = true;
   await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();
   await panel.getByText('운영 상태 수집 실패', { exact: true }).waitFor();
   assert.doesNotMatch(await panel.innerText(), /현재 정상 응답/);
+  assert.doesNotMatch(await panel.innerText(), /실행 수 ·/);
   fail = false;
   observation = { ...snapshot('ready', 'ready', 'succeeded'), application_id: 'another-app' };
   await panel.getByRole('button', { name: '현재 상태 다시 확인' }).click();

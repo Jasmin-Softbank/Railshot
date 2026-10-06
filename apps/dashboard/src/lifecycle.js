@@ -3,6 +3,12 @@ import { request } from './api.js';
 export const applicationStates = { ready: '등록 완료', stopped: '중지됨', deleted: '삭제됨', unknown: '확인 필요',
   stopping: '중지 중', starting: '재개 중', deleting: '삭제 중', queued: '배포 대기', registering: '배포 준비 중' };
 
+export function updateStrategyLabel(strategy) {
+  if (strategy?.type === 'Recreate') return '순차 교체 · 영구 저장소를 보호하기 위해 기존 실행을 종료한 뒤 새 버전을 시작합니다. 전환 중 중단이 발생합니다.';
+  if (strategy?.type === 'RollingUpdate') return `롤링 업데이트 · 허용 중단 ${strategy.max_unavailable ?? '확인 필요'}, 추가 실행 ${strategy.max_surge ?? '확인 필요'}`;
+  return '업데이트 방식 확인 전 · 일반 앱은 롤링 업데이트, 단일 영구 저장소 앱은 순차 교체로 적용합니다.';
+}
+
 export function applicationLabel(app) {
   if (app.status !== 'ready') return applicationStates[app.status] || '상태 확인 필요';
   if (app.current_deployment_state === 'unverified') return '배포 결과 확인 필요';

@@ -301,6 +301,17 @@ def ensure(config_path, request):
         previous = private_json(path) if path.exists() or path.is_symlink() else None
         mutation_pending = isinstance(previous, dict) and previous.get('phase') == 'creating'
         try:
+            if isinstance(previous, dict) and previous.get('phase') == 'deleted':
+                # Only the same application may reuse its verified-deleted hostname. Content
+                # may differ (for example a new certificate challenge); the old row is kept.
+                old = previous.get('request')
+                require(previous.get('version') == 1 and previous.get('config_sha256') == config['_sha256'] and
+                        isinstance(old, dict) and all(old.get(name) == request[name] for name in
+                                                      ('application_id', 'purpose', 'application_hostname')),
+                        'DNS_INTENT_BINDING_CONFLICT')
+                require(not records_at(config, request['hostname']), 'DNS_DELETED_RECORD_REAPPEARED')
+                save(root / (key + '.deleted-' + digest(previous)[:16] + '.json'), previous)
+                previous = None
             if previous is not None:
                 require(isinstance(previous, dict) and previous.get('version') == 1 and
                         previous.get('config_sha256') == config['_sha256'] and previous.get('request') == request and

@@ -51,6 +51,7 @@ class BridgeTest(unittest.TestCase):
         self.calls = []
         self.active_deployment = 'deployment-1'
         self.retained_jobs = []
+        self.live_application = True
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), '-c', 'core.hooksPath=/dev/null', *args],
@@ -140,6 +141,9 @@ class BridgeTest(unittest.TestCase):
         self.calls.append(['kubectl', *args])
         if args[0:2] == ('get', 'appproject'):
             return argo.projects([self.fixture.review])['items'][0]
+        if not (self.root / 'state' / self.active_deployment / 'review').exists():
+            # Pre-write storage guard: a prior generation's Application may or may not still exist.
+            return self.fixture.healthy(self.fixture.review) if self.live_application else None
         review = argo.load_review(self.root / 'state' / self.active_deployment / 'review')
         live = self.fixture.healthy(review)
         for job in self.retained_jobs:
@@ -147,6 +151,42 @@ class BridgeTest(unittest.TestCase):
                 'name': job['metadata']['name'], 'status': 'OutOfSync', 'requiresPruning': True, 'health': {'status': 'Healthy'}})
             live['status']['summary']['images'].append(job['spec']['template']['spec']['containers'][0]['image'])
         return live
+
+    def test_storage_mode_change_blocks_before_git_write_and_stays_blocked_on_replay(self):
+        self.fixture.prepare(storage=True)
+        target = self.config['targets']['k3s-aws']['target']
+        prior = bridge.handoff.render(self.root / 'published', {**target, 'revision': self.git('rev-parse', 'HEAD')})['workload']
+        path = self.repo / target['path'] / 'workload.json'
+        path.parent.mkdir(parents=True); path.write_bytes(bridge.encoded(prior))
+        self.git('add', '--', target['path']); self.git('commit', '-qm', 'Existing persistent app'); self.git('push', '-q', 'origin', 'main')
+        before = self.git('rev-parse', 'HEAD')
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl):
+            for _ in range(2):
+                result = bridge.execute(self.config, self.request)
+                self.assertEqual(result['error']['code'], 'CD_STORAGE_MODE_CHANGE_UNSUPPORTED')
+                self.assertFalse(result['error']['outcome_unknown'])
+                self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+                self.assertEqual(json.loads(path.read_bytes()), prior)
+        self.assertFalse(any('push' in args or 'patch' in args or 'apply' in args for args in self.calls))
+
+    def test_storage_mode_change_proceeds_after_verified_delete_removed_application(self):
+        self.fixture.prepare(storage=True)
+        target = self.config['targets']['k3s-aws']['target']
+        prior = bridge.handoff.render(self.root / 'published', {**target, 'revision': self.git('rev-parse', 'HEAD')})['workload']
+        path = self.repo / target['path'] / 'workload.json'
+        path.parent.mkdir(parents=True); path.write_bytes(bridge.encoded(prior))
+        self.git('add', '--', target['path']); self.git('commit', '-qm', 'Deleted persistent app'); self.git('push', '-q', 'origin', 'main')
+        before = self.git('rev-parse', 'HEAD')
+        self.live_application = False  # A verified delete removed the Argo Application; Git still has the old workload.
+        verified = {'state': 'succeeded', 'verified_at': '2026-10-02T12:00:00+00:00', 'url': 'https://app.example/health'}
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value=verified), patch('bridge.site_probe', return_value=True):
+            result = bridge.execute(self.config, self.request)
+        self.assertNotIn('error', result)
+        self.assertTrue(result['cd']['deployed'])
+        self.assertNotEqual(self.git('rev-parse', 'HEAD'), before)
+        self.assertFalse(any(item['kind'] == 'PersistentVolumeClaim' for item in json.loads(path.read_bytes())['items']))
+        self.assertIn(['kubectl', 'get', 'application', 'k3s-aws-tenant-demo-demo', '--ignore-not-found', '-o', 'json'], self.calls)
 
     def test_apply_pins_git_argo_and_public_receipt_then_replay_only_observes(self):
         verified = {'state': 'succeeded', 'verified_at': '2026-10-02T12:00:00+00:00', 'url': 'https://app.example/health'}
@@ -273,6 +313,24 @@ class BridgeTest(unittest.TestCase):
                     self.assertFalse(result['cd']['deployed'])
                     self.assertEqual(result['public_http']['state'], 'not_run')
                     health.assert_not_called(); site.assert_not_called()
+
+    def test_only_completed_degraded_rollout_reports_rollout_failed_code(self):
+        verified = {'state': 'succeeded', 'verified_at': '2026-10-03T00:00:00Z', 'url': 'https://app.example/health'}
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value=verified), patch('bridge.site_probe', return_value=True):
+            self.assertTrue(bridge.execute(self.config, self.request)['cd']['deployed'])
+            for case, code in (('degraded', 'CD_ROLLOUT_FAILED'), ('comparison_error', 'CD_OBSERVATION_REJECTED')):
+                def observed(context, namespace, *args, document=None):
+                    live = self.kubectl(context, namespace, *args, document=document)
+                    if args[0:2] == ('get', 'application'):
+                        if case == 'degraded': live['status']['health']['status'] = 'Degraded'
+                        else: live['status']['conditions'] = [{'type': 'ComparisonError', 'message': 'repo server unavailable'}]
+                    return live
+                with self.subTest(case=case), patch('argo.kubectl', side_effect=observed):
+                    result = bridge.execute(self.config, {**self.request, 'action': 'observe'})
+                    self.assertEqual(result['cd']['state'], 'failed')
+                    self.assertEqual(result.get('error', {}).get('code'), code)
+                    self.assertEqual(result['error']['outcome_unknown'], case == 'comparison_error')
 
     def test_public_contract_rejects_ambiguous_unbound_or_invalid_expectations_before_push(self):
         valid = {'url': 'https://app.example/health', 'expected_status': 200}

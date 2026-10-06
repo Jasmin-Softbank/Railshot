@@ -360,8 +360,15 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(lifecycle.lifecycle(self.fixture.config_path, request), result)
         self.assertEqual(self.calls, before)
         self.edge_plan.assert_called_once()  # Apply validates the saved provider plan instead of minting another.
-        with self.assertRaisesRegex(ValueError, 'APPLICATION_LIFECYCLE_BLOCKED'):
-            self.fixture.register()
+        # Verified deletion releases the same identity; the old generation is archived intact.
+        recreated = self.fixture.register()
+        self.assertEqual((recreated['status'], recreated['application_id']), ('succeeded', app_id), recreated)
+        self.assertEqual(runtime.read_private(self.home.parent / 'archive' / app_id / request['operation_id'] / 'lifecycle.json')['status'], 'deleted')
+        self.calls.clear()
+        with self.assertRaises(FileNotFoundError):
+            lifecycle.lifecycle(self.fixture.config_path, request)  # The archived plan cannot act on the new app.
+        self.assertTrue(all(verb == 'get' for verb, _ in self.calls))
+        self.assertFalse((self.home / 'lifecycle.json').exists())
 
     def test_stop_then_start_restores_explicit_snapshot(self):
         _, canonical = self.shared_registration(); shared_before = copy.deepcopy(canonical)
@@ -460,8 +467,10 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(lifecycle.lifecycle(self.fixture.config_path, request), result)
         self.assertEqual(lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'reconcile'}), result)
         self.assertEqual(lifecycle.lifecycle(self.fixture.config_path, {**request, 'phase': 'resume'}), result)
-        with self.assertRaisesRegex(ValueError, 'APPLICATION_LIFECYCLE_BLOCKED'):
-            self.fixture.register('queued-app')
+        self.assertEqual(self.fixture.register('queued-app')['status'], 'succeeded')
+        self.assertTrue((self.home.parent / 'archive' / self.app['application_id'] / request['operation_id'] / 'lifecycle.json').exists())
+        with self.assertRaises(FileNotFoundError):
+            lifecycle.lifecycle(self.fixture.config_path, request)  # The tombstone plan is archived with its generation.
 
     def test_active_argo_sync_and_missing_confirmation_block(self):
         app = next(obj for (_, kind, _), obj in self.control.objects.items() if kind == 'application')
