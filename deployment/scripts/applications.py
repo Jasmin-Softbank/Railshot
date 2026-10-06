@@ -30,6 +30,22 @@ def require(condition, code='APPLICATION_CONFIGURATION_INVALID'):
         raise RegistrationError(code)
 
 
+def reserved_node_ports(profile, descriptor):
+    used = set()
+    edge_path = profile['ingress'].get('edge_config_file')
+    if edge_path and profile['provider'] == 'aws':
+        import edge
+        used.update(edge.reserved_ports(edge_path, descriptor['addresses']['private']))
+    elif edge_path and profile['provider'] == 'gcp':
+        import gcp_routes
+        edge_config = gcp_routes.config_at(edge_path)
+        with gcp_routes.locked(edge_config):
+            values = runtime.read_private(edge_config['variables_file'])
+            used.add(values.get('node_port', 30080))
+            used.update(route['node_port'] for route in values.get('routes', {}).values())
+    return used
+
+
 def exact(value, keys):
     return isinstance(value, dict) and set(value) == set(keys)
 
@@ -222,6 +238,7 @@ def register(config_path, request):
                     if prior.get('environment_id') == env_id:
                         require(type(prior.get('node_port')) is int, 'APPLICATION_STORAGE_INVALID')
                         used.add(prior['node_port'])
+                used.update(reserved_node_ports(profile, descriptor))
                 start = int(app_id[4:], 16) % 2768
                 port = next((30000 + (start + n) % 2768 for n in range(2768) if 30000 + (start + n) % 2768 not in used), None)
                 require(port is not None, 'NODEPORT_CAPACITY_EXCEEDED')

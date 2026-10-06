@@ -21,3 +21,9 @@ The runner controller checks demand at 0, 15 and 30 seconds within its existing 
 ## Preserve before stopping
 
 Keep the API SQLite backup, source snapshots, configuration and encryption/session keys, Terraform state, registered transport files and GitOps references together in private encrypted storage. Public evidence should contain identifiers, times, statuses, digests and checksums only. Confirm backup integrity and restoration before ending the operating window; saving CI logs alone is insufficient.
+
+## Route allocation and completion
+
+A deleted AWS edge allocation releases its NodePort, hostname and listener priority; stopped, reserved and uncertain allocations remain reserved. Application registration also checks native edge reservations, including routes that predate product registration. Keep route preparation and the initial GitOps apply in one mutation turn so a second preparation cannot overtake the first application's apply.
+
+Delivery requires repeated exact-origin health/site success over at least 15 seconds, resetting after failure or a revision/URL change. Redirects do not count as success. This settling check reduces premature completion while a global load balancer propagates a new route; it does not certify every global frontend. Verify application behavior independently from the controller and preserve any first-request failure in the operation evidence.

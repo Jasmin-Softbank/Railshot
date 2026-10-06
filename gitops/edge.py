@@ -68,6 +68,16 @@ def base_values(config, *, writable=False):
     return values
 
 
+def reserved_ports(config_path, address):
+    """Include legacy/unpublished routes while releasing verified deleted allocations."""
+    config = config_at(config_path)
+    with locked(config) as root:
+        values = base_values(config, writable=True)
+        ledger = read_private(root / 'allocations.json') if (root / 'allocations.json').exists() else {}
+        routes = [*values['routes'].values(), *(row['route'] for row in ledger.values() if row['phase'] != 'deleted')]
+        return {row['node_port'] for row in routes if row['target_private_ip'] == address}
+
+
 def free_number(seed, start, end, used):
     for offset in range(end - start + 1):
         candidate = start + (seed + offset) % (end - start + 1)
@@ -145,11 +155,12 @@ def prepare(config_path, request):
                     current.pop(field, None)
                 save(config, current)
             return {**current, 'reference': reference}
-        require(len(values['routes']) + len(ledger) < 50, 'shared edge route capacity exhausted')
-        routes = [*values['routes'].values(), *(row['route'] for row in ledger.values())]
+        active = [row for row in ledger.values() if row['phase'] != 'deleted']
+        require(len(values['routes']) + len(active) < 50, 'shared edge route capacity exhausted')
+        routes = [*values['routes'].values(), *(row['route'] for row in active)]
         require(not any(row['request']['target_private_ip'] == request['target_private_ip'] and
                         row['request']['namespace'] == request['namespace'] and row['request']['app'] == request['app']
-                        for row in ledger.values()), 'application namespace already allocated to another environment')
+                        for row in active), 'application namespace already allocated to another environment')
         name = service_name(request['app'], request['tenant'], request['environment_id'], values['base_domain'])
         require(key not in values['routes'] and name['hostname'] not in {r['host'] for r in routes}, 'hostname collision')
         seed = int(digest(identity), 16)
@@ -326,6 +337,8 @@ def plan_route(reference):
         for key in read_private(Path(config['state_dir']) / 'allocations.json'):
             require(re.fullmatch(r'app-[a-f0-9]{24}', key), 'registered allocation key required')
             other = read_private(Path(config['state_dir']) / (key + '.json'))
+            if other['phase'] == 'deleted':
+                continue
             require(other['phase'] != 'applying', 'another edge apply needs reconciliation')
             if other['phase'] == 'applied' or other['route_key'] == row['route_key'] or other.get('previous_route'):
                 require(other['route']['provider_kind'] == 'aws', 'migrate the legacy GCP allocation before AWS edge writes')

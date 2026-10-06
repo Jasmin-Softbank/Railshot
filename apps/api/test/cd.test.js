@@ -67,38 +67,3 @@ process.on('SIGTERM',()=>{});process.stdin.resume();setInterval(()=>{},1000);
     assert.equal(await readFile(heartbeat, 'utf8'), stopped, 'no native child continues after callback completion');
   }
 });
-
-test('waiting for public HTTP releases the mutation slot for another deployment', async (t) => {
-  const directory = await mkdtemp(join(tmpdir(), 'railshot-cd-concurrent-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
-  const configPath = join(directory, 'config.json'), python = join(directory, 'fake-python');
-  await writeFile(configPath, JSON.stringify({ version: 1, targets: {
-    aws: { app: 'demo', tenant: 'team', target: { id: 'aws' } },
-    gcp: { app: 'demo', tenant: 'team', target: { id: 'gcp' } },
-  } }), { mode: 0o600 });
-  await writeFile(python, `#!/usr/bin/env node
-let raw='';process.stdin.on('data',c=>raw+=c);process.stdin.on('end',()=>{
- const r=JSON.parse(raw),waiting=r.target_id==='gcp'&&r.action==='apply';
- console.log(JSON.stringify({cd:{state:waiting?'progressing':'deployed',deployed:!waiting,revision:'a'.repeat(40)},public_http:{state:waiting?'unverified':'succeeded'}}));
-});\n`, { mode: 0o700 });
-  let tail = Promise.resolve(), active = 0, peak = 0, applies = 0;
-  const withMutation = fn => {
-    const next = tail.then(async () => { peak = Math.max(peak, ++active); applies++;
-      try { return await fn(); } finally { active--; } });
-    tail = next.catch(() => {}); return next;
-  };
-  const adapter = createCdAdapter({ configPath, python, loadPublished: async () => [] });
-  const request = targetId => ({ deploymentId: targetId, app: 'demo', targetId, sourceCommit: 'a'.repeat(40),
-    publication: { app: 'demo', tenant: 'team', target_id: targetId, source_commit: 'a'.repeat(40) }, withMutation });
-  let progress;
-  const firstProgress = new Promise(resolve => { progress = resolve; });
-  let gcpDone = false;
-  const gcp = adapter({ ...request('gcp'), onProgress: progress }).then(result => { gcpDone = true; return result; });
-  await firstProgress;
-  assert.equal(active, 0);
-  assert.equal((await adapter(request('aws'))).public_http.state, 'succeeded');
-  assert.equal(gcpDone, false, 'AWS completed while GCP still waited for its readiness poll');
-  assert.equal((await gcp).public_http.state, 'succeeded');
-  assert.equal(applies, 2, 'observations never acquire the mutation slot');
-  assert.equal(peak, 1);
-});

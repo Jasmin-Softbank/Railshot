@@ -466,12 +466,15 @@ class BridgeTest(unittest.TestCase):
         executable = self.root / 'synthetic-python'
         executable.write_text('#!' + sys.executable + '\n' + '''import json,sys
 from pathlib import Path
+import time
 request=json.load(sys.stdin)
 path=Path(sys.argv[-1])
 config=json.loads(path.read_text())
 config['calls'].append(request['action'])
+if len(config['calls']) == 3: config['last_failed_at'] = time.monotonic()
+config['last_checked_at'] = time.monotonic()
 path.write_text(json.dumps(config))
-done=request['action']=='observe'
+done=request['action']=='observe' and len(config['calls']) != 3
 print(json.dumps({'cd':{'state':'deployed' if done else 'progressing','revision':'a'*40,'deployed':done},
  'public_http':{'state':'succeeded' if done else 'not_run','verified_at':'2026-10-02T00:00:00Z' if done else None,
  'url':'https://app.example/health' if done else None}}))
@@ -483,7 +486,7 @@ print(json.dumps({'cd':{'state':'deployed' if done else 'progressing','revision'
         program = '''
 import assert from 'node:assert/strict';
 const {createCdAdapter}=await import(process.argv[1]);
-const adapter=createCdAdapter({configPath:process.argv[2],python:process.argv[3],timeoutMs:10000,
+const adapter=createCdAdapter({configPath:process.argv[2],python:process.argv[3],timeoutMs:30000,
  loadPublished:async()=>[{path:'handoff.json',content:Buffer.from('{}')}]});
 assert.equal(adapter.targets['k3s-aws'].applicationName,'demo');
 assert.equal(adapter.targets['k3s-aws'].deploymentScope,'registered_application');
@@ -494,8 +497,13 @@ assert.equal(result.cd.deployed,true);assert.equal(result.public_http.state,'suc
 await assert.rejects(adapter({...request,app:'wrong'}),/binding differs/);
 '''
         subprocess.run(['node', '--input-type=module', '-e', program, adapter.as_uri(), str(calls), str(executable)],
-                       check=True, capture_output=True, text=True, timeout=15)
-        self.assertEqual(json.loads(calls.read_text())['calls'], ['apply', 'observe'])
+                       check=True, capture_output=True, text=True, timeout=40)
+        observations = json.loads(calls.read_text())['calls']
+        self.assertEqual(observations[0], 'apply')
+        self.assertGreaterEqual(len(observations), 4)
+        self.assertTrue(all(action == 'observe' for action in observations[1:]))
+        timing = json.loads(calls.read_text())
+        self.assertGreaterEqual(timing['last_checked_at'] - timing['last_failed_at'], 15)
 
 
 if __name__ == '__main__':

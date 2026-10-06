@@ -302,6 +302,7 @@ class ApplicationsTest(unittest.TestCase):
         self.assertFalse((self.home() / 'registration.json').exists())
 
     def test_ambiguous_runtime_group_blocks_before_registration_and_accepts_attached_selection(self):
+        self.enterContext(patch.object(apps, 'reserved_node_ports', return_value=set()))
         self.config['environments'][self.env_id]['ingress']['edge_config_file'] = str(self.root / 'edge.json')
         self.write_config()
         self.native.side_effect = None
@@ -416,6 +417,28 @@ class ApplicationsTest(unittest.TestCase):
         stored = json.loads((self.home() / 'registration.json').read_text()); stored['node_port'] = next_port
         env.save(self.home() / 'registration.json', stored)
         second = self.register('second-app'); self.assertNotEqual(second['node_port'], next_port)
+
+    def test_native_gcp_route_reservations_are_excluded(self):
+        config = {'version': 1, 'provider': 'gcp', 'edge_kind': 'native',
+            'state_file': str(self.root / 'state.json'), 'state_dir': str(self.root / 'edge-state'),
+            'variables_file': str(self.root / 'vars.json'), 'state_lineage': 'fixture',
+            'owned_resources': {'google_compute_url_map.app': 'owned'}, 'previous_source_sha': 'a' * 40}
+        self.fixture.write('gcp-edge.json', config)
+        self.fixture.write('vars.json', {'node_port': 30080, 'routes': {
+            'active': {'node_port': 31001}, 'stopped': {'node_port': 31002, 'enabled': False}}})
+        profile = {'provider': 'gcp', 'ingress': {'edge_config_file': str(self.root / 'gcp-edge.json')}}
+        self.assertEqual(apps.reserved_node_ports(profile, {}), {30080, 31001, 31002})
+
+    def test_legacy_edge_reservation_is_excluded_before_registration(self):
+        import edge
+        seed = 30000 + int(self.request()['application_id'][4:], 16) % 2768
+        self.config['environments'][self.env_id]['ingress']['edge_config_file'] = '/private/aws-edge.json'
+        self.write_config()
+        with patch.object(env, 'aws_security_group', return_value='sg-0123456789abcdef0'), \
+                patch.object(edge, 'reserved_ports', return_value={seed}) as ports:
+            result = self.register()
+        self.assertNotEqual(result['node_port'], seed)
+        ports.assert_called_once_with('/private/aws-edge.json', self.fixture.descriptor['addresses']['private'])
 
     def test_foreign_namespace_cannot_be_adopted(self):
         app_id = self.request()['application_id']
