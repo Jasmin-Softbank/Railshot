@@ -13,8 +13,8 @@ const source = (app, provider = 'aws') => ({ source_type: 'folder', source_name:
 const successful = (args) => ({ cd: { state: 'deployed', deployed: true, revision: args.sourceCommit },
   public_http: { state: 'succeeded', verified_at: new Date().toISOString(), url: `https://${args.app}.example.test/` } });
 
-async function until(read, predicate = (record) => !['queued', 'running'].includes(record.status)) {
-  const deadline = performance.now() + 10000;
+async function until(read, predicate = (record) => !['queued', 'running'].includes(record.status), timeoutMs = 10000) {
+  const deadline = performance.now() + timeoutMs;
   let value;
   do {
     value = await read();
@@ -24,7 +24,7 @@ async function until(read, predicate = (record) => !['queued', 'running'].includ
   assert.fail(`Queue did not settle: ${JSON.stringify(value)}`);
 }
 
-async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments } = {}) {
+async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurrentDeployments, cdObservationRetryMs } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'railshot-queue-'));
   const submissions = [], deliveries = [], publications = new Map(), releases = [];
   const service = { targetId: 'runtime-aws', targetIds: ['runtime-aws', 'runtime-gcp'],
@@ -48,7 +48,7 @@ async function fixture(t, { unknownGraceMs = 40, environmentAdapter, maxConcurre
   };
   const options = { directory, service, applicationAdapter: adapter, environmentAdapter,
     target: { id: 'runtime-aws', provider: 'aws' }, providerTargets: { gcp: 'runtime-gcp' },
-    pollInterval: 5, unknownGraceMs, maxConcurrentDeployments, observeMetrics: async () => ({ metrics: {} }) };
+    pollInterval: 5, unknownGraceMs, maxConcurrentDeployments, cdObservationRetryMs, observeMetrics: async () => ({ metrics: {} }) };
   const f = { directory, service, adapter, options, submissions, deliveries,
     gate() { let release; const wait = new Promise((resolve) => { release = resolve; }); releases.push(release); return { wait, release }; } };
   f.product = await createProductService(options);
@@ -382,6 +382,51 @@ test('a verified deletion settles unfinished deliveries so the recreated app is 
     assert.equal((await until(() => f.read(second.id))).status, 'succeeded');
     assert.equal(f.product.getApplication(id, f.owner).current_deployment.id, second.id);
     assert.equal((await f.read(first.id)).status, 'blocked');
+  });
+});
+
+test('condition-only CD observation rejections retry within a bound; a known rollout failure stays final', async (t) => {
+  // The bridge reports a transient Argo condition error as progressing + retryable uncertain rejection.
+  const rejected = () => ({ cd: { state: 'progressing', deployed: false, revision: 'a'.repeat(40) }, public_http: { state: 'not_run' },
+    error: { code: 'CD_OBSERVATION_REJECTED', retryable: true, outcome_unknown: true } });
+  const cases = {
+    // First error ends the bounded apply observation; a second error on recovery; then Healthy.
+    recovers: { retryMs: undefined, observations: (args) => [rejected(), successful(args)] },
+    // Shorter than the 5-second recovery retry floor: the second consecutive rejection is past the bound.
+    exhausted: { retryMs: 1000, observations: () => [rejected(), rejected(), rejected()] },
+    known: { retryMs: undefined, observations: (args) => [{ cd: { state: 'failed', deployed: false, revision: args.sourceCommit },
+      public_http: { state: 'not_run' }, error: { code: 'CD_ROLLOUT_FAILED', retryable: false, outcome_unknown: false } }, successful(args)] },
+  };
+  for (const [name, { retryMs, observations }] of Object.entries(cases)) await t.test(name, async (t) => {
+    const f = await fixture(t, { cdObservationRetryMs: retryMs });
+    let queue, calls = 0, firstError;
+    f.adapter.deployPublished = async () => rejected();
+    f.adapter.observePublished = async (_application, args) => {
+      if (!calls) firstError = (await f.read(args.deploymentId)).error;
+      queue ??= observations(args); calls++; return queue.shift();
+    };
+    const created = await f.create('delta');
+    const settled = await until(() => f.read(created.id), (row) => ['succeeded', 'blocked', 'failed'].includes(row.status), 20000);
+    // The first (apply-path) rejection was recorded as uncertain and handed to bounded recovery.
+    assert.deepEqual([firstError?.code, firstError?.outcome_unknown], ['CD_OBSERVATION_REJECTED', true]);
+    if (name === 'recovers') {
+      assert.equal(settled.status, 'succeeded');
+      assert.equal(calls, 2);
+      assert.equal(f.product.getApplication(settled.application_id, f.owner).current_deployment.id, created.id);
+    } else if (name === 'exhausted') {
+      assert.equal(settled.status, 'blocked');
+      assert.deepEqual([settled.error.code, settled.error.outcome_unknown], ['CD_OBSERVATION_REJECTED', true]);
+      assert.equal(settled.cd.state, 'blocked');
+      assert.equal(settled.cd.observation.next_retry_at, null);
+      assert.equal(calls, 2, 'a consecutive rejection past the bound stops observation');
+      assert.equal(f.product.getApplication(settled.application_id, f.owner).current_deployment_state, 'unverified');
+    } else {
+      assert.equal(settled.status, 'blocked');
+      assert.deepEqual([settled.error.code, settled.error.outcome_unknown], ['CD_ROLLOUT_FAILED', false]);
+      assert.equal(calls, 1);
+    }
+    await pause(50);
+    assert.equal(calls, name === 'known' ? 1 : 2, 'no observation after a final result');
   });
 });
 

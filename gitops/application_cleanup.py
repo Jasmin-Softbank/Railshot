@@ -132,7 +132,7 @@ def subset(expected, actual):
 
 
 def refresh_metadata(document):
-    """Allow only AWS's empty-tag normalization and the known ALB association."""
+    """Allow only known provider representation changes, never semantic route drift."""
     changes = {row['address']: row['change'] for row in document.get('resource_changes', [])}
     alb = changes.get('aws_lb.app', {})
     alb_id = (alb.get('before') or {}).get('id')
@@ -141,6 +141,17 @@ def refresh_metadata(document):
         kind = row.get('type')
         before, after = change.get('before'), change.get('after')
         planned = changes.get(address, {})
+        if address in gcp_routes.UPDATES:
+            require(row.get('mode') == 'managed' and not row.get('deposed') and
+                    not change.get('importing') and not change.get('replace_paths') and
+                    not change.get('after_unknown') and change.get('actions') == ['update'] and
+                    isinstance(before, dict) and isinstance(after, dict) and before.get('id') and
+                    before['id'] == after.get('id') and planned.get('before') == after and
+                    planned.get('actions') in (['no-op'], ['update']) and
+                    gcp_routes.comparable_resource(address, before, sort_rules=True) ==
+                    gcp_routes.comparable_resource(address, after, sort_rules=True),
+                    'edge drift must be reconciled first')
+            continue
         require(kind in ('aws_lb_listener_rule', 'aws_lb_target_group') and
                 address.startswith(kind + '.app[') and row.get('mode') == 'managed' and
                 not row.get('deposed') and not change.get('importing') and not change.get('replace_paths') and
@@ -282,7 +293,10 @@ def validate_shared(provider, address, before, after, unknown, route, key, value
 
 
 def terraform(work, *args):
-    return edge.native(['terraform', '-chdir=' + str(work), *args])
+    # GCP must propagate URL-map removal before deleting its backend and NEG.
+    # Keep reads short; the mutation fits inside the lifecycle runner's 30-minute bound.
+    return edge.native(['terraform', '-chdir=' + str(work), *args],
+                       **({'timeout': 900} if args and args[0] == 'apply' else {}))
 
 
 def saved_plan(work, values, label):

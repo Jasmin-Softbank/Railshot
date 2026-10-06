@@ -36,6 +36,42 @@ class WorkloadDiagnosticsTest(unittest.TestCase):
             if change=='error': self.assertEqual(result['pods'][0]['containers'][0]['reason'],'OOMKilled')
             self.f.pod,self.f.deployment=before
 
+    def test_drained_counts_only_live_pods_of_this_deployments_older_or_terminating_replicasets(self):
+        observed = self.observe()
+        self.assertEqual((observed['state'], observed['drained'], observed['obsolete_pods']), ('ready', True, 0))
+        old_rs = copy.deepcopy(self.f.rs)
+        old_rs['metadata'].update(name='demo-old', uid='old-rs-uid')
+        old_rs['spec']['template']['spec']['containers'][0]['image'] = 'registry.example/old@sha256:' + 'a' * 64
+        foreign_rs = copy.deepcopy(old_rs)
+        foreign_rs['metadata'].update(name='demo-foreign', uid='foreign-rs-uid',
+                                      ownerReferences=[{'kind': 'Deployment', 'uid': 'other-deployment', 'controller': True}])
+        def pod(name, owner, **changes):
+            value = copy.deepcopy(self.f.pod)
+            value['metadata'].update(name=name, uid=name, ownerReferences=[{'kind': 'ReplicaSet', 'uid': owner, 'controller': True}])
+            for key, item in changes.items():
+                (value['metadata'] if key == 'deletionTimestamp' else value['status'])[key] = item
+            return value
+        cases = {
+            'old pod still serving': ([pod('old', 'old-rs-uid')], False),
+            'old pod terminating': ([pod('old', 'old-rs-uid', deletionTimestamp='2026-10-06T04:55:05Z')], False),
+            'surplus current pod terminating': ([pod('extra', 'rs-uid', deletionTimestamp='2026-10-06T04:55:05Z')], False),
+            'same labels, other controller': ([pod('foreign', 'foreign-rs-uid')], True),
+            'old pod already terminal': ([pod('old', 'old-rs-uid', phase='Failed')], True),
+            'fully drained': ([], True)}
+        customer = self.f.customer
+        for name, (extra, drained) in cases.items():
+            with self.subTest(name=name):
+                def read(*args, **kwargs):
+                    value = customer(*args, **kwargs)
+                    if '/replicasets?' in args[3]: value = {**value, 'items': [self.f.rs, old_rs, foreign_rs]}
+                    if '/pods?' in args[3]: value = {**value, 'items': [self.f.pod, *extra]}
+                    return value
+                with patch('argo.kubectl', side_effect=self.f.control), patch('credentials.customer', side_effect=read):
+                    result = workload_diagnostics.workload(self.f.config, self.f.review)
+                # The requested image remains ready; only draining decides completion.
+                self.assertEqual((result['state'], result['drained'], result['obsolete_pods']), ('ready', drained, 0 if drained else 1))
+                self.assertEqual([row['name'] for row in result['pods']], ['demo-rs-pod'])
+
     def test_transport_failure_is_unavailable_and_never_fabricates_readiness(self):
         with patch('logs.customer_auth',side_effect=ValueError('private-secret')):
             result=workload_diagnostics.workload(self.f.config,self.f.review)

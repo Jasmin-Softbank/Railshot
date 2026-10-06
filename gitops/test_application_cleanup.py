@@ -114,7 +114,7 @@ class LifecycleTest(unittest.TestCase):
         changes.append({'address': address, 'change': {'actions': ['no-op'], 'before': rows[address], 'after': rows[address]}})
         return {'resource_changes': changes, 'variables': {k: {'value': v} for k, v in candidate.items()}}
 
-    def native(self, argv):
+    def native(self, argv, **kwargs):
         self.calls.append(argv)
         if argv[0] == 'gcloud':
             self.assertIn('--project=' + self.values['project_id'], argv)
@@ -124,6 +124,7 @@ class LifecycleTest(unittest.TestCase):
                 return json.dumps({'Account': self.values['account_id']})
             return json.dumps({'TargetGroups': [], 'Rules': [], 'SecurityGroupRules': [], 'ResourceRecordSets': []})
         work, command = Path(argv[1].split('=', 1)[1]), argv[2]
+        self.assertEqual(kwargs, {'timeout': 900} if command == 'apply' else {})
         if command == 'init':
             self.assertEqual(json.loads((work / 'backend.tf.json').read_text())['terraform']['backend']['local']['path'], self.config['state_file'])
             return ''
@@ -195,6 +196,23 @@ class LifecycleTest(unittest.TestCase):
                 run()
         self.assertEqual(calls, len(self.calls))
         self.assertEqual(cleanup.read_private(self.config['variables_file']), self.values)
+
+    def test_gcp_refresh_accepts_unset_descriptions_but_rejects_route_drift(self):
+        address = 'google_compute_url_map.redirect'
+        before = {'id': 'projects/fixture/global/urlMaps/redirect',
+                  'host_rule': [{'description': None, 'hosts': ['one.example.com'], 'path_matcher': 'one'}]}
+        after = copy.deepcopy(before)
+        after['host_rule'][0]['description'] = ''
+        base = {'resource_drift': [{'address': address, 'type': 'google_compute_url_map', 'mode': 'managed',
+                'change': {'actions': ['update'], 'before': before, 'after': after}}],
+                'resource_changes': [{'address': address, 'change': {'actions': ['no-op'], 'before': after, 'after': after}}]}
+        cleanup.unchanged(base)
+        for key, value in [('hosts', ['foreign.example.com']), ('description', 'changed'), ('path_matcher', 'foreign')]:
+            with self.subTest(key=key):
+                changed = copy.deepcopy(base)
+                changed['resource_drift'][0]['change']['after']['host_rule'][0][key] = value
+                with self.assertRaises(ValueError):
+                    cleanup.unchanged(changed)
 
     def test_gcp_lifecycle_accepts_only_equivalent_provider_routing_representations(self):
         document = self.document({**self.values, 'routes': {}})
@@ -419,10 +437,10 @@ class AWSLifecycleTest(unittest.TestCase):
     def test_provider_presence_after_delete_cannot_be_reported_as_success(self):
         plan = cleanup.plan(self.binding, 'delete')
         native = self.native
-        def retained_group(argv):
+        def retained_group(argv, **kwargs):
             if 'describe-target-groups' in argv:
                 return json.dumps({'TargetGroups': [{'TargetGroupArn': 'exact-owned-target-group'}]})
-            return native(argv)
+            return native(argv, **kwargs)
         with patch('edge.native', side_effect=retained_group), self.assertRaises(cleanup.CleanupError) as caught:
             cleanup.execute(self.binding, 'delete', plan)
         self.assertTrue(caught.exception.unknown)

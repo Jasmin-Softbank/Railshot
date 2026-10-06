@@ -52,6 +52,10 @@ class BridgeTest(unittest.TestCase):
         self.active_deployment = 'deployment-1'
         self.retained_jobs = []
         self.live_application = True
+        # Success now also requires the requested workload ready and older Pods drained.
+        self.workload = {'state': 'ready', 'drained': True, 'obsolete_pods': 0, 'pods': []}
+        observer = patch('workload_diagnostics.workload', side_effect=lambda config, review: copy.deepcopy(self.workload))
+        observer.start(); self.addCleanup(observer.stop)
 
     def git(self, *args):
         return subprocess.run(['git', '-C', str(self.repo), '-c', 'core.hooksPath=/dev/null', *args],
@@ -328,9 +332,37 @@ class BridgeTest(unittest.TestCase):
                     return live
                 with self.subTest(case=case), patch('argo.kubectl', side_effect=observed):
                     result = bridge.execute(self.config, {**self.request, 'action': 'observe'})
-                    self.assertEqual(result['cd']['state'], 'failed')
+                    # A known rollout failure stays final; a condition-only error is a retryable uncertain observation.
+                    self.assertEqual(result['cd']['state'], 'failed' if case == 'degraded' else 'progressing')
+                    self.assertFalse(result['cd']['deployed'])
                     self.assertEqual(result.get('error', {}).get('code'), code)
                     self.assertEqual(result['error']['outcome_unknown'], case == 'comparison_error')
+                    self.assertEqual(result['error']['retryable'], case == 'comparison_error')
+
+    def test_argo_healthy_is_not_deployed_until_requested_pods_are_ready_and_old_pods_drained(self):
+        verified = {'state': 'succeeded', 'verified_at': '2026-10-03T00:00:00Z', 'url': 'https://app.example/health'}
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \
+                patch('bridge.public_probe', return_value=verified) as health, patch('bridge.site_probe', return_value=True):
+            self.assertTrue(bridge.execute(self.config, self.request)['cd']['deployed'])
+            health.reset_mock()
+            for name, observed in (
+                    ('old pod terminating', {'state': 'ready', 'drained': False, 'obsolete_pods': 1, 'pods': []}),
+                    ('new image not ready', {'state': 'progressing', 'drained': True, 'obsolete_pods': 0, 'pods': []}),
+                    ('unavailable', {'state': 'unavailable', 'pods': [], 'code': 'WORKLOAD_OBSERVATION_UNAVAILABLE'}),
+                    ('missing', {'state': 'missing', 'pods': [], 'code': 'WORKLOAD_MISSING'})):
+                with self.subTest(name=name):
+                    self.workload = observed
+                    result = bridge.execute(self.config, {**self.request, 'action': 'observe'})
+                    # Conservative: never success, never a known failure, no public probe yet.
+                    self.assertEqual((result['cd']['state'], result['cd']['deployed']), ('progressing', False))
+                    self.assertNotIn('error', result)
+                    self.assertEqual(result['public_http']['state'], 'not_run')
+                    self.assertEqual(result['cd']['evidence']['workload']['state'], observed['state'])
+                    health.assert_not_called()
+            self.workload = {'state': 'ready', 'drained': True, 'obsolete_pods': 0, 'pods': []}
+            result = bridge.execute(self.config, {**self.request, 'action': 'observe'})
+            self.assertEqual((result['cd']['state'], result['cd']['deployed']), ('deployed', True))
+            self.assertEqual(result['public_http']['state'], 'succeeded')
 
     def test_public_contract_rejects_ambiguous_unbound_or_invalid_expectations_before_push(self):
         valid = {'url': 'https://app.example/health', 'expected_status': 200}

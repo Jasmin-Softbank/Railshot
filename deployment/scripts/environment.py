@@ -2,7 +2,7 @@
 """Register one operator-bound runtime and application after runtime_ready."""
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import copy
 from datetime import datetime, timezone
 import fcntl
@@ -15,6 +15,7 @@ import re
 import shlex
 import stat
 import sys
+import tempfile
 import time
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
@@ -191,19 +192,32 @@ def load_configuration(registry, target_id, config, binding_file=None):
 @contextmanager
 def runtime_kubectl(request):
     node = request['inventory']['control_plane'][0]
-    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 540) as port:
+    with ansible.forwarded_port(node['ssh'].get('transport_ref'), time.monotonic() + 540) as port, ExitStack() as resources:
         host = next(iter(ansible.build_inventory(request, port)['all']['children']['k3s_server']['hosts'].values()))
         prefix = ['ssh', *shlex.split(host['ansible_ssh_common_args']), '-i', host['ansible_ssh_private_key_file'],
-                  '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15', host['ansible_user'] + '@' + host['ansible_host']]
+                  '-p', str(host['ansible_port']), '-o', 'ConnectTimeout=15']
+        destination = host['ansible_user'] + '@' + host['ansible_host']
+        multiplex = request['target']['provider'] in ('aws', 'gcp') and node['ssh'].get('port') != 2223
+        if multiplex:
+            # One private connection per operation; never reuse another request's identity or tunnel.
+            directory = resources.enter_context(tempfile.TemporaryDirectory(prefix='rs-ssh-', dir='/tmp'))
+            prefix += ['-o', 'ControlMaster=auto', '-o', 'ControlPersist=10', '-S', directory + '/s']
         def kubectl(namespace, *args, document=None):
             remote = shlex.join(['sudo', '-n', 'k3s', 'kubectl', '--request-timeout=20s', '-n', namespace, *args])
             # Personal relay rechecks the complete app ownership/storage inventory
             # before lifecycle mutations. Keep ordinary commands on their short deadline.
             lifecycle = (node['ssh'].get('port') == 2223 and re.fullmatch(r'app-[a-f0-9]{24}', namespace)
                          and args and args[0] in ('delete', 'patch'))
-            raw = argo.native([*prefix, remote], document=document, **({'timeout': 300} if lifecycle else {}))
+            raw = argo.native([*prefix, destination, remote], document=document, **({'timeout': 300} if lifecycle else {}))
             return json.loads(raw) if raw.strip() else None
-        yield kubectl
+        try:
+            yield kubectl
+        finally:
+            if multiplex:
+                try:
+                    argo.native([*prefix, '-O', 'exit', destination], timeout=5)
+                except (OSError, RuntimeError, ValueError):
+                    pass  # A failed initial connection may never have created the socket.
 
 
 def owned_apply(kube, document):
