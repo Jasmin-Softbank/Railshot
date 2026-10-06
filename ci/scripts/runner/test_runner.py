@@ -38,6 +38,24 @@ def native_turn(status='completed', response='{"status":"proposed"}', identity='
 
 
 class RunnerTest(unittest.TestCase):
+    def test_account_rotation_stops_bound_attempt_before_sdk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            with patch.object(run_agent, 'validate_read_roots'), \
+                    patch.object(run_agent, 'effective_auth_route', return_value={'credential_rotation': 'new'}), \
+                    patch('openai_codex.Codex') as sdk, \
+                    self.assertRaises(run_agent.OperationError) as caught:
+                run_agent._run_codex({'auth_route_sha256': 'a' * 64}, '', '', {}, root, root, [])
+            self.assertEqual(caught.exception.code, 'SDK_CONFIG_INVALID')
+            self.assertEqual(caught.exception.as_dict()['side_effect'], 'none')
+            sdk.assert_not_called()
+
+    def test_unsupported_model_diagnostic_does_not_expose_provider_text(self):
+        detail = run_agent.codex_failure_diagnostic(SimpleNamespace(
+            message="The model is not supported for this account: SECRET_CANARY", codex_error_info=None))
+        self.assertEqual(detail['category'], 'model_not_supported')
+        self.assertNotIn('SECRET_CANARY', json.dumps(detail))
+
     def test_path_policy_supports_recursive_globs_without_python313(self):
         for rel, pattern, expected in [('app.py', '**/*.py', True), ('src/lib/app.py', '**/*.py', True),
                                        ('src/lib/app.py', '*.py', False), ('x/tests/a.py', '**/tests/**', True),
