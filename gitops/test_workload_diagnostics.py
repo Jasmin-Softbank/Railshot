@@ -19,6 +19,11 @@ class WorkloadDiagnosticsTest(unittest.TestCase):
 
     def test_readiness_requires_exact_pod_owner_digest_and_observed_generation(self):
         self.assertEqual(self.observe()['state'],'ready')
+        self.f.deployment['spec']['strategy'] = {'type': 'RollingUpdate', 'rollingUpdate': {'maxUnavailable': 0, 'maxSurge': 1}}
+        self.f.deployment['status']['updatedReplicas'] = 1
+        observed = self.observe()
+        self.assertEqual(observed['update_strategy'], {'type': 'RollingUpdate', 'max_unavailable': 0, 'max_surge': 1})
+        self.assertEqual(observed['replicas'], {'updated': 1, 'available': 1, 'ready': None})
         for change in ('owner','image','generation','error'):
             before=copy.deepcopy((self.f.pod,self.f.deployment))
             if change=='owner': self.f.pod['metadata']['ownerReferences'][0]['uid']='foreign'
@@ -35,6 +40,7 @@ class WorkloadDiagnosticsTest(unittest.TestCase):
         with patch('logs.customer_auth',side_effect=ValueError('private-secret')):
             result=workload_diagnostics.workload(self.f.config,self.f.review)
         self.assertEqual(result['state'],'unavailable'); self.assertNotIn('private-secret',json.dumps(result))
+        self.assertNotIn('replicas', result)
 
     def test_typed_deployment_list_items_may_omit_kind_but_cannot_change_identity(self):
         self.f.deployment.pop('kind')

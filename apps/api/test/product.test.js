@@ -1381,6 +1381,20 @@ test('resume honors native unknown results without clearing journals or automati
   await pause(30); assert.equal(f.deliveries.length, 2);
 });
 
+test('exact revision rollout failure ends resume uncertainty without dispatching new CI', async (t) => {
+  const f = await interruptedApplication(t);
+  f.adapter.deployPublished = async (...args) => {
+    await f.deliver(...args);
+    return { cd: { state: 'failed', revision: 'b'.repeat(40), deployed: false },
+      public_http: { state: 'not_run', url: null, verified_at: null },
+      error: { code: 'CD_ROLLOUT_FAILED', outcome_unknown: false } };
+  };
+  await f.product.resumeDeployment(f.created.id, f.owner);
+  const result = await settle(() => f.product.getDeployment(f.created.id, f.owner));
+  assert.equal(result.status, 'failed'); assert.equal(result.error.outcome_unknown, false);
+  assert.equal(f.submissions.length, 1); assert.equal(f.registrations.length, 1);
+});
+
 test('resume cannot downgrade an earlier unknown when a later native preflight returns blocked', async (t) => {
   const f = await interruptedApplication(t);
   f.adapter.deployPublished = async (...args) => {

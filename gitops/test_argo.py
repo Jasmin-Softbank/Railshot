@@ -96,6 +96,17 @@ class ArgoTest(unittest.TestCase):
         app['status']['operationState']['syncResult']['resources'][0]['images'] = app['status']['summary']['images'][:]
         return app
 
+    def test_only_bound_completed_degraded_rollout_is_a_known_failure(self):
+        live = self.healthy()
+        live['status']['health']['status'] = 'Degraded'
+        self.assertEqual(argo.observe(self.review, live)['status'], 'failed')
+        for mutation in ('revision', 'operation', 'sync'):
+            candidate = copy.deepcopy(live)
+            if mutation == 'revision': candidate['status']['sync']['revision'] = 'f' * 40
+            if mutation == 'operation': candidate['operation'] = {'sync': {'revision': self.review['application']['spec']['source']['targetRevision']}}
+            if mutation == 'sync': candidate['status']['sync']['status'] = 'OutOfSync'
+            self.assertEqual(argo.observe(self.review, candidate)['status'], 'progressing')
+
     def test_database_rollout_orders_policy_migration_and_runtime_without_credentials(self):
         self.prepare(database=True)
         review = argo.load_review(self.directory)

@@ -148,6 +148,23 @@ class BridgeTest(unittest.TestCase):
             live['status']['summary']['images'].append(job['spec']['template']['spec']['containers'][0]['image'])
         return live
 
+    def test_storage_mode_change_blocks_before_git_write_and_stays_blocked_on_replay(self):
+        self.fixture.prepare(storage=True)
+        target = self.config['targets']['k3s-aws']['target']
+        prior = bridge.handoff.render(self.root / 'published', {**target, 'revision': self.git('rev-parse', 'HEAD')})['workload']
+        path = self.repo / target['path'] / 'workload.json'
+        path.parent.mkdir(parents=True); path.write_bytes(bridge.encoded(prior))
+        self.git('add', '--', target['path']); self.git('commit', '-qm', 'Existing persistent app'); self.git('push', '-q', 'origin', 'main')
+        before = self.git('rev-parse', 'HEAD')
+        with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl):
+            for _ in range(2):
+                result = bridge.execute(self.config, self.request)
+                self.assertEqual(result['error']['code'], 'CD_STORAGE_MODE_CHANGE_UNSUPPORTED')
+                self.assertFalse(result['error']['outcome_unknown'])
+                self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+                self.assertEqual(json.loads(path.read_bytes()), prior)
+        self.assertFalse(any('push' in args or 'patch' in args or 'apply' in args for args in self.calls))
+
     def test_apply_pins_git_argo_and_public_receipt_then_replay_only_observes(self):
         verified = {'state': 'succeeded', 'verified_at': '2026-10-02T12:00:00+00:00', 'url': 'https://app.example/health'}
         with patch('argo.native', side_effect=self.native_local_only), patch('argo.kubectl', side_effect=self.kubectl), \

@@ -278,7 +278,10 @@ def observe(review, live):
                 sync.get('revision') == revision and sync.get('status') == 'Synced' and
                 status.get('health', {}).get('status') == 'Healthy' and operation.get('phase') == 'Succeeded' and
                 sync_result.get('revision') == revision and images == set(observed_images))
-    failed = errors or (not live.get('operation') and operation.get('phase') in {'Failed', 'Error'} and
+    degraded = (not live.get('operation') and binding and sync.get('revision') == revision
+                and sync.get('status') == 'Synced' and operation.get('phase') == 'Succeeded'
+                and sync_result.get('revision') == revision and status.get('health', {}).get('status') == 'Degraded')
+    failed = degraded or errors or (not live.get('operation') and operation.get('phase') in {'Failed', 'Error'} and
                         operation.get('syncResult', {}).get('revision') == revision)
     return {'status': 'deployed' if complete else 'failed' if failed else 'progressing', 'deployed': bool(complete),
             'application': app['metadata']['name'], 'target_id': receipt['target_id'],

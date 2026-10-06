@@ -24,6 +24,9 @@ const occupiesSlot = (record) => active(record) && !(record.status === 'unknown'
   && !(record.status === 'running' && (record.ci?.observation?.next_retry_at || record.cd?.observation?.next_retry_at));
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const deliveryMessages = {
+  CD_ROLLOUT_FAILED: '새 버전이 준비되지 않아 배포에 실패했습니다. 앱 상세에서 기존 서비스 상태를 확인하고, 수정한 소스나 이전 소스로 업데이트할 수 있습니다.',
+  CD_STORAGE_MODE_CHANGE_UNSUPPORTED: '업데이트 중 영구 저장소 사용 여부를 바꿀 수 없습니다. 기존 저장소 설정을 유지하거나 별도 앱으로 배포해 주세요.',
+  APPLICATION_ROUTE_RESERVATION_UNAVAILABLE: '배포 포트의 기존 사용 내역을 확인하지 못했습니다. 클러스터 변경 전에 중단했으며 운영 확인이 필요합니다.',
   GCP_ROUTE_PREPARATION_FAILED: 'GCP 로드밸런서 경로 준비에 실패했습니다. 앱 적용 전에 환경 설정과 실행 권한을 확인해야 합니다.',
   GCP_ROUTE_APPLY_TIMEOUT: 'GCP 로드밸런서 구성 시간이 초과됐습니다. 일부 자원이 생성됐을 수 있으며 현재 상태 확인 후 게시된 이미지로 이어갈 수 있습니다.',
   GCP_ROUTE_APPLY_INCOMPLETE: 'GCP 로드밸런서 구성이 끝나지 않았습니다. 방화벽·경로·인증서 적용 결과를 확인해야 합니다.',
@@ -679,7 +682,9 @@ export async function createProductService({ service, directory, target, provide
         stage: succeeded ? 'complete' : cd.deployed ? 'http' : 'cd', cd: { ...cd, observation },
         ...(unknown ? {} : { public_http: result.public_http }),
         url: succeeded ? result.public_http.site_url || result.public_http.url : null,
-        error: stopped ? originalError || { ...operationError(result.error?.code || 'CD_OBSERVATION_REJECTED', true), message: '기존 배포 기록으로 클러스터 결과를 확인하지 못했습니다. 이 앱의 배포 기록을 확인해야 합니다.' }
+        error: stopped ? originalError || (result.cd?.state !== 'failed' || result.error?.code !== 'CD_ROLLOUT_FAILED'
+          ? { ...operationError(result.error?.code || 'CD_OBSERVATION_REJECTED', true), message: '기존 배포 기록으로 클러스터 결과를 확인하지 못했습니다. 이 앱의 배포 기록을 확인해야 합니다.' }
+          : operationError(result.error?.code || 'CD_ROLLOUT_FAILED', false))
           : unknown ? store.read('operations', record.id).error : null });
       if (succeeded || stopped) cdRecoveries.delete(record.id);
     } catch (error) {
@@ -751,7 +756,10 @@ export async function createProductService({ service, directory, target, provide
             return;
           }
           const succeeded = result.cd?.deployed === true && typeof result.cd.revision === 'string' && result.cd.revision.length > 0 && result.public_http?.state === 'succeeded' && result.public_http.verified_at && /^https?:\/\//.test(result.public_http.url || '');
-          const status = succeeded ? 'succeeded' : resume || result.error?.outcome_unknown ? 'unknown' : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
+          const confirmedFailure = result.cd?.state === 'failed' && result.error?.code === 'CD_ROLLOUT_FAILED'
+            && /^[a-f0-9]{40}$/.test(result.cd.revision || '');
+          const status = succeeded ? 'succeeded' : result.error?.outcome_unknown || resume && !confirmedFailure ? 'unknown'
+            : ['blocked', 'failed'].includes(result.cd?.state) ? result.cd.state : 'unknown';
           await update(record.id, { status, stage: succeeded ? 'complete' : result.cd?.deployed ? 'http' : 'cd', cd: result.cd, public_http: result.public_http,
             url: succeeded ? (result.public_http.site_url || result.public_http.url) : null, error: succeeded ? null : operationError(result.error?.code || 'CD_UNVERIFIED', status === 'unknown') });
           if (status === 'unknown' && record.application_id) cdRecoveries.add(record.id);
