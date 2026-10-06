@@ -1741,12 +1741,12 @@ for (const limit of [3, 16]) test(`${limit === 3 ? 'default' : 'explicit'} ${lim
       return { ...row, state: completed.has(row.app) ? 'published' : 'running',
         ...(completed.has(row.app) ? { publication: { ...row, artifact_id: Number(id) + 100, producer_attempt: 1 } } : {}) };
     },
-  }, deployPublished: async ({ app, publication: result, withMutation }) => withMutation(async () => {
+  }, deployPublished: async ({ app, publication: result }) => {
     assert.equal(result.app, app);
     peakCdWriters = Math.max(peakCdWriters, ++cdWriters);
     await pause(4); cdWriters--;
     return deployed;
-  }) });
+  } });
   const rows = await Promise.all(Array.from({ length: limit + 2 }, (_, i) =>
     f.product.createDeployment({ ...input, app: `parallel-${i}` }, `parallel-${i}`)));
   await settle(() => f.product.getDeployment(rows[limit - 1].id), row => Boolean(row.ci.run_id));
@@ -1784,4 +1784,36 @@ test('operator resumes only the exact published operation without new CI', async
   assert.equal(result.status, 'succeeded');
   assert.equal(f.submissions.length, 1);
   assert.equal(diskState(f.directory).operations[f.created.id].resume_initiated_by, 'operator');
+});
+
+test('route preparation and apply stay together, then another app can deploy during HTTPS observation', async t => {
+  const runs = new Map(), phases = [];
+  let finishSlow, finishRoute;
+  const slowReady = new Promise(resolve => { finishSlow = resolve; });
+  const routeReady = new Promise(resolve => { finishRoute = resolve; });
+  t.after(() => { finishRoute(); finishSlow(); });
+  const f = await fixture(t, { service: {
+    deploy: async ({app,target_id}) => {
+      const row = { app,target_id,run_id:String(1000+runs.size),source_commit:'a'.repeat(40) };
+      runs.set(row.run_id,row);return row;
+    },
+    status: async id => ({ ...runs.get(String(id)),state:'published',publication:{...runs.get(String(id)),artifact_id:123,producer_attempt:1} }),
+  }, deployPublished: async ({app,onProgress}) => {
+    phases.push(app+':route');
+    if(app==='slow-app')await routeReady;
+    phases.push(app+':apply');
+    await onProgress({cd:{state:'progressing',revision:'b'.repeat(40),deployed:false},public_http:{state:'unverified'}});
+    if(app==='slow-app')await slowReady;
+    phases.push(app+':ready');return deployed;
+  }});
+  const slow = await f.product.createDeployment({...input,app:'slow-app'},'slow-app');
+  await settle(()=>f.product.getDeployment(slow.id), ()=>phases.includes('slow-app:route'));
+  const fast = await f.product.createDeployment({...input,app:'fast-app'},'fast-app');
+  await settle(()=>f.product.getDeployment(fast.id), row=>row.stage==='cd');
+  assert.deepEqual(phases,['slow-app:route']);
+  finishRoute();
+  await settle(()=>f.product.getDeployment(fast.id),row=>row.status==='succeeded');
+  assert.deepEqual(phases,['slow-app:route','slow-app:apply','fast-app:route','fast-app:apply','fast-app:ready']);
+  assert.equal((await f.product.getDeployment(slow.id)).status,'running');
+  finishSlow();await settle(()=>f.product.getDeployment(slow.id),row=>row.status==='succeeded');
 });

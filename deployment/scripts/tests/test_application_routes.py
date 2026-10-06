@@ -27,6 +27,7 @@ class ApplicationRoutesTest(unittest.TestCase):
 
         def setup_registration(case):
             original(case)
+            case.enterContext(patch.object(applications, 'reserved_node_ports', return_value=set()))
             profile = case.config['environments'][case.env_id]
             profile['provider'] = provider
             profile['ingress'].update(edge_config_file=str(case.root / 'edge.json'),

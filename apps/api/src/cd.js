@@ -65,7 +65,7 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
     });
     child.stdin.end(JSON.stringify(request));
   });
-  async function deployPublished({ deploymentId, app, targetId, sourceCommit, publication, signal, onProgress, observeOnly = false, withMutation = (fn) => fn() }) {
+  async function deployPublished({ deploymentId, app, targetId, sourceCommit, publication, signal, onProgress, observeOnly = false }) {
     if (publication?.app !== app || publication?.target_id !== targetId || publication?.source_commit !== sourceCommit) {
       throw new Error('Published deployment binding differs.');
     }
@@ -76,21 +76,28 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
     const request = { action: observeOnly ? 'observe' : 'apply', deployment_id: deploymentId, target_id: targetId,
       config_sha256: configDigest, publication,
       files: Object.fromEntries(files.map(({ path, content }) => [path, content.toString('base64')])) };
-    let deadline = Date.now() + timeoutMs;
-    // Only apply can mutate the shared Git checkout. Health/HTTPS waits must not
-    // retain another application's infrastructure slot.
-    let result = await (observeOnly ? invoke(request, signal, deadline - Date.now())
-      : withMutation(() => {
-        deadline = Date.now() + timeoutMs;
-        return invoke(request, signal, timeoutMs);
-      }));
+    const deadline = Date.now() + timeoutMs;
+    let healthySince = null, healthyBinding = null;
+    const stablePublicResult = (value) => {
+      const binding = JSON.stringify([value.cd.revision, value.public_http.url, value.public_http.site_url]);
+      if (!value.cd.deployed || value.public_http.state !== 'succeeded') {
+        healthySince = null; healthyBinding = null;
+        return value;
+      }
+      if (binding !== healthyBinding) { healthySince = performance.now(); healthyBinding = binding; }
+      // A newly propagated LB route can briefly alternate between the new app
+      // and its default route. Require repeated success over a settling window.
+      if (performance.now() - healthySince < 15_000) return { ...value,
+        public_http: { state: 'unverified', verified_at: null, url: null } };
+      return value;
+    };
+    let result = stablePublicResult(await invoke(request, signal, deadline - Date.now()));
     await onProgress?.(result);
-    if (observeOnly) return result;
-    while (!signal?.aborted && Date.now() < deadline &&
+    while ((!observeOnly || healthySince !== null) && !signal?.aborted && Date.now() < deadline &&
            (result.cd.state === 'progressing' || (result.cd.deployed && result.public_http.state === 'unverified'))) {
       try { await setTimeout(Math.min(2000, Math.max(1, deadline - Date.now())), undefined, { signal }); }
       catch { return unknown(); }
-      result = await invoke({ ...request, action: 'observe' }, signal, deadline - Date.now());
+      result = stablePublicResult(await invoke({ ...request, action: 'observe' }, signal, deadline - Date.now()));
       await onProgress?.(result);
     }
     return result;

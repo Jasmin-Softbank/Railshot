@@ -202,9 +202,8 @@ export async function createApplicationAdapter({ configPath, ciIdentity, loadPub
       if (exists) {
         if (hash(await privateJson(request, { maxBytes: 14_000_000 })) !== hash(payload)) throw fail('APPLICATION_PUBLICATION_MISMATCH');
       } else await savePrivate(request, payload);
-      const withMutation = args.withMutation || ((fn) => fn());
-      const result = resultStatus(await withMutation(() => runner(python, [FINALIZE, '--config', configPath, '--request', request],
-        { mutation: true, timeout: 1_800_000 })), application);
+      const result = resultStatus(await runner(python, [FINALIZE, '--config', configPath, '--request', request],
+        { mutation: true, timeout: 1_800_000 }), application);
       if (result.status !== 'succeeded') throw fail(result.error?.code || 'APPLICATION_PUBLIC_ROUTE_UNVERIFIED', 502, result.status === 'unknown');
       const deploy = createCdAdapter({ configPath: join(run, 'cd.json'), loadPublished, python });
       return deploy(args);

@@ -161,13 +161,17 @@ def render(directory, target):
         container['volumeMounts'].append({'name': 'database-ca', 'mountPath': '/etc/railshot/db', 'readOnly': True})
     container['readinessProbe'] = {'httpGet': {'path': health, 'port': svc['port']}, 'periodSeconds': 5}
     workload = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': name, 'namespace': namespace},
-                'spec': {'replicas': svc.get('replicas', 1), 'selector': {'matchLabels': runtime_labels},
+                'spec': {'replicas': svc.get('replicas', 1), 'minReadySeconds': 3,
+                         'strategy': {'type': 'RollingUpdate', 'rollingUpdate': {'maxUnavailable': 0, 'maxSurge': 1}},
+                         'selector': {'matchLabels': runtime_labels},
                          'template': {'metadata': {'labels': runtime_labels}, 'spec': {
                              'automountServiceAccountToken': False, 'nodeSelector': {'kubernetes.io/arch': 'amd64'},
                              'securityContext': pod_security(), 'containers': [container],
                              'volumes': [{'name': 'tmp', 'emptyDir': {'sizeLimit': '64Mi'}}]}}}}
     if pull_secret is not None:
         workload['spec']['template']['spec']['imagePullSecrets'] = [{'name': pull_secret['name']}]
+    if not svc.get('storage'):
+        container['lifecycle'] = {'preStop': {'sleep': {'seconds': 5}}}
     if database:
         workload['spec']['template']['spec']['volumes'].append({'name': 'database-ca', 'secret': {
             'secretName': database['ca_secret'], 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}], 'defaultMode': 0o444}})

@@ -219,7 +219,8 @@ test('expired and foreign plans cannot execute; lost replies recover from the sa
   await page.waitForFunction(() => document.querySelector('#lifecycle-operation-message').textContent.includes('상태 조회 실패')
     && !document.querySelector('#lifecycle-operation-refresh').disabled);
   assert.equal(await appAction(page, 'paused-app', '삭제').isDisabled(), true);
-  assert.equal(await page.locator('#lifecycle-operation-refresh').isEnabled(), true);
+  // The predicate above verifies refresh is available. The next automatic
+  // read can temporarily disable it again without permitting another write.
   state.outcome = 'succeeded';
   await page.reload(); await page.waitForFunction(() => document.querySelector('#lifecycle-operation-state').textContent.startsWith('완료'));
   assert.equal(await appAction(page, 'paused-app', '삭제').count(), 0);

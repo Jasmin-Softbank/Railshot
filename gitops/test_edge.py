@@ -57,6 +57,49 @@ class EdgeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'namespace already allocated'):
             edge.prepare(self.path, {**self.request, 'environment_id': 'other-env'})
 
+    def test_deleted_app_name_can_be_recreated_with_a_new_target(self):
+        first = self.prepared()
+        config, row = edge.load(first['reference'])
+        row['phase'] = 'deleted'
+        edge.save(config, row)
+        ledger_path = Path(config['state_dir']) / 'allocations.json'
+        edge.durable_write(ledger_path, edge.encoded({row['route_key']: row}))
+        replacement = edge.prepare(self.path, {**self.request, 'target_id': 'replacement-app',
+                                               'namespace': 'replacement-app'})
+        self.assertEqual(replacement['hostname'], first['hostname'])
+        self.assertEqual(replacement['phase'], 'reserved')
+        self.assertEqual(edge.load(replacement['reference'])[1]['request']['target_id'], 'replacement-app')
+
+    def test_deleted_route_releases_port_but_reserved_and_stopped_routes_keep_it(self):
+        first = self.prepared()
+        config, row = edge.load(first['reference'])
+        address, port = self.request['target_private_ip'], first['node_port']
+        self.assertIn(port, edge.reserved_ports(self.path, address))
+        for phase in ('reserved', 'stopped', 'applying'):
+            row['phase'] = phase
+            edge.save(config, row)
+            with self.subTest(phase=phase), self.assertRaisesRegex(ValueError, 'already routed'):
+                edge.prepare(self.path, {**self.request, 'app': 'second-app', 'namespace': 'tenant-second', 'node_port': port})
+        row.update(phase='deleted', previous_route=copy.deepcopy(row['route']))
+        edge.save(config, row)
+        ledger_path = Path(config['state_dir']) / 'allocations.json'
+        ledger = edge.read_private(ledger_path); ledger[row['route_key']] = row
+        edge.durable_write(ledger_path, edge.encoded(ledger))
+        self.assertNotIn(port, edge.reserved_ports(self.path, address))
+        second = edge.prepare(self.path, {**self.request, 'app': 'second-app', 'namespace': 'tenant-second', 'node_port': port})
+        self.assertEqual(second['node_port'], port)
+        def terraform(config, *args):
+            if args[0] == 'plan':
+                saved = next(arg[5:] for arg in args if arg.startswith('-out='))
+                Path(saved).write_bytes(b'plan')
+                return ''
+            return json.dumps({'resource_changes': []})
+        with patch('edge.terraform', side_effect=terraform):
+            edge.plan_route(second['reference'])
+        candidate = edge.read_private(Path(config['state_dir']) / (second['route_key'] + '.tfvars.json'))
+        self.assertNotIn(row['route_key'], candidate['routes'], 'deleted health-change history must never resurrect a route')
+        self.assertIn(second['route_key'], candidate['routes'])
+
     def test_redeploy_updates_only_health_on_applied_owned_route(self):
         first = self.prepared()
         config, row = edge.load(first['reference'])

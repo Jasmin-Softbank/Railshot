@@ -130,8 +130,9 @@ resource "google_compute_backend_service" "routes" {
 resource "google_compute_url_map" "app" {
   name = var.name
   default_url_redirect {
-    host_redirect = var.hostname
-    strip_query   = false
+    host_redirect          = var.hostname
+    strip_query            = false
+    redirect_response_code = "FOUND"
   }
   host_rule {
     hosts        = [var.hostname]
