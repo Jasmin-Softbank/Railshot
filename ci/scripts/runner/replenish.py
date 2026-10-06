@@ -253,6 +253,31 @@ def read_json(path):
     return json.loads(raw)
 
 
+def poll(controller, deadline, *, clock=time.monotonic, pause=time.sleep):
+    """Check new demand within the same CronJob and shared HTTP deadline."""
+    started = clock()
+    result = {'state': 'blocked', 'code': 'HTTP_DEADLINE'}
+    created = []
+    for offset in (0, 15, 30):
+        delay = max(0, started + offset - clock())
+        if clock() + delay >= deadline:
+            break
+        if delay:
+            pause(delay)
+        if clock() >= deadline:
+            break
+        result = controller.tick()
+        if result['state'] in ('unknown', 'blocked'):
+            return result
+        if result['state'] == 'created':
+            created.extend(result.get('jobs', [result['job']]))
+    if created:
+        return {'state': 'created', 'job': created[0],
+                **({'jobs': created, 'capacity': len(controller.slots)}
+                   if len(created) > 1 or len(controller.slots) > 1 else {})}
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--template', default='/etc/railshot-controller/job.json')
@@ -263,7 +288,8 @@ def main():
         kube = Client('https://kubernetes.default.svc', Path('/run/railshot-kubernetes/token').read_text().strip(),
                       ca='/run/railshot-kubernetes/ca.crt', deadline=deadline)
         github = Client('https://api.github.com', Path('/run/secrets/github/token').read_text().strip(), deadline=deadline)
-        result = Controller(kube, github, read_json(args.template), read_json(args.policy)).tick()
+        controller = Controller(kube, github, read_json(args.template), read_json(args.policy))
+        result = poll(controller, deadline)
     except Blocked as error:
         result = {'state': 'blocked', 'code': str(error)}
     except (OSError, ValueError, KeyError, TypeError):

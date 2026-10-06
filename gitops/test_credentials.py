@@ -21,6 +21,17 @@ class CredentialsTest(unittest.TestCase):
         return {'version': 1, 'targets': [{**copy.deepcopy(self.target), 'target_id': f'reserved-{index}',
             'secret': f'railshot-reserved-{index}'} for index in range(count)]}
 
+    def test_expired_credentials_are_classified_without_remote_calls_or_writes(self):
+        config = json.loads(base64.b64decode(self.secret['data']['config']))
+        config['bearerToken'] = self.token(self.now - 22000)
+        self.secret['data']['config'] = base64.b64encode(json.dumps(config).encode()).decode()
+        with patch('credentials.platform', side_effect=self.platform), patch('credentials.customer') as remote:
+            with self.assertRaises(credentials.CredentialExpiredError) as caught:
+                credentials.renew(self.target, self.now)
+            self.assertEqual(credentials.renewal_error(caught.exception), 'CREDENTIAL_EXPIRED')
+        remote.assert_not_called()
+        self.assertEqual(self.writes, [])
+
     def test_registration_count_is_not_a_deployed_app_quota(self):
         policy = self.policy(40)
         self.assertEqual(credentials.validate_policy(policy), policy)

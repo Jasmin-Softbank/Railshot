@@ -1495,6 +1495,7 @@ function renderEnvironments() {
     const credentials = credentialStatus(observation), cell = document.createElement('div'), value = element('dd', credentials.label);
     const reasons = { ENVIRONMENT_OBSERVER_NOT_REGISTERED: '환경 공통 자격 관측이 아직 등록되지 않았습니다.',
       RENEWAL_TIMEOUT: '자격 상태 확인 시간이 초과됐습니다.', CUSTOMER_TLS_FAILED: '실행 환경의 TLS 연결을 검증하지 못했습니다.',
+      CREDENTIAL_EXPIRED: '장시간 중단으로 연결 자격이 만료됐습니다. 운영자의 자격 복구가 필요합니다.',
       CUSTOMER_AUTH_REJECTED: '실행 환경에서 자격 인증을 거부했습니다.', CUSTOMER_API_FAILED: '실행 환경 API가 자격 확인에 실패했습니다.',
       CUSTOMER_API_UNREACHABLE: '실행 환경 API에 연결할 수 없습니다.', RENEWAL_FAILED: '자격 상태를 확인하지 못했습니다.' };
     if (reasons[observation?.credentials?.reason]) value.append(element('small', reasons[observation.credentials.reason]));

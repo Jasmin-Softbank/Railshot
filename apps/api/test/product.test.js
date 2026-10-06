@@ -1741,12 +1741,12 @@ for (const limit of [3, 16]) test(`${limit === 3 ? 'default' : 'explicit'} ${lim
       return { ...row, state: completed.has(row.app) ? 'published' : 'running',
         ...(completed.has(row.app) ? { publication: { ...row, artifact_id: Number(id) + 100, producer_attempt: 1 } } : {}) };
     },
-  }, deployPublished: async ({ app, publication: result }) => {
+  }, deployPublished: async ({ app, publication: result, withMutation }) => withMutation(async () => {
     assert.equal(result.app, app);
     peakCdWriters = Math.max(peakCdWriters, ++cdWriters);
     await pause(4); cdWriters--;
     return deployed;
-  } });
+  }) });
   const rows = await Promise.all(Array.from({ length: limit + 2 }, (_, i) =>
     f.product.createDeployment({ ...input, app: `parallel-${i}` }, `parallel-${i}`)));
   await settle(() => f.product.getDeployment(rows[limit - 1].id), row => Boolean(row.ci.run_id));

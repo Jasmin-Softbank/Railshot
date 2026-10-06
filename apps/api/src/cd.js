@@ -65,7 +65,7 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
     });
     child.stdin.end(JSON.stringify(request));
   });
-  async function deployPublished({ deploymentId, app, targetId, sourceCommit, publication, signal, onProgress, observeOnly = false }) {
+  async function deployPublished({ deploymentId, app, targetId, sourceCommit, publication, signal, onProgress, observeOnly = false, withMutation = (fn) => fn() }) {
     if (publication?.app !== app || publication?.target_id !== targetId || publication?.source_commit !== sourceCommit) {
       throw new Error('Published deployment binding differs.');
     }
@@ -76,8 +76,14 @@ export function createCdAdapter({ configPath, loadPublished, python = 'python3',
     const request = { action: observeOnly ? 'observe' : 'apply', deployment_id: deploymentId, target_id: targetId,
       config_sha256: configDigest, publication,
       files: Object.fromEntries(files.map(({ path, content }) => [path, content.toString('base64')])) };
-    const deadline = Date.now() + timeoutMs;
-    let result = await invoke(request, signal, deadline - Date.now());
+    let deadline = Date.now() + timeoutMs;
+    // Only apply can mutate the shared Git checkout. Health/HTTPS waits must not
+    // retain another application's infrastructure slot.
+    let result = await (observeOnly ? invoke(request, signal, deadline - Date.now())
+      : withMutation(() => {
+        deadline = Date.now() + timeoutMs;
+        return invoke(request, signal, timeoutMs);
+      }));
     await onProgress?.(result);
     if (observeOnly) return result;
     while (!signal?.aborted && Date.now() < deadline &&
