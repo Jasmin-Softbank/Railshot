@@ -88,6 +88,20 @@ class CredentialTest(unittest.TestCase):
                 rotation.rotate(self.file, 'gpt-5.5')
             deliver.assert_not_called()
 
+    def test_operator_to_receiver_with_real_encryption(self):
+        original = subprocess.run
+        def run(command, **kwargs):
+            if command[0] == 'codex':
+                return subprocess.CompletedProcess(command, 0, '{"type":"turn.completed"}\n', '')
+            return original(command, **kwargs)
+        instance = {'Reservations': [{'Instances': [{'State': {'Name': 'running'},
+                    'Tags': [{'Key': 'Name', 'Value': 'railshot-build-worker-aws-01'}]}]}]}
+        with patch.dict(os.environ, {}, clear=True), patch.object(rotation, 'aws', side_effect=[{'Account': rotation.ACCOUNT}, instance]), \
+                patch.object(rotation.subprocess, 'run', side_effect=run), patch.object(rotation, 'deliver', side_effect=self.receive):
+            result = rotation.rotate(self.file, 'gpt-5.5')
+        self.assertEqual(result['status'], 'installed')
+        self.assertNotIn('SECRET_CANARY', json.dumps(result))
+
     def test_delivery_command_contains_only_ciphertext(self):
         encrypted = self.envelope()
         replies = [{'Command': {'CommandId': 'test'}}, {'Status': 'Success', 'StandardOutputContent': '{"status":"installed"}'}]

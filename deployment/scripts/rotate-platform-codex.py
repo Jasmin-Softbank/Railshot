@@ -174,7 +174,7 @@ def rotate(auth_file, model):
             for t in instance.get('Tags', [])), 'BUILD_HOST_MISMATCH')
     nonce = uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix='railshot-platform-credential-') as temporary:
-        root = Path(temporary); candidate = root / 'auth.json'
+        root = Path(temporary).resolve(); candidate = root / 'auth.json'
         candidate.write_text(json.dumps(auth)); candidate.chmod(0o600)
         # Dedicated auth-only home: never read user MCP/config/project files during the compatibility check.
         probe = subprocess.run(['codex', 'exec', '--json', '--model', model, '--sandbox', 'read-only',
