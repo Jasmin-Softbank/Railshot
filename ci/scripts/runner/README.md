@@ -124,8 +124,8 @@ GitHub 앱 저장소에는 기존 workflow의 변수도 설정합니다.
 | `RAILSHOT_RUN_ROOT` | `/var/lib/railshot-runner/runs`; `_work`·`RUNNER_TEMP`와 분리된 재시도 상태 |
 | `QUALITY_NETWORK` | `railshot-quality` |
 | `PLATFORM_REF` | 설치한 executor 계약과 같은 검토된 platform commit 40자리 SHA |
-| `RAILSHOT_MAX_REPAIR_ATTEMPTS` | fixer 호출 상한 0·1·2, 기본 2. 0은 패키징 옵션과 관계없이 모든 SDK 호출을 끄며 모델 인증·SDK 설치 없이 결정적 baseline을 실행한다. fixer 재계획도 이 상한에 포함한다. 게이트 실패를 성공으로 바꾸거나 검사를 생략하지 않는다. |
-| `RAILSHOT_MAX_PACKAGING_ATTEMPTS` | 초기 adapter 호출 상한 0·1·2, 기본 2. 기본 전체 상한은 패키징 2회 + 수정 2회 = 4회이며 역할 간 횟수는 빌려 쓰지 않는다. 명세가 이미 있으면 fixer 최대 2회다. 0은 모델 패키징을 끄며 규칙 기반 패키징은 유지한다. |
+| `RAILSHOT_MAX_REPAIR_ATTEMPTS` | fixer 호출 상한 0~8, 미설정 시 워크플로 기본 8(CLI 기본 2). 0은 패키징 옵션과 관계없이 모든 SDK 호출을 끄며 모델 인증·SDK 설치 없이 결정적 baseline을 실행한다. fixer 재계획도 이 상한에 포함한다. 게이트 실패를 성공으로 바꾸거나 검사를 생략하지 않는다. |
+| `RAILSHOT_MAX_PACKAGING_ATTEMPTS` | 초기 adapter 호출 상한 0~8, 기본 2. 미설정 시 워크플로 전체 상한은 패키징 2회 + 수정 8회 = 10회이며 역할 간 횟수는 빌려 쓰지 않는다. 명세가 이미 있으면 설정한 fixer 상한만 쓴다. 실제 시간 상한은 job 40분과 호출별 1,800초이며 `SOURCE-REPAIR.md`에 정리한다. 0은 모델 패키징을 끄며 규칙 기반 패키징은 유지한다. |
 | `AGENT_PROVIDER`, `AGENT_AUTH_MODE` | 기존 workflow 계약의 provider와 `subscription` 또는 `api-key` |
 | `RAILSHOT_CODEX_HOME` | subscription일 때 `/var/lib/railshot-runner/codex`; 운영자가 해당 전용 디렉터리에 `auth.json` 준비 |
 

@@ -576,6 +576,35 @@ class RegistrationTest(unittest.TestCase):
 
 
 class DirectSshTest(unittest.TestCase):
+    def test_cloud_connection_is_private_reused_and_closed_on_failure(self):
+        host = {'ansible_ssh_common_args': '-F /dev/null -o StrictHostKeyChecking=yes',
+                'ansible_ssh_private_key_file': '/private/key', 'ansible_port': 22,
+                'ansible_user': 'ubuntu', 'ansible_host': '10.26.1.5'}
+        inventory = {'all': {'children': {'k3s_server': {'hosts': {'node': host}}}}}
+        sockets = []
+        for provider in ('aws', 'gcp'):
+            request = {'target': {'provider': provider}, 'inventory': {'control_plane': [{'ssh': {'port': 22}}]}}
+            with patch.object(env.ansible, 'build_inventory', return_value=inventory), \
+                    patch.object(env.argo, 'native', return_value='{"items": []}') as native:
+                with self.assertRaisesRegex(RuntimeError, 'caller failed'):
+                    with env.runtime_kubectl(request) as kube:
+                        kube('default', 'get', 'nodes', '-o', 'json')
+                        first = native.call_args.args[0]
+                        socket = first[first.index('-S') + 1]
+                        self.assertEqual(Path(socket).parent.stat().st_mode & 0o777, 0o700)
+                        self.assertIn('ControlMaster=auto', first)
+                        self.assertIn('StrictHostKeyChecking=yes', first)
+                        kube('default', 'get', 'services', '-o', 'json')
+                        self.assertIn(socket, native.call_args.args[0])
+                        raise RuntimeError('caller failed')
+                cleanup = native.call_args.args[0]
+                self.assertIn(socket, cleanup)
+                self.assertEqual(cleanup[-3:], ['-O', 'exit', 'ubuntu@10.26.1.5'])
+                self.assertEqual(native.call_args.kwargs['timeout'], 5)
+                self.assertFalse(Path(socket).parent.exists())
+                sockets.append(socket)
+        self.assertNotEqual(*sockets)
+
     def test_runtime_kubectl_uses_private_address_and_strict_host_verification(self):
         request = env.ansible.from_openstack({'id': 'server-1', 'project_id': 'project-1', 'status': 'ACTIVE',
             'addresses': [{'network': 'management', 'address': '10.26.1.5', 'version': 4}]},

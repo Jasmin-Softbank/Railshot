@@ -81,3 +81,10 @@ variable "routes" {
     error_message = "Applications on this VM must have distinct hostnames and NodePorts."
   }
 }
+
+variable "detached_routes" {
+  description = "Enabled routes removed from both URL maps while their backends remain. Only the lifecycle detach stage sets this; it is never persisted."
+  type        = set(string)
+  default     = []
+  nullable    = false
+}

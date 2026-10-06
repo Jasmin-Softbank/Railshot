@@ -1,7 +1,7 @@
 """Read bounded workload facts with the existing application-scoped credential.
 
 No Pod output, exception messages, environment values or mutation is exported.
-Observation failure does not change the bridge's deterministic result.
+The bridge reports success only for a ready, drained observation; failure keeps it progressing.
 """
 from datetime import datetime, timezone
 import argparse
@@ -43,13 +43,20 @@ def workload(config, review):
         replicas = credentials.customer(*auth, '/apis/apps/v1/namespaces/' + namespace + '/replicasets?' + selector, **tls)
         argo.require(replicas['kind'] == 'ReplicaSetList' and not replicas.get('metadata', {}).get('continue')
                      and len(replicas['items']) <= 20, 'bounded replicas required')
-        owners = {row['metadata']['uid'] for row in replicas['items'] if row['metadata']['namespace'] == namespace
-                  and logs.owns(row, 'Deployment', live['metadata']['uid']) and logs.template_matches(row['spec']['template'], template)}
+        controlled = [row for row in replicas['items'] if row['metadata']['namespace'] == namespace
+                      and logs.owns(row, 'Deployment', live['metadata']['uid'])]
+        owners = {row['metadata']['uid'] for row in controlled if logs.template_matches(row['spec']['template'], template)}
         listing = credentials.customer(*auth, '/api/v1/namespaces/' + namespace + '/pods?' + selector, **tls)
         argo.require(listing['kind'] == 'PodList' and not listing.get('metadata', {}).get('continue')
                      and len(listing['items']) <= 20, 'bounded pods required')
         selected = [p for p in listing['items'] if not p['metadata'].get('deletionTimestamp')
                     and any(logs.owns(p, 'ReplicaSet', uid) for uid in owners)]
+        # Deployment status and Argo health omit terminating Pods, which can still serve
+        # during preStop/keepalive drain. Count only this Deployment UID's ReplicaSets;
+        # same-label Pods of other controllers do not block. Terminal-phase Pods no longer serve.
+        obsolete = sum(1 for p in listing['items'] if p not in selected
+                       and p.get('status', {}).get('phase') not in ('Succeeded', 'Failed')
+                       and any(logs.owns(p, 'ReplicaSet', row['metadata']['uid']) for row in controlled))
         rows = []
         expected_images = {c['name']: c['image'] for c in template['spec']['containers']}
         for pod in selected:
@@ -92,6 +99,7 @@ def workload(config, review):
                  and status.get('observedGeneration', 0) >= live['metadata']['generation']
                  and status.get('availableReplicas', 0) >= desired)
         return {'state': 'ready' if ready else 'progressing', 'checked_at': checked, 'pods': rows,
+                'drained': obsolete == 0, 'obsolete_pods': obsolete,
                 'code': None, 'observed_generation': status.get('observedGeneration'), 'desired_replicas': desired,
                 'update_strategy': update_strategy,
                 'replicas': {key: status.get(field) if type(status.get(field)) is int and status[field] >= 0 else None

@@ -103,11 +103,11 @@ def site_probe(url):
         return False
 
 
-def output(cd='blocked', *, revision=None, deployed=False, public=None, code=None, unknown=False, migration=None):
+def output(cd='blocked', *, revision=None, deployed=False, public=None, code=None, unknown=False, migration=None, retryable=False):
     value = {'cd': {'state': cd, 'revision': revision, 'deployed': deployed},
              'public_http': public or {'state': 'not_run', 'verified_at': None, 'url': None}}
     if code:
-        value['error'] = {'code': code, 'retryable': False, 'outcome_unknown': unknown}
+        value['error'] = {'code': code, 'retryable': retryable, 'outcome_unknown': unknown}
     if migration:
         value['cd']['migration'] = migration
     return value
@@ -166,8 +166,18 @@ def observe(config, registered, directory, state):
     argo.validate_project(project, app, review['workload'])
     # sync=False is read-only even after an interrupted push or Argo operation.
     observed = argo.deploy(review, config['context'], sync=False, timeout=0)
+    from workload_diagnostics import workload
+    current = workload(config, review)
+    # Argo Healthy omits terminating Pods, which still serve during drain. Success also
+    # needs the requested image ready and every older Pod of this Deployment gone.
+    # An unavailable/missing observation stays progressing, never a known failure.
+    deployed = observed['deployed'] and current['state'] == 'ready' and current.get('drained') is True
+    # A condition-only error (e.g. transient ComparisonError) is uncertain, not a rollout
+    # outcome; it stays within the caller's bounded observation retries.
+    rejected = observed['status'] == 'failed' and not observed.get('rollout_failed')
+    cd_state = 'progressing' if rejected or observed['deployed'] and not deployed else observed['status']
     public = None
-    if observed['deployed']:
+    if deployed:
         if 'edge' in registered:
             try:
                 public = edge.observe(registered['edge'], state['edge_request'], observed['git_revision'],
@@ -181,17 +191,14 @@ def observe(config, registered, directory, state):
                 site_url = 'https://' + health.netloc + handoff.http_path(review['receipt']['http']['route'])
                 public = {**public, 'site_url': site_url} if site_probe(site_url) else {
                     'state': 'unverified', 'verified_at': None, 'url': None}
-    value = output(observed['status'], revision=observed['git_revision'], deployed=observed['deployed'], public=public,
-                   code=('CD_ROLLOUT_FAILED' if observed.get('rollout_failed') else 'CD_OBSERVATION_REJECTED')
-                   if observed['status'] == 'failed' else None,
-                   unknown=observed['status'] == 'failed' and not observed.get('rollout_failed'),
-                   migration=observed.get('migration'))
-    from workload_diagnostics import workload
+    value = output(cd_state, revision=observed['git_revision'], deployed=deployed, public=public,
+                   code='CD_OBSERVATION_REJECTED' if rejected else 'CD_ROLLOUT_FAILED' if cd_state == 'failed' else None,
+                   unknown=rejected, retryable=rejected, migration=observed.get('migration'))
     value['cd']['evidence'] = {'observed_at': datetime.now(timezone.utc).isoformat(),
         'config_revision': observed['git_revision'], 'observed_revision': observed.get('observed_revision') if re.fullmatch(r'[0-9a-f]{40}', str(observed.get('observed_revision'))) else None,
         'sync': observed.get('sync') if observed.get('sync') in {'Synced', 'OutOfSync', 'Unknown'} else None,
         'health': observed.get('health') if observed.get('health') in {'Healthy', 'Progressing', 'Degraded', 'Suspended', 'Missing', 'Unknown'} else None,
-        'workload': workload(config, review)}
+        'workload': current}
     return value
 
 

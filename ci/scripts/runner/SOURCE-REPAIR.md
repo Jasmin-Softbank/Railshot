@@ -1,10 +1,20 @@
 # Source repair in customer CI
 
-The workflow and CLI default to at most two initial adapter invocations plus at most two
-fixer invocations, with a hard cap of four SDK invocations. The existing operator
-variable `RAILSHOT_MAX_REPAIR_ATTEMPTS` bounds fixers (`0|1|2`, default `2`), while
-`RAILSHOT_MAX_PACKAGING_ATTEMPTS` bounds adapters (`0|1|2`, default `2`). Repair `0`
+The operator variable `RAILSHOT_MAX_REPAIR_ATTEMPTS` bounds fixers and
+`RAILSHOT_MAX_PACKAGING_ATTEMPTS` bounds the initial adapter, each `0..8`. When a
+variable is unset the workflow falls back to fixer `8` and adapter `2` (at most ten SDK
+invocations); the CLI defaults to two each. Explicitly configured repository variables
+always take precedence over these fallbacks. Repair `0`
 remains the explicit switch that disables all SDK work, including the adapter.
+
+The invocation count is a ceiling, not the only bound. The whole loop runs inside the
+job's `timeout-minutes: 40`. Each SDK or gate subprocess is killed after 1,800 seconds,
+and that includes waiting up to 1,200 seconds for the host's agent slot. Claude
+invocations also stop at the profile's `max_turns: 40` and `max_budget_usd: 2.0`. A Codex
+invocation is one SDK turn with no token or cost cap configured, so for Codex the
+wall-clock limits above are the effective bound. A job stopped mid-invocation is not
+replayed on resume: the leftover role receipt stops the loop with
+`STATE_EVIDENCE_MISMATCH`, and an operator must reconcile it.
 Out-of-range role limits are rejected before SDK setup. The workflow retains source scope
 and the CLI retains packaging scope; the budget does not broaden either.
 Repository variables override workflow fallbacks. Jev diagnostics run separately in the API
@@ -111,7 +121,7 @@ observed count. Final `sdk_invocations` counts only SDK invocations
 established by receipts; an uncertain count remains null. Model requests within an
 SDK invocation are separate. `evidence.json` retains the declared budget, while
 `budget_used` records consumed supervisor slots by role. Deploy a reader accepting
-the optional budget field with a maximum of three before promoting this workflow and runner. Older events
+the optional budget field with a maximum of 16 before promoting this workflow and runner. Older events
 omit the field and must not be assigned an invented budget.
 The job's short-lived `checks:write` token is removed from the environment before
 child processes run; transport failure never changes the gate result or repeats

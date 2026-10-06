@@ -70,6 +70,7 @@ class LifecycleTest(unittest.TestCase):
         self.calls, self.documents = [], {}
         self.fail_apply = False
         self.mutate_plan = None
+        self.mutations, self.applies = {}, []
         self.after_drift = False
         self.applied = False
         self.native_patch = patch('edge.native', side_effect=self.native)
@@ -88,6 +89,8 @@ class LifecycleTest(unittest.TestCase):
         new = candidate['routes'].get(self.request['application_id'])
         was = any(address.startswith('google_compute_backend_service.routes[') for address in rows)
         now = new is not None and new.get('enabled', True)
+        # URL maps follow routed routes; the backend, NEG and firewall port follow enabled routes.
+        routed_now = now and self.request['application_id'] not in candidate.get('detached_routes', [])
         changes = []
         for source in self.creation['resource_changes']:
             address = source['address']; kind = address.split('.')[0]
@@ -102,19 +105,24 @@ class LifecycleTest(unittest.TestCase):
                     change = {'actions': ['no-op'], 'before': rows[address], 'after': rows[address]}
                 else:
                     continue
-            elif was != now:
-                after = copy.deepcopy(source['change']['after' if now else 'before'])
-                after.pop('fingerprint', None)
-                after['id'] = rows[address]['id']
-                change = {'actions': ['update'], 'before': rows[address], 'after': after}
             else:
-                change = {'actions': ['no-op'], 'before': rows[address], 'after': rows[address]}
+                live, wanted = (self.routes(rows[address]), routed_now) if address in cleanup.DETACH else (was, now)
+                if live == wanted:
+                    change = {'actions': ['no-op'], 'before': rows[address], 'after': rows[address]}
+                else:
+                    after = copy.deepcopy(source['change']['after' if wanted else 'before'])
+                    after.pop('fingerprint', None)
+                    after['id'] = rows[address]['id']
+                    change = {'actions': ['update'], 'before': rows[address], 'after': after}
             changes.append({'address': address, 'change': change})
         address = 'google_compute_global_address.app'
         changes.append({'address': address, 'change': {'actions': ['no-op'], 'before': rows[address], 'after': rows[address]}})
         return {'resource_changes': changes, 'variables': {k: {'value': v} for k, v in candidate.items()}}
 
-    def native(self, argv):
+    def routes(self, url_map):
+        return any(self.request['hostname'] in rule['hosts'] for rule in url_map.get('host_rule') or [])
+
+    def native(self, argv, **kwargs):
         self.calls.append(argv)
         if argv[0] == 'gcloud':
             self.assertIn('--project=' + self.values['project_id'], argv)
@@ -124,6 +132,7 @@ class LifecycleTest(unittest.TestCase):
                 return json.dumps({'Account': self.values['account_id']})
             return json.dumps({'TargetGroups': [], 'Rules': [], 'SecurityGroupRules': [], 'ResourceRecordSets': []})
         work, command = Path(argv[1].split('=', 1)[1]), argv[2]
+        self.assertEqual(kwargs, {'timeout': 900} if command == 'apply' else {})
         if command == 'init':
             self.assertEqual(json.loads((work / 'backend.tf.json').read_text())['terraform']['backend']['local']['path'], self.config['state_file'])
             return ''
@@ -133,6 +142,8 @@ class LifecycleTest(unittest.TestCase):
             document = self.document(cleanup.read_private(variables))
             if self.mutate_plan and Path(variables).name == 'change.json':
                 self.mutate_plan(document)
+            if Path(variables).stem in self.mutations:
+                self.mutations[Path(variables).stem](document)
             if self.after_drift and self.applied:
                 document['resource_drift'] = [{'address': 'google_compute_global_address.app'}]
             self.documents[path] = document
@@ -142,9 +153,17 @@ class LifecycleTest(unittest.TestCase):
             return json.dumps(self.documents[argv[-1]])
         self.assertEqual(command, 'apply')
         self.assertEqual(cleanup.read_private(work / 'intent.json')['phase'], 'applying')
-        if self.fail_apply:
+        if self.fail_apply in (True, Path(argv[-1]).name):
             raise RuntimeError('uncertain fake provider response')
         state = cleanup.read_private(self.config['state_file']); rows = state_rows(state)
+        changed = [(item['address'], item['change']['actions']) for item in self.documents[argv[-1]]['resource_changes']
+                   if item['change']['actions'] not in (['no-op'], ['read'])]
+        self.applies.append((Path(argv[-1]).name, changed))
+        # GCP: a backend still referenced by a live URL map cannot be deleted. One plan does
+        # not order the URL-map update first, so model the observed provider rejection.
+        if any(address.startswith('google_compute_backend_service.routes[') and actions == ['delete']
+               for address, actions in changed) and any(self.routes(rows[address]) for address in cleanup.DETACH):
+            raise RuntimeError('Error 400: resourceInUseByAnotherResource')
         for item in self.documents[argv[-1]]['resource_changes']:
             action = item['change']['actions']
             if action == ['delete']:
@@ -184,6 +203,93 @@ class LifecycleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'stopped'):
             cleanup.plan(self.binding, 'start')
 
+    def backend(self):
+        return 'google_compute_backend_service.routes[' + json.dumps(self.request['application_id']) + ']'
+
+    def test_gcp_detaches_both_url_maps_in_a_reviewed_apply_before_deleting_the_backend(self):
+        for action in ('stop', 'delete'):
+            with self.subTest(action=action):
+                self.applies.clear()
+                plan = cleanup.plan(self.binding, action)
+                self.assertEqual(plan['private']['native']['detach']['candidate']['detached_routes'], [self.request['application_id']])
+                self.assertEqual(cleanup.execute(self.binding, action, plan)['phase'], {'stop': 'stopped', 'delete': 'deleted'}[action])
+                (first, detached), (second, removed) = self.applies
+                self.assertEqual((first, second), ('detach.tfplan', 'remove.tfplan'))
+                self.assertEqual({address for address, _ in detached}, cleanup.DETACH)
+                self.assertTrue(all(actions == ['update'] for _, actions in detached))
+                self.assertIn((self.backend(), ['delete']), removed)
+                self.assertFalse({address for address, _ in removed} & cleanup.DETACH)
+                if action == 'stop':
+                    self.assertEqual(cleanup.execute(self.binding, 'start', cleanup.plan(self.binding, 'start'))['phase'], 'started')
+
+    def test_single_plan_removal_reproduces_the_backend_in_use_failure_and_fails_closed(self):
+        with patch('application_cleanup.staged', return_value=False):
+            plan = cleanup.plan(self.binding, 'delete')
+            self.assertNotIn('detach', plan['private']['native'])
+            with self.assertRaises(cleanup.CleanupError) as caught:
+                cleanup.execute(self.binding, 'delete', plan)
+        self.assertTrue(caught.exception.unknown)
+        self.assertEqual([name for name, _ in self.applies], ['change.tfplan'])
+        self.assertEqual(cleanup.read_private(self.config['variables_file']), self.values)
+
+    def test_reviewed_plan_without_required_detach_stage_is_rejected_before_any_write(self):
+        with patch('application_cleanup.staged', return_value=False):
+            plan = cleanup.plan(self.binding, 'delete')
+        with self.assertRaisesRegex(ValueError, 'detach stage'):
+            cleanup.execute(self.binding, 'delete', plan)
+        self.assertEqual(self.applies, [])
+        self.assertEqual(cleanup.read_private(Path(plan['private']['native']['work']) / 'intent.json')['phase'], 'planned')
+
+    def test_detach_plan_rejects_unrelated_routes_deletes_and_partial_detachment(self):
+        def foreign_host(document):
+            row = next(r for r in document['resource_changes'] if r['address'] == 'google_compute_url_map.app')
+            row['change']['after']['host_rule'] = []  # also removes the existing legacy host
+        def early_delete(document):
+            row = next(r for r in document['resource_changes'] if r['address'] == self.backend())
+            row['change'] = {'actions': ['delete'], 'before': row['change']['before'], 'after': None}
+        def firewall(document):
+            row = next(r for r in document['resource_changes'] if r['address'] == 'google_compute_firewall.gfe')
+            after = copy.deepcopy(row['change']['before']); after['allow'][0]['ports'] = after['allow'][0]['ports'][:-1]
+            row['change'] = {'actions': ['update'], 'before': row['change']['before'], 'after': after}
+        def redirect_kept(document):
+            row = next(r for r in document['resource_changes'] if r['address'] == 'google_compute_url_map.redirect')
+            row['change'] = {'actions': ['no-op'], 'before': row['change']['before'], 'after': row['change']['before']}
+        for mutation in (foreign_host, early_delete, firewall, redirect_kept):
+            with self.subTest(mutation=mutation.__name__):
+                self.mutations['detach'] = mutation
+                with self.assertRaises(ValueError):
+                    cleanup.plan(self.binding, 'delete')
+                self.assertEqual(self.applies, [])
+        self.assertEqual(cleanup.read_private(self.config['variables_file']), self.values)
+
+    def test_interruption_or_mismatch_after_any_stage_fails_closed_and_records_the_stage(self):
+        def keeps_url_map(document):  # refresh shows the live URL map still routes the app
+            row = next(r for r in document['resource_changes'] if r['address'] == 'google_compute_url_map.app')
+            row['change']['actions'] = ['update']
+        def drops_backend_delete(document):  # runtime removal must equal the reviewed deletions
+            document['resource_changes'] = [r for r in document['resource_changes'] if r['address'] != self.backend()]
+        cases = (('detach apply', {'fail_apply': 'detach.tfplan'}, 'detaching', []),
+                 ('detach unverified', {'detached': keeps_url_map}, 'detaching', ['detach.tfplan']),
+                 ('removal differs', {'remove': drops_backend_delete}, 'detached', ['detach.tfplan']),
+                 ('remove apply', {'fail_apply': 'remove.tfplan'}, 'removing', ['detach.tfplan']))
+        for name, setup, stage, applied in cases:
+            with self.subTest(name=name):
+                self.setUp()
+                self.fail_apply = setup.get('fail_apply', False)
+                self.mutations = {k: v for k, v in setup.items() if k != 'fail_apply'}
+                plan = cleanup.plan(self.binding, 'delete')
+                with self.assertRaises(cleanup.CleanupError) as caught:
+                    cleanup.execute(self.binding, 'delete', plan)
+                self.assertTrue(caught.exception.unknown)
+                self.assertEqual([n for n, _ in self.applies], applied)
+                intent = cleanup.read_private(Path(plan['private']['native']['work']) / 'intent.json')
+                self.assertEqual((intent['phase'], intent['stage']), ('unknown', stage))
+                calls = len(self.calls)
+                with self.assertRaisesRegex(ValueError, 'reconciliation'):
+                    cleanup.execute(self.binding, 'delete', plan)
+                self.assertEqual(len(self.calls), calls, 'an uncertain stage is never replayed')
+                self.assertEqual(cleanup.read_private(self.config['variables_file']), self.values)
+
     def test_partial_apply_cannot_be_replayed_or_bypassed_by_new_plan(self):
         plan = cleanup.plan(self.binding, 'delete'); self.fail_apply = True
         with self.assertRaises(cleanup.CleanupError) as caught:
@@ -195,6 +301,23 @@ class LifecycleTest(unittest.TestCase):
                 run()
         self.assertEqual(calls, len(self.calls))
         self.assertEqual(cleanup.read_private(self.config['variables_file']), self.values)
+
+    def test_gcp_refresh_accepts_unset_descriptions_but_rejects_route_drift(self):
+        address = 'google_compute_url_map.redirect'
+        before = {'id': 'projects/fixture/global/urlMaps/redirect',
+                  'host_rule': [{'description': None, 'hosts': ['one.example.com'], 'path_matcher': 'one'}]}
+        after = copy.deepcopy(before)
+        after['host_rule'][0]['description'] = ''
+        base = {'resource_drift': [{'address': address, 'type': 'google_compute_url_map', 'mode': 'managed',
+                'change': {'actions': ['update'], 'before': before, 'after': after}}],
+                'resource_changes': [{'address': address, 'change': {'actions': ['no-op'], 'before': after, 'after': after}}]}
+        cleanup.unchanged(base)
+        for key, value in [('hosts', ['foreign.example.com']), ('description', 'changed'), ('path_matcher', 'foreign')]:
+            with self.subTest(key=key):
+                changed = copy.deepcopy(base)
+                changed['resource_drift'][0]['change']['after']['host_rule'][0][key] = value
+                with self.assertRaises(ValueError):
+                    cleanup.unchanged(changed)
 
     def test_gcp_lifecycle_accepts_only_equivalent_provider_routing_representations(self):
         document = self.document({**self.values, 'routes': {}})
@@ -419,10 +542,10 @@ class AWSLifecycleTest(unittest.TestCase):
     def test_provider_presence_after_delete_cannot_be_reported_as_success(self):
         plan = cleanup.plan(self.binding, 'delete')
         native = self.native
-        def retained_group(argv):
+        def retained_group(argv, **kwargs):
             if 'describe-target-groups' in argv:
                 return json.dumps({'TargetGroups': [{'TargetGroupArn': 'exact-owned-target-group'}]})
-            return native(argv)
+            return native(argv, **kwargs)
         with patch('edge.native', side_effect=retained_group), self.assertRaises(cleanup.CleanupError) as caught:
             cleanup.execute(self.binding, 'delete', plan)
         self.assertTrue(caught.exception.unknown)
