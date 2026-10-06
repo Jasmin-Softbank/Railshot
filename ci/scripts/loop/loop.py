@@ -179,13 +179,14 @@ def task_text(role, attempt, n, run, request, repair_scope="packaging", app_id=N
         "Write summary and user_action in Korean.\n")
 
 
-def agent(role, provider, ws, run, attempt, n, request, repair_scope="packaging", app_id=None, progress_sink=None, gate_order=GATE_ORDER):
+def agent(role, provider, ws, run, attempt, n, request, repair_scope="packaging", app_id=None, progress_sink=None, gate_order=GATE_ORDER, auth_route_sha256=None):
     if any((run / (role + suffix)).exists() for suffix in ('.json', '-events.jsonl', '-session.json')):
         raise StateError('STATE_EVIDENCE_MISMATCH', component='loop', phase='agent.prepare', retry_policy='after_reconcile')
     t = run / f"task-{attempt}.md"
     t.write_text(task_text(role, attempt, n, run, request, repair_scope, app_id, gate_order))
     rc, out, err = run_json(PY + [str(PLATFORM / "runner/run_agent.py"), role, "--provider", provider,
-                                  "--workspace", str(ws), "--run", str(run), "--task", str(t), "--repair-scope", repair_scope, "--gate-order", ",".join(gate_order)],
+                                  "--workspace", str(ws), "--run", str(run), "--task", str(t), "--repair-scope", repair_scope, "--gate-order", ",".join(gate_order),
+                                  *(['--auth-route-sha256', auth_route_sha256] if auth_route_sha256 else [])],
                                   phase='agent', observer=agent_observer(run, role, provider, progress_sink))
     rec_path = run / f"{role}.json"
     try:
@@ -398,6 +399,8 @@ def execute(a, run, state, progress_sink=None):
             def agent_step():
                 arguments = (role, a.provider, ws, run, attempt, total_limit, a.request, attempt_scope, app_id)
                 kwargs = {}
+                if state.data['binding'].get('auth_route_sha256'):
+                    kwargs['auth_route_sha256'] = state.data['binding']['auth_route_sha256']
                 if progress_sink is not None:
                     kwargs['progress_sink'] = progress_sink
                 if tuple(a.layers.split(',')) != tuple(GATE_ORDER):

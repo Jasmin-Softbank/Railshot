@@ -100,7 +100,7 @@ def lifecycle(run, role, provider, model):
 
     def emit(kind, *, error=None, **fields):
         nonlocal seq
-        allowed = {"status", "sdk_status", "session_id", "thread_id", "turn_id", "sdk_failure", "sandbox_preflight", "progress"}
+        allowed = {"status", "sdk_status", "session_id", "thread_id", "turn_id", "sdk_failure", "sandbox_preflight", "progress", "model"}
         if set(fields) - allowed:
             raise OperationError("INTERNAL_ERROR", component="runner", phase="observation")
         if 'progress' in fields:
@@ -451,6 +451,9 @@ def codex_failure_diagnostic(error):
     if "invalid" in message.lower() and "schema" in message.lower():
         category = "invalid_output_schema"
         safe_message = "The provider rejected the structured output schema."
+    elif "model" in message.lower() and "not supported" in message.lower():
+        category = "model_not_supported"
+        safe_message = "The configured model is not supported by the platform account."
     return {"category": category, "codes": sorted(set(codes))[:8], "message": safe_message,
             "message_sha256": hashlib.sha256(message.encode()).hexdigest()}
 
@@ -566,6 +569,11 @@ def _run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=N
     # The operator provisions an auth-only home on the dedicated agent VM.
     # Never select an account or copy credentials from an uploaded repository.
     route = effective_auth_route('codex')
+    if cfg.get('auth_route_sha256') and cfg['auth_route_sha256'] != hashlib.sha256(json.dumps(route, sort_keys=True).encode()).hexdigest():
+        raise OperationError('SDK_CONFIG_INVALID', component='runner', phase='account-binding',
+                             retry_policy='after_configuration', side_effect='none')
+    # Re-read under the existing agent slot lock: rotation may have occurred since execute() loaded the profile.
+    cfg = {**cfg, **({'model': route['model']} if route.get('model') else {})}
     mode, home = route['mode'], route['credential_home']
     if mode not in {"subscription", "api-key"}:
         raise OperationError("SDK_CONFIG_INVALID", component="runner", phase="config", retry_policy="after_configuration")
@@ -591,7 +599,7 @@ def _run_codex(cfg, system, task, schema, workspace, run, read_deny=None, emit=N
         with Codex(config) as codex:
             if mode == "api-key":
                 codex.login_api_key(key)
-            emit("session.starting", sdk_status="running")
+            emit("session.starting", sdk_status="running", model=cfg.get('model'))
             thread = codex.thread_start(
                 cwd=str(workspace),
                 approval_mode=ApprovalMode.deny_all, ephemeral=True,
@@ -795,6 +803,7 @@ def main():
     ap.add_argument("--run")
     ap.add_argument("--task")
     ap.add_argument("--resume-session-id", help="Reserved: native conversation resume is unsupported")
+    ap.add_argument('--auth-route-sha256', help='Trusted loop account/model binding; contains no credentials')
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
@@ -817,6 +826,10 @@ def execute(a):
         profile = load_yaml(PLATFORM / "runner/profiles.yaml")
         role_cfg = profile["roles"][a.role]
         provider = a.provider
+        if provider == 'codex' and getattr(a, 'auth_route_sha256', None):
+            if not re.fullmatch(r'[a-f0-9]{64}', a.auth_route_sha256):
+                raise ValueError('invalid account binding')
+            profile['providers'][provider]['auth_route_sha256'] = a.auth_route_sha256
         workspace, run = Path(a.workspace).resolve(), private_directory(a.run)
         allow, protect = writable_rules(role_cfg["writable"], scope=a.repair_scope)
         gate_order = tuple(getattr(a, 'gate_order', ','.join(GATE_ORDER)).split(","))

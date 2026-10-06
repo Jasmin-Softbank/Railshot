@@ -58,7 +58,8 @@ class ResumeTest(unittest.TestCase):
 
     @contextmanager
     def agent_result(self, record=None, rc=0, side_effect=None):
-        def produce(*args):
+        def produce(*args, auth_route_sha256=None):
+            self.assertRegex(auth_route_sha256, r'^[a-f0-9]{64}$')
             role, _, _, run, attempt = args[:5]
             status, receipt = side_effect(*args) if side_effect else (rc, record)
             (run / f'{role}-{attempt}.json').write_text(json.dumps(receipt))

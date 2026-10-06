@@ -131,6 +131,8 @@ GitHub 앱 저장소에는 기존 workflow의 변수도 설정합니다.
 
 API key 모드는 기존 workflow의 GitHub Actions secret을 사용합니다. Codex subscription 디렉터리는 토큰 갱신을 위해 runner에만 쓰기 가능하게 연결되며 작업 workspace와 분리됩니다. API key 모드에서는 해당 디렉터리를 비워둡니다. AWS/GCP/Azure/OpenStack 자격, Docker registry login 설정이나 운영 KUBECONFIG는 이 VM/컨테이너에 전달하지 않습니다. CI VM instance role은 기존 bootstrap/관리용으로 제한하고 운영 cloud 권한을 부여하지 않습니다.
 
+플랫폼 Codex 계정의 인증·지원 모델 교체는 [운영자 전용 배포 경로](../../../docs/operations/platform-agent-credentials.md)를 사용합니다. 이 경로는 GitHub에 비밀값을 저장하지 않고 기존 SSM 관리 통신으로 암호화 전달하며, 계정·모델을 사전 검사한 뒤 실행 중인 에이전트가 없을 때 교체합니다.
+
 ## 호스트 경로와 실패 조건
 
 workspace(`/var/lib/railshot-runner/work`), run root(`/var/lib/railshot-runner/runs`), `TMPDIR`(`/var/lib/railshot-runner/work/_temp`)는 **컨테이너와 호스트의 절대경로가 같아야** 합니다. gate는 source와 L4의 임시 image archive를 호스트 Docker에 bind mount하므로 경로가 다르면 실행할 수 없습니다. Compose는 경로를 고정하고 시작 전 실제 `docker inspect`로 mount source/destination과 읽기·쓰기 모드를 검사합니다. `prepare-host.sh`가 만든 root-owned 전용 CI 마커, 호스트의 K3s 디렉터리, helper·executor 계약·실제 네트워크 검증 receipt도 확인합니다. 허용 목록 밖의 mount, 변경된 권한·네트워크·추가 capability는 등록 전에 거부합니다.
