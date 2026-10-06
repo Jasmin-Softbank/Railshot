@@ -258,7 +258,10 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   assert.equal(await page.locator('#repository-url').inputValue(), 'https://github.com/example/my-app');
   await page.locator('#provider').selectOption('ready-target');
   await page.getByRole('button', { name: /선택 내용 확인/ }).click();
-  await page.getByRole('button', { name: '배포 시작' }).click();
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/deployments' && response.request().method() === 'POST'),
+    page.getByRole('button', { name: '배포 시작' }).click(),
+  ]);
   assert.deepEqual(calls.find((call) => call.kind === 'deployment'), { kind: 'deployment', environment: 'onprem', provider: 'openstack', target: 'ready-target' });
 
   await page.getByRole('button', { name: '개인 배포환경 관리' }).click();
@@ -271,7 +274,10 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   assert.deepEqual(calls.find((call) => call.kind === 'delete-plan').body, { action: 'delete', delete_data: true });
   await page.locator('#environment-delete-confirmation').fill('연구실 OpenStack');
   await page.locator('#environment-delete-data-consent').check();
-  await page.getByRole('button', { name: '삭제 시작' }).click();
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/targets/ready-target/operations' && response.request().method() === 'POST'),
+    page.getByRole('button', { name: '삭제 시작' }).click(),
+  ]);
   assert.deepEqual(calls.find((call) => call.kind === 'delete-operation').body, { action: 'delete', plan_id: 'delete-plan', plan_hash: 'signed-plan', confirmation: '연구실 OpenStack', delete_data: true });
   await page.getByText('작업 operation-1 · 결과 확인 필요 · 남은 항목 확인 필요').waitFor();
   await page.getByText('남은 서비스·클라이언트를 확인해야 합니다. 자동 재실행하지 않습니다.').waitFor();
@@ -280,7 +286,10 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   await page.getByText('클라이언트·보안 연결 제거 확인 · ready-target').waitFor();
   assert.equal(await page.getByRole('button', { name: '삭제 상태 확인' }).isVisible(), true);
 
-  await page.getByRole('button', { name: '삭제 재개 가능 여부 확인' }).click();
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/targets/ready-target/reconciliations' && response.request().method() === 'POST'),
+    page.getByRole('button', { name: '삭제 재개 가능 여부 확인' }).click(),
+  ]);
   assert.deepEqual(calls.find((call) => call.kind === 'delete-reconciliation').body, { operation_id: 'operation-1' });
   await page.getByRole('button', { name: '삭제 재개 가능 여부 확인 중' }).waitFor();
   assert.equal(await page.getByRole('button', { name: '삭제 재개 가능 여부 확인 중' }).isDisabled(), true);
@@ -288,7 +297,10 @@ test('personal OpenStack management uses HTTP fixture states, preserves deploy s
   await page.getByRole('button', { name: '환경 삭제 재개' }).click();
   await page.locator('#environment-delete-confirmation').fill('연구실 OpenStack');
   await page.locator('#environment-delete-data-consent').check();
-  await page.getByRole('button', { name: '삭제 재개 실행' }).click();
+  await Promise.all([
+    page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/targets/ready-target/operations' && response.request().method() === 'POST'),
+    page.getByRole('button', { name: '삭제 재개 실행' }).click(),
+  ]);
   assert.deepEqual(calls.find((call) => call.kind === 'resume-operation').body, { action: 'resume', operation_id: 'operation-1', reconciliation_id: 'reconciliation-1', confirmation: '연구실 OpenStack', delete_data: true });
   await page.getByText('환경 삭제를 완료했습니다. 등록 목록과 배포 대상에서 제거했습니다.').waitFor();
   assert.equal(await page.getByRole('button', { name: '연구실 OpenStack' }).count(), 0);
