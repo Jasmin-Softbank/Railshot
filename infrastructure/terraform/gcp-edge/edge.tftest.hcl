@@ -90,6 +90,38 @@ run "stopped_app_keeps_identity_and_certificate_without_unhealthy_backend" {
   }
 }
 
+run "detached_app_leaves_url_maps_before_its_backend_is_removed" {
+  command = plan
+  variables {
+    routes = {
+      app-leaving = { hostname = "leaving.railshot.io", node_port = 31001, health_path = "/health" }
+      app-running = { hostname = "running.railshot.io", node_port = 31002, health_path = "/health" }
+    }
+    detached_routes = ["app-leaving"]
+  }
+  assert {
+    condition = (keys(google_compute_backend_service.routes) == ["app-leaving", "app-running"] &&
+      keys(google_compute_network_endpoint_group.routes) == ["app-leaving", "app-running"] &&
+      keys(google_compute_health_check.routes) == ["app-leaving", "app-running"] &&
+      one(google_compute_firewall.gfe.allow).ports == tolist(["30080", "31001", "31002"]) &&
+      length(google_compute_url_map.app.host_rule) == 2 && length(google_compute_url_map.app.path_matcher) == 2 &&
+      length(google_compute_url_map.redirect.host_rule) == 1 && length(google_compute_url_map.redirect.path_matcher) == 1 &&
+      alltrue([for rule in google_compute_url_map.app.host_rule : !contains(rule.hosts, "leaving.railshot.io")]) &&
+      alltrue([for rule in google_compute_url_map.redirect.host_rule : !contains(rule.hosts, "leaving.railshot.io")]) &&
+    anytrue([for rule in google_compute_url_map.redirect.host_rule : contains(rule.hosts, "running.railshot.io")]))
+    error_message = "Detaching removes only the app's host routes and keeps its backend until a later plan deletes it."
+  }
+}
+
+run "unknown_detached_route_rejected" {
+  command = plan
+  variables {
+    routes          = { app-running = { hostname = "running.railshot.io", node_port = 31002, health_path = "/health" } }
+    detached_routes = ["app-missing"]
+  }
+  expect_failures = [google_compute_url_map.app]
+}
+
 run "two_apps_share_existing_frontend" {
   # Plan checks topology without running the DNS creation hook against a fake
   # provider. DNS publication and propagation are covered by test_gcp_routes.py.

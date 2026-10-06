@@ -21,6 +21,10 @@ locals {
   route_names            = { for id in keys(var.routes) : id => "${var.name}-${substr(sha256(id), 0, 16)}" }
   active_routes          = { for id, route in var.routes : id => route if route.enabled }
   dedicated_certificates = { for id, route in var.routes : id => route if route.certificate_id == null }
+  # A detached route keeps its backend but leaves both URL maps. Lifecycle applies this
+  # first: GCP rejects deleting a backend still referenced by a URL map, and one plan
+  # does not order the URL-map update before the removed backend's deletion.
+  routed_routes = { for id, route in local.active_routes : id => route if !contains(var.detached_routes, id) }
 }
 
 resource "google_project_service" "certificates" {
@@ -143,14 +147,14 @@ resource "google_compute_url_map" "app" {
     default_service = google_compute_backend_service.app.id
   }
   dynamic "host_rule" {
-    for_each = local.active_routes
+    for_each = local.routed_routes
     content {
       hosts        = [host_rule.value.hostname]
       path_matcher = local.route_names[host_rule.key]
     }
   }
   dynamic "path_matcher" {
-    for_each = local.active_routes
+    for_each = local.routed_routes
     content {
       name            = local.route_names[path_matcher.key]
       default_service = google_compute_backend_service.routes[path_matcher.key].id
@@ -162,6 +166,10 @@ resource "google_compute_url_map" "app" {
         route.hostname != var.hostname && route.node_port != var.node_port
       ])
       error_message = "Additional applications cannot reuse the existing application's hostname or NodePort."
+    }
+    precondition {
+      condition     = alltrue([for id in var.detached_routes : contains(keys(local.active_routes), id)])
+      error_message = "Only an existing enabled route can be detached."
     }
   }
 }
@@ -267,14 +275,14 @@ resource "google_compute_url_map" "redirect" {
     strip_query            = false
   }
   dynamic "host_rule" {
-    for_each = local.active_routes
+    for_each = local.routed_routes
     content {
       hosts        = [host_rule.value.hostname]
       path_matcher = local.route_names[host_rule.key]
     }
   }
   dynamic "path_matcher" {
-    for_each = local.active_routes
+    for_each = local.routed_routes
     content {
       name = local.route_names[path_matcher.key]
       default_url_redirect {

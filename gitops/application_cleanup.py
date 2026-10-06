@@ -21,6 +21,14 @@ from edge import digest, encoded, read_private, durable_write, require
 ROOT = Path(__file__).resolve().parents[1]
 AWS_KINDS = ('aws_lb_target_group', 'aws_lb_target_group_attachment', 'aws_lb_listener_rule')
 GCP_BACKENDS = gcp_routes.KINDS[:4]
+# GCP rejects deleting a backend still referenced by a URL map (resourceInUseByAnotherResource),
+# and one Terraform plan does not order the URL-map update before that deletion.
+DETACH = {'google_compute_url_map.app', 'google_compute_url_map.redirect'}
+
+
+def staged(provider, action, route):
+    """An active GCP route leaves both URL maps in a reviewed apply before its backend is removed."""
+    return provider == 'gcp' and action in ('stop', 'delete') and bool(route) and route.get('enabled', True)
 
 
 class CleanupError(ValueError):
@@ -169,14 +177,18 @@ def refresh_metadata(document):
         require(normalized == after, 'edge drift must be reconciled first')
 
 
-def validate_plan(document, snapshot, candidate, provider, action):
-    """No configuration drift/replacement/import; exact app addresses and shared edits."""
+def validate_plan(document, snapshot, candidate, provider, action, stage=None):
+    """No configuration drift/replacement/import; exact app addresses and shared edits.
+
+    stage='detach' permits only this app's removal from both URL maps; stage='remove'
+    then requires both URL maps unchanged while the owned resources are deleted.
+    """
     require(not document.get('errored'), 'edge drift must be reconciled first')
     refresh_metadata(document)
     require(all(subset(v, document.get('variables', {}).get(k, {}).get('value')) for k, v in candidate.items()),
             'saved plan variables changed')
     route, key = snapshot['route'], snapshot['key']
-    targets = addresses(provider, key, route, snapshot['values'], action)
+    targets = set() if stage == 'detach' else addresses(provider, key, route, snapshot['values'], action)
     owned = snapshot['owned']
     changes, seen = [], set()
     for item in document.get('resource_changes', []):
@@ -201,11 +213,14 @@ def validate_plan(document, snapshot, candidate, provider, action):
         else:
             require(route and actions == ['update'] and address in owned and before and after and
                     before.get('id') == after.get('id') == owned[address], 'shared identity or action changed')
+            require(stage is None or (address in DETACH) == (stage == 'detach'),
+                    'URL-map detachment must precede owned resource removal')
             validate_shared(provider, address, before, after, change.get('after_unknown', {}), route, key,
                             snapshot['values'], action)
         changes.append({'address': address, 'actions': actions})
     changed_targets = {r['address'] for r in changes} & targets
     require(changed_targets == targets, 'complete exact application resource set required')
+    require(stage != 'detach' or {r['address'] for r in changes} == DETACH, 'both URL maps must detach only this app')
     return changes
 
 
@@ -408,9 +423,15 @@ def native_plan(binding, action, config):
     unchanged(saved_plan(work, snapshot['values'], 'before'))
     document = saved_plan(work, candidate, 'change')
     changes = validate_plan(document, snapshot, candidate, binding['provider'], action)
+    result = {'snapshot': snapshot, 'candidate': candidate, 'work': str(work), 'changes': changes,
+              'module_sha256': module_hash(files), 'plan_sha256': sha(work / 'change.tfplan')}
+    if staged(binding['provider'], action, route):
+        # The full plan above is the reviewed outcome; this saved first apply detaches only.
+        detach = {**copy.deepcopy(snapshot['values']), 'detached_routes': [key]}
+        validate_plan(saved_plan(work, detach, 'detach'), snapshot, detach, binding['provider'], action, stage='detach')
+        result['detach'] = {'candidate': detach, 'plan_sha256': sha(work / 'detach.tfplan')}
     require(authority(binding) == snapshot, 'edge authority changed during planning')
-    return {'snapshot': snapshot, 'candidate': candidate, 'work': str(work), 'changes': changes,
-            'module_sha256': module_hash(files), 'plan_sha256': sha(work / 'change.tfplan')}
+    return result
 
 
 def config_at(binding):
@@ -469,7 +490,21 @@ def plan(binding, action):
         return result
 
 
-def native_execute(binding, action, expected):
+def reviewed_detach(binding, action, native, work):
+    """A staged GCP plan must carry its exact saved detach plan; others must not."""
+    snapshot, detach = native['snapshot'], native.get('detach')
+    require((detach is not None) == staged(binding['provider'], action, snapshot['route']),
+            'reviewed URL-map detach stage required')
+    if detach is None:
+        return None
+    require(detach['candidate'] == {**snapshot['values'], 'detached_routes': [snapshot['key']]} and
+            sha(work / 'detach.tfplan') == detach['plan_sha256'], 'saved detach plan changed')
+    validate_plan(json.loads(terraform(work, 'show', '-json', str(work / 'detach.tfplan'))), snapshot,
+                  detach['candidate'], binding['provider'], action, stage='detach')
+    return detach
+
+
+def native_execute(binding, action, expected, checkpoint=lambda stage, **fields: None):
     snapshot, candidate, work = expected['snapshot'], expected['candidate'], Path(expected['work'])
     require(authority(binding) == snapshot and module_hash(source_files(binding['provider'])) == expected['module_sha256'],
             'edge authority or source changed after review')
@@ -478,7 +513,26 @@ def native_execute(binding, action, expected):
             'saved plan or copied source changed')
     document = json.loads(terraform(work, 'show', '-json', str(work / 'change.tfplan')))
     validate_plan(document, snapshot, candidate, binding['provider'], action)
-    terraform(work, 'apply', '-input=false', '-lock-timeout=5s', str(work / 'change.tfplan'))
+    detach = reviewed_detach(binding, action, expected, work)
+    if detach is None:
+        terraform(work, 'apply', '-input=false', '-lock-timeout=5s', str(work / 'change.tfplan'))
+    else:
+        checkpoint('detaching')
+        terraform(work, 'apply', '-input=false', '-lock-timeout=5s', str(work / 'detach.tfplan'))
+        detached = read_private(snapshot['state_file'])
+        require(detached['lineage'] == snapshot['state']['lineage'] and detached['serial'] > snapshot['state']['serial'] and
+                gcp_routes.owned(detached) == snapshot['owned'], 'URL-map detachment changed resource identities')
+        # A refreshed no-change plan proves both live URL maps no longer route this app.
+        unchanged(saved_plan(work, detach['candidate'], 'detached'))
+        checkpoint('detached', state_serial=detached['serial'])
+        # The reviewed full plan is stale after the first apply. Plan the removal now and
+        # require exactly the reviewed owned deletions and shared firewall change.
+        document = saved_plan(work, candidate, 'remove')
+        removal = validate_plan(document, snapshot, candidate, binding['provider'], action, stage='remove')
+        reviewed = [row for row in expected['changes'] if row['address'] not in DETACH]
+        require(sorted(map(encoded, removal)) == sorted(map(encoded, reviewed)), 'removal plan differs from reviewed plan')
+        checkpoint('removing', state_serial=detached['serial'], remove_plan_sha256=sha(work / 'remove.tfplan'))
+        terraform(work, 'apply', '-input=false', '-lock-timeout=5s', str(work / 'remove.tfplan'))
     after = read_private(snapshot['state_file'])
     identities = gcp_routes.owned(after)
     targets = addresses(binding['provider'], snapshot['key'], snapshot['route'], snapshot['values'], action)
@@ -528,6 +582,7 @@ def validate_locked(binding, action, expected_plan, config, dns_config, root):
                 'copied source changed after review')
         validate_plan(json.loads(terraform(work, 'show', '-json', str(work / 'change.tfplan'))), native['snapshot'],
                       native['candidate'], binding['provider'], action)
+        reviewed_detach(binding, action, native, work)
         unchanged(saved_plan(work, native['snapshot']['values'], 'preflight'))
         require(authority(binding) == native['snapshot'], 'edge authority changed during preflight')
     else:
@@ -585,12 +640,17 @@ def execute(binding, action, expected_plan):
             return receipt  # Historical receipt only; never replay a completed mutation.
         work = validate_locked(binding, action, expected_plan, config, dns_config, root)
         durable_write(work / 'intent.json', encoded({'phase': 'applying', 'plan_sha256': expected_plan['plan_sha256']}))
+        progress = {}
+        def checkpoint(stage, **fields):
+            # Operator evidence of the last started stage; never a resume point.
+            progress.clear(); progress.update(stage=stage, **fields)
+            durable_write(work / 'intent.json', encoded({'phase': 'applying', 'plan_sha256': expected_plan['plan_sha256'], **progress}))
         try:
             if binding['provider'] == 'openstack':
                 import openstack_routes
                 result = openstack_routes.lifecycle_execute(binding, action, native)
             else:
-                result = native_execute(binding, action, native)
+                result = native_execute(binding, action, native, checkpoint)
             if action == 'delete':
                 dns.remove_application(dns_config, binding['application_id'], binding['hostname'], private['dns'])
             receipt = {'status': 'succeeded', 'phase': {'stop': 'stopped', 'start': 'started', 'delete': 'deleted'}[action],
@@ -600,5 +660,5 @@ def execute(binding, action, expected_plan):
             durable_write(work / 'intent.json', encoded({'phase': 'succeeded', 'receipt': receipt}))
             return receipt
         except BaseException:
-            durable_write(work / 'intent.json', encoded({'phase': 'unknown', 'plan_sha256': expected_plan['plan_sha256']}))
+            durable_write(work / 'intent.json', encoded({'phase': 'unknown', 'plan_sha256': expected_plan['plan_sha256'], **progress}))
             raise CleanupError('APPLICATION_EDGE_RECONCILE_REQUIRED', unknown=True) from None
